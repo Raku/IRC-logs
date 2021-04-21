@@ -1,0 +1,519 @@
+[00:58] *** vendethiel- joined
+[01:46] *** vendethiel joined
+[01:46] *** skids joined
+[01:47] *** ilbot3 joined
+[06:02] *** geekosaur joined
+[06:35] *** geekosaur joined
+[06:35] *** geekosaur joined
+[06:36] *** geekosaur joined
+[08:28] *** RabidGravy joined
+[09:31] <dalek> nqp: 57900fc | (Pawel Murias)++ | src/vm/js/RegexCompiler.nqp:
+
+[09:31] <dalek> nqp: [js] Implement the noop '' regex anchor subtype.
+
+[09:31] <dalek> nqp: review: https://github.com/perl6/nqp/commit/57900fcab3
+
+[10:15] *** vendethiel- joined
+[10:23] <psch> hm, sprintf not giving a proper backtrace stumps me
+
+[10:23] <psch> m: sprintf "%d", 1..*
+
+[10:23] <camelia> rakudo-moar 61d231: OUTPUT«Cannot (s)printf a lazy list␤  in any  at /home/camelia/rakudo-m-inst-1/share/perl6/runtime/CORE.setting.moarvm line 1␤  in block <unit> at /tmp/5ohGAzxn0M line 1␤␤»
+
+[10:24] <psch> i have that case kinda working, as in it prints the real location and "Actually thrown at..." pointing at CORE.setting.moarvm
+
+[10:24] <psch> which is still somewhat LTA
+
+[10:24] <psch> m: sprintf "%d", "foo"
+
+[10:24] <camelia> rakudo-moar 61d231: OUTPUT«Directive d not applicable for type Str␤  in any  at /home/camelia/rakudo-m-inst-1/share/perl6/runtime/CORE.setting.moarvm line 1␤  in any panic at /home/camelia/rakudo-m-inst-1/share/nqp/lib/NQPHLL.moarvm line 1␤␤»
+
+[10:24] <psch> but that case i don't get :/
+
+[10:25] <jnthn> psch: Maybe check the "end of interesting backtrace" heuristics in Backtrace.pm
+
+[10:25] <jnthn> It may be looking for "parse" or something
+
+[10:27] <psch> jnthn: i'm not even sure i have the right backtrace when sprintf throws, fwiw... :)
+
+[10:29] <psch> https://github.com/rakudo/rakudo/blob/nom/src/core/Cool.pm#L348 i've added ".throw($_.backtrace)" to the statements in the whens, and that seems to work for Cannot::Lazy (minus the "Actually thrown at"), but not for the one returned from HANDLE-NQP-SPRINTF-ERRORS...
+
+[10:29] <psch> in the latter case the backtrace that is in $_ during the CATCH seems to be empty, 'cause the one in the Exception that arrives outside of the sprintf is empty...
+
+[10:30] <jnthn> psch: How are you determining it's empty, though?
+
+[10:30] <psch> .list prints ()
+
+[10:31] <jnthn> Hm, OK
+
+[10:31] <psch> or, well, 'is', not 'prints' :)
+
+[10:31] <jnthn> Still worth looking in Backtrace.pm to see what, if anything, it might be throwing out
+
+[10:37] <psch> fwiw, the Exception that gets caught is already without a Backtrace in the default case
+
+[10:38] <psch> i suppose that actually makes sense, considering it's from a nqp::die in the sprintf handler...
+
+[10:38] <psch> i think i'll make some more coffe... :S
+
+[11:09] *** pmurias joined
+[11:22] <nine> coffee++
+
+[11:30] <psch> hrm
+
+[11:30] <psch> apparently even creating a new Backtrace in Rakudo::Internals.HANDLE-NQP-SPRINTF-ERRORS doesn't actually see sprintf..?
+
+[11:32] <psch> i suppose that mean i do actually have to read and understand what and how Backtrace filters... :P
+
+[11:32] <psch> +s
+
+[11:32] <timotimo> could be because sprintf is actually an op? perhaps?
+
+[11:33] <psch> well, we do have a sub sprintf
+
+[11:33] <psch> and nqp::sprintf throws a VMException which is caught and in that CATCH we build a Exception
+
+[11:33] <psch> and one of the two cases has the right backtrace, while the other doesn't
+
+[11:35] <timotimo> oof
+
+[11:35] <psch> hm, the one with the right Backtrace isn't a VMException that's caught though
+
+[11:36] <timotimo> so it's already boxed in something?
+
+[11:37] <psch> don't we always box them somewhere..?
+
+[11:37] <psch> well, to be precise
+
+[11:37] <psch> the case that works is a X::Cannot::Lazy that gets thrown in .elems, which sprintf calls to reify all arguments
+
+[11:38] <psch> that is caught and a new Cannot::Lazy is thrown with :action('sprintf')
+
+[11:38] <psch> i suppose i could nqp::bindattr_s instead for performance, but that's a side note
+
+[11:39] <psch> the one that doesn't work is a VMException that gets handed over to Rakudo::Internals::HANDLE-NQP-SPRINTF-ERRORS, which throws the appropriate X::Str::Sprintf::*
+
+[11:39] <timotimo> right, we don't expect users to sprintf a million lazy lists and hope for good performance
+
+[11:40] <psch> m: sprintf "%d", 1..*
+
+[11:40] <camelia> rakudo-moar 61d231: OUTPUT«Cannot (s)printf a lazy list␤  in any  at /home/camelia/rakudo-m-inst-1/share/perl6/runtime/CORE.setting.moarvm line 1␤  in block <unit> at /tmp/N4vdEOMIPX line 1␤␤»
+
+[11:42] <psch> m: use nqp; sub f { nqp::die("foo"); CATCH { default { X::AdHoc.new.throw } } }; try f; $!.backtrace.list>>.file.say
+
+[11:42] <camelia> rakudo-moar 61d231: OUTPUT«(gen/moar/m-CORE.setting /tmp/cswKwE3xZg /tmp/cswKwE3xZg /tmp/cswKwE3xZg /tmp/cswKwE3xZg /tmp/cswKwE3xZg)␤»
+
+[11:42] <psch> this is kinda how it looks, except the CATCH case calls into Rakudo::Internals and throws the return
+
+[11:42] <psch> oh
+
+[11:42] <timotimo> step 1) explain it to someone
+
+[11:42] <timotimo> step 2) suddenly understand it better
+
+[11:43] <psch> m: sub f { X::AdHoc.new.throw }; sub g { f.throw }; try g; say $!.backtrace.list>>.file
+
+[11:43] <camelia> rakudo-moar 61d231: OUTPUT«(gen/moar/m-CORE.setting /tmp/1bgiPEio4L /tmp/1bgiPEio4L /tmp/1bgiPEio4L)␤»
+
+[11:43] <psch> not sure i do yet understand it better... :P
+
+[12:25] <dalek> rakudo/nom: dc9552d | lizmat++ | src/core/QuantHash.pm:
+
+[12:25] <dalek> rakudo/nom: Make .minpairs/.maxpairs about 6% faster
+
+[12:25] <dalek> rakudo/nom:
+
+[12:25] <dalek> rakudo/nom: Well, really depends on size, hash order and values, but at least
+
+[12:25] <dalek> rakudo/nom: we're not doing an unnecessary "next" anymore.  Benchmark was on:
+
+[12:25] <dalek> rakudo/nom: <a b b c c c d d d d>.Bag .
+
+[12:25] <dalek> rakudo/nom:
+
+[12:25] <dalek> rakudo/nom: Also micro-optimize QuantHash.fmt
+
+[12:25] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/dc9552dc21
+
+[12:28] <timotimo> cool :)
+
+[12:44] <psch> yeah, not getting anywhere here with this BT vOv
+
+[12:46] <dalek> rakudo/nom: 7024e87 | lizmat++ | src/core/ (3 files):
+
+[12:46] <dalek> rakudo/nom: Move minpairs/maxpairs to Any
+
+[12:46] <dalek> rakudo/nom:
+
+[12:46] <dalek> rakudo/nom: Anything that can do .pairs, can now also do .minpairs and .maxpairs
+
+[12:46] <dalek> rakudo/nom: (assuming the values can do > < ==)
+
+[12:46] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/7024e87d46
+
+[12:46] <psch> but hey, apparently i had the fix for #125577 sitting here uncommited for 5 days... o.o
+
+[12:46] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=125577
+
+[12:46] <dalek> nqp: bdb13a2 | jnthn++ | tools/build/MOAR_REVISION:
+
+[12:46] <dalek> nqp: Bump MOAR_REVISION for fixes, tuning.
+
+[12:46] <dalek> nqp: review: https://github.com/perl6/nqp/commit/bdb13a2cd5
+
+[12:46] <dalek> rakudo/nom: 0c78181 | peschwa++ | src/core/Mu.pm:
+
+[12:46] <dalek> rakudo/nom: Fix for RT #125577.
+
+[12:46] <dalek> rakudo/nom:
+
+[12:46] <dalek> rakudo/nom: Whatever the need for the jvm path was, removing it fixes the ticket.
+
+[12:46] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/0c78181bcb
+
+[12:46] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=125577
+
+[12:46] <lizmat> jnthn: if you bump rakudo, could you mention what improvements we get with that in the commit message ?
+
+[12:47] <lizmat> jnthn: makes life a lot easier for me in the P6W  :-)
+
+[12:48] <timotimo> let me see ...
+
+[12:48] <jnthn> lizmat: Ah...you don't look at Moar commit logs, I guess? ;)
+
+[12:48] <timotimo> we've had major collections not do an actual major collection for a long time, that got fixed
+
+[12:49] <jnthn> Yeah, will comment on it
+
+[12:49] <lizmat> well, I would have to, and it's rather hard to match it with version bumps
+
+[12:49] <timotimo> when encountering a utf16-encoded file with a BOM at the beginning, we could end up reading past the end of the actual string, that got fixed, too
+
+[12:49] <timotimo> on top of that, heap snapshots became more insightful
+
+[12:50] <lizmat> jnthn: so more like what got fixed, rather than how, please  :-)
+
+[12:50] <timotimo> and some cases where maliciously crafted .moarvm files could segfault moar were fixed, too. but not all of the ones discovered so far.
+
+[12:50] <timotimo> and moar is now also a bit smarter (hopefully) about when to run a major collection
+
+[12:51] <timotimo> especially when you have very big arrays or strings involved that will eat a lot of heap space, but not cause collections more often
+
+[12:51] <timotimo> because only the size of their headers was factored into when to collect fully
+
+[12:52] <dalek> rakudo/nom: 40a953f | jnthn++ | tools/build/NQP_REVISION:
+
+[12:52] <dalek> rakudo/nom: Bump NQP_REVISION for various MoarVM fixes/tuning.
+
+[12:52] <dalek> rakudo/nom:
+
+[12:52] <dalek> rakudo/nom: The most important fix in here addresses a memory leak that was most
+
+[12:52] <dalek> rakudo/nom: liable to show up in programs that `EVAL` a lot of code, but could
+
+[12:52] <dalek> rakudo/nom: show up easily in programs with lots of medium-age objects too. Also
+
+[12:52] <dalek> rakudo/nom: a bit of GC tuning that hopefully improves memory behavior, plus a
+
+[12:52] <dalek> rakudo/nom: UTF-16 fix, a crash fixed when reading corrupt bytecode, and some
+
+[12:52] <dalek> rakudo/nom: further details in heap snapshots.
+
+[12:52] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/40a953f5d9
+
+[12:56] <dalek> roast: e1702d0 | jnthn++ | S32-str/encode.t:
+
+[12:56] <dalek> roast: Test to cover a UTF-16 BOM handling bug.
+
+[12:56] <dalek> roast:
+
+[12:56] <dalek> roast: "Somebody set up us the BOM!"
+
+[12:56] <dalek> roast: review: https://github.com/perl6/roast/commit/e1702d0085
+
+[12:58] <psch> oh hm
+
+[12:58] <psch> apparently i did that CC thing for RT Replies wrong again :/
+
+[12:58] <psch> well, or the mailing list doesn't update quickly, or RT takes a while to send...
+
+[12:59] *** pmurias joined
+[13:13] <jnthn> Grr, I still can't reproduce that threading crash from last night
+
+[13:13] <timotimo> .o( crashes from last night .com )
+
+[13:19] * jnthn leaves it running in a loop on his Linux VM
+
+[13:19] <jnthn> I want to figure out why on earth spectest hangs on Windows
+
+[13:20] <jnthn> Only in parallel spectest
+
+[13:21] <moritz> one thing you can use to make it easier to debug is to only put a few files into t/localtest.data and do a 'TEST_JOBS=8 localtest' or so
+
+[13:22] <moritz> well, easier to reproduce, not easier to fix
+
+[13:22] <jnthn> moritz: That's exactly what I'm doing... ;)
+
+[13:22] <jnthn> Thanks, though! :)
+
+[13:22] <jnthn> It fails to hang with TEST_JOBS=1..4
+
+[13:22] <jnthn> 6 is enough :)
+
+[13:23] <lizmat> Files=1109, Tests=52301, 269 wallclock secs (13.89 usr  4.00 sys + 1624.99 cusr 145.27 csys = 1788.15 CPU)
+
+[13:24] <lizmat> after bump  :)
+
+[13:24] <lizmat> cycling&
+
+[13:24] <jnthn> lizmat: How much improvement/disprovement is that? :)
+
+[13:24] <lizmat> in noise range, I'm afraid
+
+[13:25] <lizmat> Files=1109, Tests=52300, 256 wallclock secs (14.29 usr  4.05 sys + 1574.62 cusr 140.77 csys = 1733.73 CPU)
+
+[13:26] <lizmat> was the previous one I did
+
+[13:26] <lizmat> so, looks like it is definitely not faster, but that could well be because the CPU was hotter when I did the last one
+
+[13:26] <lizmat> will run one again when I'm back
+
+[13:26] <lizmat> afk&
+
+[13:27] <jnthn> Yeah...I wasn't expecting a speedup really
+
+[13:27] <jnthn> Spectests are mostly short and would never have reached a full collection in most cases anyway
+
+[13:32] <jnthn> Aha, managed to get it down to a localtest.data of 2 files :)
+
+[13:32] <jnthn> S10-packages/precompilation.t
+
+[13:32] <jnthn> S11-modules/export.t
+
+[13:34] * jnthn builds debug moar and hopes that won't hide it :)
+
+[13:41] <jnthn> One of them is blocking on acquiring a file lock in the precomp store
+
+[13:41] <jnthn> nine: Don't suppose you're about? :)
+
+[13:52] <timotimo> ah, yeah, locks. that'd do it
+
+[13:54] <jnthn> Yeah, I'm trying to play spot the difference to see why it doesn't happen elsewhere
+
+[13:58] <jnthn> It fails to hang on linux with exact same localtest.data
+
+[13:58] <jnthn> And TEST_JOBS
+
+[14:44] *** skids joined
+[14:47] <jnthn> It's really rather odd
+
+[14:48] <jnthn> t\spec\S11-modules\export.rakudo.moar is holding the lock, and it's blocked saying the result of test 13 (ok 13 - ...)
+
+[14:49] <jnthn> t\spec\S10-packages\precompilation.rakudo.moar spawned a process to run code and is blocked on running that (this makes sense)
+
+[14:49] <jnthn> getout-14960-846439.code is what it's running, and wants the lock
+
+[14:49] <jnthn> What is unclear is why the first of these is blocking on output.
+
+[14:49] <jnthn> I'm wondering a tiny bit if it could be something about how parallel test running works on Windows?
+
+[14:50] <moritz> blocking on output? Isn't there some kind of IPC between parent and child process when communicating?
+
+[14:50] <moritz> maybe the parent doesn't read from its pipe, so the output of the child blocks
+
+[14:50] <timotimo> then the file lock was just a big red herring?!
+
+[14:50] <moritz> dunno
+
+[14:51] <jnthn> Well no, it's also a bit odd that we're holding the lock still while trying to write a test result
+
+[14:51] <moritz> it could be not reading from the pipe because it waits for a lock, or something
+
+[14:51] <jnthn> Well, or it wants another process to output first
+
+[14:51] <moritz> jnthn: could you try to do the parallelization at a different level than the test harness, and see if that changes anything?
+
+[14:52] <moritz> like, write a small perl6 script that quickly launches individual test processes
+
+[14:52] <moritz> that way you could rule out the test harness
+
+[14:57] <jnthn> my $p1 = Proc::Async.new('cmd', '/c', Q/perl6-m -Ilib t\spec\S10-packages\precompilation.rakudo.moar/);
+
+[14:57] <jnthn> No hang with this
+
+[14:58] <jnthn> my $p2 = Proc::Async.new('cmd', '/c', Q/perl6-m -Ilib t\spec\S11-modules\export.rakudo.moar/);
+
+[14:58] <jnthn> ($p1, $p2)>>.stdout>>.tap(&print);
+
+[14:58] <jnthn> await ($p1, $p2)>>.start;
+
+[14:58] <jnthn> Outputs both test results
+
+[14:58] <jnthn> Partly overlapped
+
+[15:03] <jnthn> If I stick a sleep inside of the export test, though, the second really won't complete beyond the point of the is_run in the second
+
+[15:03] <jnthn> ...until the export test has completed
+
+[15:04] <jnthn> So I gotta wonder if we somehow are leaking the lock somewhere
+
+[15:16] <jnthn> ...very possible, 'cus the point of lock acquisition and lock release seem a bit distant, which is kinda asking for a bug...
+
+[15:41] <jnthn> OK, we do indeed leak a lock: https://gist.github.com/jnthn/d5edcce0436d4f45889ffb35139f1821
+
+[15:42] <jnthn> And, at a guess, combined with the way prove parallelizes on Windows, we get a hang
+
+[16:02] <jnthn> Think I have a patch that fixes it
+
+[16:03] <RabidGravy> jnthn, https://rt.perl.org/Ticket/Display.html?id=127860 - bug that afflicts OO::Monitors
+
+[16:15] <jnthn> yay, seems the hang is gone
+
+[16:17] <RabidGravy> I'll PR the failing test to OO::Monitors (which is basically the Counter from the basic.t moved to a separate file)
+
+[16:21] <dalek> rakudo/nom: 81e6747 | coke++ | docs/ChangeLog:
+
+[16:21] <dalek> rakudo/nom: Add some items for 2016.04
+
+[16:21] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/81e67477be
+
+[16:25] <dalek> rakudo/nom: a93edd9 | jnthn++ | src/core/CompUnit/PrecompilationRepository.pm:
+
+[16:25] <dalek> rakudo/nom: Fix a missing pre-comp store unlock.
+
+[16:25] <dalek> rakudo/nom:
+
+[16:25] <dalek> rakudo/nom: This could cause the store to remain locked until program exit. This
+
+[16:25] <dalek> rakudo/nom: was particularly problematic on Windows parallel spectests, causing a
+
+[16:25] <dalek> rakudo/nom: hang. The test harness seems to read from the processes one at a time
+
+[16:25] <dalek> rakudo/nom: on Windows, blocking the output of those it's not currently reading
+
+[16:25] <dalek> rakudo/nom: from. A test that needed to pre-compile something while running would
+
+[16:25] <dalek> rakudo/nom: block on acquiring the lock, which was being held by another script that
+
+[16:25] <dalek> rakudo/nom: would not release it until process exit. In combination, this created a
+
+[16:25] <dalek> rakudo/nom: circular wait, and thus a deadlock. However, there are probably platform
+
+[16:25] <dalek> rakudo/nom: independent deadlocks that could have been caused by this bug, not to
+
+[16:26] <jnthn> That took some finding...
+
+[16:27] <jnthn> nine: So I figured it out but...if you have upcoming refactors, a more robust code structure around the locking may be wise. It's tricky to audit lock/unlock correctness when they are so far apart...
+
+[16:28] <jnthn> RabidGravy: Thanks...will see if I can figure that one out...but right now I need to rest a bit :)
+
+[16:29] <RabidGravy> :) and it's Friday
+
+[16:30] <jnthn> bbl & :)
+
+[16:30] <stmuk> nearly Beer O' Clock
+
+[16:30] <timotimo> i missed feed-the-kittehs o' clock
+
+[16:31] <stmuk> ours has started feed-the-humans o' clock :/
+
+[16:31] <timotimo> brought in things it hunted?
+
+[16:33] <stmuk> yes
+
+[16:34] <timotimo> it really cares for you :)
+
+[17:02] <RabidGravy> jnthn, actually I'll just commit that test directly with a TODO as I forgot you gave me commit
+
+[17:18] <dalek> rakudo/nom: a3b8fef | TimToady++ | src/Perl6/Actions.nqp:
+
+[17:18] <dalek> rakudo/nom: fix "useless use" in import arguments
+
+[17:18] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/a3b8fefe93
+
+[17:30] <nine> jnthn: commit 0204bffa351c049a573cfdabc5fba4c9ec3554fc in the relocateable-precomp should fix some locking issues
+
+[17:32] <nine> jnthn: and I guess it's exactly the same issue you fixed :/
+
+[17:36] <moritz> (long-lived branches)--
+
+[17:39] <nine> Well I never thought it would take me a month and a half to get this blocker out of the way
+
+[18:12] *** FROGGS joined
+[18:24] *** [Coke] joined
+[18:28] *** vendethiel joined
+[18:42] <lizmat> Files=1109, Tests=52301, 256 wallclock secs (13.78 usr  3.71 sys + 1566.28 cusr 139.66 csys = 1723.43 CPU)
+
+[18:42] <lizmat> jnthn: ^^^ so definitely within noise range
+
+[18:43] <jnthn> lizmat: OK, good to know the thing I wasn't expecting to change didn't budge :)
+
+[18:43] <jnthn> nine: Does the branch address the fragility?
+
+[18:43] <jnthn> (e.g. bring the lock/unlock pairs closer)?
+
+[18:44] <jnthn> The patch you mentioned doesn't appear to do that
+
+[18:47] <jnthn> lizmat: Was that with my precomp lock fix patch too?
+
+[18:47] <lizmat> m: say (1,2,666,42,666,27).maxpairs
+
+[18:47] <camelia> rakudo-moar 40a953: OUTPUT«[2 => 666 4 => 666]␤»
+
+[18:48] <lizmat> so .maxpairs/.minpairs now also work on lists / arrays / anything that can do .pairs basically
+
+[18:51] <lizmat> jnthn: no, running that now
+
+[18:51] <lizmat> Files=1109, Tests=52301, 274 wallclock secs (14.16 usr  4.33 sys + 1648.70 cusr 145.60 csys = 1812.79 CPU)
+
+[18:52] <lizmat> jnthn: again, hot CPU and doing other stuff in the meantime, so take this just as a proof of spectest cleanliness  :-)
+
+[18:53] <jnthn> Sure, was more concerned that unbusting stuff on Windows didn't bust it elsewhere ;)
+
+[18:53] <jnthn> Thanks :)
+
+[18:53] * jnthn is happy to be able to TEST_JOBS=12 again :)
+
+[19:11] *** AlexDaniel joined
+[19:15] *** hankache joined
+[19:20] <[Coke]> jnthn: does that fix the occasional thing that died under load, or was this a recent bustage that got fixed?
+
+[19:20] <timotimo> just a hang that only happens on windows
+
+[19:20] <timotimo> um
+
+[19:20] <timotimo> actually
+
+[19:21] <timotimo> probably could also happen on linux
+
+[19:29] *** sortiz joined
+[19:34] *** hankache joined
+[19:51] <jnthn> I think you could construct a cross-platform hang from the bug
+
+[19:52] <jnthn> It's hard to know when it was introduced to Rakudo, since it needed a certain pairing of spectests to be in the same "batch"
+
+[19:53] <jnthn> But I've known about it for a couple of weeks.
+
+[19:53] <jnthn> Just wanted to nail that EVAL memory leak I was on with hunting before digging in to it... :)
+
+[20:09] <dalek> rakudo/nom: d847011 | lizmat++ | src/core/Any-iterable-methods.pm:
+
+[20:09] <dalek> rakudo/nom: Optimize sort a bit
+
+[20:09] <dalek> rakudo/nom:
+
+[20:09] <dalek> rakudo/nom: - 3% for the no comparator case
+
+[20:09] <dalek> rakudo/nom:   This appears to be an optimizer issue really.  But $a cmp $b is just
+
+[20:09] <dalek> rakudo/nom:   faster than my &by = &infix:<cmp>; by($a,$b)
+
+[20:09] <dalek> rakudo/nom: - 15% for the mapper case (comparator taking a single parameter)
+
+[20:09] <dalek> rakudo/nom:   By not using .map, but an nqp loop.
+
+[20:09] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/d84701162f
+
+[20:12] <timotimo> ah, quite good :)
+
+[20:26] <masak> lizmat++
