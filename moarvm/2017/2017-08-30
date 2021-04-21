@@ -1,0 +1,461 @@
+[00:43] <Zoffix> \o
+
+[00:56] <japhb> samcv: Are you still looking for a job?  If so, have you applied at Google yet?  (I'm a manager there.)
+
+[01:51] *** ilbot3 joined
+[02:24] *** Ven`` joined
+[03:08] <samcv> i think you remember saying that before. i will add it to my list, thanks :)
+
+[03:16] <samcv> i should probably commit something today. i think i'll do adding the unicode names for the hangul syllables
+
+[03:21] <samcv> u: hangul
+
+[03:21] <unicodable6> samcv, U+1100 HANGUL CHOSEONG KIYEOK [Lo] (?)
+
+[03:21] <unicodable6> samcv, U+1101 HANGUL CHOSEONG SSANGKIYEOK [Lo] (?)
+
+[03:21] <unicodable6> samcv, 563 characters in total: https://gist.github.com/86a72f089958516afe9e96a6e453dcbf
+
+[03:22] <samcv> hmm did i already do it?
+
+[03:24] <samcv> m: 0xD4DB.uniname.say
+
+[03:24] <camelia> rakudo-moar e3af66: OUTPUT: «<Hangul Syllable>?»
+
+[03:48] <samcv> i was going to finish getting ucd2c.pl working properly i remember now. so i don't deal with the hassel of it regenerating wrong after adding the names
+
+[05:36] <samcv> m: use nqp; my $p = nqp::unipropcode('General_Category'); my $pv = nqp::unipvalcode($p, 'L');  nqp::hasuniprop('a', 0, $p, $pv).say
+
+[05:36] <camelia> rakudo-moar e3af66: OUTPUT: «0?»
+
+[05:36] <samcv> m: use nqp; my $p = nqp::unipropcode('General_Category'); my $pv = nqp::unipvalcode($p, 'N');  nqp::hasuniprop('3', 0, $p, $pv).say
+
+[05:36] <camelia> rakudo-moar e3af66: OUTPUT: «0?»
+
+[06:03] *** brrt joined
+[06:33] <brrt> good * #moarvm
+
+[06:34] <samcv> good *
+
+[06:39] <brrt> samcv, can you help me figure something out
+
+[06:39] <samcv> i hope :-)
+
+[06:39] <brrt> i'm having a design…. challenge, or tradeoff, or whatever in the optimizer, that i kind of know how to resolve, but would prefer another mind to look at :-)
+
+[06:40] <samcv> ok :)
+
+[06:40] <brrt> context: I really, really, really, like bounded-sized-sets
+
+[06:40] <brrt> or more properly
+
+[06:40] <brrt> i like knowing in advance how much of a thing to allocate
+
+[06:40] <brrt> so that i only ever have to allocate that single thing
+
+[06:40] <samcv> yeah
+
+[06:41] <brrt> so i use that pretty heavily in even-moar-jit
+
+[06:41] <brrt> now, in the optimizer, i need to be able to swap out one node for another
+
+[06:42] <brrt> and also, i want to be able to compute number of referents for a node, for instance to replace a heavily-referenced LOAD with a COPY of the same, so that the tiler thinks it's opaque and will actually load it into a register rather than issue two separate LOADs
+
+[06:43] <brrt> so what i'd like is to associate each node with its set of parents, or referents, or inboud edges, or whatever you want to call them
+
+[06:43] <brrt> i.e. its users
+
+[06:43] <brrt> now there is a very simple identity going on. it's impossible for there to be more referents than nodes
+
+[06:44] <brrt> it would be possible to have almost as many references as there are nodes, for instance if i have a single DO list that refers the same node over and over and over again
+
+[06:45] <brrt> so, that makes me happy, because now i can allocate the reference-mapping things as a single array, arrange them in a linked list per node, and use pointer bumping to allocate
+
+[06:45] <brrt> however.
+
+[06:45] <brrt> when i'm optimizing, i'm modifying the tree at the same time
+
+[06:46] <brrt> so when e.g. i swap out node A for node B, all references to A must be replaced by B
+
+[06:46] <brrt> great, i can use my reference list, and find out all nodes that refer to A, and have them refer to B
+
+[06:47] <brrt> this never adds any new references, so my initial constraint still holds
+
+[06:47] <brrt> but B can be the root of a tree, as can A
+
+[06:47] <brrt> all references to the children of A are now become useless (A has been spliced out). all children of B have no references allocated to them
+
+[06:49] <brrt> the second part is a problem because i would like to iterate over B (haivng not visitied it before) and see if there is anything there i can optimize
+
+[06:52] <brrt> and if i want to assign references to the nodes in B, i can't because i'll easily end up with more references than i'd have allocated
+
+[06:52] <brrt> so, i can now: try to garbage collect all references from A
+
+[06:52] <brrt> which will break my pointer-bumping scheme, but okay
+
+[06:53] <brrt> will have to use a free list scheme instead
+
+[06:53] <brrt> or B, allocate all references from a region (MVM_spesh_alloc), and have them cleaned up later
+
+[06:53] <brrt> i mean, i know fairly well that B is the solution here
+
+[06:53] <brrt> i also have C, split optimization in multiple passes
+
+[06:54] <nine> brrt: how performance sensitive is that code anyway? Spesh already runs in a separate thread and thus the JIT does, too.
+
+[06:55] <brrt> it's partly about performance, but it's also partly about manageablility
+
+[06:56] <brrt> brb
+
+[07:12] *** brrt joined
+[07:14] <brrt> on the other hands, two things come to mind
+
+[07:14] <brrt> the sooner we finish compilation, the sooner that code now actually runs
+
+[07:14] <brrt> so fast compilation does have an effect
+
+[07:15] <brrt> more importantly,  the size of the data that the expr compiler works on is potentially huge
+
+[07:15] <brrt> we have already very large frames
+
+[07:15] <brrt> ultimately, we want to compile the entire frame to an expression
+
+[07:15] <brrt> so cheap and cheerful is i think the way to go
+
+[07:16] <brrt> (what if all you need is a hammer, and good aim?)
+
+[07:16] <nine> brrt: MVM_spesh_alloc is pretty much just pointer bumping and you don't have to care about freeing the memory. Sounds like the perfect compromise between performance and manageability
+
+[07:17] <brrt> it's pretty good, yes, and to be fair, the only good reaosn i have not to use it in the expr tree, is that it doesn't handle dynamically growing arrays very well
+
+[07:17] <brrt> and a dynamically growing array is such a super useful data structure
+
+[07:17] <brrt> hash table? dynamic array
+
+[07:17] <brrt> free list? dynamic array
+
+[07:17] <samcv> brrt, how would splitting opt into multiple passes be
+
+[07:18] <brrt> heap, dynamic array
+
+[07:18] <brrt> union-find, you get the point
+
+[07:18] <brrt> not well defined in my mind, but you'd have one pass to get all references, another pass to do the replacements
+
+[07:19] <brrt> topological graph, well, in my case, static array
+
+[07:22] <brrt> that splitting would in fact not solve the problem of my references
+
+[07:22] <brrt> so, yeah, spesh allocation is the way to got
+
+[07:22] <brrt> *go
+
+[07:22] <brrt> just wanted to confirm that, is all :-)
+
+[07:23] <nine> brrt: thanks for asking btw. Made me investigate MVM_spesh_alloc :)
+
+[07:24] *** geekosaur joined
+[07:26] <samcv> sounds like a plan brrt
+
+[07:26] <brrt> alright
+
+[07:26] <brrt> cool
+
+[08:29] *** robertle_ joined
+[08:40] *** zakharyas joined
+[12:01] *** zakharyas joined
+[12:11] *** evalable6 joined
+[12:22] *** nwc10 joined
+[12:33] <timotimo> my readSizedInt64 is full of fastinvoke + hllize + decont_i :\
+
+[12:33] <timotimo> that might make it a bit slow
+
+[12:36] <timotimo> the hllize comes from calling .shift on the Buf[uint8], which is done as an invoke_o kind of thing
+
+[12:37] <timotimo> looks like in Blob it already just calls nqp::shift_i on itself
+
+[12:37] <timotimo> but it can return a Failure
+
+[12:37] <timotimo> that's probably what frustrates the whole effort
+
+[12:44] <timotimo> with nqp::shift_i the generated code is much nicer
+
+[12:44] <timotimo> it's a single BB with only shift_i, const_i64_16, blshift_i, and add_i
+
+[12:48] *** MasterDuke joined
+[12:49] <timotimo> oh yeah!
+
+[12:49] <timotimo> i've reached 8 seconds
+
+[12:49] <MasterDuke> timotimo: for the heap analyzer?
+
+[12:49] <timotimo> 317% cpu usage, not bad
+
+[12:50] <timotimo> yep!
+
+[12:50] <MasterDuke> nice. haven't gotten to try it out yet, but looking forward to the speedup
+
+[12:51] <timotimo> AFKBBL
+
+[12:51] <MasterDuke> btw, anybody have any comments/suggests re my INTERPOLATE questions from yesterday?
+
+[12:52] <timotimo> but maybe i'll push something before i go
+
+[12:54] *** coverable6 joined
+[12:54] *** committable6 joined
+[12:54] *** bloatable6 joined
+[12:54] *** unicodable6 joined
+[12:54] *** nativecallable6 joined
+[12:54] *** releasable6 joined
+[12:54] *** greppable6 joined
+[12:54] *** quotable6 joined
+[12:54] *** bisectable6 joined
+[12:54] *** benchable6 joined
+[12:54] *** evalable6 joined
+[12:54] *** statisfiable6 joined
+[12:58] <timotimo> i just pushed to my branch
+
+[12:58] <timotimo> have fun!
+
+[12:59] <MasterDuke> cool, checking it out now
+
+[13:00] <timotimo> yay
+
+[13:01] <timotimo> don't forget it has to be the file moar now spits out into /tmp
+
+[13:01] <timotimo> otherwise you'll have no speed benefits
+
+[13:01] <timotimo> also, it currently leaks file descriptors
+
+[13:02] <MasterDuke> right. i don't need to pass any new options to ---profile (other than =heap)?
+
+[13:02] <timotimo> correct
+
+[13:02] <timotimo> i just hacked the output in
+
+[13:02] <MasterDuke> k
+
+[13:02] <timotimo> i also haven't tested it with anything that has more than one snapshot :D
+
+[13:04] <MasterDuke> hm, got a segv. rebuilding rakudo to make sure it isn't that
+
+[13:04] <MasterDuke> (when doing the profile)
+
+[13:08] <MasterDuke> timotimo: https://gist.github.com/MasterDuke17/c9b2ad8c1fe99fa274e61b0f097d4e40
+
+[13:10] <MasterDuke> valgrind and gdb output
+
+[13:28] <timotimo> huh
+
+[13:35] <MasterDuke> it gets through one call of `MVM_spesh_sim_stack_gc_mark`, but the second seems to have an invalid/missing/something `sims->frames`
+
+[13:36] <timotimo> i don't think i meant to commit that
+
+[13:36] <MasterDuke> i.e., it segvs on the first iteration of the loop
+
+[13:36] <timotimo> gimme a sec
+
+[13:36] <MasterDuke> commit what?
+
+[13:36] <timotimo> oh, did i forget to commit the independent "make heap snapshot no longer segv" stuff
+
+[13:37] <MasterDuke> ha. btw, i'm on your heapsnapshot_binary_format branch
+
+[13:37] <timotimo> yeah
+
+[13:38] <MasterDuke> and i rebased master onto it
+
+[13:39] <timotimo> ah!
+
+[13:39] <timotimo> i do have changes!
+
+[13:40] <Geth> ¦ MoarVM/heapsnapshot_binary_format: 3b2fefcaf4 | (Timo Paulssen)++ | 7 files
+
+[13:40] <Geth> ¦ MoarVM/heapsnapshot_binary_format: WIP gc_describe functions for new spesh datastructures
+
+[13:40] <Geth> ¦ MoarVM/heapsnapshot_binary_format: review: https://github.com/MoarVM/MoarVM/commit/3b2fefcaf4
+
+[13:40] <timotimo> the important part is that it no longer tries to gc_mark if it's actually in heapsnapshot mode (which means there is no "worklist")
+
+[13:44] <MasterDuke> ah, no segv
+
+[13:45] <timotimo> i had already "git add"ed it and i always just "git diff" to see what's what
+
+[13:45] <timotimo> but git gui thankfully showed me
+
+[13:45] <MasterDuke> and now there's a heapsnapshot_new_format in /tmp
+
+[13:45] <timotimo> yup!
+
+[13:47] <MasterDuke> does seem a bit faster. longer than 8s though
+
+[13:47] <timotimo> compare it to the regular format on an unpatched heapanalyzer
+
+[13:48] <timotimo> also, how big are the files and such? :)
+
+[13:49] <MasterDuke> 48m for regular, 100m for binary
+
+[13:49] <MasterDuke> 2 snapshots
+
+[13:50] <MasterDuke> didn't time it, but `summary` in the regular one was a bunch slower
+
+[13:53] *** MasterDuke_ joined
+[13:54] <MasterDuke_> hm, binary version does seem to switch snapshots much faster
+
+[13:57] <MasterDuke_> oh, but maybe `top objects by size` gives different results
+
+[13:59] <timotimo> well, switching snapshots does no work
+
+[13:59] <timotimo> i'd time something like echo "snapshot 0\nsummary" on both implementations
+
+[14:00] <timotimo> "top objects by size" will additionally go through the whole snapshot once again
+
+[14:00] <MasterDuke_> timotimo: https://gist.github.com/MasterDuke17/91bceab7d1a3f29464313d9fde812822
+
+[14:00] <MasterDuke_> looks like the numbers are the same, but different names
+
+[14:00] <timotimo> huh
+
+[14:00] <timotimo> that's not right
+
+[14:01] <timotimo> oh, perhaps the empty string in the string heap tripped me up
+
+[14:01] <timotimo> can you check into the file to see if these strings are neighbours except off by one?
+
+[14:01] <MasterDuke_> in which file?
+
+[14:02] <timotimo> the old version is easier to look at
+
+[14:03] <MasterDuke_> "Spesh slot entry","<SC>","P6opaque","Scalar","Perl6::Metamodel::ContainerDescriptor","NQPMu","Method cache","Type cache entry","Boolification method","WHO","WHAT","HOW"
+
+[14:04] <MasterDuke_> selection from old file around P6opaque
+
+[14:04] <MasterDuke_> "RoleToClassApplier","149","&has_method","&has_attribute","NQPArray","NQPMatch","int","str","gen/moar/stage2/QRegex.nqp","$?CLASS","$?PACKAGE","$NO_CAPS",
+
+[14:04] <MasterDuke_> selection from old file around NQPArray
+
+[14:05] <MasterDuke_> useful?
+
+[14:05] <timotimo> oh
+
+[14:05] <timotimo> maybe snapshots 0 and 1 are swapped
+
+[14:06] <timotimo> no that makes no sense either
+
+[14:06] <MasterDuke_> oh, i just noticed p6opaque shows up a couple times in the new version's output
+
+[14:06] <MasterDuke_> 3 times
+
+[14:06] <timotimo> it shouldn't do that :D
+
+[14:07] <timotimo> well, it's easy to be much faster, but also wrong
+
+[14:07] <timotimo> for every bit of wrong you can potentially be 10x as fast :D
+
+[14:07] <MasterDuke_> yup
+
+[14:08] <timotimo> oh, i gotta get ready to head out
+
+[14:08] <timotimo> seems like i'll have to fix this later
+
+[14:12] <MasterDuke_> k
+
+[14:15] <timotimo> unless you can figure out what mistake i made :D
+
+[14:15] <timotimo> like you could print out the @!strings for both versions and compare
+
+[14:29] <MasterDuke_> you think the problem is in the app? not the moarvm branch?
+
+[14:37] <timotimo> hm, right, could also be the functions that write out things. not sure how, though
+
+[14:40] <MasterDuke_> i added `dd @!strings[^20]` to the BUILDs
+
+[14:40] <MasterDuke_> the output for just running the app is the same
+
+[15:07] *** brrt joined
+[15:16] <brrt> rebase from hell, but we'll get there...
+
+[15:17] <Zoffix> .oO( ? I'm on a reeeeeebaaaasee to hell... ? )
+
+[15:36] *** AlexDaniel joined
+[15:39] *** benchable6 joined
+[15:52] <japhb> .oO( The rebase to hell is paved with well-intentioned patches. )
+
+[16:29] *** dogbert2 joined
+[17:03] *** zakharyas joined
+[17:17] *** leont joined
+[18:21] <nine> That's an interesting comment: https://github.com/MoarVM/MoarVM/blob/master/src/core/interp.c#L108
+
+[18:21] <nine> The lists don't actually match. I wonder how much that costs?
+
+[18:25] <nine> Now finally the whole thing makes sense! "Points to the current opcode." is just plain wrong. cur_op does _not_ point at the current opcode, but at the place following that, which is the number of the first register.
+
+[18:26] <nine> The NEXT_OP macro tellst that story
+
+[18:27] <nine> so *tc->interp_cur_op should actually point at GETREG(cur_op, 0) which is exactly what I need, because it's the register I should return values into
+
+[19:49] <dogbert2> https://github.com/libtom/libtommath/blob/develop/changes.txt
+
+[19:50] <Zoffix> "-- Fixed mp_rand() to fill the correct number of bits" we had a bug due to that
+
+[19:52] <dogbert2> and I believe we had another bug relating to 'Fixed mp_invmod()'
+
+[19:52] *** brrt joined
+[19:52] <dogbert2> I think timotimo patched that though
+
+[19:53] <brrt> good *
+
+[19:53] <brrt> i'm thinking of calling of the whole rebase plan
+
+[19:53] <brrt> its super frustrating
+
+[19:53] <brrt> it doesn't actuallly give a 'clean' set of patches
+
+[19:53] <brrt> since many of the intermediate steps are just broken
+
+[19:54] <brrt> it risks diverging from the current, working, code
+
+[19:55] <brrt> *off
+
+[19:56] <dogbert2> Zoffix: RT #129829
+
+[19:56] <synopsebot6> Link:  https://rt.perl.org/rt3/Public/Bug/Display.html?id=129829
+
+[19:56] <brrt> and it distract from actual useful changes
+
+[20:12] <brrt> .ask jnthn i notice a bunch of jgb_sc_wb calls to things where the operand might be an integer rather than an object
+
+[20:12] <yoleaux> brrt: I'll pass your message to jnthn.
+
+[20:32] <nine> .ask brrt why does the JIT clear RV in the epilogue? It could be used for returning a value to the caller otherwise
+
+[20:32] <yoleaux> nine: I'll pass your message to brrt.
+
+[22:09] *** geekosaur joined
+[22:19] <timotimo> ended up not doing anything much today
+
+[22:22] * lizmat knows the feeling
+
+[22:22] * lizmat goes to bed
+
+[23:26] <samcv> another day, gotta work on ucd2c.pl again. ugh. i will prevail!
+
+[23:36] <Zoffix> \o/
+
+[23:37] <samcv> Zoffix, what is your opinion on the Unified ideographs. none of them have names. it's my opinion like the control codes we should call them <CJK Unified Ideograph-7FFE> or such
+
+[23:37] <samcv> because atm there's no way to distinguish them
+
+[23:38] <samcv> m: "?".uninames.say
+
+[23:38] <camelia> rakudo-moar 8a2158: OUTPUT: «(<CJK Ideograph>)?»
+
+[23:38] <samcv> err just CJK IDeograph i guess plus the number
+
+[23:43] *** geekosaur joined
+[23:45] <Zoffix> samcv: yeah, sounds like a plan
+
+[23:48] *** geekosaur joined
+[23:53] <samcv> and fixing this i made a function to catch the bad output that gets in there and i'm putting it every damn place with a croak
+
+[23:53] <samcv> eventually i'll figure out where it's being added in...

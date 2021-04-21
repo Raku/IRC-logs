@@ -1,0 +1,208 @@
+[00:36] *** dogbert11 joined
+[00:39] *** dogbert17 left
+[00:41] *** dogbert11 left
+[00:41] *** dogbert11 joined
+[00:42] *** dogbert11 left
+[00:43] *** dogbert11 joined
+[00:44] *** dogbert11 left
+[00:45] *** dogbert11 joined
+[00:51] *** dogbert17 joined
+[00:54] *** dogbert11 left
+[01:11] *** dogbert17 left
+[01:29] *** sxmx left
+[01:51] *** dogbert17 joined
+[01:52] *** sxmx joined
+[02:12] *** sena_kun left
+[02:27] *** sena_kun joined
+[02:32] *** sxmx left
+[02:34] *** sxmx joined
+[04:26] *** Altai-man_ joined
+[04:28] *** sena_kun left
+[06:33] *** squashable6 left
+[06:35] *** squashable6 joined
+[06:46] *** frost-lab joined
+[06:52] <nwc10> good *, #moarvm 
+
+[07:43] <nine> good Friday!
+
+[08:05] *** domidumont joined
+[08:31] *** frost-lab left
+[08:35] *** frost-lab joined
+[08:59] *** Kaiepi left
+[09:05] *** frost-lab left
+[09:12] *** zakharyas joined
+[09:23] *** Altai-man_ left
+[09:25] *** sena_kun joined
+[09:35] *** frost-lab joined
+[09:46] *** frost-lab88 joined
+[09:50] *** frost-lab left
+[10:02] *** frost-lab88 left
+[10:40] *** frost-lab joined
+[10:59] *** Kaiepi joined
+[12:00] *** zakharyas left
+[12:14] *** frost-lab left
+[12:17] *** frost-lab joined
+[12:42] *** frost-lab left
+[12:49] *** frost-lab joined
+[13:23] *** domidumont left
+[13:25] *** cog_ joined
+[13:27] *** samcv_ joined
+[13:33] *** samcv left
+[13:33] *** cog__ left
+[13:45] <sena_kun> Any estimates if we squeeze the https://github.com/rakudo/rakudo/pull/4253 in before release?
+
+[14:00] <jnthn> releasable6: status
+
+[14:00] <releasable6> jnthn, Next release in ≈1 day and ≈4 hours. 1 blocker. 23 out of 64 commits logged (⚠ 37 warnings)
+
+[14:00] <releasable6> jnthn, Details: https://gist.github.com/5bfb281a92955f43efc935a7e241216e
+
+[14:00] <jnthn> I...wouldn't, tbh
+
+[14:00] <sena_kun> Fair enough.
+
+[14:00] <jnthn> Well, maybe the original version of the PR, but even then I'm nervous.
+
+[14:01] <jnthn> A *lot* of things go through that code path
+
+[14:01] <sena_kun> Ok, let's not hurry then.
+
+[14:02] <sena_kun> Guess it was too late for me to urge people to pay attention to the blocker ticket, but even these efforts are already very admirable, I guess.
+
+[14:06] *** frost-lab left
+[14:36] <nine> The current version of the PR is definitely not for merge. It's known to be broken and contains debug output. If we want to merge something that'd be $l.lock; $l.unlock; nqp::continuationinvoke($continuation, nqp::null());
+
+[14:38] <nine> jnthn: FYI I cannot make any more progress on that PR without input. I'm absolutely baffled. If what I see is correct, the issue is simply that another thread does not see the change to the lexical, even though it's definitely read from memory again. I even tried it without spesh and with -O0
+
+[14:49] *** zakharyas joined
+[15:28] *** Kaiepi left
+[15:34] *** Kaiepi joined
+[15:39] *** Kaiepi left
+[15:42] *** Kaiepi joined
+[16:16] *** samcv_ is now known as samcv
+
+[16:16] *** samcv left
+[16:16] *** samcv joined
+[16:28] *** samcv left
+[16:34] <nine> sena_kun: it's pretty clear why t/spec/S17-procasync/kill.t flaps. It's the signal handler setup itself that's asynchronous (happens on the IO eventloop thread) and that we're not waiting for.
+
+[16:36] <moritz> is that a problem in the test or in the code that does the signal handler setup?
+
+[16:42] <nine> The test is innocent. There's just no way to write it correctly. It's a lack in our APIs at all layers
+
+[16:43] <sena_kun> One simple way is to just disable it then, another way is to make it retry so many times the chances of failing are really slim.
+
+[16:47] <nine> Of course we could also fix our APIs :D
+
+[16:48] <sena_kun> That's the third way, The Bravest One. :3
+
+[16:50] <nine> Though I'm still a little bit surprised. Setting up the signal handler happens on the event loop thread, ok. But the program also prints to STDOUT after setting up the handler. I thought that all our IO is async nowadays and would happen on the event loop thread. So how can the status message be out but the handler not yet registered?
+
+[16:52] <nine> To answer my own question: I'm simply wrong. That write to STDOUT is synchronous.
+
+[16:58] <nine> But if it weren't I'd actually have been right. Which points at a....rather dubious way to make the test stable. Simply add a await Proc::Async.new('/bin/true').start; after handler setup. This ensures that the handler setup has run before we print 'Started' to STDOUT
+
+[16:59] <nine> But this actually reveals another issue with the test: default { is $_, $signal, 'Output correct for Supply.merge on signals'; } doesn't always get run. The surprising part though is that when this test does get run, the whole test file fails because of a wrong test count.
+
+[17:11] <MasterDuke> nine++ troubleshooting the very tricky things
+
+[17:18] <nine> Oooooooh..... that's devious. With the signal handler in place at the time the parent sends the SIGINT the program simply ends normally in most cases instead of the signal handler printing the number of the signal and then exiting
+
+[17:19] <nine> So the test is wrong in that it doesn't insist on the child process exiting via signal handler.
+
+[17:19] <nine> And the test count reflects the wrong behaviour.
+
+[17:24] <nine> Yep, looks perfectly stable now
+
+[17:25] <jnthn> nine: Only async I/O is done on the async event loop thread. In principle there shouldn't be issues between setup of signal handlers and running of procs in so far as there is only one async event loop thread, we put things to do into an ordered queue, and so the handler setup would be processed ahead of any process spawning.
+
+[17:26] <jnthn> Unless libuv is more async than I think on the inside
+
+[17:30] *** samcv joined
+[17:31] <nine> jnthn: that's how I worked around the problem. The test flaps because we cannot determine when the signal handler is ready. nqp::signal doesn't take an after-setup callback.
+
+[17:32] <nine> I worked around it by using the fact that there's only one event loop and when Proc::Async.new('/bin/true').start is done I can be sure that the signal handler is setup. But of course that's no long term solution
+
+[19:11] *** zakharyas left
+[19:17] <nwc10> .tell brrt The jit docs seem to be very out of date - they mention MVM_JIT_LOG and MVM_JIT_BYTECODE_DIR which I figured out have been removed/replaced with MVM_JIT_DUMP_BYTECODE, and I can't find any docs for jit-bisect.pl -- Where do I start?
+
+[19:17] <tellable6> nwc10, I'll pass your message to brrt
+
+[19:18] <nwc10> .tell brrt well, obvious step 0 is "make tea" but step 1 is where I'm stuck.
+
+[19:19] <tellable6> nwc10, I'll pass your message to brrt
+
+[19:33] *** zakharyas joined
+[19:56] <nine> nwc10: a possible step is asking questions here and adding answers to the docs
+
+[19:59] <nwc10> OK, I seem to be going backwards. I think that this will (also) SEGV on master:
+
+[19:59] <nwc10> MVM_JIT_DEBUG=1 MVM_JIT_DUMP_BYTECODE=1 ./rakudo-m -Ilib t/02-rakudo/04-settingkeys-6c.t
+
+[19:59] <nwc10> *first* bug is that src/jit/compile.c needs something like this:
+
+[19:59] <nwc10>      /* Logging for insight */
+
+[19:59] <nwc10> -    if (MVM_jit_bytecode_dump_enabled(tc))
+
+[19:59] <nwc10> +    if (MVM_jit_bytecode_dump_enabled(tc) && code)
+
+[19:59] <nwc10>          MVM_jit_dump_bytecode(tc, code);
+
+[20:00] <nwc10> but even if I fix that, I'm getting a SEGV further on, inside JITTed code - seems to be trying to read address 0x30
+
+[20:05] <nine> Doesn't seem to segfault here
+
+[20:05] <nine> on master/master/master
+
+[20:06] <nwc10> I have
+
+[20:06] <nwc10> MVM_SPESH_BLOCKING=1
+
+[20:06] <nwc10> MVM_SPESH_CHECK_DU=1
+
+[20:06] <nwc10> MVM_SPESH_NODELAY=1
+
+[20:08] <nwc10> I've deleted all the intermediate builds and I'm starting from clean
+
+[20:08] <nwc10> restarting from clean
+
+[20:11] <sena_kun> Erm, I cannot restart the CI. :S
+
+[20:12] <sena_kun> Can anyone restart https://travis-ci.org/github/MoarVM/MoarVM/jobs/761801808 please?
+
+[20:12] <sena_kun> Also, if it succeeds it means spawnprocasync.t is a flapper and if not it means we have a release blocker.
+
+[20:14] <nine>  nwc10: ah, NODELAY and BLOCKING do make a difference! Try: MVM_JIT_DEBUG=1 MVM_JIT_DUMP_BYTECODE=1 perl nqp/MoarVM/tools/jit-bisect.pl --nodelay -- ./rakudo-m -Ilib t/02-rakudo/04-settingkeys-6c.t
+
+[20:15] <nine> sena_kun: sorry, don't see any way to restart that build
+
+[20:18] <sena_kun> Hmm... I guess that's a time to rely on our azure configs then.
+
+[20:33] <sena_kun> Changelog: https://github.com/MoarVM/MoarVM/commit/dbe3b4dba4bc5c754eed8e30b637a6f39cac9be5
+
+[20:44] <MasterDuke> sena_kun++
+
+[21:06] *** zakharyas left
+[21:25] <jnthn> sena_kun: I found the restart job button and pressed it :)
+
+[21:25] <sena_kun> jnthn, thank you very much!
+
+[21:25] <sena_kun> Though either of the outcomes is not very reassuring. :S
+
+[21:31] <MasterDuke> i don't remember, can a string have different strand types? e.g., a strand of MVM_STRING_GRAPHEME_32 and a strand of MVM_STRING_GRAPHEME_ASCII
+
+[21:32] <jnthn> MasterDuke: Pretty sure it can
+
+[21:32] <MasterDuke> ok, thanks
+
+[22:12] *** jjatria_ joined
+[22:12] *** [Coke]_ joined
+[22:12] *** jjatria left
+[22:12] *** [Coke]_ left
+[22:12] *** [Coke]_ joined
+[22:13] *** jnthn left
+[22:13] *** jjatria_ is now known as jjatria
+
+[22:13] *** jnthn joined
+[22:13] *** [Coke] left

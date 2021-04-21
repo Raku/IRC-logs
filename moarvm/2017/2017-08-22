@@ -1,0 +1,340 @@
+[01:51] *** ilbot3 joined
+[05:52] *** brrt joined
+[06:03] *** brrt joined
+[06:05] <brrt> good * #moarvm
+
+[06:59] *** domidumont joined
+[07:07] *** domidumont joined
+[07:13] *** brrt joined
+[07:17] <brrt> timotimo: why is commit 2fbd57a5ad0be3c0946227aa150fb720569cb464 only in even-moar-jit?
+
+[07:17] <brrt> it touches toos/update_ops.p6
+
+[07:28] *** domidumont joined
+[07:40] *** zakharyas joined
+[08:58] *** robertle joined
+[09:00] *** samcv joined
+[09:43] *** lizmat joined
+[10:51] *** cog_ joined
+[10:53] <timotimo> dunno why, it could easily be cherry-picked over
+
+[11:01] *** harrow joined
+[11:01] *** leedo_ joined
+[11:02] *** Voldenet joined
+[11:02] *** Voldenet joined
+[11:17] <dogbert17> not much happening here, is everyone away on some cool conference?
+
+[11:17] <nine> Swiss Perl Workshop is coming up
+
+[11:17] <dogbert17> are you going?
+
+[11:18] <nine> yes :) Just booked my train tickets
+
+[11:18] <timotimo> huh, that's last-minute :)
+
+[11:18] <timotimo> well, my tickets back will also be last-minute
+
+[11:19] <nine> timotimo: that's actually the very first time that I have bought train tickets ahead. I usually buy them at the vending machine at the station.
+
+[11:19] <timotimo> hm, i guess that's fair
+
+[11:19] <nine> If everything works out, I'll have > 10 hours of quality coding time tomorrow which I will waste on trying to JIT NativeCall :)
+
+[11:23] <dogbert17> aren't you both undisputed masters of the C language?
+
+[11:23] <nine> Nah, I just stumble along ;)
+
+[11:23] <timotimo> nine is both masters
+
+[11:24] <dogbert17> perhaps you could explain what this line is doing, https://github.com/MoarVM/MoarVM/blob/master/src/6model/reprs/VMArray.c#L340
+
+[11:24] <dogbert17> I have a sneaking suspicion that a bug is lurking close to that line
+
+[11:24] <dogbert17> RT #131375
+
+[11:24] <synopsebot6> Link:  https://rt.perl.org/rt3/Public/Bug/Display.html?id=131375
+
+[11:27] <nine> I can read that line but I don't know its context
+
+[11:28] <dogbert17> I suffer from the problem in the RT so I can run that code through gdb and tell you the values of the variables if that helps
+
+[11:29] <dogbert17> it's of course more than possible that something has gone wrong at an earlier stage
+
+[11:31] * dogbert17 builds the latest rakudo ...
+
+[11:37] <dogbert17> ok, when it hits the error line then ssize = 20000000
+
+[11:37] <dogbert17> which is the element size of the array I guess
+
+[11:38] <dogbert17> p (8 * sizeof(size_t) - repr_data->elem_size)
+
+[11:38] <dogbert17> ww
+
+[11:38] <dogbert17> $1 = 24
+
+[11:39] <dogbert17> gdb) p (8 * sizeof(size_t) - repr_data->elem_size)
+
+[11:39] <dogbert17> $1 = 24
+
+[11:39] <dogbert17> (gdb) p (1UL << 24)
+
+[11:39] <dogbert17> $2 = 16777216
+
+[11:40] <dogbert17> 20_000_000 is indeed larger than 16_777_216 which means that the exception will be thrown
+
+[11:41] <dogbert17> but I have plenty of memory in my system, this allocation should be a piece of cake
+
+[11:41] <nine> Wait, 24? That means sizeof(size_t) is 4, i.e. you're on a 32 bit machine?
+
+[11:41] <timotimo> look at commit b41c4e397a8c0ee3466357062f18bc0d9e432f15
+
+[11:41] <dogbert17> yes, 32 bit in my case
+
+[11:41] <timotimo> that's the intention behind that check
+
+[11:42] <dogbert17> I don't have W10 64 bit but there seems to be aproblem there as well
+
+[11:43] <dogbert17> nine: my vm has been allocated 3 Gigs
+
+[11:44] <dogbert17> but this array can't really be over size, can it?
+
+[11:48] <timotimo> look at the commit. it's about overflowing in calculations when indices get multiplied with element size or something
+
+[11:49] *** ggoebel joined
+[11:50] <nine> I think there's an off by one error there
+
+[11:52] <nine> Actually it's missing parenthesis. repr_data->elem_size is the size in bytes, not bits. So it should be 8 * (sizeof(size_t) - repr_data->elem_size)
+
+[11:52] <nine> no
+
+[12:02] <nine> The correct value would be log2(repr_data->elem_size)
+
+[12:02] <nine> not just repr_data->elem_size
+
+[12:03] <nine> When elem_size is 8 (a 64 bit int), we lose 3 bits, not 8
+
+[12:03] * dogbert17 was away on a meeting ($work)
+
+[12:05] <dogbert17> does this log2 function exist
+
+[12:05] <nine> An inlined implementation could look like this horrible thing: repr_data->elem_size == 8 ? 3 : repr_data->elem_size == 4 ? 2 : repr_data->elem_size == 2 ? 1 : 0
+
+[12:06] <dogbert17> any theories as to why it fails on W10 64 but not on 64 bit Linux
+
+[12:06] <nine> The question it answers is "how many bits does it take to _address_ this number of bytes"
+
+[12:06] <nine> none at all :/
+
+[12:07] <dogbert17> 20_000_000, isn't that 25 bits
+
+[12:07] <nine> Yes, but our budget is 29 bits, so it's ok.
+
+[12:07] <nine> Budget is 32 bits (architecture size) - 3 bits (to address the individual bytes in an element) = 29 bits
+
+[12:08] <nine> The calculation is tricky because we just can't represent 2^32 in a long int. Only 2^32 - 1
+
+[12:09] <timotimo> i know! let's use our big integer library!
+
+[12:11] <dogbert17> will your 'horrible' solution do the trick or should we try to figure out something 'non-horrible' :)
+
+[12:13] <nine> timotimo: I'm not sure if that'd be more or less horrible than using log2() ;)
+
+[12:14] <timotimo> since we call this piece of code a whole lot, we don't want to be slow :)
+
+[12:15] <nine> I don't even know how to properly format this beast
+
+[12:16] <timotimo> you mean printf?
+
+[12:18] <nine> No, in the code
+
+[12:18] <nine> It's either a really long line or some equally unreadable block
+
+[12:18] *** ggoebel joined
+[12:19] *** colomon joined
+[12:21] <timotimo> split it into many lines with named variables?
+
+[12:33] *** zakharyas joined
+[12:41] <Geth> ¦ MoarVM: f9b65a9e37 | (Stefan Seifert)++ | src/6model/reprs/VMArray.c
+
+[12:41] <Geth> ¦ MoarVM: RT 131375: Fix calculation for maximum array size
+
+[12:41] <Geth> ¦ MoarVM:
+
+[12:41] <Geth> ¦ MoarVM: We were off by elem_size - log2(elem_size). As we're calculating the
+
+[12:41] <Geth> ¦ MoarVM: number of bits available for adressing individual array elements, we
+
+[12:41] <Geth> ¦ MoarVM: have to substract the number of bits for addressing individual bytes in
+
+[12:41] <Geth> ¦ MoarVM: an array element rather than the number of bytes.
+
+[12:41] <Geth> ¦ MoarVM: For 64 bit array elements, i.e. 8 bytes, we need 3 bits for addressing
+
+[12:41] <Geth> ¦ MoarVM: individual bytes. So we lose 3 bits when adressing elements in the
+
+[12:41] <Geth> ¦ MoarVM: array.
+
+[12:41] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/f9b65a9e37
+
+[12:42] <nine> Actually we are still off by one, i.e. we only allow 2^31 one-byte elements on a 32 bit system and 2^63 elements on a 64 bit system. But that's already much better :)
+
+[12:46] *** lizmat joined
+[12:47] <Geth> ¦ MoarVM: 703b5f5c4f | (Stefan Seifert)++ | src/6model/reprs/VMArray.c
+
+[12:47] <Geth> ¦ MoarVM: Reformat to make input and output correlation more clear
+
+[12:47] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/703b5f5c4f
+
+[12:47] *** domidumont joined
+[12:58] <brrt> timotimo, seerms like a good idea
+
+[12:59] <brrt> cherry-pick, that's the thing i'm after though
+
+[13:01] <nine> Hi brrt! How are your efforts to get even-moar-jit merged going along?
+
+[13:02] <brrt> i have a cunning plan
+
+[13:02] <brrt> https://gist.github.com/bdw/f5f0bfc1f3aedd591c598dc50093ac6c#file-jit-cleanup-org
+
+[13:02] <brrt> which is basically ^
+
+[13:03] <brrt> long story short - i want to first reduce the diff in the legacy JIT between even-moar-jit and master
+
+[13:03] <brrt> then hopefully, we'll have a 'clean rebase' on top of that
+
+[13:04] <brrt> i.e. split out stuff that's changed in the old stuff, from stuff that's new
+
+[13:04] <nine> Sounds like a very good idea, yes
+
+[13:05] <nine> Also explains why it's too hard to rebase even-moar-jit right now
+
+[13:09] <brrt> i kind of resisted it at first because it is a bit of busywork. but that's the social side of engineering
+
+[13:09] <brrt> making sure your collaborators can grok the changes you're making i mean :-)
+
+[13:13] <nine> FWIW I know what that's like :) Last year we merged the compiler I wrote for my master's thesis after 2 years of development in a branch. Getting that thing rebased and reviewed piece by piece was quite some work and I dreaded it for a long time...
+
+[13:13] <brrt> hehe
+
+[13:14] <brrt> when i worked on a project for my masters thesis, they basically told me just to fork off...
+
+[13:32] <dogbert17> nine++, was away on another $work meetin :(
+
+[13:58] *** domidumont joined
+[14:07] *** leont joined
+[14:09] <leont> If I am to add a feature to moar, how should I approach that?
+
+[14:10] <nine> leont: depends on the feature? A PR is always a good approach
+
+[14:10] <leont> I suspect working from my rakudo checkout is easiest, as I can then test with rakudo on top of it, does that sounds sensible?
+
+[14:10] <nine> That's how I do it
+
+[14:14] *** quotable6 joined
+[14:14] *** quotable6 joined
+[14:14] *** statisfiable6 joined
+[14:16] <leont> nine: the feature I want is nqp::asyncpipe{open,init}
+
+[14:17] <timotimo> pipes like in mkfifo?
+
+[14:21] *** bloatable6 joined
+[14:21] *** quotable6 joined
+[14:21] *** evalable6 joined
+[14:21] *** coverable6 joined
+[14:21] *** committable6 joined
+[14:21] *** bisectable6 joined
+[14:21] *** releasable6 joined
+[14:21] *** greppable6 joined
+[14:21] *** unicodable6 joined
+[14:21] *** benchable6 joined
+[14:21] *** statisfiable6 joined
+[14:23] *** lizmat joined
+[14:25] <brrt> yeah, that's going to need more spec
+
+[14:26] <brrt> but, PRs welcome and stuff
+
+[14:36] <brrt> nine: the other thing i want to do is to try compiling only the jit, rather than generating bytecode and then JIT it
+
+[14:37] <leont> Does that need more spec before implementation?
+
+[14:37] <leont> I would say it's better to first prove that an interface is workable before writing it down
+
+[14:39] <nine> brrt: I'm not sure I follow you?
+
+[14:39] <ilmari> leont: when I did it I used NQP to do the initial low-level testing
+
+[14:44] <brrt> i mean i don't understand what you mean :-)
+
+[14:45] <brrt> nine: currently we first compile the spesh candidate 'regular' moarvm, bytecode and then try to compile the JIT machine code
+
+[14:45] <brrt> that's redundant. we only need to compile the regular moarvm bytecode if we can't JIT it
+
+[14:46] <brrt> i think that failed due to handler setups. but that is not really relevant now
+
+[15:04] *** brrt joined
+[15:17] <timotimo> don't we use spesh candidates' speshed bytecode for inlining?
+
+[15:18] <lizmat> brrt: that feels like taking on another level of complexity before finishing the previous level of complexity
+
+[15:20] <timotimo> hm, i think that's just a matter of iterating over the bytecode a bit differently
+
+[15:21] <timotimo> okay, that and taking care of annotations like the ones for exception handlers and deopt
+
+[15:21] <brrt> lizmat: that's true, but, it would simplify a bunch of things
+
+[15:22] <brrt> like we have a separate spesh candiate bytecode and jit code bytecode, and if we did this, we wouldn't have to anymore
+
+[15:22] *** domidumont joined
+[15:22] <brrt> (and a separate spesh local types array and jit local types array)
+
+[15:22] <lizmat> well, fwiw, it feels like something I would do
+
+[15:23] <lizmat> and I've learned I tend to do premature optimization
+
+[15:23] <brrt> and then, we'd only have the spesh cand local types array etc, so we'd never have to switch
+
+[15:23] <brrt> hehe
+
+[15:23] <brrt> i've *never* done that of course :-P
+
+[15:23] <brrt> </sarcasm>
+
+[15:23] <timotimo> hey brrt, how slow is the jit? should we put another thread in to do jitting while the other just speshes? :P
+
+[15:24] <lizmat> anyways, I'll settle for a silver egg now rather than for a golden egg in a year from now  :-)
+
+[15:24] <brrt> :-)
+
+[15:24] <brrt> yeah, and i'm *itching* to get started on the optimizer
+
+[15:25] <brrt> i mean, that's going to be sooooo cool
+
+[15:25] <brrt> already thought up the pattern matcher and everything
+
+[15:27] <timotimo> :D
+
+[15:35] <brrt> magit actually makes cherry-picking this relatively easily
+
+[15:35] <brrt> *easy
+
+[15:42] <timotimo> it should be easy by itself, already :)
+
+[15:44] *** lizmat_ joined
+[15:52] <leont> It seems I successfully moves the read/write bits of asyncsocket to asyncstream. That was the easy bit.
+
+[15:59] <leont> Net step is writing a asyncpipe, which will actually require me to have a clue about what I'm doing
+
+[16:05] *** dogbert2 joined
+[16:21] *** lizmat joined
+[16:33] *** domidumont joined
+[16:51] *** robertle joined
+[17:26] *** stmuk_ joined
+[18:12] *** zakharyas joined
+[18:24] *** geekosaur joined
+[19:05] <[Coke]> https://github.com/MoarVM/MoarVM/blob/c1f66bb6993633898a9e4da1c16dc6482aca6258/src/spesh/optimize.c#L666 - MS VS found this error: https://github.com/MoarVM/MoarVM/blob/c1f66bb6993633898a9e4da1c16dc6482aca6258/src/spesh/optimize.c#L666
+
+[19:06] *** domidumont joined
+[19:16] <dogbert2> that looks suspicious
+
+[19:35] *** brrt joined
+[22:05] *** dogbert11 joined

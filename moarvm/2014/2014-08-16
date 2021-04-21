@@ -1,0 +1,1397 @@
+[00:13] *** klaas-janstol joined
+[00:19] <jnthn> sleep &
+
+[00:25] *** klaas-janstol joined
+[00:34] <TimToady> $ perl6-m -e 'my $i = 0; while $i < 262145 { ++$i }'
+
+[00:34] <TimToady> Segmentation fault
+
+[00:34] <TimToady> that might be easier to trace
+
+[00:36] <TimToady> replaceing ++$i with $i = $i + 1 gets back to the Invalid SC index in bytecode stream
+
+[00:42] <TimToady> klooer: low numbers don't segfault, but binary search for a sharp boundary fails at about: perl6-m -e 'our $i = 1; while $i < 154745 { ++$i }'
+
+[00:46] <TimToady> at that number, it fails approximately 50% of the times I run it on my machine, so perhaps GC pressure
+
+[00:46] <TimToady> never fails at 153000, always fails at 155000
+
+[00:48] *** dalek joined
+[00:54] <TimToady> 154700 seems to fail about ¼ the time
+
+[00:56] <TimToady> 154900 fails about ¾ the time
+
+[00:58] <japhb> Interesting that it is not a sharp transition
+
+[00:58] <TimToady> so some kind of normal curve with mean at about 154800, with a sigma on the order of magnitude of 100
+
+[00:59] <TimToady> yeah, I thought so
+
+[00:59] <TimToady> I was expecting it to fail at the short to long int transition, but no
+
+[01:00] <TimToady> how does that number compare to nursery size?
+
+[01:01] <TimToady> but you'd think this would be more predictable if it were related to some fixed allocation size
+
+[01:01] <japhb> Dunno for sure.  I'd probably go look at the last time jnthn calculated savings in terms of GC runs ... but of course, there's probably a constant somewhere.  :-)
+
+[01:02] <TimToady> it's almost like it's related to something that's allocated based on how much memory we think we have available instantaneously
+
+[01:02] <TimToady> but I dunno if we do that
+
+[01:02] <TimToady> what other possible sources of noise are there?
+
+[01:03] <TimToady> does Mersenne Twistor take a variable number of startup resources?
+
+[01:03] <japhb> Race/missing write barrier/etc. in GC code itself?
+
+[01:04] <japhb> Wait, does the process seem to leak at all?  Or is it too fast to notice?
+
+[01:04] <TimToady> fails very quicly
+
+[01:04] <TimToady> I suppose if we'd just run gdb on it, we'd've found the problem by now :)
+
+[01:05] <TimToady> but it's more fun to guess
+
+[01:10] <TimToady> not very interesting without debugging info: https://gist.github.com/anonymous/fb0951ec83f86812783f
+
+[01:11] <TimToady> but somewhere inside of MVM_fixed_size_alloc_zeroed, 10 levels up
+
+[01:12] <TimToady> well, I'll let someone else pursue it from here
+
+[01:28] *** FROGGS__ joined
+[03:06] <diakopter> if it's beneath MVM_fixed_size_alloc_zeroed, that's the GC, for sure
+
+[03:07] <diakopter> or above, if you're declined that direction
+
+[03:13] *** colomon joined
+[03:13] *** lue joined
+[03:13] *** daxim joined
+[03:13] *** ingy joined
+[03:13] *** retupmoca joined
+[03:13] *** FROGGS__ joined
+[03:13] *** sergot joined
+[03:13] *** ashleydev joined
+[03:13] *** avuserow joined
+[03:13] *** TimToady joined
+[03:15] <diakopter> if it's beneath MVM_fixed_size_alloc_zeroed, that's the GC, for sure
+
+[03:15] <diakopter> or above, if you're declined that direction
+
+[08:44] *** danaj joined
+[08:53] *** brrt joined
+[08:53] <brrt> diakopter: (in response to your question from last night): set the environment variable MVM_JIT_BYTECODE_DIR
+
+[08:53] <timotimo> brrt: good to see you're here!
+
+[08:53] <brrt> i'm backlogging :-)
+
+[08:54] <timotimo> i'm just now trying to implement ~assertparamcheck in the jit
+
+[08:54] <brrt> assertparamcheck?
+
+[08:54] <timotimo> would you like to tell me if i did it rong?
+
+[08:54] <brrt> let me see that
+
+[08:54] <brrt> i saw there was a bugyesterday
+
+[08:54] <timotimo> because it gives an "inconsistent bind result" now in the restricted setting
+
+[08:55] <timotimo> https://gist.github.com/timo/ccf81437e03e276d8a88
+
+[08:56] <brrt> no, that's not quite right yet
+
+[08:56] <brrt> you're missing the argument to MVM_args_bind_failed
+
+[08:57] <brrt> i.e. | mov ARG1, TC;
+
+[08:58] <timotimo> oh! tc!
+
+[08:58] <timotimo> of course
+
+[08:58] <brrt> also.. you want to call MVM_args_bind_failed if ok is zero, right?
+
+[08:58] <timotimo> one thing i was especially wondering about: how do i make sure it all works properly with exception throwing
+
+[08:58] <timotimo> if (!ok) { args_bind_failed }
+
+[08:58] <brrt> which means that you want to jump over it if TMP1 tests /nonzero/
+
+[08:59] <brrt> so you'll want to use jnz rather than jz
+
+[08:59] <brrt> lastly, for adhoc exceptions, you don't need to do anything
+
+[08:59] <timotimo> oooh
+
+[08:59] <brrt> adhoc exceptions don't return to the JIT, they return directly to the interpreter
+
+[08:59] <brrt> via longjmp
+
+[09:00] <timotimo> i see!
+
+[09:00] <timotimo> but
+
+[09:00] <brrt> the :throwish is for regular exceptions that assume they return to the interpreter
+
+[09:00] <timotimo> how does that handle stuff like the instruction pointer?
+
+[09:00] <timotimo> OK, so i'll remove :throwish
+
+[09:01] <brrt> basically 'handle the instruction pointer' is a much longer answer than the question :-)
+
+[09:01] <brrt> but the gist of it is this
+
+[09:01] <brrt> when you throw an exception, it is handled by a handler
+
+[09:01] <brrt> that handler is either a JIT code handler or a interpreted code handler
+
+[09:01] <brrt> depending on the frame
+
+[09:02] <timotimo> the thing is that the interpretation version increases the IP before it calls the error raising function
+
+[09:02] <brrt> that is of no significance to us
+
+[09:02] <timotimo> OK, great!
+
+[09:03] <brrt> basically, it does this to deal with handlers correctly
+
+[09:03] <timotimo> i'm going to learn a tiny bit about x86_64 assembly!
+
+[09:03] <timotimo> a friend told me about x86_64 long mode
+
+[09:03] <timotimo> where everything is beautiful
+
+[09:03] <brrt> but the jit_entry_label is updated every 'handler border'
+
+[09:03] <brrt> x86_64 isn't so bad :-)
+
+[09:04] <timotimo> now building rakudo works again :)
+
+[09:04] * timotimo makes a spectest run
+
+[09:06] * brrt is only a little bit stuck on the param_* stuff because he'd like to remove a few switches
+
+[09:06] <brrt> as in, this is a very common path
+
+[09:06] <brrt> making it faster = better
+
+[09:08] <timotimo> well, making it implemented at all would make stuff faster, too, but it's entirely up to you :)
+
+[09:10] <timotimo> the spectests look quite good
+
+[09:12] <dalek> MoarVM: c053c8d | (Timo Paulssen)++ | src/jit/ (2 files):
+
+[09:12] <dalek> MoarVM: assertparamcheck implemented in the jit, yay
+
+[09:12] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/c053c8de2e
+
+[09:12] <brrt> shall i tell you the funny secret about that
+
+[09:12] <timotimo> sure :)
+
+[09:13] *** klaas-janstol joined
+[09:13] <brrt> posix x64 says 'hey, the MVMArgInfo struct is less than 16 bytes wide. we can stuff that into rax/rdx and be done'
+
+[09:14] <brrt> windows says: 'tis a struct. ye shall allocate a pointer and read from there'
+
+[09:14] <timotimo> %)
+
+[09:14] <timotimo> excellent
+
+[09:16] <timotimo> is there something that'd make implementing getlex_no hard for me?
+
+[09:17] <brrt> let me see
+
+[09:18] <brrt> it's not implementable as a c call per se
+
+[09:18] <timotimo> 358 bails across the setting compilation nowadays
+
+[09:18] <timotimo> 48 of which are getlex_no
+
+[09:18] <brrt> oh that's not a lot anymore
+
+[09:18] <timotimo> 407 across tadziks test run of steroids on moar-jit
+
+[09:18] <nwc10> the current fun is setting bail out whack-a-mole?
+
+[09:18] <timotimo> :)
+
+[09:18] <timotimo> the setting is too big to fail!
+
+[09:19] * timotimo throws bailouts
+
+[09:21] <brrt> basically, you'll want to implement the found ? found->o : NULL as: test RV, RV; cmovnz RV, [RV]; mov WORK[dst], RV;
+
+[09:22] <brrt> why? if RV is NULL, cmovnz will be skipped, whcih means you'll assign NULL]
+
+[09:22] <brrt> if RV isn't NULL, RV will be dereferenced, and you'll assign the object
+
+[09:22] <timotimo> the oooh, conditional move not ero
+
+[09:23] <brrt> yes, they're very handy for precisely this situation :-)
+
+[09:23] <brrt> also take a look at the get_string macro
+
+[09:23] <timotimo> oke :3
+
+[09:34] <timotimo> er ... dumb question probably, but how do i set a register's value to the value of an integer i know at dynasm-compile-time?
+
+[09:34] <timotimo> ... a literal, so to speak
+
+[09:40] <brrt> is this a 64 bit literal?
+
+[09:40] <brrt> normally it's just mov register, literal
+
+[09:40] <brrt> but a 64 bit literal would be mov64 register, literal
+
+[09:41] <brrt> literal /must/ be an integer, by the way, cast that way if necessary
+
+[09:41] <brrt> also
+
+[09:41] <brrt> what compiles
+
+[09:41] <brrt> ehm
+
+[09:41] <brrt> what allocates a fixed frame from the JIT
+
+[09:46] <timotimo> uint16 actually
+
+[09:48] <brrt> oh, in that case, you can pass it as is
+
+[09:50] <timotimo> oke
+
+[09:50] <timotimo> it builds and spectests fine so far
+
+[09:51] <brrt> i'm wondering what caused the jit bug from yesterday
+
+[09:52] <timotimo> you mean theempty while loop that asplode?
+
+[09:53] <timotimo> the s17 tests seem a bit too sad ...
+
+[09:54] <dalek> MoarVM: 28738a6 | (Timo Paulssen)++ | src/jit/ (2 files):
+
+[09:54] <dalek> MoarVM: implement getlex_no in the jit
+
+[09:54] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/28738a63f0
+
+[09:57] <brrt> yes that
+
+[09:57] <brrt> much timotimo++
+
+[10:01] <timotimo> oh that was nothing! :P
+
+[10:01] *** FROGGS[mobile] joined
+[10:01] <timotimo> er, also wrong
+
+[10:02] <dalek> MoarVM: 857f244 | (Timo Paulssen)++ | src/jit/emit_x64.dasc:
+
+[10:02] <dalek> MoarVM: fix a copy-pasto.
+
+[10:02] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/857f244072
+
+[10:02] * brrt lunch &
+
+[10:02] <timotimo> you almost did all of the work
+
+[10:07] <timotimo> S17 seems very unhappy indeed ... not sure if it's the changes i made :\
+
+[10:12] <nwc10> NQP build from clean fails
+
+[10:13] <nwc10> 963         MVMFrame *cur_frame = tc->cur_frame;
+
+[10:13] <nwc10> (gdb) p tc
+
+[10:13] <nwc10> $1 = (MVMThreadContext *) 0xfc80
+
+[10:13] *** zakharyas joined
+[10:14] <nwc10> #0  0x00007ffff65be972 in MVM_frame_find_lexical_by_name (tc=0xfc80,  name=0x627000017e90, type=8) at src/core/frame.c:963
+
+[10:14] <nwc10> #1  0x00007ffff1d5f454 in ?? ()
+
+[10:14] <nwc10> #18 0x00007fffffffc810 in ?? ()
+
+[10:14] <nwc10> #19 0x00007ffff674bf76 in MVM_jit_enter_code (tc=0x7fffffffe000,  cu=0x7fffffffe040, code=0xffffffffc12) at src/jit/compile.c:123
+
+[10:14] <nwc10> ...
+
+[10:25] <jnthn> Hm, that's called by getlex_no
+
+[10:25] <jnthn> That tc pointer looks hosed
+
+[11:09] *** timotimo joined
+[11:15] *** brrt joined
+[11:18] <brrt> yes
+
+[11:18] <brrt> hmm
+
+[11:18] <brrt> but the code looks pretty good
+
+[11:19] <brrt> haha i see what it is
+
+[11:20] <brrt> much subtle, such bug
+
+[11:20] <brrt> | mov ARG1, tc
+
+[11:20] <jnthn> get_string uses ARG1? :)
+
+[11:21] <brrt> see it?
+
+[11:21] <brrt> no
+
+[11:21] <jnthn> oh
+
+[11:21] <jnthn> That's the local tc
+
+[11:21] <brrt> uhuh
+
+[11:21] <brrt> passed as a 32 bit number
+
+[11:21] <brrt> while it is a 64 bit pointer
+
+[11:22] <jnthn> Should be TC, I guess?
+
+[11:22] <brrt> yeah
+
+[11:22] * brrt is testing the fix
+
+[11:23] <dalek> MoarVM: e6c5f48 | (Bart Wiegmans)++ | src/jit/emit_x64.dasc:
+
+[11:23] <dalek> MoarVM: Use TC from register rather than from variable :-)
+
+[11:23] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/e6c5f48399
+
+[11:28] <brrt> interesting slides (the pitfualls of object oriented programming thingy)
+
+[11:29] * brrt wonders if we can't make a compiler 'sufficiently smart' (tm) to make such transformations by itself
+
+[11:33] <brrt> OT: vodafone computes that with 35 MB, you can check facebook a whopping 70 times
+
+[11:34] <brrt> (facebook uses .5MB per update reqeust? WOW)
+
+[11:34] <lizmat> yes, FB uses inordinate amounts of data
+
+[11:35] <lizmat> we burned ~600 MB in the US in 10 days
+
+[11:35] <lizmat> I expect 550MB of that to be from FB
+
+[11:36] <brrt> as a way of comparison, you can send (again according to vodafone) 3500 whatsapps with the same amount of data
+
+[11:36] * brrt resists making a perl/php joke out of this
+
+[11:37] <tadzik> whatsapp is perl?
+
+[11:38] <brrt> whatsapp is partially perl
+
+[11:38] <brrt> perl, erlang, c++ iirc
+
+[11:38] <brrt> on freebsd
+
+[11:38] <tadzik> nice
+
+[11:39] * brrt bbi2h
+
+[11:51] <sergot> o/
+
+[12:04] <tadzik> \o
+
+[12:42] * timotimo is back, too
+
+[12:43] <timotimo> tadzik: would you like to generate a new jit log with an up-to-date moarvm/master? :)
+
+[12:44] <timotimo> 33 + 28 bails havehad their op implemented and a few others by not using master when you made the log you missed at least all the bigint ops
+
+[12:47] *** cognome joined
+[12:48] <timotimo> about 24 bails would be gone or pushed back due to the bigint ops
+
+[12:49] <tadzik> timotimo: sure :)
+
+[12:49] <timotimo> also 5 bails from existspos
+
+[12:49] <tadzik> oh, so now I need to have some rakudobrew trickyness
+
+[12:50] <tadzik> to actually fetch moarvm head
+
+[12:50] <timotimo> --gen-moar=master
+
+[12:50] <tadzik> that'd be --gen-moar=...right
+
+[12:50] <timotimo> would be all you'll need
+
+[12:51] <timotimo> also, nan and inf are bailing somewhere in your code, these are just calls to MVM_num_{nan,inf}, so i can implement them soon, too
+
+[12:51] <timotimo> but first: benchmark analysis time!
+
+[12:55] *** ggoebel1111119 joined
+[13:05] <tadzik> timotimo: yay, didn't segfault :)|
+
+[13:05] <tadzik> http://feather.perl6.nl/~tjs/foo2.txt
+
+[13:06] * tadzik off to fetch some food
+
+[13:15] <timotimo> about 30 bails less, so many of those bails have just moved further into the frame
+
+[13:17] <timotimo> 16 more param_ns for example
+
+[13:46] <tadzik> so, certain frames are still not jat because some of the ops are missing, right?
+
+[13:48] *** brrt joined
+[13:48] <timotimo> yes
+
+[13:59] <timotimo> seems like i'm not built for writing assembly code ...
+
+[13:59] <timotimo> brrt: https://gist.github.com/timo/4dc3eb65b316b9adfc3c - can you have a look?
+
+[13:59] <timotimo> i think this should be correct
+
+[14:01] <timotimo> but it breaks spectests
+
+[14:02] <timotimo> it could be that iscont just makes some frames suddenly get jitted that didn't get jitted before and iscont is correct, but some other op isn't ...
+
+[14:02] <timotimo> that would be great
+
+[14:02] <brrt> that doesn't mean it's broken
+
+[14:02] <brrt> yeah, i think this is correct
+
+[14:02] <brrt> not optimal, but correct
+
+[14:03] <timotimo> i know there's some kind of "setz" and "setnz" opcodes
+
+[14:03] <jnthn> brrt: Been looking at the SEGV in the benchmarks
+
+[14:03] <timotimo> that i could have used, but i think i would have had to branch anyway
+
+[14:03] <brrt> jnthn: yes?
+
+[14:03] <brrt> TimToady++ found a pretty quick way to replicate it iirc
+
+[14:03] <jnthn> Yeah
+
+[14:03] <jnthn> I'm looking at the disassembly
+
+[14:03] <jnthn> I'm fairly sure I'm looking at
+
+[14:03] <jnthn> |.macro get_string, reg, idx
+
+[14:03] <jnthn> | mov reg, CU->body.strings;
+
+[14:03] <jnthn> | mov reg, STRING:reg[idx];
+
+[14:03] <jnthn> |.endmacro
+
+[14:03] <jnthn> The output of this
+
+[14:04] <jnthn> reg ends up NULL after the first thing
+
+[14:04] <jnthn> CU is a GC-able object
+
+[14:04] <brrt> o rly
+
+[14:04] <jnthn> Yes.
+
+[14:04] <brrt> ehm
+
+[14:04] <brrt> oops
+
+[14:04] <brrt> how is that
+
+[14:04] <timotimo> hehe
+
+[14:04] <brrt> why is that
+
+[14:04] <brrt> i don't even
+
+[14:04] <timotimo> we're not rooting the CU from a jitted frame?
+
+[14:05] <brrt> hmmm
+
+[14:05] <brrt> this is annoying
+
+[14:05] <jnthn> Well, because we'd rather like eval to not leak memory for one :)
+
+[14:05] <timotimo> yes, pretty please
+
+[14:06] <brrt> ok
+
+[14:06] <brrt> hmmm
+
+[14:06] <brrt> so if you'd call eval a bunch of times, this should break
+
+[14:07] <timotimo> brrt: in what way should i improve my assembly code for iscont?
+
+[14:07] <brrt> timotimo: basically, you can use setnz and cmovnz to not jump
+
+[14:07] <brrt> not jumping is awesome
+
+[14:08] <timotimo> oh!
+
+[14:08] <timotimo> of course, conditional mov!
+
+[14:08] <brrt> yes, it does make things more compilcated though
+
+[14:08] <timotimo> i think i can handle that, it'll be fun!
+
+[14:09] <brrt> :-)
+
+[14:10] <timotimo> i have a solution, not sure if it's correct, though
+
+[14:10] <dalek> MoarVM: de91a91 | jnthn++ | src/core/compunit.c:
+
+[14:10] <dalek> MoarVM: Force compunits to be gen-2 allocated.
+
+[14:10] <dalek> MoarVM:
+
+[14:10] <dalek> MoarVM: This means they won't move - something the JIT chose to rely on.
+
+[14:10] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/de91a91934
+
+[14:11] <brrt> hmm jnthn, there is of course another solution :-)
+
+[14:11] <brrt> (not that i mind this solution)
+
+[14:11] <timotimo> https://gist.github.com/timo/414f465df7efa622148b
+
+[14:11] <jnthn> brrt: Yeah, but I doubt it's less lines of code than mine ;)
+
+[14:12] <brrt> hmm yeah, that's true
+
+[14:12] <brrt> also having CU in the register is /really/ handy for all sorts of things
+
+[14:12] <jnthn> Right
+
+[14:13] <jnthn> It wasn't a bad choice in the JIT; just wasn't a safe one until the above patch :)
+
+[14:13] <brrt> fair enough. i had assumed the CU to be an immutable thing, but that's obviously not true in eval()
+
+[14:18] <timotimo> oh, it seems like setnz needs an extend register value roperation or something
+
+[14:19] <timotimo> movzx
+
+[14:19] <brrt> yes
+
+[14:20] <timotimo> the failure mode is the same a sbefore
+
+[14:20] <jnthn> Grrrr
+
+[14:21] <jnthn> Allocating the cu in gen2 seems to cause some other fails
+
+[14:21] <brrt> o? how is that? earlier fails?
+
+[14:23] <dalek> MoarVM: 0bb7430 | (Timo Paulssen)++ | src/jit/ (2 files):
+
+[14:23] <dalek> MoarVM: implement iscont with clever non-branching strats
+
+[14:23] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/0bb7430c03
+
+[14:23] <timotimo> this looks good?
+
+[14:23] * brrt reading :-)
+
+[14:24] <brrt> yes
+
+[14:24] <brrt> nice :-)
+
+[14:26] <brrt> jnthn: i think you said deopt_all spesh annotations would be transformed to deopt_inline in inlines?
+
+[14:36] <jnthn> brrt: I think so
+
+[14:36] <brrt> ok, hmm
+
+[14:36] <dalek> MoarVM: d6365b0 | jnthn++ | src/core/compunit.c:
+
+[14:36] <dalek> MoarVM: Fix inter-generational issue with CU/HLLConfig.
+
+[14:36] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d6365b0989
+
+[14:37] <jnthn> brrt: Well, it's more that it doens't have much info left about what kind of deopt index it was
+
+[14:37] <brrt> that may be an issue for my current setup
+
+[14:37] <brrt> i.e. i may have to move the 'is this a deopt all idx' thingy back to the invocation node creation function
+
+[14:42] *** zakharyas joined
+[14:43] <brrt> that, or not care that we sometimes add deopt idx labels without a good reason
+
+[14:44] <timotimo> do we do jit-only version bumps?
+
+[14:45] <jnthn> brrt: Maybe not caring is good enough for now? :)
+
+[14:45] <jnthn> My 2 patches seem to have dealt with the perl6-bench SEGVs
+
+[14:46] <timotimo> nice.
+
+[14:46] <timotimo> but now spectests fail pretty hard, like t/spec/S02-types/sethash.rakudo.moar
+
+[14:46] <timotimo> and i don't quite know what to look at to figure it out
+
+[14:46] <brrt> yeah, i agree with the not caring
+
+[14:47] <nwc10> PASS at de91a91 (apart from sin)
+
+[14:47] <jnthn> nwc10: Oddness; it bust things like Panda builds...
+
+[14:48] <brrt> const_iX NYI whut
+
+[14:48] <timotimo> we don't have smaller int registers at all
+
+[14:48] <jnthn> That tends to mean "jumped to a bogus spot of bytecode"
+
+[14:48] <nwc10> I don't think that I did anything stsupid
+
+[14:48] <jnthn> nwc10: Was it with --enable-jit?
+
+[14:49] <nwc10> exactly. I need to check.
+
+[14:49] <jnthn> nwc10: It's quite possible the spectests didn't trigger it. It got a good way into the Panda build before exploding here
+
+[14:49] <jnthn> nwc10: HEAD seems good to me, though.
+
+[14:49] <nwc10> ah sigh. It's getting like Perl 5
+
+[14:49] <nwc10> there's regression tests.
+
+[14:49] <nwc10> and then there's stuff that breaks for a clean build, even though the regression tests all pass
+
+[14:50] <jnthn> nwc10: Note I didn't try the spectests locally before patching the issue; some may have failed here for me too
+
+[14:50] <nwc10> and then there's also stuff out in the ecosystem that neither the regression tests nor a clean build spot
+
+[14:51] <timotimo> trouble is that the jit only kicks in on hot code and our spectests are mostly do things only a few times
+
+[14:51] <timotimo> times*
+
+[14:52] <jnthn> Yeah. I think one thing we may want is a JIT_ALL_THE_SHIT envvar that sets the thresholds to zero.
+
+[14:52] <jnthn> Or close to zero
+
+[14:53] <nwc10> or the sort of politer version - the tellytubbie flag
+
+[14:53] <nwc10> ("again again")
+
+[14:55] <jnthn> MVM_TELLYTUBBIE
+
+[14:56] <jnthn> That'd really force us to document the envvars :P
+
+[14:57] <brrt> true
+
+[14:57] <brrt> hmm
+
+[14:57] <brrt> adding an extra label makes for ugly crashes
+
+[14:58] <timotimo> well, you need to ++ the index, too
+
+[15:00] <brrt> hmm?
+
+[15:00] * brrt no comprendre
+
+[15:01] <timotimo> i was trying to give you a sufficiently vague tip so that you wuld be forced to think about a different possible cause for the issue and maybe help you find the problem faster that way
+
+[15:01] <brrt> :-)
+
+[15:01] <brrt> thank you
+
+[15:03] * brrt afk for a bit
+
+[15:04] * TimToady finds that being vague works frequently that way, but maybe it's just because other people are so smart around here... :)
+
+[15:35] * timotimo has an implementation for guardconttype
+
+[15:35] <timotimo> luckily it was almost a complete copy-paste from guardcontconc
+
+[15:35] <nwc10> JIST spectest now somewhat unhappy
+
+[15:36] <nwc10> t/spec/S03-operators/bag.t t/spec/S02-types/mix.rakudo.moar t/spec/S03-operators/set.rakudo.moar t/spec/S02-types/mixhash.rakudo.moar spin the CPU, but steady on RAM
+
+[15:36] <nwc10> had to kill them
+
+[15:36] <nwc10> other fails
+
+[15:36] <nwc10> eg t/spec/S32-temporal/DateTime-Instant-Duration.rakudo.moar
+
+[15:36] <nwc10> MVMArray: Can't shift from an empty array in method STORE at src/gen/m-CORE.setting:7380
+
+[15:36] <nwc10> ...
+
+[15:39] <jnthn> um...which commit did that?
+
+[15:39] <nwc10> will try to work out, but might be abducted by mealtime
+
+[15:40] <nwc10> no actual ASAN fail that I can spot
+
+[15:41] *** klaas-janstol joined
+[15:57] <timotimo> yes, many fails sadly :(
+
+[15:57] <timotimo> jnthn: the commit i did for iscont brought those fails to light
+
+[15:58] <jnthn> Yes, that's my conclusion too
+
+[15:58] <jnthn> Should probably spectest JIT additions before adding them.
+
+[15:59] <timotimo> i thought the conclusion was that iscont is correct, but something else is now enabled to fail
+
+[16:00] <jnthn> That still doesn't make it Ok to commit something that knowingly breaks spectest.
+
+[16:00] <jnthn> That's what branches are for.
+
+[16:00] <timotimo> oh
+
+[16:01] <timotimo> do you suggest i push the anticommit for iscont and continue that line of thought on a branch by cherry-picking the original commit again?
+
+[16:03] <jnthn> Yeah
+
+[16:03] <dalek> MoarVM: b6b37b2 | (Timo Paulssen)++ | src/jit/ (2 files):
+
+[16:03] <dalek> MoarVM: add guardconttype, almost a 1:1 copy of guardcontconc.
+
+[16:03] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/b6b37b2e3e
+
+[16:03] <dalek> MoarVM: 08c56b5 | (Timo Paulssen)++ | src/jit/ (2 files):
+
+[16:03] <dalek> MoarVM: Revert "implement iscont with clever non-branching strats"
+
+[16:03] <dalek> MoarVM:
+
+[16:03] <dalek> MoarVM: This reverts commit 0bb7430c030017d4ddb86bd210cf320b57cfde61.
+
+[16:03] <dalek> MoarVM:
+
+[16:03] <dalek> MoarVM: It looks correct, but it leads to spectest fails, so i'm continuing the
+
+[16:03] <dalek> MoarVM: investigation on a branch.
+
+[16:03] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/08c56b5c30
+
+[16:05] <jnthn> Even reverting that only gets rid of the hang, not the Can't shift...
+
+[16:05] <timotimo> so i made even more boo-boo ...
+
+[16:06] <jnthn> Trouble is, going back further doesn't help either
+
+[16:06] <jnthn> maybe I need to re-build Rakudo
+
+[16:06] <timotimo> that would be bad :\
+
+[16:08] <jnthn> wtf, even going back to a commit 2 days ago has that broken...
+
+[16:09] <timotimo> er ...
+
+[16:09] <timotimo> there were changes to spectests recently
+
+[16:09] <timotimo> your rakudo is up to date i assume?
+
+[16:10] <jnthn> Yeah, and bag.t wasn't touched in a while
+
+[16:10] <timotimo> well... damn :\
+
+[16:10] <jnthn> 4th Aug, to be specific
+
+[16:10] <timotimo> augh.
+
+[16:15] <timotimo> t/spec/S04-phasers/init.t, t/spec/S17-lowlevel/lock.rakudo.moar, t/spec/S32-io/IO-Socket-Async.rakudo.moar and t/spec/S32-str/sprintf.rakudo.moar fail on moarvm/master for me
+
+[16:15] <timotimo> the fail in sprintf is "todos unexpectedly passed", though
+
+[16:15] <jnthn> well, wtf...
+
+[16:16] * jnthn just realcleans everything
+
+[16:16] <timotimo> my apartment could use a good spring cleaning, too ...
+
+[16:23] <jnthn> OK, it was some local artefact, I think
+
+[16:23] <jnthn> master/master/nom now is just the usual handful of fails
+
+[16:26] <timotimo> good to know
+
+[16:28] <jnthn> Which means I can think about by next task for today, which is to unbust init.t
+
+[16:29] <timotimo> OK
+
+[16:29] <jnthn> Hm, I should chop some veg first...
+
+[16:29] <timotimo> i'm not really feeling like i'm helping anything by implementing those low-hanging ops
+
+[16:30] <jnthn> One suggestion: MATCH is not currently JITted. It may not be many ops off being, but it is very hot-path in parsing.
+
+[16:30] <timotimo> on the other hand, the bail summary for the setting now fits on a single screen
+
+[16:30] <diakopter> timotimo: nopaste it?
+
+[16:34] <timotimo> the summary?
+
+[16:34] <timotimo> can do
+
+[16:35] <timotimo> https://gist.github.com/timo/5adae0b84092d9055a3a
+
+[16:40] <diakopter> will the JIT be able to package its JITted routines into an SC on disk? (with the obligatory tables of offsets to pointers [and their relocatable identifying target addresses] that will need updating when it's loaded again?]
+
+[16:40] <diakopter> )
+
+[16:40] <timotimo> i suppose it could if you implement that :)
+
+[16:41] <diakopter> I'm asking if it's conceptually plausible.. next question is whether it'd be effective.. next question is feasibility.. next question is worth it..
+
+[16:42] <timotimo> unfortunately, i can only guess :(
+
+[16:44] <timotimo> the pypy people always said "we'd rather make jit warm-up faster than do any kind of persistent jit"
+
+[16:45] <diakopter> jnthn: ^ your thoughts?
+
+[16:46] <dalek> MoarVM: 0be1b0f | (Timo Paulssen)++ | src/jit/graph.c:
+
+[16:46] <dalek> MoarVM: isbig_I and join based on function calls.
+
+[16:46] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/0be1b0fb3a
+
+[16:46] <timotimo> ^- spectests still in the known state
+
+[16:48] <jnthn> diakopter: Problem will always be trusting such a cache
+
+[16:48] <jnthn> diakopter: It'll be a nuisance to implement fixing up stuff too
+
+[16:48] <japhb> So I was trying to understand why I haven't seen cmovnz used all the time for segfault avoidance, so I went searching.  And the answer is: it doesn't help avoid segfaults.  Due to pipelining, the src is loaded *before* the test happens.
+
+[16:48] <jnthn> diakopter: May well be possible, just tricky
+
+[16:49] <japhb> Or rather, referenced before the test.
+
+[16:49] <diakopter> jnthn: why would it be less trustworthy than a normal SC, if you saved room for "jitted version hashsum" in the SC reference identifiers
+
+[16:49] <timotimo> japhb: wait what.
+
+[16:49] <timotimo> https://github.com/MoarVM/MoarVM/commit/0bb7430c030017d4ddb86bd210cf320b57cfde61 - does that mean this is wrong?
+
+[16:50] <japhb> timotimo: Yes, I believe so.
+
+[16:50] <japhb> I found multiple places this problem was referenced.  :-(
+
+[16:50] <diakopter> japhb++ # research
+
+[16:51] <diakopter> Chrome thinks that BAIL op list gist is in Danish
+
+[16:51] *** brrt joined
+[16:51] <timotimo> %)
+
+[16:56] <brrt> diakopter: currently that's hard
+
+[16:56] <brrt> the hard bit is the 'relocatable identifying taget addresses'
+
+[16:57] <brrt> cuz you don't exactly know where these are in the bytecode
+
+[16:57] <jnthn> diakopter: SC is the wrong place for it anyway, I think. That's static at compile time, whereas this really would want generating and caching.
+
+[16:57] <diakopter> hm that's true, per machine
+
+[16:57] <jnthn> But yeah, what brrt++ said. We'd have to know where all the interesting things that need relocating are.
+
+[16:57] <timotimo> what we could perhaps do is cache the flags we observe after the logging stage
+
+[16:57] *** klaas-janstol joined
+[16:57] <jnthn> Which probably means custom dynasm patches.
+
+[16:57] <timotimo> so that we can immediately spesh stuff
+
+[16:57] * brrt nods
+
+[16:58] <diakopter> yeah, need some kind of mapping with canonicalized identifiers to unique thingies
+
+[16:59] <brrt> that isn't even all that hard :-) the hard bit is knowing where exactly those addresses are
+
+[17:00] <diakopter> I meant all the places that initially place the things in those addresses need to store such a mapping
+
+[17:00] <brrt> you can't label within an operand in dynasm (obviously) so you'd have to guess
+
+[17:01] <brrt> i.e. if i store somewhere a pointer to a function (which i do really often) then i have to know which part of the mov instruction references the address, and which is the instruction proper
+
+[17:01] <diakopter> I wouldn't want to guess :p
+
+[17:01] <brrt> no, neither would i
+
+[17:01] <jnthn> .oO( Conservative GC^Wmachine code modification! )
+
+[17:02] <brrt> yeah, exactly that
+
+[17:02] <brrt> you'd have to implement a linker
+
+[17:02] <diakopter> oh, is that what that's called..
+
+[17:03] <TimToady> well, we already have a LINK phaser, so we're all set, apart from a smop
+
+[17:05] *** jnap joined
+[17:05] <diakopter> just need a few more doublings vertically on all those log-log graphs... ;)
+
+[17:06] <diakopter> (I'm teasing of course, even 1 doubling (ever) is tremendous)
+
+[17:07] <timotimo> did you see the long-term benchmarks i posted on #perl6 a minute ago and a few hours ago?
+
+[17:07] <diakopter> maybe not
+
+[17:07] <diakopter> er yes those are the ones I meant
+
+[17:07] <diakopter> didn't see the one a few hours ago
+
+[17:09] * brrt dinner &
+
+[17:09] *** brrt left
+[17:10] <timotimo> it was the exact same
+
+[17:36] *** zakharyas joined
+[17:42] <nwc10> master/master/nom PASS, apart from the usual sin :-(
+
+[17:43] <nwc10> yes, "implement iscont with clever non-branching strats" was the problem
+
+[17:46] <timotimo> sorry :(
+
+[17:46] <timotimo> it could be the cmovnz thing mentioned above
+
+[17:49] * jnthn hoped prepping chili would help him figure out what on earth is going on with init.t...alas, no...
+
+[17:52] <FROGGS> :/
+
+[18:25] <jnthn> I think I busted autoclose.
+
+[18:25] <jnthn> And think I see how to fix it
+
+[18:25] <jnthn> But right now, the chili has become ready to nom, so I'll do it in a bit :)
+
+[18:25] <nwc10> enjoy
+
+[18:50] <timotimo> i don't know what autoclose is ..
+
+[19:07] <timotimo> oh that's when a nexception flies and we close a file descriptor for that automatically
+
+[19:08] <timotimo> OSLT
+
+[19:18] *** brrt joined
+[19:18] <brrt> \o
+
+[19:18] <brrt> hmm we can always implement iscont the dumb way
+
+[19:18] <nwc10> o/
+
+[19:19] <timotimo> oh, yeah
+
+[19:19] <timotimo> the way i had it before you told me not to branch
+
+[19:19] <timotimo> i still have the patch here
+
+[19:20] <timotimo> the 'ternet connection here is really weaksauce >_<
+
+[19:20] <timotimo> https://gist.github.com/timo/414f465df7efa622148b#
+
+[19:20] <timotimo> actually ...
+
+[19:21] <brrt> hmm
+
+[19:21] <brrt> must be other gist
+
+[19:21] <timotimo> https://gist.github.com/timo/4dc3eb65b316b9adfc3c
+
+[19:21] <timotimo> it takes me minutes to load stuff
+
+[19:22] <timotimo> maybe *one* of the branches can be turned into a cmovnz instead
+
+[19:22] <brrt> hmm
+
+[19:23] <brrt> i don't necessarily thnk your version was wrong
+
+[19:23] <timotimo> the cmovnz?
+
+[19:23] <brrt> yeah, the gist is wrong 'cuz lacking extension
+
+[19:24] <jnthn> mmm...such hot :)
+
+[19:24] <timotimo> oh
+
+[19:24] <brrt> much curry
+
+[19:24] <jnthn> Chili tonight :)
+
+[19:24] <brrt> but the committed version looks really much right
+
+[19:24] <timotimo> i have the extension locally
+
+[19:24] <timotimo> and in the jit-iscont branch, too
+
+[19:25] <brrt> did you push that?
+
+[19:25] <timotimo> yeah, except you mustn't use cmovnz if the condition would prevent a null dereference
+
+[19:25] <timotimo> because the pipeline will go ahead and try to dereference and explode before it even checks the flag
+
+[19:27] <timotimo> japhb said so
+
+[19:32] <brrt> hmmm
+
+[19:32] <brrt> and that'd still cause a null pointer exception
+
+[19:32] <brrt> ?
+
+[19:33] <timotimo> he says he sfound multiple references to that exploding
+
+[19:35] <brrt> weird
+
+[19:36] <brrt> hmm, i see
+
+[19:36] <brrt> you're quite correct
+
+[19:36] <brrt> https://www.cs.cmu.edu/~fp/courses/15213-s07/misc/asm64-handout.pdf says the same, page 16
+
+[19:36] <timotimo> not me, him.
+
+[19:36] <brrt> japhb++ is quite correct :-)
+
+[19:36] <brrt> i did not know that
+
+[19:40] <brrt> i use that pattern quite often
+
+[19:40] <timotimo> seems like you really shouldn't do that :)
+
+[19:42] * jnthn seems to have an init.t fix
+
+[19:42] <dalek> MoarVM: 530fada | (Bart Wiegmans)++ | src/jit/emit_x64.dasc:
+
+[19:42] <dalek> MoarVM: Remove cmovnz NULL pointer deref
+
+[19:42] <dalek> MoarVM:
+
+[19:42] <dalek> MoarVM: Apparantly these are executed by the pipeline
+
+[19:42] <dalek> MoarVM: before considering the flag, thus causing a null
+
+[19:42] <dalek> MoarVM: pointer exception. japhb++ for pointing this out.
+
+[19:42] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/530fada697
+
+[19:42] <brrt> \o/
+
+[19:43] <timotimo> getlex_no was mine!
+
+[19:43] <timotimo> thanks for fixing
+
+[19:45] <jnthn> (init.t passes, just doing a spectest run to make sure I didn't knock off anything else)
+
+[19:47] <brrt> thanks for pointing it out (both of you :-))
+
+[19:47] <brrt> that could've been quite a nasty bughunt session
+
+[19:50] <brrt> by the way, what actuall broke because of it?
+
+[19:50] <brrt> ugh netsplit
+
+[19:50] *** FROGGS joined
+[19:50] *** sergot joined
+[19:50] *** ashleydev joined
+[19:50] *** avuserow joined
+[19:50] *** TimToady joined
+[19:51] <brrt> as in, whcih tests broke
+
+[19:51] <timotimo> a bunch
+
+[19:51] <brrt> hmmm
+
+[19:51] <brrt> :-(
+
+[19:53] *** lue joined
+[19:53] *** klaas-janstol joined
+[19:53] *** colomon joined
+[19:53] *** daxim joined
+[19:53] *** ingy joined
+[19:53] *** retupmoca joined
+[19:54] <brrt> seems they still do
+
+[19:54] <timotimo> oh no! :(
+
+[19:55] <brrt> well...
+
+[19:55] <brrt> wei'll manage
+
+[19:55] <dalek> MoarVM: 669a171 | jnthn++ | src/core/frame.c:
+
+[19:55] <dalek> MoarVM: Fix under-sharing of containers regression.
+
+[19:55] <dalek> MoarVM:
+
+[19:55] <dalek> MoarVM: The lazy lexical deserialization caused an overly-incomplete static
+
+[19:55] <dalek> MoarVM: environment to be copied into place, meaning things that should have
+
+[19:55] <dalek> MoarVM: been shared over BEGIN/INIT blocks failed to be.
+
+[19:55] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/669a17141b
+
+[20:00] <timotimo> oh my
+
+[20:10] <FROGGS> jnthn: that fixed init.t?
+
+[20:11] <brrt> ugh, iscont is /really/ common in baghash.t
+
+[20:11] <jnthn> FROGGS: yes
+
+[20:11] <brrt> hmmm
+
+[20:11] <brrt> p6box_n
+
+[20:11] <brrt> is an extop?
+
+[20:11] <jnthn> Yes
+
+[20:11] <FROGGS> jnthn++
+
+[20:11] <FROGGS> now I can unfudge v5's grammar :o)
+
+[20:12] <FROGGS> all p6* are extops, no?
+
+[20:12] <jnthn> Right
+
+[20:12] <jnthn> Well, actually
+
+[20:12] <jnthn> Some are just code-gen'd
+
+[20:13] <jnthn> But many map to a function in perl6_ops.c
+
+[20:17] <brrt> which tests are expected to fail?
+
+[20:17] <brrt> none?
+
+[20:19] <brrt> hmmmpf
+
+[20:20] <brrt> well, that sure doesn't work out as planned
+
+[20:20] <timotimo> brrt, jnthn, posted my benchmarks on reddit: http://www.reddit.com/r/perl6/comments/2cozob/week_31_rakudos_speedram_performance_improves_at/cjs4rpv
+
+[20:21] <brrt> impressive
+
+[20:21] <jnthn> timotimo++
+
+[20:21] <brrt> timotiom++ indeed
+
+[20:22] <brrt> timotimo++ that is
+
+[20:24] <timotimo> what is impressive about that?
+
+[20:26] <timotimo> jnthn: if the init.t fix (and maybe something else, too?) warrant a version bump, could we get iscont in there, too?
+
+[20:26] <timotimo> brrt, with the branching version of iscont, do things still asplode?
+
+[20:26] <brrt> aye
+
+[20:26] <brrt> they do
+
+[20:27] <timotimo> damn.
+
+[20:28] <brrt> yah
+
+[20:28] <brrt> what's more
+
+[20:28] <brrt> iscont is in /many/ frames
+
+[20:28] <timotimo> https://gist.github.com/timo/40214498dae386ee0bdd
+
+[20:30] <jnthn> iscont is extremely common because it shows up in many assignments
+
+[20:30] <timotimo> mhm
+
+[20:30] <timotimo> so not frequent in the setting compilation, as that's basically nqp code
+
+[20:30] <jnthn> yup
+
+[20:30] <brrt> ok, that's good to know
+
+[20:31] <jnthn> Except the bits of Perl 6 code that we might run
+
+[20:31] <jnthn> Butthat's mostly BEGIN blocks
+
+[20:31] <jnthn> = not hot
+
+[20:31] <timotimo> yup
+
+[20:31] <timotimo> should i collect bails for the nqp portion of the benchmark suite as well?
+
+[20:32] <timotimo> i think i will.
+
+[20:33] <timotimo> brrt: do you have an idea when you'll pfinish and push the param* support?
+
+[20:34] <brrt> uh... 'yesterday' was my original guess :-(
+
+[20:34] <timotimo> hehe
+
+[20:34] <brrt> basically i'm stuck thinking 'this can be more efficient'
+
+[20:34] <timotimo> no need to feel bad
+
+[20:34] <brrt> :-)
+
+[20:35] <brrt> basically, we know ahead of time which of (obj/str/int/num) we want
+
+[20:35] <timotimo> sounds like you'd best implement it less efficient first and we'll see from there
+
+[20:35] <brrt> no need to dispatch
+
+[20:35] <dalek> MoarVM: cb9e151 | jnthn++ | src/6model/6model.c:
+
+[20:35] <dalek> MoarVM: Complain properly about missing late-bound methods.
+
+[20:35] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/cb9e151ecf
+
+[20:35] <brrt> no, first i need to fix the bug that causes iscont to fail
+
+[20:35] <timotimo> OK
+
+[20:35] <brrt> although i have some bits of an idea
+
+[20:39] <FROGGS> Program received signal SIGSEGV, Segmentation fault.
+
+[20:39] <FROGGS> 0x00007ffff79d2467 in MVM_sc_get_object (tc=tc@entry=0x603650, sc=0x7ffff63db300, idx=idx@entry=1258) at src/6model/sc.c:151
+
+[20:39] <FROGGS> 151	    MVMObject **roots = sc->body->root_objects;
+
+[20:39] <FROGGS> :o(
+
+[20:41] <brrt> what
+
+[20:42] <FROGGS> jit is not enabled fwiw
+
+[20:42] <brrt> oh
+
+[20:42] <brrt> pfew
+
+[20:43] <brrt> :-) these tend to be more fixable
+
+[20:51] * brrt has no idea why adding a few labels makes nqp crash
+
+[20:59] <brrt> adding a few deopt idxs makes nqp crash, apparantly
+
+[21:18] <dalek> Heuristic branch merge: pushed 51 commits to MoarVM/moar-jit by bdw
+
+[21:18] <brrt> last commit of these contains new iscont timotimo
+
+[21:18] <brrt> also the line that adds some extra labels for inline deopts... that causes a crash in nqp building
+
+[21:18] <brrt> no idea why
+
+[21:19] <brrt> or, not yet a good idea :-)
+
+[21:19] * brrt afk for tonight
+
+[21:19] *** brrt left
+[21:19] <jnthn> 'night, brrt++
+
+[21:20] <timotimo> gnite brrt
+
+[21:23] <FROGGS> jnthn: that causes trouble in v5: d6365b0989965fa3577eb6e87b838a4a6011834c
+
+[21:24] <jnthn> FROGGS: huh...that should either fix a GC bug or have no effect...
+
+[21:24] <FROGGS> well, all v5 spectests fail...
+
+[21:25] <FROGGS> with the segfault pasted 50 minutes ago
+
+[21:25] <jnthn> And if you revert exactly that commit?
+
+[21:25] <FROGGS> let's see
+
+[21:31] <timotimo> oh, we're not even optimizing iscont into a const in spesh yet
+
+[21:31] <timotimo> that could be a low-hanging fruit even
+
+[21:31] <timotimo> especially since it shares a whole bunch of logic with the decont opt
+
+[21:32] <FROGGS> jnthn: reverting exactly this commit helps for most of the spectests
+
+[21:34] <FROGGS> ewww
+
+[21:34] <FROGGS> Internal error: invalid thread ID in GC work pass
+
+[21:34] <FROGGS> ERROR: Cannot build English, failing command was:
+
+[21:34] <FROGGS> /home/froggs/dev/nqp/install/bin/perl6-m -I/home/froggs/dev/v5/lib --target=mbc --output=lib/Perl5/English.pm.moarvm src/Perl5/English.pm
+
+[21:34] <FROGGS> that's new
+
+[21:34] <jnthn> Yes, that's exactly what the patch fixed.
+
+[21:35] <FROGGS> ahhh, I did not have the problem before the patch :o)
+
+[21:35] <FROGGS> dunno at what revision I was before though :/
+
+[21:36] <jnthn> Well, that commit was to fix an issue introduced by the patch to allocate the compunit in gen2, in order to fix the JIT SEGV
+
+[21:36] <FROGGS> I see
+
+[21:37] <jnthn> So reverting the pair of them should get you something that works again
+
+[21:42] <timotimo> don't really know why dalek thought brrt did a branch merge?
+
+[21:42] <timotimo> oh!
+
+[21:42] <timotimo> to moarvm/moar-jit!
+
+[21:42] <timotimo> that's new
+
+[21:43] <timotimo> callercode seems to be quite common
+
+[21:43] <jnthn> Used in !cursor_start iirc
+
+[21:43] <timotimo> but i'm quite tired right now
+
+[21:43] <timotimo> i think i want to go to bed
+
+[21:43] <timotimo> maybe i'll implement cal
+
+[21:44] <timotimo> callercode tomorrow or something
+
+[21:44] <jnthn> :)
+
+[21:44] <jnthn> 'night
+
+[21:44] <FROGGS> jnthn: I moved back to HEAD and the object is just garbage:
+
+[21:44] <FROGGS> p *sc
+
+[21:44] <FROGGS> $1 = {common = {header = {owner = 3, flags = 0, size = 0, sc_forward_u = {forwarder = 0x4b64210, sc = {sc_idx = 79053328, idx = 0}, st = 0x4b64210}},
+
+[21:44] <FROGGS> st = 0x20000400000001}, body = 0x0}
+
+[21:44] <timotimo> indeed, !cursor_start has it almost immediately
+
+[21:45] <FROGGS> gnight timo :o)
+
+[21:45] <jnthn> Urgh
+
+[21:45] <timotimo> gnite froggs, and good luck with your v5 woes!
+
+[21:45] <jnthn> OK, then it appears a bit more is going on...
+
+[21:45] <FROGGS> it also fails here when I rerun:
+
+[21:45] <FROGGS> Program received signal SIGSEGV, Segmentation fault.
+
+[21:45] <FROGGS> MVM_sc_get_object (tc=tc@entry=0x603650, sc=0x7ffff63c7d18, idx=idx@entry=565) at src/6model/sc.c:154
+
+[21:45] <FROGGS> 154	        return roots[idx] ? roots[idx] : MVM_serialization_demand_object(tc, sc, idx);
+
+[21:46] <jnthn> I'm guessing something went unmarked
+
+[21:47] <jnthn> It's not too clear to me how, though :(
+
+[21:47] <FROGGS> I'll go to bed now too... but I guess that this will also show up in star-daily
+
+[21:47] <timotimo> poor jit, MATCH chomps through four screen-pages full of ops to bail on bindattrs_i~
+
+[21:47] <jnthn> ugh, why're we using the indirect form...
+
+[21:48] <jnthn> oh...I know
+
+[21:48] <jnthn> And it's not hot path
+
+[21:48] <jnthn> (It's <( and )> handling)
+
+[21:49] <timotimo> since it's always either "from" or "to", maybe it'd be better code if we had an if there for those two possibilities :)
+
+[21:50] <jnthn> Mebbe
+
+[21:51] <timotimo> https://gist.github.com/timo/40214498dae386ee0bdd - anyway, this has the bails for perl6 and nqp benchmarks now
+
+[21:51] <timotimo> but i don't think the rakudo benchmarks actually got to the point where the actual benchmark part got "hot"

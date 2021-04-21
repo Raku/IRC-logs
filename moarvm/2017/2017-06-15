@@ -1,0 +1,331 @@
+[00:52] *** geekosaur joined
+[01:49] *** ilbot3 joined
+[01:55] *** colomon joined
+[05:37] *** brrt joined
+[05:59] *** domidumont joined
+[06:03] <brrt> brain is not producing any inspiration for the JIT today...
+
+[06:05] *** domidumont joined
+[06:10] <brrt> let's see where we were
+
+[06:10] <brrt> i've added the opr_kind to the JIT expr info
+
+[06:10] <brrt> (so to the 'metadata' nodes)
+
+[06:11] <brrt> happily, those are 0 if not defined
+
+[06:11] <brrt> saves me a bug of difficulty
+
+[06:13] <brrt> that wasn't grammar
+
+[06:13] <brrt> anyway
+
+[06:14] <brrt> what i need to do now is associate them with the live ranges
+
+[06:14] <brrt> the thing after that is to have a 'type' specific memroy-location allocator
+
+[06:48] *** brrt joined
+[06:55] *** domidumont joined
+[07:40] *** sivoais joined
+[07:52] <brrt> the association with live ranges is where my brain is drying up
+
+[07:52] <brrt> so lets try and figure that out
+
+[07:52] <brrt> - if something is 'basic', then obviously, the type of the value is the same as the type of the node it represents
+
+[07:53] <brrt> - if a copy of some sort (DO/COPY pseudotile), then..
+
+[07:54] <brrt> - either the copied value has a type and the DO/COPY does not, in which case nothing changes
+
+[08:03] <brrt> - or the DO/COPY has some value, and the copied value has not, in which case we assign the copied values' type
+
+[08:04] <brrt> - or they both have a value and it agrees, in which case we're ok
+
+[08:04] <brrt> -or it doesn't agree
+
+[08:04] <brrt> the same thing is kind of true of IF / PHI nodes
+
+[08:09] <samcv> i know that feeling about not as much inspiration :P
+
+[08:09] <samcv> you seem to be working with it though :)
+
+[08:12] <brrt> :-)
+
+[08:12] <brrt> so there's another thing i didn't think of...
+
+[08:12] <brrt> if we load a value directly from a local, it should kind of agree with the local types map
+
+[08:13] <brrt> and indeed, set and getlex don't have a type, i think
+
+[08:19] <brrt> okay, in that case, we kind of want to use the local_types map
+
+[08:34] *** robertle_ joined
+[08:45] *** geekosaur joined
+[08:46] <lizmat> https://www.reddit.com/r/perl6/comments/6hagwm/performance_concern_with_respect_to_gnu_yes/   # wonder how Perl 6 is doing after jnthn's latest refactoring
+
+[08:53] <jnthn> morning #moarvm
+
+[08:55] <jnthn> lizmat: Haven't looked much at output yet, though it's certainly not anything like so speedy as it could be
+
+[09:01] <samcv> yeah it does seem a bit slow lizmat
+
+[09:01] <samcv> hm
+
+[09:02] <samcv> not as slow as they show
+
+[09:02] <samcv> getting 250-280KiB/s
+
+[09:03] <jnthn> But anyway, yes output has gotten slower, 'cus it calls .encode, which normalizes the encoding every time through and so forth
+
+[09:03] <samcv> i can get 3.4MB using nqp::say
+
+[09:04] <samcv> if i set it to a variable i get way faster speeds
+
+[09:04] <samcv> hmm now it went down
+
+[09:05] <samcv> hmm looks like a fluk? idk i got 3 mb on perl 6 code and now it's back to what it was at before only a tiny bit faster
+
+[09:06] <samcv> jnthn, any way to cache it on the user code side?
+
+[09:10] <samcv> i can go from 270 to 380KB/s by doing $*OUT.open
+
+[09:19] <jnthn> huh, I don't know how $*OUT.open would change anything :S
+
+[09:20] *** zakharyas joined
+[09:44] <jnthn> Urgh. So it turns out that actually coping with deopt during args processing is even trickier as we need to recreate the args processing context
+
+[09:45] <jnthn> Uh, in the inline case I mean
+
+[09:45] <jnthn> But it also turns out that my "did we deopt" check was wrong too (it checked everywhere, not just in the args processing region)
+
+[09:54] <jnthn> This is especially good in that it means I can do a much simpler and far more localized change and get the inlining I was hoping for, rather than a bunch of wider-ranging and delicate chances.
+
+[09:54] <jnthn> *changes
+
+[10:03] <Geth> ¦ MoarVM: ebe2bb0b38 | (Jonathan Worthington)++ | src/spesh/args.c
+
+[10:03] <Geth> ¦ MoarVM: Correct deopt check when removing named arg marks.
+
+[10:03] <Geth> ¦ MoarVM:
+
+[10:03] <Geth> ¦ MoarVM: We only care about whether there is a deopt point during argument
+
+[10:03] <Geth> ¦ MoarVM: processing. If there isn't, we can safely strip out the tracking.
+
+[10:03] <Geth> ¦ MoarVM: It's only when there is that we must leave the tracking in place,
+
+[10:03] <Geth> ¦ MoarVM: which in turn prevents inlining. Previously we tracked it there
+
+[10:03] <Geth> ¦ MoarVM: was a deopt anywhere in the routine, rather than just up to the
+
+[10:03] <Geth> ¦ MoarVM: end of argument processing.
+
+[10:04] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ebe2bb0b38
+
+[10:04] <jnthn> Another couple of percent from that inlining.
+
+[10:04] <jnthn> Not quite so much as I'd hoped, but still
+
+[10:13] *** brrt joined
+[10:43] <jnthn> Currently I've reached the point where things are faster than before the I/O refactors in my for/lines thing
+
+[10:44] <jnthn> But many of the opts should help more generally
+
+[10:52] <eveo> awesome
+
+[11:00] *** zakharyas joined
+[11:11] <jnthn> callgrind++ # telling me when a microoptimization is actually making things worse
+
+[11:16] <jnthn> lunch &
+
+[11:40] <brrt> jnthn++ awesome!
+
+[11:57] <dogbert17> jnthn++ optimizations
+
+[12:20] *** colomon joined
+[12:21] * jnthn back
+
+[12:22] <jnthn> So, how shall I optimize this thing next...
+
+[12:23] <dogbert17> does callgrind show anything in need of opts?
+
+[12:24] <[Coke]> Are you still opting the char counter?
+
+[12:25] <jnthn> [Coke]: Yes, except mostly what I've been finding so far has just been poor code-gen or poor spesh
+
+[12:26] <jnthn> [Coke]: Meaning the fixes should have implications far beyond that
+
+[12:26] <[Coke]> Would it be worthwhile to add a short "here's how I optimized this, and so can you." doc?
+
+[12:26] <[Coke]> jnthn++
+
+[12:27] <jnthn> I'm not sure, in that most of the fixes are deep in code-gen or the specializer
+
+[12:28] <jnthn> I'll certainly blog about what I've done
+
+[12:28] <jnthn> And if there's anything generally useful I'm fine with it being lifted into the docs
+
+[12:28] <[Coke]> jnthn++ again. :)
+
+[12:29] <jnthn> So, what to optimize next...
+
+[12:29] * jnthn has 3 things that all need work
+
+[12:30] * lizmat volunteers as tie-breaker
+
+[12:30] <jnthn> Well, it's either doing the long-planned code-gen improvements for statementlist `for`, looking into utf-8 decoding, and looking into separator hunting
+
+[12:31] <dogbert17> are they equally difficult you think?
+
+[12:32] <jnthn> Well, the `for` one I already know what to do up front :)
+
+[12:32] <jnthn> Though I know that when I do it, people will ask me to do the same but for more cases of it :P
+
+[12:32] <lizmat> perhaps then you won't need to do it yourself ?
+
+[12:32] <jnthn> Possibly :)
+
+[12:33] <jnthn> The idea is to have statementlist `for` compile into code that does a while loop that calls pull-one
+
+[12:33] <jnthn> Rather than go through sink-all
+
+[12:33] <jnthn> In simple cases. :)
+
+[12:34] <jnthn> The upshot of this is that we will typically end up with a monomorphic callsite at the pull-one rather than a megamorphic one
+
+[12:34] <dogbert17> why not start with that one then, perhaps it can make to the next MoarVM release
+
+[12:34] <jnthn> Well, it's in Rakudo :)
+
+[12:34] <jnthn> But yeah
+
+[12:34] <dogbert17> *make it*
+
+[12:35] * jnthn digs in
+
+[12:35] <dogbert17> lizmat: wasn't there some opt regarding map and grep which had to be removed because of some phaser problem a couple of months ago?
+
+[12:36] <lizmat> well, we still need an extra scope every now and then
+
+[12:37] <dogbert17> it was a noticable change (at least in some of my code)
+
+[12:37] <lizmat> ah, grep you mean, with redo and stuff
+
+[12:47] <dogbert17> yeah, that was it
+
+[13:07] *** zakharyas joined
+[13:07] <eveo> I did some digging for that reddit perf question and wrote a detailed answer: https://www.reddit.com/r/perl6/comments/6hagwm/performance_concern_with_respect_to_gnu_yes/dixps6s/
+
+[13:08] <eveo> Looks like 50% of performance loss is actually in loop {}
+
+[13:12] <lizmat> I guess we need an opt that turns loop { } into postfix while 1  :-)
+
+[13:14] <jnthn> Or actually look at the generated code and figure out what's different :)
+
+[13:15] <eveo> Phaser support?
+
+[13:15] <eveo> Which I'm assuming can be statically checked or something
+
+[13:15] * eveo &
+
+[13:33] *** colomon joined
+[14:37] <jnthn> Well, seems I've got the better for code-gen for the simple loop case working
+
+[14:37] <eveo> \o/
+
+[14:37] <jnthn> Alas, spesh needs teaching to make the most of the new opportunities still.
+
+[14:38] <jnthn> But it's some more percent off at least :)
+
+[14:40] <jnthn> argh wat, suddenly new spectest failure after I fixed the only one I had left failing :/
+
+[15:02] <lizmat> jnthn: param_rp_s   what could be the cause of that ?
+
+[15:03] <lizmat> it's preventing &DYNAMIC from getting JITted
+
+[15:05] <jnthn> Means something didn't work out when it was trying to specialized something that takes a required positional string parameter
+
+[15:06] <jnthn> Though I don't know why the _s 'cus DYNAMIC is declared as \name
+
+[15:06] <lizmat> yeah, oops, that was after something I changed
+
+[15:06] <lizmat> turns out otherwise the JIT is being blocked by getlexreldyn
+
+[15:07] <jnthn> That one is probably fixable
+
+[15:08] <lizmat> then DYNAMIC could be JITted and loops with .say would be faster still  :-)
+
+[15:11] *** brrt joined
+[15:11] *** zakharyas joined
+[15:15] *** AlexDaniel joined
+[15:16] *** evalable6 joined
+[15:17] *** bisectable6 joined
+[15:17] *** greppable6 joined
+[15:49] <jnthn> Found find_separator was missing an easy optimization
+
+[15:50] <jnthn> Though it is probable that it can be improved further also
+
+[15:51] <jnthn> (But by now we've had the big win, so it'll be smaller bits)
+
+[15:56] <jnthn> argh, and it breaks one spectest :/
+
+[15:58] *** nwc10 joined
+[16:25] <Geth> ¦ MoarVM: 1f5be6a63a | (Jonathan Worthington)++ | src/strings/decode_stream.c
+
+[16:25] <Geth> ¦ MoarVM: Make find_separator only look at the last chars.
+
+[16:25] <Geth> ¦ MoarVM:
+
+[16:25] <Geth> ¦ MoarVM: Since there's no path where we'd be looking for the separator where we
+
+[16:25] <Geth> ¦ MoarVM: did not get it at the very end.
+
+[16:25] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/1f5be6a63a
+
+[16:25] <jnthn> m: say 1.866 / 2.004
+
+[16:25] <camelia> rakudo-moar 6f9326: OUTPUT: «0.931138␤»
+
+[16:26] <jnthn> 7% improvement on line reading from that, and I think a fresher me in the morning can probably simplify that code a bit mroe too
+
+[16:29] <eveo> Sweet!
+
+[16:29] <jnthn> And there's still more places to look for opts :)
+
+[16:30] <jnthn> But I think my brane is frazzled enough by now. :) And the chili won't cook itself...
+
+[16:53] *** domidumont joined
+[17:41] <Geth> ¦ MoarVM: 5ea6aaab42 | jnthn++ | src/platform/win32/io.c
+
+[17:41] <Geth> ¦ MoarVM: Don't barf on things we can't flush on Windows.
+
+[17:41] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/5ea6aaab42
+
+[19:29] *** AlexDaniel joined
+[20:03] *** colomon joined
+[20:25] *** praisethemoon joined
+[20:25] *** praisethemoon joined
+[21:55] *** colomon joined
+[22:01] <dogbert17> .seen samcv
+
+[22:01] <yoleaux> I saw samcv 21:11Z in #perl6: <samcv> and make them revert back to the old android designs. i don't think they understand how unicode works...
+
+[22:01] <samcv> hi
+
+[22:01] <dogbert17> hi, have a doc question for you
+
+[22:02] <dogbert17> do you think it would be ok to move the utf-c8 description from https://github.com/MoarVM/MoarVM/blob/master/src/strings/utf8_c8.c#L3 to you unicode document?
+
+[22:02] <dogbert17> I'm no expert on unicode perhaps something more is needed?
+
+[22:02] <samcv> like docs.perl6.org?
+
+[22:03] <dogbert17> yeah, here's the issue: https://github.com/MoarVM/MoarVM/blob/master/src/strings/utf8_c8.c#L3
+
+[22:03] <dogbert17> https://github.com/perl6/doc/issues/1345
+
+[22:03] <samcv> ah yes
+
+[22:04] <samcv> that would be a splendid idea. it's on my todo list now :)
+
+[22:04] <dogbert17> cool ++samcv

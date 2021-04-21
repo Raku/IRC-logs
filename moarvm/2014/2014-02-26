@@ -1,0 +1,191 @@
+[00:41] *** tgt joined
+[00:54] *** tgt joined
+[01:05] *** colomon joined
+[01:28] *** benabik joined
+[01:55] *** tgt joined
+[02:05] *** FROGGS_ joined
+[02:56] *** tgt joined
+[04:59] *** tgt joined
+[05:44] *** ingy joined
+[06:00] *** tgt joined
+[07:01] *** tgt joined
+[08:01] *** tgt joined
+[08:48] *** odc joined
+[09:30] *** tgt joined
+[09:42] *** tgt joined
+[10:56] *** donaldh joined
+[12:12] <dalek> MoarVM: 3ef533d | (Timo Paulssen)++ | src/strings/ops.c:
+
+[12:12] <dalek> MoarVM: a more general fastpath for flattening ropes.
+
+[12:12] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/3ef533d15e
+
+[12:13] <timotimo> jnthn: does it seem like a bad idea to put the string allocation counter next to nursery_fromspace and nursery_tospace?
+
+[12:13] <timotimo> struct memory layout wise?
+
+[12:13] <timotimo> and cache lines and stuff?
+
+[12:14] <jnthn> timotimo: I doubt they'll be accessed that close in time
+
+[12:14] <jnthn> timotimo: So I think it doesn't overly matter here.
+
+[12:14] <timotimo> should i put it at the end of the struct?
+
+[12:15] <jnthn> Well, maybe put it near other memory management related bits, for the sake of humans :)
+
+[12:16] <timotimo> mhhh sake
+
+[12:16] <timotimo> i should try that some time
+
+[12:17] <timotimo> what's a good place to put the constant i should compare to? allocate.h has the function to add pressure
+
+[12:17] <jnthn> I tried it once and can't wine against the experience...
+
+[12:17] <jnthn> timotimo: Near the function that adds pressure :)
+
+[12:17] <jnthn> timotimo: uh, in the .h though :)
+
+[12:17] <jnthn> So, that same one
+
+[12:18] <timotimo> aye.
+
+[12:20] <jnthn> http://kingjamesprogramming.tumblr.com/post/77900176002/the-integral-procedure-at-the-end-of-the :)
+
+[12:20] <timotimo> %)
+
+[12:21] <timotimo> it seems like i should store MVMGCStatus_INTERRUPT to tc->gc_status
+
+[12:22] <timotimo> is that what i use MVM_STORE for?
+
+[12:22] <timotimo> or do i CAS that?
+
+[12:23] <jnthn> Well, you know it's your own, which simplifies things since you don't race with yourself.
+
+[12:23] <jnthn> So MVM_store will do it
+
+[12:24] <timotimo> ah
+
+[12:24] <timotimo> good
+
+[12:37] <timotimo> jnthn: are we certain that enter_from_interrupt actually works?
+
+[12:38] <jnthn> timotimo: Umm
+
+[12:38] <jnthn> timotimo: It may make an assumption...
+
+[12:39] <jnthn> (That another thread set the flag.)
+
+[12:39] <timotimo> oh
+
+[12:39] <jnthn> It certainly works as in we wouldn't be able to pass the concurrency tests we do if it didn't.
+
+[12:40] <timotimo> hold on.
+
+[12:40] <timotimo> i may have done something dumb .. .again :)
+
+[12:48] <timotimo> jnthn: so, MVMGCStatus_SHOULD, or something like that?
+
+[12:48] <timotimo> or _INTERRUPTED_SELF?
+
+[12:51] <jnthn> Maybe the latter...
+
+[12:52] <timotimo> done
+
+[12:52] <jnthn> Do make sure you didn't regress threads.t and locks.t in moar-conc with these changes.
+
+[12:53] <timotimo> ah. i check that only in GC_SYNC_POINT, which might be wrong.
+
+[12:53] <jnthn> Yeah, this may cause issues...hm.
+
+[12:54] <timotimo> yeah
+
+[12:54] <timotimo> does rerouting enter_from_interrupt directly to enter_from_allocator seem like a bad idea to you, too? :)
+
+[12:54] <jnthn> We may be better off allowing self-interupting. But not sure. And can't be now.
+
+[12:57] <timotimo> allocate_nursery checks for !=0, so at a normal allocation, it'll enter_from_interrupt
+
+[12:59] <timotimo> ... do we even reset the gc status? o_O
+
+[13:00] <timotimo> i may have just reproduced nwc10++'s torture tester by accident %)
+
+[13:03] <timotimo> ah, we CAS it from INTERRUPT to NONE
+
+[13:03] *** Ven joined
+[13:03] <timotimo> but if it's INTERRUPTED_SELF, the cas will infiniloop instead
+
+[13:04] <jnthn> Right
+
+[13:05] <jnthn> I think adding an extra status will mess things up
+
+[13:05] <timotimo> it doesn't infiniloop, it just doesn't swap and returns immediately
+
+[13:05] <timotimo> while the code doing it doesn't expect that
+
+[13:06] <timotimo> should i if(cas(try to change INTERRUPT to NONE) == INTERRUPTED_SELF) { cas(try to change INTERRUPTED_SELF to NONE) }; ?
+
+[13:06] <timotimo> that's ... not really atomic %)
+
+[13:06] <timotimo> it does, however, now gc a bunch of times
+
+[13:06] <jnthn> Nok don't screw with csa stuff unless yo're good enough.
+
+[13:07] <jnthn> *as
+
+[13:07] <jnthn> *cas, even
+
+[13:07] <jnthn> If you're asking, you're going to get it wrong.
+
+[13:07] <timotimo> aye :)
+
+[13:07] <timotimo> i put a second cas below the INTERRUPT to NONE change that changes INTERRUPTED_SELF to NONE, but it really does seem terribly fragile
+
+[13:07] <jnthn> (I'm doing too many other things at the moemnt to work it out...this stuff is too hard to multi-task on...)
+
+[13:08] <timotimo> what i could do is set the state to INTERRUPT as soon as we've seen it's INTERRUPTED_SELF and *then* enter_from_allocator
+
+[13:08] <jnthn> It may be we can fuse enter_from_allocator and enter_from_interupt into a single enter that does the right thing.
+
+[13:08] <timotimo> i've changed the manual check + invocation in gc_allocate_nursery to a SYNC_POINT instead
+
+[13:09] <timotimo> whoops, integer overflow %)
+
+[13:10] <moritz> .oO( us an Int )
+
+[13:11] <timotimo> now it gets up to 3 gigabytes of ram used and then collects pretty often
+
+[13:12] <timotimo> dinner time :)
+
+[13:51] <timotimo> 270.30user 11.18system 4:42.56elapsed 99%CPU (0avgtext+0avgdata 3378420maxresident)k
+
+[13:51] <timotimo> perl6-m -e 'my $s = ""; for (1 .. 1000000) { $s ~= "x" }; 1'
+
+[13:52] <timotimo> as soon as it hits the set value for the threshold, it'll start collecting very often for this very test.
+
+[13:52] <timotimo> in this case 3 gb is the threshold for string allocations
+
+[13:53] <timotimo> (for string allocations to trigger a gc run)
+
+[13:53] <timotimo> but since it would try to allocate 3gb of string directly after the collection anyway, it's the choice between getting killed by memory pressure or becoming very slow :P
+
+[13:54] <timotimo> if there was a way to signal "do a minor collection only" so it would skip major collections, that might be nice.
+
+[16:25] *** rurban_ joined
+[17:45] *** rurban joined
+[18:41] *** tgt joined
+[19:38] *** lizmat_ joined
+[19:44] *** __rnddim__ joined
+[19:48] *** synopsebot joined
+[19:58] *** _sri joined
+[20:00] *** lue joined
+[20:01] *** japhb joined
+[20:05] *** _sri joined
+[20:13] *** japhb__ joined
+[20:13] *** colomon_ joined
+[20:26] *** tgt joined
+[20:54] *** benabik joined
+[21:23] *** lizmat joined
+[21:24] *** ggoebel1118 joined
+[21:32] *** colomon_ joined
+[23:29] *** tgt joined

@@ -1,0 +1,341 @@
+[00:29] *** ingy joined
+[00:58] <FROGGS> jnthn: that might be interesting https://gist.github.com/FROGGS/8efa32fce9e288e9f7f0
+
+[00:58] <FROGGS> jnthn: it seems like a MVMStaticFrame is exploding there
+
+[01:12] <FROGGS> jnthn: at src/core/interp.c:2268 is an alloc in box_i
+
+[01:16] <timotimo> so type should be temp-rooted?
+
+[01:23] <timotimo> adding that doesn't prevent the pointer to past fromspace :(
+
+[01:24] <timotimo> but box_n and box_s do the same thing
+
+[01:24] <timotimo> (also, aren't registers rooted anyway?)
+
+[01:28] <timotimo> no change :\
+
+[01:49] *** jnap joined
+[02:04] *** jnap joined
+[02:20] *** eternaleye joined
+[02:27] *** eternaleye joined
+[03:03] *** ggoebel111 joined
+[03:39] *** colomon joined
+[04:13] *** jnap joined
+[06:46] <FROGGS> timotimo: it must  be something before box_i
+
+[06:46] <FROGGS> since the allocation in box_i just triggers a gc run
+
+[07:45] <timotimo> ah
+
+[07:50] <FROGGS> morning timotimo
+
+[07:51] *** jnap joined
+[08:56] *** lizmat joined
+[09:19] *** lizmat_ joined
+[09:53] *** jnap joined
+[10:07] *** cognominal joined
+[10:42] *** tgt joined
+[10:45] <jnthn> Note that type doesn't need rooting in box_i 'cus it's used only as args to the next line, which allocates
+
+[10:47] <FROGGS> yes, box_i just kicks the gc
+
+[10:47] <jnthn> Right
+
+[10:48] <jnthn> Interesting that it's a pointer to a static frame though
+
+[10:49] <FROGGS> yeah, I skimmed through the code, but was to sleepy to see anything
+
+[10:52] <jnthn> It may (or may not) be helpful to know what was on the stack during the *previous* GC run
+
+[10:56] <jnthn> hm, I see a bug
+
+[10:56] <jnthn> Though...how it'd be hit I dunno.
+
+[10:56] <jnthn> No, that makes no sense to be the issue...
+
+[11:04] <dalek> MoarVM: 204495e | jnthn++ | src/core/frame.c:
+
+[11:04] <dalek> MoarVM: Add a missing write barrier.
+
+[11:04] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/204495e85e
+
+[11:04] * FROGGS tries
+
+[11:04] <jnthn> I'm doubtful that does anything to help
+
+[11:05] <FROGGS> no, no change
+
+[11:06] <FROGGS> I don't know how to look what was on the stack before :/
+
+[11:08] <jnthn> I thought you did that once before?
+
+[11:08] <FROGGS> yeah...
+
+[11:08] <jnthn> The thing with gc_seq_number?
+
+[11:08] * FROGGS reads clogs
+
+[11:09] <jnthn> And conditional breakpoint on that
+
+[11:11] <dalek> MoarVM: 9f8d923 | jnthn++ | src/core/interp.c:
+
+[11:11] <dalek> MoarVM: Mame freshcoderef op less vulnerable to GC issues.
+
+[11:11] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/9f8d92342e
+
+[11:13] <FROGGS> jnthn: okay, before it did src/core/interp.c:1959
+
+[11:13] <FROGGS> nqp::create
+
+[11:15] <FROGGS> https://gist.github.com/FROGGS/f703c5e110204da6a54a
+
+[11:15] <jnthn> OK, that tells us nothing really, then...
+
+[11:17] <FROGGS> jnthn: I stepped through from the second breakpoint: Breakpoint 2, MVM_gc_collect (tc=0x6033e0, what_to_do=<optimized out>, gen=gen@entry=0 '\000') at src/gc/collect.c:73
+
+[11:17] <FROGGS> 73	            process_worklist(tc, worklist, &wtp, gen);
+
+[11:17] <FROGGS> (gdb) finish
+
+[11:17] <FROGGS> Run till exit from #0  MVM_gc_collect (tc=0x6033e0, what_to_do=<optimized out>, gen=gen@entry=0 '\000') at src/gc/collect.c:73
+
+[11:17] <FROGGS> run_gc (tc=tc@entry=0x6033e0, what_to_do=what_to_do@entry=0 '\000') at src/gc/orchestrate.c:267
+
+[11:17] <FROGGS> 267	    for (i = 0, n = tc->gc_work_count ; i < n; i++) {
+
+[11:17] <FROGGS> (gdb) finish
+
+[11:17] <FROGGS> Run till exit from #0  run_gc (tc=tc@entry=0x6033e0, what_to_do=what_to_do@entry=0 '\000') at src/gc/orchestrate.c:267
+
+[11:17] <FROGGS> MVM_gc_enter_from_allocator (tc=tc@entry=0x6033e0) at src/gc/orchestrate.c:380
+
+[11:17] <FROGGS> 380	}
+
+[11:17] <FROGGS> (gdb) finish
+
+[11:17] <FROGGS> Run till exit from #0  MVM_gc_enter_from_allocator (tc=tc@entry=0x6033e0) at src/gc/orchestrate.c:380
+
+[11:17] <FROGGS> MVM_gc_allocate_nursery (tc=0x6033e0, size=64) at src/gc/allocation.c:29
+
+[11:17] <FROGGS> 29	        while ((char *)tc->nursery_alloc + size >= (char *)tc->nursery_alloc_limit) {
+
+[11:17] <FROGGS> (gdb) finish
+
+[11:17] <FROGGS> Run till exit from #0  MVM_gc_allocate_nursery (tc=0x6033e0, size=64) at src/gc/allocation.c:29
+
+[11:17] <FROGGS> 0x00007ffff7a00ada in MVM_gc_allocate_object (tc=0x6033e0, st=0x78c708) at src/gc/allocation.c:84
+
+[11:17] <FROGGS> 84	    MVMROOT(tc, st, {
+
+[11:17] <FROGGS> Value returned is $2 = (void *) 0x7ffff6a4cd30
+
+[11:17] <FROGGS> (gdb) finish
+
+[11:17] <FROGGS> Run till exit from #0  0x00007ffff7a00ada in MVM_gc_allocate_object (tc=0x6033e0, st=0x78c708) at src/gc/allocation.c:84
+
+[11:17] <FROGGS> MVM_interp_run (tc=tc@entry=0x6033e0, initial_invoke=initial_invoke@entry=0x7ffff7a30330 <toplevel_initial_invoke>, invoke_data=<optimized out>) at src/core/interp.c:1960
+
+[11:17] <FROGGS> 1960	                GET_REG(cur_op, 0).o = obj;
+
+[11:17] <FROGGS> Value returned is $3 = (MVMObject *) 0x7ffff6a4cd30
+
+[11:17] <FROGGS> (gdb) finish
+
+[11:17] <FROGGS> Run till exit from #0  MVM_interp_run (tc=tc@entry=0x6033e0, initial_invoke=initial_invoke@entry=0x7ffff7a30330 <toplevel_initial_invoke>, invoke_data=<optimized out>)
+
+[11:17] <FROGGS> at src/core/interp.c:1960
+
+[11:18] <FROGGS> Breakpoint 1, process_worklist (tc=tc@entry=0x6033e0, worklist=worklist@entry=0x53fa7f0, wtp=wtp@entry=0x7fffffffd910, gen=gen@entry=1
+
+[11:18] <FROGGS> err
+
+[11:18] <FROGGS> sory
+
+[11:18] <FROGGS> https://gist.github.com/FROGGS/f703c5e110204da6a54a#file-2-bash
+
+[11:18] <FROGGS> >.<
+
+[11:18] <jnthn> ...
+
+[11:19] <jnthn> Sure, there you're just running it until it hits the next GC, though, I guess...
+
+[11:20] <FROGGS> before the nqp::create it did OP(takeclosure)
+
+[11:20] <jnthn> takeclosure *does* do stuff with static frames...
+
+[11:20] <FROGGS> yeah
+
+[11:21] <FROGGS> I'll print its pointer to see if this one is it
+
+[11:23] <jnthn> Could always try a build with frame.c not optimized, too...
+
+[11:24] *** colomon joined
+[11:25] <FROGGS> okay, MVM_frame_takeclosure seems involved
+
+[11:25] <FROGGS> the reported pointer is `closure`
+
+[11:27] <jnthn> The out-dated pointer?
+
+[11:27] <FROGGS> yes
+
+[11:27] <FROGGS> the one from "Heap corruption detected: pointer 0x7ffff69fc650 to past fromspace"
+
+[11:27] <jnthn> o.O
+
+[11:28] <FROGGS> this pointer is reported five times in MVM_frame_takeclosure due to my print statement
+
+[11:29] <FROGGS> four times with different code pointers, but the fifth code pointer is indentical to the fourth
+
+[11:29] <jnthn> But...closure is allocated each time in that routine...
+
+[11:29] <FROGGS> so we are taking a closure of the same code I guess?
+
+[11:29] <jnthn> Are we talking about code or about closure here?
+
+[11:30] <jnthn> Yes, that's very likely, but it's code I'd expect to see repeated, not closure...
+
+[11:30] <jnthn> Unless this is entire execution?
+
+[11:31] <FROGGS> https://gist.github.com/FROGGS/2e518058dcd3661d5c4e
+
+[11:32] <FROGGS> and that is for the entire compilation of m-BOOTSTRAP
+
+[11:35] <jnthn> Can you print the gc_seq_number out for each of those too?
+
+[11:36] <FROGGS> k
+
+[11:39] <FROGGS> jnthn: updated https://gist.github.com/FROGGS/2e518058dcd3661d5c4e
+
+[11:47] <jnthn> Ah, they're spread over many runs...
+
+[11:48] <jnthn> 150...and which is the seq number where we crash?
+
+[11:51] <FROGGS> jnthn: 180
+
+[11:52] <jnthn> Whoa, that's still a good way off
+
+[11:52] <jnthn> Can you maybe try dong a print like that in the allocate function of MVMStaticFrame.c?
+
+[11:52] <FROGGS> k
+
+[11:52] <jnthn> So we can catch every allocation of them?
+
+[12:00] <FROGGS> ahh, it allocates an MVMCode, not MVMStaticframe
+
+[12:00] <jnthn> takeclosure? Yes...
+
+[12:01] <FROGGS> should I print every allocation of MVMStaticFrame then?
+
+[12:01] <jnthn> Well, every matching one, yes
+
+[12:01] <FROGGS> there are not too many as it seems
+
+[12:01] <jnthn> No, there shouldn't be many in total
+
+[12:01] <jnthn> So could just do all then filter it
+
+[12:02] <FROGGS> there is no matching one
+
+[12:02] <FROGGS> ohh, you mean the ones that match closure->body.sf
+
+[12:03] <jnthn> No, that match the one in the error
+
+[12:03] <FROGGS> no match
+
+[12:04] <FROGGS> MVMCode->allocate matches though
+
+[12:07] <FROGGS> jnthn: here is a better gist: https://gist.github.com/FROGGS/01405a4286863c673fbc
+
+[12:15] <JimmyZ> jnthn: Did you see my message to you? :P
+
+[12:16] <jnthn> JimmyZ: About the probably unrequired flatten_ropes call?
+
+[12:16] <JimmyZ> yeah
+
+[12:16] <jnthn> I suspect you're right...
+
+[12:26] *** colomon joined
+[12:56] *** jnap joined
+[13:00] <nwc10> I have a SEGV after stage mbc with:
+
+[13:00] <nwc10> 238         if (handle->type == UV_SIGNAL)
+
+[13:00] <nwc10> $1 = (uv_handle_t *) 0xfff7ddbe60ddc040
+
+[13:00] <nwc10> running with valgrind
+
+[13:00] <nwc10> expect more in about 3 hours
+
+[13:02] <FROGGS> so, handle is null I guess
+
+[13:03] <nwc10> um, it's garbage, not NULL.
+
+[13:05] <FROGGS> that might be the issue jnthn++ pointed out last night
+
+[13:08] <jnthn> Quite possibly, yes.
+
+[13:33] *** camelia joined
+[14:09] <FROGGS> jnthn: I just think the printed pointers are coincidences... the printed ones have repr MVMCode while the exploding one show MVMStaticFrame
+
+[14:09] <jnthn> Sonds like :(
+
+[14:10] <jnthn> Though, maybe the printed ones point us to where we store something that later becomes invalid...
+
+[14:17] *** tgt joined
+[14:35] *** lizmat joined
+[14:35] *** jnap joined
+[14:46] *** ggoebel111 joined
+[15:52] <FROGGS> jnthn: it appears in GCDEBUG: https://gist.github.com/FROGGS/01405a4286863c673fbc
+
+[15:53] <FROGGS> or, hmmm
+
+[15:54] <FROGGS> no, the exploding one has repr id 23
+
+[16:06] <TimToady> FROGGS: if you're using irssi, you should know about paste_verify_line_count, which prevents most accidental pastes
+
+[16:06] * FROGGS is an XChat user
+
+[16:07] <FROGGS> but I might switch some day
+
+[16:10] <arnsholt> Yeah, the "are you sure you want to paste all of this junk" functionality in irssi is a lifesaver
+
+[16:37] <diakopter> yeah but it doesn't always work for me
+
+[16:39] * TimToady has his set to 1, so sometimes it gets false positives on echo lag, but rarely produces a false negative
+
+[16:40] * TimToady doesn't mind typing an extra ^K occasionally to confirm
+
+[17:16] *** lizmat joined
+[17:42] <dalek> MoarVM: 9bb18f5 | (Tobias Leich)++ | src/gc/collect.c:
+
+[17:42] <dalek> MoarVM: fix s/%d/%p/ in GCDEBUG and print reprid in two others
+
+[17:42] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/9bb18f52fe
+
+[17:45] <FROGGS> jnthn: is there something else in that exploding sf that gives us useful information?
+
+[17:46] <jnthn> Not that I can immediately think of :(
+
+[17:46] <FROGGS> :/
+
+[17:47] <FROGGS> gc bugs are really the worst things out there
+
+[18:01] *** ssutch joined
+[18:11] *** colomon joined
+[18:43] <FROGGS> btw, it seems like to happen after switching from<=>tospace
+
+[18:45] <FROGGS> because I added a print stmt in MVMStaticFrame->allocate, and after a block of similar mem addresses, there is one that sticks out and then the crash
+
+[18:51] *** lizmat joined
+[18:59] <nwc10> bad news - valgrind only shows the base64_* errors
+
+[18:59] <nwc10> so I think that that means that "GC bug" is the most likely
+
+[20:03] *** jnap joined
+[20:40] *** lue joined
+[21:11] *** lizmat joined
+[21:33] *** colomon joined
+[22:03] *** colomon_ joined
+[22:05] *** jnap1 joined
+[23:48] *** lizmat joined

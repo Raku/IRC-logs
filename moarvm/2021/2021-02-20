@@ -1,0 +1,239 @@
+[02:33] *** nevore joined
+[03:09] *** nevore left
+[03:11] *** nevore joined
+[03:26] *** nevore left
+[03:51] *** nevore joined
+[04:16] *** nevore left
+[04:22] *** nevore joined
+[04:24] *** nevore left
+[04:33] *** nevore joined
+[04:36] *** nevore left
+[04:42] *** nevore joined
+[04:46] *** nevore left
+[05:59] *** leont_ left
+[10:14] <sena_kun> I think we have a moarvm-level regression around.
+
+[10:15] <sena_kun> Luckily it is easy to reproduce.
+
+[10:16] <sena_kun> Can updated libuv really break things?
+
+[10:20] <nine> depends on what broke
+
+[10:21] <sena_kun> nine, https://github.com/MoarVM/MoarVM/issues/1435
+
+[10:22] <sena_kun> I have no better golf, alas, have to spend some time looking at what's wrong with Blin.
+
+[10:30] <nine> Yeah, that looks bad: [WebSocket] MoarVM panic: use of invalid eventloop work item index -1
+
+[10:32] <sena_kun> nine, uninstall/install it again
+
+[10:33] <sena_kun> nine, I saw that one, but it is rare (though sometimes happens), in most cases it just skip tests
+
+[10:33] <sena_kun> nine, the failure you saw I saw in Cro::LDAP as well, I even had a rr Timo tried to utilize to fix that without much luck.
+
+[10:33] <sena_kun> Hmm, I am seeing it again, so it is not so rare. Anyway, that's the thing.
+
+[10:39] <nine> libuv 06b731742208c0c7b0b56948da2f2e0c9e645ec9 is the first bad commit
+
+[10:40] *** linkable6 left
+[10:42] *** linkable6 joined
+[10:42] <nine> And reverting that commit fixes the issue.
+
+[10:44] <sena_kun> nine++
+
+[10:48] <nine> Previously we didn't get an error at all, now uv_read_start fails with: EALREADY connection already in progress
+
+[10:49] <nine> According to the commit message, we would have gotten that error already on Windows
+
+[10:51] <sena_kun> nine, so the tests are bogus (rely on non-throwing a valid error) or there is still an issue on our side?
+
+[10:59] <nine> Well there's definitely an error in our error handling or we wouldn't end up in a panic
+
+[11:17] <sena_kun> Were there any potentially big changes to how threads handled introduced in a recent month?
+
+[11:17] <sena_kun> Hmm, not really.
+
+[11:19] <lizmat> I'm not aware of any
+
+[11:29] *** Kaiepi left
+[11:32] *** Kaiepi joined
+[11:33] *** Kaeipi joined
+[11:33] *** Kaiepi left
+[12:10] *** Kaeipi left
+[12:10] *** Kaeipi joined
+[12:19] *** leont joined
+[12:28] <nine> So the test in question uses HTTP::Server::Tiny which opens the connection and tapps a binary supply. It also uses ws-psgi which tapps the same binary supply. Could that lead to 2 async read ops on the same handle?
+
+[12:33] <nine> Looks like:
+
+[12:33] <nine> nine@sphinx:~/rakudo (master=)> install/bin/rakudo -e 'react { whenever IO::Socket::Async.listen("localhost", 1234) -> $conn { $conn.Supply(:bin).tap: -> $v { say $v } for ^2 } }'
+
+[12:33] <nine> uv_read_start error: EALREADY connection already in progress
+
+[12:36] <dogbert11> bogus test?
+
+[12:37] <nine> And exactly the same error: > install/bin/rakudo -e 'react { whenever IO::Socket::Async.listen("localhost", 1234) -> $conn { $conn.Supply(:bin).tap: -> $v { say $v }, quit => { say "quit" }, done => { say "done" }, closing => { say "closing" } for ^2 } }'
+
+[12:37] <nine> uv_read_start error: EALREADY connection already in progress
+
+[12:37] <nine> quit
+
+[12:37] <nine> MoarVM panic: use of invalid eventloop work item index -1
+
+[12:47] <nine> Well our documentation fails to mention that one must only tap a Supply on a connection once. MoarVM fails to clean up properly after the EALREADY error (it basically kills the previous successful tap). And the test mixes HTTP::Server::Tiny and Websocket::P6W, both of which want to be in charge of the connection.
+
+[12:48] <nine> The sad thing is that this has just worked magically for over 5 years because of the implicit latest wins semantics that not reporting the error brought
+
+[12:56] <dogbert11> is it reasonable to assume that you example above should work or should it fail with a nicer error that MoarVM Panic?
+
+[12:56] <dogbert11> *your
+
+[12:59] *** squashable6 left
+[12:59] <nine> I honestly can't say what is the intended reaction at the high level. MoarVM certainly must not panic over something benign like this. Note that it didn't do in my first golf. It needs a quit handler to do so. Otherwise exception cleanup seems to take care of things.
+
+[13:01] *** squashable6 joined
+[13:01] <nine> I'd say for the release, we ought to revert to the previous behavior, so we get time to figure out the desired semantics. We can do so in two ways: revert to libuv 1.39.0 or with a tiny patch:
+
+[13:01] <nine> -    if ((r = uv_read_start(handle_data->handle, on_alloc, on_read)) < 0) {
+
+[13:01] <nine> +    r = uv_read_start(handle_data->handle, on_alloc, on_read);
+
+[13:01] <nine> +    if (r < 0 && r != UV_EALREADY) {
+
+[13:03] <dogbert11> where would that patch be located?
+
+[13:04] <dogbert11> nine, speaking of errors, did you see this the other day? https://gist.github.com/dogbert17/5c6a632a646087321a88bbe2bfed97fa
+
+[13:05] <nine> src/io/asyncsocket.c
+
+[13:13] <dogbert11> I guess the patch also fixes the, already present, problem on Windows
+
+[13:16] <nine> should so, yes
+
+[13:27] <nine> https://github.com/MoarVM/MoarVM/commit/5ee4f8be61810666ff5f8b139ad804084cbbfbd9 Work around libuv behavior change on multiple active reads on async s…
+
+[13:27] <nine> ocket
+
+[13:28] <nine> sena_kun: ^^^
+
+[13:29] <sena_kun> yay
+
+[13:29] <sena_kun> I'll do a bump somewhere soon if nobody beats me to it
+
+[13:42] <dogbert11> nine++
+
+[13:43] <sena_kun> nine++ dogbert11++
+
+[13:43] <sena_kun> Guess I don't have to delay release for a week.
+
+[13:48] <nine> jnthn: https://github.com/MoarVM/MoarVM/commit/5ee4f8be61810666ff5f8b139ad804084cbbfbd9 needs an architect's opinion.
+
+[14:01] <nine> dogbert11: nothing I can do about that GC panic from the gist alone
+
+[14:05] <dogbert11> nine: anything I can do to help?
+
+[14:06] <dogbert11> would you like steps to repro?
+
+[14:11] *** domidumont joined
+[14:15] <dogbert11> also, I have the crash in gdb
+
+[14:38] <dogbert11> step 1: git clone https://github.com/bduggan/p6-jupyter-kernel.git
+
+[14:39] <dogbert11> step 2: change src/gc/collect.h - #define MVM_NURSERY_SIZE 8192
+
+[14:40] <dogbert11> step 3: change src/gc/debug.h - #define MVM_GC_DEBUG 1
+
+[14:41] <dogbert11> step 4: go to dir where the module was cloned and run - perl6-gdb-m -Ilib t/20-end-to-end.t
+
+[14:41] <dogbert11> you might have to run several times but it should show up relatively quickly
+
+[14:56] *** domidumont left
+[14:57] *** domidumont joined
+[15:54] *** domidumont left
+[15:56] *** domidumont joined
+[16:03] *** domidumont left
+[16:04] *** domidumont joined
+[16:33] <nine> dogbert11: cought it in rr
+
+[16:40] <dogbert11> nine++, good to know that it's a real fault and not something messed up with my install
+
+[16:42] <dogbert11> hopefully you can figure out what's going on
+
+[16:42] <dogbert11> btw, should I report it as a bug?
+
+[16:54] *** domidumont left
+[17:32] *** squashable6 left
+[17:33] *** squashable6 joined
+[17:36] <jnthn> OK, this is nice. MoarVM build in 5s. Stage parse for CORE.setting build in 34s. Spectest in 77s.
+
+[17:36] <jnthn> And my goodness is it quiet
+
+[17:41] *** Kaeipi left
+[17:43] *** Kaiepi joined
+[17:45] <jnthn> nine: Hm, I suspect code trying to have two active supplies off the same socket is bogus so that could want to become an error eventually
+
+[17:45] <jnthn> Agree with keeping existing behavior in the meantime, however
+
+[18:57] <dogbert11> jnthn: what numbers did the old hardware provide?
+
+[18:58] <jnthn> I forget the numbers from my office machine; those were not too much worse. But on the Linux VM I ran on my home desktop it was more like 20s / 100s / 10 minutes :)
+
+[19:02] <jnthn> After rebase onto master, the rakuast branch of Rakudo is doing 214 spectests fully, which is about what I remember it being
+
+[19:03] <jnthn> So yay, in theory this box is all ready for me to do RakuAST hacking next week
+
+[19:12] <dogbert11> very cool
+
+[19:21] <MasterDuke> nice
+
+[19:40] *** MasterDuke left
+[19:44] *** zakharyas joined
+[19:52] <nine> jnthn: nothing like fresh, new hardware :)
+
+[20:11] *** Kaiepi left
+[20:13] *** Kaiepi joined
+[20:59] <nine> dogbert11: I think I got a lead on that gc issue
+
+[21:02] <nine> The GC trips over an only half-deserialized STable. The original backtrace actually already gives a hint at this: GC gets triggered while we're still deserializing that STable's type check cache
+
+[21:09] <dogbert11> nine++, could there perhaps be a missing root
+
+[21:16] <nine> dogbert11: no, what happens is that at https://github.com/MoarVM/MoarVM/blob/master/src/6model/serialization.c#L2717 we set st->type_check_cache_length to 18, then allocate st->type_check_cache, but deserializing the first entry in that cache already triggers the GC. The STable's gc_mark then tries to mark all 18 entries, but they are not even there yet
+
+[21:17] <nine> A fix may look like this: https://gist.github.com/niner/df18be7b31e3b9f93be31515c2bf987e
+
+[21:20] *** Kaeipi joined
+[21:20] *** Kaiepi left
+[21:22] *** Kaeipi left
+[21:23] *** Kaeipi joined
+[21:24] *** Kaeipi left
+[21:25] <dogbert11> very nice, I wonder if this an old bug or was it recently introduced?
+
+[21:25] <nine> I'd say old
+
+[21:26] <nine> And as expected, the same problem is there for all the other fields in STable. The type_check_cache is just the first to get filled
+
+[21:27] <dogbert11> oops
+
+[21:37] <nine> https://github.com/MoarVM/MoarVM/pull/1436 Fix possible GC upset caused by half-deserialized STables
+
+[21:40] <dogbert11> nine++, superb work
+
+[21:40] <sena_kun> nine++
+
+[21:41] <nine> jnthn: I guess https://github.com/MoarVM/MoarVM/pull/1436#issuecomment-782753534 needs you to get answered
+
+[21:46] <sena_kun> Anyone to take a quick look at the changelog, just for additional safety?
+
+[22:01] *** MasterDuke joined
+[22:07] *** Geth joined
+[22:16] <sena_kun> Ouch, I should've checked copyright years. Doing it for Rakudo now. :S
+
+[22:16] *** zakharyas left
+[22:16] <sena_kun> Guess next release.
+
+[22:29] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #1438: Always log the type coming out of an nqp::decont
+
+[22:29] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1438
+
+[23:38] *** japhb left

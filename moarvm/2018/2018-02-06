@@ -1,0 +1,127 @@
+[01:27] *** squashable6 joined
+[01:28] *** reportable6 joined
+[01:28] *** coverable6 joined
+[01:28] *** greppable6 joined
+[01:28] *** bisectable6 joined
+[01:28] *** statisfiable6 joined
+[01:28] *** bloatable6 joined
+[01:59] *** evalable6 joined
+[02:26] *** MasterDuke joined
+[02:58] *** ilbot3 joined
+[03:17] *** MasterDuke joined
+[03:22] *** colomon_ joined
+[04:29] *** japhb joined
+[07:13] *** domidumont joined
+[07:18] *** domidumont joined
+[07:42] *** brrt joined
+[08:01] <brrt> good * #moarvm
+
+[08:11] *** committable6 joined
+[08:16] <brrt> i'm thinking how i want to implement the const-copying trick in the register allocator
+
+[08:46] *** brrt joined
+[09:07] *** zakharyas joined
+[10:28] *** zakharyas1 joined
+[10:30] *** japhb joined
+[11:02] *** brrt joined
+[11:06] <dogbert2_> brrt: did you see https://github.com/rakudo/rakudo/issues/1483 ?
+
+[11:07] <brrt> did not
+
+[11:08] <dogbert2_> initial findings make it look as if the JIT might be involved
+
+[11:11] *** zakharyas joined
+[11:16] <brrt> yeah, i see it
+
+[11:24] *** brrt joined
+[11:27] *** AlexDaniel joined
+[12:45] <timotimo> floor_n is a juicy target for jitting to make this code faster: perl6 -e'my @a = "a".."z"; for ^500_000 {my @b = @a.roll(20)}'
+
+[12:45] <dogbert2_> brrt: any theories?
+
+[12:45] <timotimo> it has 82% speshed-but-not-jitted frame calls
+
+[12:46] <brrt> ouch
+
+[12:46] <timotimo> 73% call frames thrown out by inlining, but that makes any jit bail more extreme
+
+[12:46] <brrt> no theories, no
+
+[12:46] <brrt> haven't looked at it in detail now
+
+[12:46] <timotimo> i guess we could implement floor_n with a coerce_ni and a floor_i to have an impl immediately
+
+[12:47] <timotimo> i don't have any time today, though
+
+[12:51] <dogbert2_> I guess the gdb output isn't enough (but perhaps a clue)
+
+[14:32] *** japhb joined
+[14:42] *** japhb joined
+[14:44] *** zakharyas joined
+[14:46] *** zakharyas joined
+[15:10] *** zakharyas joined
+[16:05] *** brrt joined
+[16:26] *** zakharyas joined
+[16:37] <brrt> expr jit can bisect it
+
+[16:57] <brrt> i can fairly probably debug this
+
+[16:58] *** japhb joined
+[17:26] *** domidumont joined
+[17:34] *** zakharyas joined
+[17:41] *** samcv joined
+[18:08] *** zakharyas joined
+[18:16] *** AlexDaniel joined
+[21:00] *** Kaiepi joined
+[21:30] *** Ven`` joined
+[22:12] *** bart__ joined
+[22:50] <bart__> good *
+
+[22:55] <brrt> oh boy, there's deopt_inlines on the sp_getspeshslot
+
+[23:07] *** brrt joined
+[23:15] <brrt> weird thing i'm seeing, is double restore of spilled value
+
+[23:26] <brrt> ok, i've spotted the miscompile in question
+
+[23:27] <jnthn> brrt++
+
+[23:29] <brrt> https://github.com/rakudo/rakudo/issues/1483 check it out
+
+[23:29] <brrt> see the mov rax, [rbx+...
+
+[23:29] <brrt> those are spilled-value restores
+
+[23:29] <brrt> except
+
+[23:29] <brrt> they should never be using rax
+
+[23:30] <brrt> rax is register 0, and it's illegal to allocate
+
+[23:30] <brrt> (well, within my system. other compilers can allocate rax just fine)
+
+[23:30] <brrt> but i use it as the scratch register
+
+[23:31] <brrt> now that would most plausibly happen, if the live ranges used for that 'spill restore' are never allocated for at all
+
+[23:31] <brrt> now all i have to do is figure out why that is :-)
+
+[23:31] <brrt> but my guess is somewhere between not being added to the spill list, or not being processsed because the loop enters prematurely
+
+[23:32] <brrt> also, earlier in the code i'm seeing restores being inserted twice
+
+[23:32] <brrt> i wonder what's up with that
+
+[23:33] <jnthn> Sounds like it's getting itself a tad confused
+
+[23:33] <brrt> yeah
+
+[23:33] <brrt> i was attempting to optimize that to never spill for tiles that hold constant values (but to copy them instead)
+
+[23:34] <brrt> this morning
+
+[23:34] <brrt> it was more complex than i had thought :-)
+
+[23:34] <jnthn> Yeah, those two dead writes into rax would be wrong dodgy even if rax was legal in our JIT's scheme
+
+[23:36] <brrt> so one of the reasons why it could get confused, maybe, is that they are joined over an IF node as well as over a COPY node

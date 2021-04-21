@@ -1,0 +1,407 @@
+[00:46] *** cognominal joined
+[00:52] *** woosley joined
+[01:10] *** FROGGS_ joined
+[03:13] *** btyler joined
+[06:43] *** FROGGS joined
+[06:48] *** zakharyas joined
+[08:10] <jnthn> So, while my class hack out staged event driven architecture code, I'm pondering the "we waste so much time on SC lookups" issue
+
+[08:10] <jnthn> Of note, in CORE.setting compilation
+
+[08:10] <jnthn> At the moment we point to an SC
+
+[08:10] <nwc10> how much profiling info do you have currently?
+
+[08:11] <jnthn> It occurs to me we could keep an array of active SCs somewhere, and then usem the current pointer slot to point to an SC offset into it and the index in the SC.
+
+[08:11] <jnthn> It's an extra level of indirection, but not on a hot path
+
+[08:12] <nwc10> what is "the current pointer slot"?
+
+[08:12] <jnthn> nwc10: A C-level profile should this as basically the most expensive thing that wasn't being in the interp runloop or GC.
+
+[08:12] <jnthn> *showed
+
+[08:12] <nwc10> I don't know if I'm useful here asking questions, but I vaguely remember the basic structure of the Object header
+
+[08:13] <nwc10> OK. "ouch"
+
+[08:13] <jnthn> As in, most costly thing in CORE.setting compilation once you discount the interp and GC.
+
+[08:13] <jnthn> Thing is, it goes O(n**2) on setting size
+
+[08:13] <jnthn> And recent not-huge additions have had a big cost :(
+
+[08:13] <nwc10> oh. that would be bad.
+
+[08:13] <jnthn> So I think this is a likely culprit.
+
+[08:14] <jnthn> I'm referring to the sc pointer in the object header.
+
+[08:14] <nwc10> ah
+
+[08:14] <nwc10> so this would as a side effect eliminate the SC pointer?
+
+[08:15] <nwc10> oh, which is in the union, so "nevermind"
+
+[08:16] <moritz> where does the O(n^2) come from?
+
+[08:16] <nwc10> the pointer dereference of sc_forward_u.sc  is the pain?
+
+[08:18] <jnthn> moritz: Serializing.
+
+[08:18] <jnthn> We need to turn object references into indexes.
+
+[08:18] <jnthn> And we currently do it by linear search.
+
+[08:19] <jnthn> So if you have n objects in an SC to serialie, with an average of m references to other things in the SC, then it's O(mnn)
+
+[08:19] <nwc10> oh, right
+
+[08:19] <nwc10> he said "linear search". snigger
+
+[08:20] <jnthn> nwc10: Well, we can either just change the entry in the union to be either a pair of some SC number (index into another array) and an offset in that
+
+[08:20] <jnthn> Or we can look at having a totally separate lookup table
+
+[08:20] <jnthn> So that we just have a flag bit "in an SC"
+
+[08:20] <jnthn> make every object smaller
+
+[08:21] <nwc10> will it? For a 64 bit platform, I'd assume that we're talking pointers of 64 bits, and 2 indexes of 32 bit each
+
+[08:21] <nwc10> 32 bit platform is more annoying, as I guess that we're still talking 2 indexes of 32 bit each
+
+[08:21] <jnthn> Uh, it's the alternative approach that makes them smaller
+
+[08:21] <jnthn> Sticking the index etc into the header makes the larger on 32-bit
+
+[08:22] <jnthn> Same on 64-bit though.
+
+[08:22] <nwc10> ah righto
+
+[08:22] <nwc10> yes, my gut feeling is that it's important to keep the same code paths on 32 and 64 bit systems
+
+[08:22] <jnthn> oh, certainly
+
+[08:22] <nwc10> programmer sanity is much more valuable than the memory saving
+
+[08:22] <nwc10> it's why Perl 5 never got NVs moved into the SV head, as it would only make sense on 64 bit platforms
+
+[08:23] <nwc10> (OK, strictly, anything built with 64 bit integers)
+
+[08:23] <jnthn> Anyway, we need to do something about this.
+
+[08:24] <jnthn> As it's currently quite a slowdown
+
+[08:24] <jnthn> For compilation, taht is.
+
+[08:24] <nwc10> hopefully not in the "do something" sense of http://en.wikipedia.org/wiki/Politician%27s_syllogism
+
+[08:25] <jnthn> Well, that's why I'm weighing up the solutions...
+
+[08:25] <jnthn> Trying to make sure the "something" gives the improvement we want without an icky drawback.
+
+[08:26] <nwc10> I wonder if Wikipedia is accurate, and the entire "This is something" reasoning was not indentified before Yes, Prime Minister
+
+[08:27] <jnthn> A solution that lets us shrink every object is nice, but also hassle. Currently the forwarder pointer shares the SC slot, for example.
+
+[08:27] <nwc10> yes, that was my point about the union
+
+[08:27] <nwc10> I can't see a good way to shrink objects
+
+[08:27] <jnthn> Well, the forwarder pointer can overwrite data in the old object body
+
+[08:28] <nwc10> oh, yes, I forgot that. oops :-)
+
+[08:29] <jnthn> iirc there's one more funky thing in taht union
+
+[08:29] <nwc10> yes
+
+[08:29] <nwc10> /* Used to chain STables queued to be freed. */
+
+[08:29] <nwc10> MVMSTable *st;
+
+[08:29] <jnthn> Though iirc it was something I found deplorable design-wise anyway :)
+
+[08:29] * nwc10 is looking at said union
+
+[08:29] <jnthn> oh...
+
+[08:30] <jnthn> yeah, I think that can change easily enough.
+
+[08:30] <nwc10> I think, if one is going to shrink stuff, that flags (or at least 1 bit of it) likely has to not be in a union with "forwarding pointer"
+
+[08:32] <nwc10> are STables so large that they are "oversized" and hence allocated individually?
+
+[08:33] <jnthn> I think so
+
+[08:33] <jnthn> Well, in gen2 anyway
+
+[08:33] <jnthn> in nursery they just eat space, but we make relatively few of them.
+
+[08:33] <jnthn> (compared to toher object tyeps)
+
+[08:34] <nwc10> that seems to be sort-of-a bother as one way to eliminate that chain from the union would be to sweep the STable allocation pool. But there isn't a pool
+
+[08:34] <nwc10> in that, I'm wary of having the GC code need to allocate memory to create a structure to remember what it needs to free
+
+[08:41] <jnthn> teaching, bbl]
+
+[09:10] *** donaldh joined
+[09:40] <nwc10> jnthn: you didn't ask for advice, so this may not be what you wanted :-)
+
+[09:41] <nwc10> but my gut feeling is start with "the simplest thing that could possibly work" to get down to O(n)
+
+[09:41] <nwc10> even if it increases memory use slightly
+
+[09:41] <nwc10> and then do or delegate the "figure out a terser way"
+
+[09:41] <nwc10> oh, and benchmark the "terser" way
+
+[10:12] *** woosley left
+[10:25] <jnthn> nwc10: That's my feeling also. Especially as it only increases it on 32-bit
+
+[10:26] <jnthn> And we know there's a path to decrease it again
+
+[10:26] <jnthn> And yes, delegating the clever way is also a good idea.
+
+[10:31] <nwc10> I suspect that the net speed win from doing KISS earlier will pay off
+
+[10:32] <jnthn> aye
+
+[10:32] <jnthn> awww...I leave Stockholm on Wed, and snow is forecast for thu
+
+[10:32] <jnthn> So I miss the snow :(
+
+[10:45] <DrEeevil> i don't
+
+[10:49] *** cognominal joined
+[10:50] <jnthn> DrEeevil: You have snow?
+
+[10:50] <jnthn> Winter here was really tame...
+
+[10:50] <DrEeevil> about once a year
+
+[10:50] <DrEeevil> still too much cold stuff
+
+[10:50] <jnthn> Oh...I like the cold stuff :)
+
+[10:51] <DrEeevil> i need clothes at temeratures under 20c to not start shaking
+
+[10:51] <DrEeevil> winter is suffering
+
+[10:51] <jnthn> I tend to wear clothes in all weather, tbh... :)
+
+[10:52] <jnthn> I tend to suffer once it gets over 25...
+
+[10:52] <DrEeevil> around 35c clothes become silly
+
+[10:52] <DrEeevil> aka. every day in july ;)
+
+[10:58] <jnthn> Thankfully, 35C jsut about doesn't happen here :)
+
+[11:13] <DrEeevil> boring ;)
+
+[12:06] <timotimo> o/
+
+[12:25] <jnthn> hi timotimo
+
+[12:33] <FROGGS> that was a very nice discussion btw, but can somebody explain what that means? "<nwc10> I suspect that the net speed win from doing KISS earlier will pay off"
+
+[12:33] <FROGGS> that is like a WAT to me :o)
+
+[12:33] <jnthn> Do you understand the meaning of KISS? :)
+
+[12:34] <jnthn> Hint: not the rock band :P
+
+[12:35] <jnthn> Anyway, I think nwc10++ just means "better to do the simple thing soon and get a win, than do nothing until we've resources to do the hard thing"
+
+[12:35] <FROGGS> no, I do not understand KISS, but I get what you said :o)
+
+[12:36] <jnthn> Keep It Simple, Stupid
+
+[12:36] <FROGGS> ahh, yes
+
+[12:37] <lizmat> or: "Debugging is twice as hard as writing the code in the first place. Therefore, if you write the code as cleverly as possible, you are, by definition, not smart enough to debug it.”
+
+[12:37] <lizmat> --Brian Kernighan
+
+[12:37] <jnthn> You could always just hope you're smarter in the future :P
+
+[12:37] <lizmat> that's only valid up to a certain age  :-)
+
+[12:38] * jnthn pretends to still be young enough :)
+
+[12:39] <nwc10> jnthn: how do JVM and Parrot backends avoid being O(n²) for Serialisation Contexts?
+
+[12:39] <jnthn> nwc10: They don't.
+
+[12:39] <nwc10> ah OK, so this is a cross-backend problem?
+
+[12:39] <nwc10> or, more, same issue in 3 different code bases?
+
+[12:39] <jnthn> It's more an issue of "seting grew big enough to make it hurt" than "no problem"
+
+[12:40] <jnthn> So we'll want a JVM fix too
+
+[12:40] <jnthn> But it'll look different I suspect
+
+[12:55] <[Coke]> /me, in review, googles "perl 6 glossary SC", hits enter, immediately remembers what SC means in this.... context.
+
+[13:49] <jnthn> :D
+
+[14:03] *** btyler joined
+[15:08] *** brrt joined
+[15:42] *** brrt joined
+[15:58] *** donaldh joined
+[16:11] *** FROGGS joined
+[16:30] *** btyler joined
+[16:54] *** brrt joined
+[17:53] <brrt> I think i'm beginning to understand the workings of spesh
+
+[17:53] <FROGGS> brrt++
+
+[17:53] <brrt> but slowly
+
+[17:54] <FROGGS> (I did no attempt to understand it yet, but also I never did CS studies which could be helpful here)
+
+[17:54] <brrt> neither did i
+
+[17:54] <brrt> but i have a book
+
+[18:11] <brrt> also - i really really want to write MVMPointerBuffer
+
+[18:14] <timotimo> what'd that be?
+
+[18:14] <brrt> i'm writing it as we speak
+
+[18:15] <brrt> (but having trouble with emacs thinking 2 spaces is enough indentation)
+
+[18:19] <timotimo> well, what do you use it for?
+
+[18:19] <timotimo> you can put MVMObjects into it and access their raw memory? :P
+
+[18:25] <brrt> i intend it for internal use :-)
+
+[18:27] <brrt> wait, i show you
+
+[18:28] <brrt> https://gist.github.com/bdw/11408247
+
+[18:30] <brrt> basically, something for the (extremely common) use case of 'if (foo->bar_num >= foo->bar_alloc) { foo->bars = realloc(foo->bars, 2 * foo->bar_alloc * sizeof(MVMBar*); foo->bar_alloc *= 2; }'
+
+[18:30] <brrt> or, also common:
+
+[18:31] <brrt> 'new_bar = malloc((foo->num_bar + 1) * sizeof(MVMBar*)); memcpy(foo->bar, new_bar, foo->num_bar * sizeof(MVMBar*)); foo->bars[foo->num_bar] = a_bar; foo->num_bar++;'
+
+[18:32] <brrt> which src/spesh/graph.c repeats 5 times or so
+
+[18:32] <brrt> imho thats just cognitive overload and an off-by-one waiting to happen
+
+[18:32] <brrt> (or a lost free)
+
+[18:39] <brrt> and.. while i know that jnthn for one must be really amazingly good by as little mistakes as seem to have been made
+
+[18:41] <brrt> i'm pretty sure i'm not that good myself
+
+[18:45] <timotimo> oh, huh.
+
+[18:47] <brrt> i mean there's an error in the code i wrote just now :-)
+
+[19:13] *** brrt joined
+[20:29] <jnthn> .oO( so he'd have been better off copy-pasting mine? ;) )
+
+[20:29] <jnthn> .tell brrt feel free to factor that out, if it makes the code easier for you to work with. :)
+
+[20:29] <jnthn> aww, no msgbt
+
+[20:30] <FROGGS> he tends to backlog IIRC
+
+[20:31] <TimToady> we really need to dogfood that
+
+[20:31] <nwc10> dogfoodmsgbot? om nom woof?
+
+[20:32] <nwc10> I think IRC bots would be excellent dogfood. I might have said this an annoying number of times already
+
+[20:32] <FROGGS> hehe, and nothing happened? :P
+
+[20:33] <nwc10> there was a valid reason. There isn't now.
+
+[20:33] <nwc10> er, there was a valid reason not to. But that reason pleasingly resolved
+
+[20:33] <TimToady> resolving, at least
+
+[20:34] <TimToady> but that's why we should dogfood it
+
+[21:14] <dalek> MoarVM/vm-null: 0487e37 | jonathan++ | / (8 files):
+
+[21:14] <dalek> MoarVM/vm-null: Add MVMNull REPR, instance->VMNull.
+
+[21:14] <dalek> MoarVM/vm-null: review: https://github.com/MoarVM/MoarVM/commit/0487e37818
+
+[21:16] <timotimo> oh, we won't be exploding with null objects any more? :)
+
+[21:16] <jnthn> Well, once the rest of the work this needs is done... :)
+
+[21:17] <jnthn> But really I need to distinguish "not vivified" from "deliberately nulled"
+
+[21:17] <jnthn> So it's opt work that's finally forced the issue :)
+
+[21:20] <timotimo> oh, more opt work, eh?
+
+[21:21] <jnthn> after the yak shave, yes. :)
+
+[21:25] <timotimo> will this change also mean when we know the repr of something, we know it's not null?
+
+[21:26] <jnthn> no
+
+[21:26] <jnthn> VMNull has REPR MVMNull
+
+[21:31] <dalek> MoarVM/vm-null: 2de460c | jonathan++ | src/6model/reprs/MVMNull.h:
+
+[21:31] <dalek> MoarVM/vm-null: Add static inline func for doing a VM-null check.
+
+[21:31] <dalek> MoarVM/vm-null: review: https://github.com/MoarVM/MoarVM/commit/2de460c285
+
+[21:31] <dalek> MoarVM/vm-null: 05e9397 | jonathan++ | src/core/interp.c:
+
+[21:31] <dalek> MoarVM/vm-null: Make nqp::null and nqp::isnull VM-null aware.
+
+[21:31] <dalek> MoarVM/vm-null: review: https://github.com/MoarVM/MoarVM/commit/05e9397cf5
+
+[21:32] <jnthn> We'll also be able to rid ourselves of ass_null in P6opaque...
+
+[21:41] *** cognominal joined
+[21:52] *** cognominal joined
+[22:01] *** donaldh_ joined
+[22:02] <dalek> MoarVM/vm-null: a134f2c | jonathan++ | src/6model/serialization.c:
+
+[22:02] <dalek> MoarVM/vm-null: Teach serialization about VM nulls.
+
+[22:02] <dalek> MoarVM/vm-null: review: https://github.com/MoarVM/MoarVM/commit/a134f2cb86
+
+[22:02] <dalek> MoarVM/vm-null: 859f173 | jonathan++ | src/ (3 files):
+
+[22:02] <dalek> MoarVM/vm-null: Teach P6opaque about VMNull; eliminate ass_null.
+
+[22:02] <dalek> MoarVM/vm-null: review: https://github.com/MoarVM/MoarVM/commit/859f173efe
+
+[22:02] <dalek> MoarVM/vm-null: e036632 | jonathan++ | src/core/interp.c:
+
+[22:02] <dalek> MoarVM/vm-null: Teach ifnonnull about VMNull.
+
+[22:02] <dalek> MoarVM/vm-null: review: https://github.com/MoarVM/MoarVM/commit/e036632425
+
+[22:02] <dalek> MoarVM/vm-null: f53bc26 | jonathan++ | src/core/continuation.c:
+
+[22:02] <dalek> MoarVM/vm-null: Update continuations code for VMNull.
+
+[22:02] <dalek> MoarVM/vm-null: review: https://github.com/MoarVM/MoarVM/commit/f53bc26478
+
+[22:03] <jnthn> Well, NQP builds and passes tests on that at least...
+
+[22:05] <jnthn> Sleep time...more tomorrow
+
+[22:07] <timotimo> gnite jnthn!
+
+[22:37] *** ggoebel111112 joined

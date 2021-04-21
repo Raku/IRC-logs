@@ -1,0 +1,164 @@
+[00:41] *** sena_kun left
+[00:56] *** sena_kun joined
+[01:50] *** ZzZombo_ joined
+[01:53] *** ZzZombo left
+[01:53] *** ZzZombo_ is now known as ZzZombo
+
+[02:05] *** Merfont left
+[02:06] *** Merfont joined
+[02:15] *** AlexDani` is now known as AlexDaniel
+
+[02:15] *** AlexDaniel left
+[02:15] *** AlexDaniel joined
+[02:41] *** sena_kun left
+[02:57] *** sena_kun joined
+[03:11] *** AlexDani` joined
+[03:12] *** AlexDaniel left
+[04:35] *** evalable6 left
+[04:37] *** evalable6 joined
+[04:40] *** sena_kun left
+[04:57] *** Voldenet left
+[04:57] *** sena_kun joined
+[05:03] *** Voldenet joined
+[05:03] *** Voldenet left
+[05:03] *** Voldenet joined
+[05:09] *** squashable6 left
+[05:11] *** squashable6 joined
+[05:53] *** squashable6 left
+[05:55] *** squashable6 joined
+[06:42] *** sena_kun left
+[06:57] *** sena_kun joined
+[07:19] *** ZzZombo left
+[07:26] *** squashable6 left
+[07:29] *** squashable6 joined
+[07:49] *** squashable6 left
+[07:50] *** squashable6 joined
+[08:42] *** sena_kun left
+[08:58] *** sena_kun joined
+[09:14] *** domidumont joined
+[10:41] *** sena_kun left
+[10:55] *** sena_kun joined
+[11:31] *** AlexDani` is now known as AlexDaniel
+
+[11:31] *** AlexDaniel left
+[11:31] *** AlexDaniel joined
+[12:17] *** zakharyas joined
+[12:27] *** zakharyas left
+[12:41] *** sena_kun left
+[12:55] *** sena_kun joined
+[12:58] *** brrt joined
+[13:05] <brrt> \o
+
+[13:10] *** brrt left
+[13:26] <nine> Oh, I cought the frame walker issue in rr for the first time! And it's....weird. As suspected, the frame's spesh cand gets cleared by a deopt, in another thread.
+
+[13:26] <nine> Which I don't know how that's possible. Especially since it's a deopt_one
+
+[13:27] <nine> For my future reference: it's rr/perl6-2863
+
+[13:30] <nine> Oh, wait a minute! What if that deopting frame is simply in the caller chain of the frame we started looking for a dynamic variable, but we were not just called but run in a different thread?
+
+[13:33] *** brrt joined
+[13:34] <nine> And indeed it is:
+
+[13:34] <nine> (rr) p initial_frame->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller->caller
+
+[13:34] <nine> $42 = (MVMFrame *) 0x7fb68c8122a8
+
+[13:34] <nine> (rr) thread 21
+
+[13:34] <nine> [Switching to thread 21 (Thread 17607.17626)]
+
+[13:34] <nine> #0  deopt_frame (tc=0x6135370, f=0x7fb68c8122a8, deopt_idx=50, deopt_offset=474, deopt_target=110) at src/spesh/deopt.c:255
+
+[13:35] <nine> So walking the stack is just not thread safe
+
+[13:37] <brrt> ohai nine
+
+[13:37] <brrt> how even
+
+[13:37] <brrt> what did I miss
+
+[13:38] <nine> brrt: I finally made some progress on https://github.com/MoarVM/MoarVM/issues/1113 after finding a way to reproduce and cathing it in rr
+
+[13:40] <brrt> :-(
+
+[13:40] <brrt> assumption breakage
+
+[13:40] <nine> The issue comes down to deoptimization of a call frame that spawned a frame on another thread that's looking for a dynamic variable
+
+[13:40] <brrt> ouch
+
+[13:41] <nine> So now I wonder: can this be salvaged by getting a local copy of a frame's spesh_cand pointer before checking and dereferencing it? Or is this more of an architectural problem?
+
+[13:41] <nine> I guess it comes down to: what happens to spesh_cands after deoptimization? I only see that f->spesh_cand is assigned NULL.
+
+[13:42] <brrt> I sort of thought they were garbage collected but I daren't say for sure
+
+[13:42] <brrt> nah, MVMSpeshCandidate doesn't have a header
+
+[13:42] <nine> Ah, of course, that would make sense. So rooting would keep them alive long enough
+
+[13:42] <brrt> but there may be some object that does
+
+[13:43] <nine> The only place where we free a spesh candidate is in MVMStaticFrameSpesh's gc_free
+
+[13:44] <nine> So, we'd need to keep that alive
+
+[13:44] <brrt> well, if we deopt, we don't immediately destroy the static frames' spesh info
+
+[13:45] <brrt> far from it, we'll just try again
+
+[13:45] <brrt> so yeah, I think that taking the pointer before checking will work. But... I'm not 100% on whether you'll also take dead information then?
+
+[13:46] <brrt> I mean, correct me if I'm wrong, but we check the spesh cand in order to check something about the frame lexicals array... and if frame is deoptimized, won't the lexicals array also have changed?
+
+[13:47] <brrt> I'm totally out of practice on that piece of code so the odds that I'm wrong are somewhat larger than usual
+
+[13:48] <nine> Well, I've never been that much into this code :D
+
+[13:51] <brrt> hmmm, let me have a look
+
+[13:52] <brrt> hmmm
+
+[13:52] <brrt> yeah, that doesn't look very threadsafe indeed
+
+[13:59] <nine> Well, being more careful about spesh_cand does make it a lot more stable
+
+[14:03] <Geth_> ¦ MoarVM/maybe_fix_frame_walker_segfaults: c4f0a8ca7b | (Stefan Seifert)++ | src/spesh/frame_walker.c
+
+[14:03] <Geth_> ¦ MoarVM/maybe_fix_frame_walker_segfaults: Fix frame walker segfaults caused by deopt of a caller on a different thread
+
+[14:03] <Geth_> ¦ MoarVM/maybe_fix_frame_walker_segfaults: review: https://github.com/MoarVM/MoarVM/commit/c4f0a8ca7b
+
+[14:15] <Geth_> ¦ MoarVM/maybe_fix_frame_walker_segfaults: ef830eb87c | (Stefan Seifert)++ | src/spesh/frame_walker.c
+
+[14:15] <Geth_> ¦ MoarVM/maybe_fix_frame_walker_segfaults: Fix frame walker segfaults caused by deopt of a caller on a different thread
+
+[14:15] <Geth_> ¦ MoarVM/maybe_fix_frame_walker_segfaults: review: https://github.com/MoarVM/MoarVM/commit/ef830eb87c
+
+[14:41] *** sena_kun left
+[14:57] *** sena_kun joined
+[15:00] *** brrt left
+[16:01] *** Merfont left
+[16:42] *** sena_kun left
+[16:59] *** sena_kun joined
+[18:20] *** domidumont left
+[18:41] *** sena_kun left
+[18:57] *** sena_kun joined
+[20:12] *** squashable6 left
+[20:14] *** squashable6 joined
+[20:22] *** squashable6 left
+[20:22] *** squashable6 joined
+[20:42] *** sena_kun left
+[20:58] *** sena_kun joined
+[21:34] *** harrow left
+[21:41] *** harrow joined
+[22:42] *** sena_kun left
+[22:56] *** sena_kun joined
+[23:22] *** AlexDaniel left
+[23:24] *** AlexDaniel joined
+[23:24] *** AlexDaniel left
+[23:24] *** AlexDaniel joined
+[23:38] *** squashable6 left
+[23:39] *** squashable6 joined

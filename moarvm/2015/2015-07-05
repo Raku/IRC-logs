@@ -1,0 +1,651 @@
+[01:20] *** colomon joined
+[02:13] <timotimo> i wonder if we should turn const_i64_16 + p6bool into something "simpler"?
+
+[02:14] <timotimo> i think p6bool is still a function call when we jit, so maybe a getspeshslot would be the right thing to do?
+
+[02:17] <timotimo> https://gist.github.com/timo/2f113b1e8536c8764726 - a tiny bit painful %)
+
+[02:42] *** FROGGS joined
+[03:07] *** vendethiel joined
+[05:52] *** vendethiel joined
+[07:45] *** vendethiel joined
+[07:52] <FROGGS> O.o
+
+[07:53] <FROGGS> root@debian-mipsel:~/nqp# perl Configure.pl --prefix=/root/MoarVM/install
+
+[07:53] <FROGGS> Found /root/MoarVM/install/bin/moar version 2015.06-83-gd0f568b, which is new enough.
+
+[07:53] <FROGGS> Bus error
+
+[07:53] <FROGGS> Cleaning up ...
+
+[07:53] <FROGGS> make: *** [gen/moar/stage1/nqpmo.moarvm] Bus error
+
+[07:53] <nwc10> real hardware?
+
+[07:53] <FROGGS> nwc10: no, qemu
+
+[07:54] <nwc10> OK, then my inital thought of "alignment constraint" seems to be wrong, as I *think* that qemu doesn't attempt to force misalignment strictness
+
+[07:54] <FROGGS> btw, the intel itanium server I was supposed to get last week turned out to be an intel xeon 32bits :o(
+
+[07:55] <nwc10> ie it doesn't emulate the hardware for the behaviour for *incorrect* code. Correct code is hard enough
+
+[07:55] <nwc10> oh :-(
+
+[07:56] <FROGGS> hmmm, maybe I just buy something like that? http://www.ebay.de/itm/121465305471
+
+[07:57] <FROGGS> okay, it does not come with a hard disk...
+
+[08:00] <FROGGS> hmmm, there are also units from Carambola (which look like a raspberry), but they only have 32MB RAM
+
+[08:08] *** vendethiel joined
+[09:43] *** Peter_R joined
+[09:58] <FROGGS> nwc10: any idea where I could start looking?
+
+[09:58] <FROGGS> I have no idea how to debug this
+
+[10:08] <FROGGS> I think that's a start:
+
+[10:08] <FROGGS> Program received signal SIGBUS, Bus error.
+
+[10:08] <FROGGS> 0x77d6c360 in set_num () from /root/MoarVM/install/lib/libmoar.so
+
+[10:08] <FROGGS> recompiling with debugging information now
+
+[10:11] <nwc10> OK, that probably *is* alignment
+
+[10:11] <FROGGS> btw: "your CPU can't read unaligned values for any of int32 int64 num64"
+
+[10:12] <nwc10> OK, odd. So the default looks like it's "I don't know this CPU, so I'm going to be defensive"
+
+[10:13] <nwc10> this bit of build/probe.pm
+
+[10:13] <nwc10> # ARMv5 and earlier do "interesting" things on unaligned 32 bit
+
+[10:13] <nwc10> # For other architectures, play it safe by default.
+
+[10:13] <nwc10> # Updates welcome.
+
+[10:13] <nwc10> so it ought be safe by default, and not doing it
+
+[10:14] <nwc10> *however*, IIRC on the ARM boards I had access to, the OS did some fixups
+
+[10:14] <nwc10> (a slowdown, but a cover up)
+
+[10:14] <nwc10> so it might be we have some code that isn't aware of unaligned, and needs to become a memcpy
+
+[10:14] <FROGGS> aha
+
+[10:16] <nwc10> based on grep, I'm going to guess that it's                 # ARMv5 and earlier do "interesting" things on unaligned 32 bit
+
+[10:16] <nwc10> # For other architectures, play it safe by default.
+
+[10:16] <nwc10> # Updates welcome.
+
+[10:17] <nwc10> oops
+
+[10:17] <nwc10> based on grep I'm goingto guess that it's set_num in P6num.c
+
+[10:17] <nwc10> default: ((MVMP6numBody *)data)->value.n64 = value; break;
+
+[10:17] <nwc10> but if it is that would mean that ->value is misaligned, and I don't know why that would be.
+
+[10:18] <FROGGS> sadly it takes a while until we know
+
+[10:19] <FROGGS> slow things are slow
+
+[10:20] <nwc10> and ccache doesn't help the first time
+
+[10:20] <FROGGS> ccache?
+
+[10:20] <nwc10> https://ccache.samba.org/
+
+[10:20] <FROGGS> ahh
+
+[10:20] <FROGGS> yeah
+
+[10:20] <nwc10> very useful.
+
+[10:21] <FROGGS> I see
+
+[11:49] *** vendethiel joined
+[12:54] <FROGGS> yay, rebuild finished
+
+[12:55] <FROGGS> nwc10: you are right:
+
+[12:55] <FROGGS> set_num (tc=0x412400, st=<optimized out>, root=0x771fceac, data=0x771fcebc,
+
+[12:55] <FROGGS> value=1436100926.6184793) at src/6model/reprs/P6num.c:52
+
+[12:55] <FROGGS> 52	        default: ((MVMP6numBody *)data)->value.n64 = value; break;
+
+[12:56] <FROGGS> nqp-m: say(nqp::time_n())
+
+[12:56] <camelia> nqp-moarvm: OUTPUT«1436101018.72548␤»
+
+[12:57] <FROGGS> so why do we get a bus error?
+
+[12:58] <timotimo> can you print offsetof the value thingie?
+
+[12:59] <FROGGS> timotimo: do you mean ALIGN_OF by any chance?
+
+[12:59] <timotimo> um
+
+[13:00] <timotimo> i forget :)
+
+[13:00] <FROGGS> (gdb) p ALIGNOF(value)
+
+[13:00] <FROGGS> A syntax error in expression, near `{ char c; value _h; } *)0)->_h) - (char *)0)'.
+
+[13:00] <timotimo> :o
+
+[13:01] <FROGGS> so our ALIGNOF macro is buggy here?
+
+[13:01] <timotimo> i didn't know alignof wasn't built-in
+
+[13:02] <FROGGS> here: /home/froggs/dev/MoarVM/src/moar.h:54:#define ALIGNOF(t) __alignof__(t)
+
+[13:02] <FROGGS> /home/froggs/dev/MoarVM/src/moar.h:57:#define ALIGNOF(t) __alignof(t)
+
+[13:02] <FROGGS> /home/froggs/dev/MoarVM/src/moar.h:60:#define ALIGNOF(t) ((char *)(&((struct { char c; t _h; } *)0)->_h) - (char *)0)
+
+[13:03] <FROGGS> ahh wait
+
+[13:03] <nwc10> I guess the alignment question is, what is
+
+[13:03] <nwc10> &((MVMP6numBody *)data)->value.n64
+
+[13:03] <FROGGS> I'm dumb
+
+[13:03] <timotimo> ah, right, we can just do it like that, too
+
+[13:03] <timotimo> i didn't realize either :)
+
+[13:03] <timotimo> it's really warm in my apartment
+
+[13:04] <timotimo> and i'm afraid opening the windows would only make it even warmer
+
+[13:04] <FROGGS> nwc10: how do I check that?
+
+[13:04] <FROGGS> the ALIGNOF macro seems useless
+
+[13:04] <nwc10> by the way, it is an illusion that I'm currently online continuously
+
+[13:04] <nwc10> I think
+
+[13:05] <FROGGS> (gdb) p ALIGNOF(double)
+
+[13:05] <FROGGS> A syntax error in expression, near `{ char c; double _h; } *)0)->_h) - (char *)0)'.
+
+[13:05] <nwc10> print  &((MVMP6numBody *)data)->value.n6
+
+[13:05] <nwc10> at the gdb prompt
+
+[13:05] <nwc10> arght
+
+[13:05] <nwc10> print  &((MVMP6numBody *)data)->value.n64
+
+[13:05] <nwc10> I missed that
+
+[13:05] <timotimo> yeah
+
+[13:05] <timotimo> just print the addresses and compare
+
+[13:05] <nwc10> ALIGNOF is a compiler macro, *and* would tell you the correct answer for alignment
+
+[13:05] <FROGGS> (gdb) p &((MVMP6numBody *)data)->value.n64
+
+[13:05] <FROGGS> $3 = (MVMnum64 *) 0x771fcebc
+
+[13:05] <nwc10> what the problem here, is what's the actual answer
+
+[13:06] <nwc10> mmm, seems to be 4 byte aligned
+
+[13:06] <FROGGS> it is a 32bit system fwiw
+
+[13:07] <nwc10> stackoverflow suggests that doubles need to be 8 byte aligned
+
+[13:09] <timotimo> so it'd be enough to put that value in our probe thingie?
+
+[13:09] <timotimo> maybe along with other things we now know about that particular platform?
+
+[13:09] <nwc10> no, because our probe is not being used for that write
+
+[13:09] <nwc10> my question, and might be to jnthn
+
+[13:09] <nwc10> jnthn: how come that value is 4 byte aligned, not 8? Where is it coming from
+
+[13:10] <timotimo> i thought having the alignment values in the probe would give us different layouts for the objects, like MVMP6numBody?
+
+[13:11] <nwc10> OK, expeimentatio on ARMv7 is that on that, one can write and read doubles at 4 byte alignment without error
+
+[13:11] <nwc10> my ARMv6 is 1500km away
+
+[13:11] <timotimo> hmm
+
+[13:19] <FROGGS> lol, I can do the failing assignment in gdb and it works O.o
+
+[13:19] <FROGGS> is that normal?
+
+[13:20] <nwc10> I think so. I think that at the gdb command line, it fixes up unaligned access
+
+[13:20] <FROGGS> ahh
+
+[13:20] <timotimo> ... how can it fix up unaligned access?
+
+[13:20] <nwc10> as far as I can work out, on ARMv7, I can't tell if it needs to be aligned without writing assembler
+
+[13:21] <timotimo> does it split up the double and do "aligned" access at the byte-level?
+
+[13:21] <nwc10> because it seems that my C test program doesn't manipulate a double, but two 32 bit integer registers
+
+[13:21] <nwc10> timotimo: I believe yes
+
+[13:21] <timotimo> ack
+
+[13:22] <nwc10> anyway, the bit I'd love doubleplusjnthn to (help) answer is "is the thing we're accessing supposed to be properly aligned for the CPU? Or is the code here supposed to "cope" and deal with packed structures?"
+
+[13:22] <nwc10> also, currently I don't hugely want to push the Pi into doing builds, as it's playing at being the wireless base station, and the power supply isn't 100% good enough for that, even with the CPU idle.
+
+[13:22] <timotimo> ack
+
+[13:22] <timotimo> that's a pi2, yeah?
+
+[13:23] <nwc10> and the old Pi, with the ARMv6, would probably be better at finding these things
+
+[13:23] <nwc10> yes, it's a Pi2
+
+[13:34] <nwc10> jnthn: Bother:
+
+[13:34] <nwc10> struct MVMP6numBody {
+
+[13:34] <nwc10> /* Float storage slot. */
+
+[13:34] <nwc10> union {
+
+[13:34] <nwc10> MVMnum64 n64;
+
+[13:34] <nwc10> that's only going to be 4 byte aligned on a 32 bit system. (he says with 80% confidence)
+
+[13:34] <nwc10> (that is from memory)
+
+[13:36] <nwc10> struct MVMCollectable -- 3 * 4 bytes
+
+[13:36] <FROGGS> nwc10: https://gist.github.com/FROGGS/4f1fac6ac4a47d555981
+
+[13:36] <nwc10> struct MVMObject -- + 4
+
+[13:39] <nwc10> oh, I'm in the other 20%. I was wrong
+
+[13:39] <nwc10> OK - so, that bugger *should* be aligned.
+
+[13:39] <nwc10> why isn't it
+
+[13:39] <nwc10> FROGGS: what is sizeof(MVMObject) ?
+
+[13:42] <nwc10> and what 6model class is the actual object that is being passed in and getting the SEGBUS
+
+[13:42] <nwc10> SIGBUS
+
+[13:43] <nwc10> also, at some point i might "vanish" without warning
+
+[13:45] <FROGGS> np
+
+[13:51] <FROGGS> nwc10: sizeof(MVMObject) is 16
+
+[13:53] <FROGGS> ohh dang, my sample code used %d on the double >.<
+
+[13:57] <nwc10> sizeof(MVMObject) of 16 means that MVMP6numBody should awalys be aligned. So what is passing in a pointer that isn't aligned?
+
+[14:02] <FROGGS> https://gist.github.com/FROGGS/43c323ed4ef0b57398e6
+
+[14:02] <FROGGS> it is a P6num
+
+[14:10] <timotimo> nwc10: "passing in a pointer that isn't aligned" isn't even the problem, is it?
+
+[14:10] <timotimo> we're doing struct access at that point
+
+[14:11] *** nebuchadnezzar joined
+[14:16] *** ggoebel joined
+[14:19] <FROGGS> (gdb) p *(MVMP6numREPRData *)0x41e128
+
+[14:19] <FROGGS> $25 = {bits = 64, storage_spec = {inlineable = 1, bits = 64, align = 8, boxed_primitive = 2, can_box = 2, is_unsigned = 48 '0'}}
+
+[14:19] <FROGGS> dunno if that is worth anything
+
+[14:19] <FROGGS> I does not help that I don't know what I am doing :o(
+
+[14:28] <dalek> MoarVM: 034551e | (Daniel Dehennin)++ | build/Makefile.in:
+
+[14:28] <dalek> MoarVM: Add $(LDFLAGS) to minilua build command
+
+[14:28] <dalek> MoarVM:
+
+[14:28] <dalek> MoarVM: The minilua is only used during build time but the Debian blhc reports
+
+[14:28] <dalek> MoarVM: the hardening flags as missing.
+
+[14:28] <dalek> MoarVM:
+
+[14:28] <dalek> MoarVM: * build/Makefile.in (3rdparty/dynasm/minilua@exe@): Add $(LDFLAGS) to
+
+[14:28] <dalek> MoarVM:   silent Debian blhc.
+
+[14:28] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/034551e9fd
+
+[14:28] <dalek> MoarVM: 8f1ed93 | FROGGS++ | build/Makefile.in:
+
+[14:28] <dalek> MoarVM: Merge pull request #228 from baby-gnu/add-LDFLAGS-to-minilua-build
+
+[14:28] <dalek> MoarVM:
+
+[14:28] <dalek> MoarVM: Add $(LDFLAGS) to minilua build command
+
+[14:28] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/8f1ed93974
+
+[14:30] *** LLamaRider joined
+[14:39] <FROGGS> so, I can't even do this:
+
+[14:39] <FROGGS> Program received signal SIGBUS, Bus error.
+
+[14:39] <FROGGS> set_num (value=1436107137.947197, data=0x771fcfa4, tc=<optimized out>, st=<optimized out>, root=<optimized out>) at src/6model/reprs/P6num.c:53
+
+[14:39] <FROGGS> 53	            ((MVMP6numBody *)data)->value.n64 = (MVMnum64)3.14;
+
+[15:03] <FROGGS> I think I know what is going on now...
+
+[15:10] <FROGGS> we are assuming that ALIGNOF(void *) is at least as big as ALIGNOF(double), which is not true here
+
+[15:10] <FROGGS> and that means that the OBJECT_BODY is giving us wrong answers here
+
+[15:14] <FROGGS> and in about 2.5 hours I'll know :o(
+
+[16:45] <timotimo> it doesn't confuse me so much that the code would generate a boxing + istrue ... it confuses me a bit more that the optimize_istrue_isfalse optimization doesn't trigger and turn the istrue into an unbox_i
+
+[16:46] <timotimo> (talking about https://gist.github.com/timo/2f113b1e8536c8764726 in case you didn't see it)
+
+[17:28] <nwc10> FROGGS: I'm temporarily back
+
+[17:29] <nwc10> if I add this in set_num and get_num:
+
+[17:29] <nwc10> +    assert(((unsigned long)&(((MVMP6numBody *)data)->value.n64) & 7) == 0);
+
+[17:29] <nwc10> I see assertion failures if building as x86
+
+[17:32] <nwc10> badness happens from MVM_box_num -- http://paste.scsys.co.uk/492254
+
+[17:33] <FROGGS> aye
+
+[17:33] <FROGGS> that's the same spot
+
+[17:35] <nwc10> but I haven't figured out what sort of object it is
+
+[17:38] <nwc10> SIGNAPPYCHANGE
+
+[17:48] <japhb> .oO( SIGNAPPY: This signal may be caught and handled; if ignored, an internal timer will start.  If not handled by the time the timer expires, child process will emit SIGSCREAM. )
+
+[17:49] <FROGGS> what I think what happens: MVMObjects get allocated on a four byte boundary, because pointers just can
+
+[17:49] <nwc10> the big problem is if the core dump overflows storage
+
+[17:49] <FROGGS> and OBJECT_BODY(root) will return &root+16, which is wrong for P6num
+
+[17:49] <FROGGS> because the body will be 8-byte aligned
+
+[17:50] <FROGGS> because it is a struct holding a union to double+float
+
+[17:50] <nwc10> food is here, and I'm sitting at the table with the laptop
+
+[17:50] <FROGGS> :D
+
+[17:50] <nwc10> I suspect that the best fix is for reprs to know what their alignment constraint is, and pass that to the allocator
+
+[17:50] <FROGGS> aye
+
+[17:50] <nwc10> and the nursery allocator pads with 4n bytes if needed
+
+[17:51] <FROGGS> the repr knows the alignment of the REPR_data already I think
+
+[17:51] <FROGGS> nwc10: enjoy your fodd
+
+[17:51] <FROGGS> food*
+
+[17:51] <nwc10> and I *think* that the gen2 will always start the memory block at maximal alignment, and due to correct object sizes will always maintain correct alignment
+
+[17:51] <nwc10> thanks
+
+[17:51] <nwc10> &
+
+[18:27] *** brrt joined
+[18:28] <timotimo> yeah, the alignment for gen2 is a bit stronger than for nursery and such
+
+[19:01] <nwc10> the only thing that's bugging me about attempting to pad the nursery is that the GC has to walk along the nursery intropsecting things.
+
+[19:02] <nwc10> so there kind of has to be a way to have the padding be a value that would be illegal in a union sc_forward_u
+
+[19:02] <timotimo> yes, it uses the "size" attribute for that
+
+[19:02] <timotimo> and it expects that after stepping one "size" step it finds the header of the next object
+
+[19:02] <nwc10> and if there's padding, it won't
+
+[19:03] <FROGGS> the dirty patch I applied right now seems to let me get further btw
+
+[19:03] <nwc10> but I *think* that it might be viable to put a sentinal value in the 4 bytes, assuming a sentinal exists
+
+[19:03] <nwc10> however, that's "optimsiation"
+
+[19:04] <FROGGS> but yeah, having holes in the nursery might not be ideal
+
+[19:04] <nwc10> the simpler fix (for now) is to align always
+
+[19:08] <timotimo> yes
+
+[19:08] <timotimo> i wonder: how much do we tend to lose when we do that?
+
+[19:08] <timotimo> that probably depends entirely on what a given workload allocates
+
+[19:13] <nwc10> This is definately the "do it later", but I think it would be viable to store an illegial serialisation context as padding (on allocation)
+
+[19:14] <nwc10> and change it to an illegial forwarding pointer at the pass that writes forwading pointers.
+
+[19:14] <nwc10> one illegal forwarding pointer would be to the exaxt same address
+
+[19:14] <timotimo> OK, but when we copy stuff over from the old nursery to the next we need to "do it again"
+
+[19:14] <timotimo> the padding
+
+[19:14] <nwc10> (NULL already has meaning)
+
+[19:15] <timotimo> isn't NULL only valid when there's also the flag "has legal forwarding pointer"?
+
+[19:15] <nwc10> good point, yes, we'd need to re-calculate whether padding is needed
+
+[19:15] <nwc10> mmm. true
+
+[19:15] <nwc10> "do it later"
+
+[19:15] <timotimo> right
+
+[19:15] <nwc10> let's just pad always on (at least) MIPs
+
+[19:15] <timotimo> we'd only need that on such bizarre platforms anyway ;)
+
+[19:15] <nwc10> heck, on anything that says it needs alignment, even ARM
+
+[19:18] *** zakharyas joined
+[19:20] <FROGGS> but only if e.g. ALIGNOF(double) > ALIGNOF(void *)
+
+[19:26] <nwc10> technically other things (eg long long) might have a greater alignment constraint than void *
+
+[19:27] <nwc10> but in the real world, I'm only aware of double (on some platforms) (and long double (on some platforms)) being the real problems
+
+[19:27] <nwc10> of the C types
+
+[19:38] *** brrt joined
+[19:45] <nwc10> brrt: "Internet 1.0" was the UTMS dongle in my laptop, and my laptop sharing it as wifi
+
+[19:46] <nwc10> "Internet 2.0" was persuading the Raspberry Pi to do that job instead
+
+[19:46] <nwc10> and now my laptop doesn't have an annoying dongle dangling from it
+
+[19:46] <nwc10> and everyone else still has Internet even when I close my laptop
+
+[19:49] <brrt> aha
+
+[19:49] <brrt> cool
+
+[19:49] <brrt> on holiday, or permanent?
+
+[19:50] * brrt had internet from his phone for about a year
+
+[19:50] <brrt> phone company capped it to 128kbps i think? that was an interesting year
+
+[19:51] <nwc10> hoilday.
+
+[19:51] <nwc10> well, visiting parents, but they usually only have 1 device which the UTMS dongle plugs into.
+
+[19:54] <brrt> right
+
+[19:54] <brrt> raspberry pi's are pretty nice
+
+[20:14] <timotimo> oh hey brrt :)
+
+[20:14] <brrt> hi timo :-)
+
+[20:14] <timotimo> warmth is kind of keeping me from doing cool stuff
+
+[20:15] <timotimo> makes sense, right?
+
+[20:15] <timotimo> it's finally beginning to cool down a tiny bit
+
+[20:15] <timotimo> as in: hotter inside than outside
+
+[20:15] <timotimo> bbiab
+
+[20:20] <brrt> yes, it has been hot; although today we had at least two thunderstorms over here
+
+[20:21] <brrt> y'know, the government of germany really ought to get some recognition for the energiewende thingy
+
+[20:26] <brrt> that is changing the world
+
+[20:28] *** colomon joined
+[20:31] <brrt> remind me to do some serious cage cleaning on the 'old' JIT one of these days
+
+[20:39] <timotimo> oh, really?
+
+[20:39] <timotimo> in germany itself, the energiewende is constantly being called a failure
+
+[20:40] <brrt> people will always complain
+
+[20:40] <brrt> it's a huge success
+
+[20:40] <timotimo> good to hear
+
+[20:40] <brrt> (i mean on a global scale)
+
+[20:40] <timotimo> well, you'd know much better than me for multiple reasons
+
+[20:41] <brrt> considering that residential solar power is as cheap or cheaper-than gird power on most parts of the globe by now (and considering the german feed-in tarriff was immensely important for that to happen) it's impact is already enormous
+
+[20:42] <brrt> and that's just solar :-)
+
+[20:45] <timotimo> the feed-in tariff was about feeding power back into the grid from your home?
+
+[20:45] <timotimo> and getting money for that?
+
+[20:46] <brrt> yes
+
+[20:46] <brrt> it used to be quite generous, not so much anymore
+
+[20:47] <brrt> i do believe you still have net metering, which is also a subsidy of sorts
+
+[20:53] <brrt> it appears i made some error in dynasm
+
+[20:53] <brrt> although it's not obvious where
+
+[20:54] <timotimo> a friend just explained to me that the energiewende stuff caused consumers to have to pay more overall, but the industry that actually uses up the most energy all in all by far didn't get any fee increase
+
+[20:54] <timotimo> that doesn't seem fair :\
+
+[20:55] <brrt> i'm ambivalent
+
+[20:55] <brrt> no
+
+[20:55] <brrt> it's not fair
+
+[20:55] <brrt> yes, it's reasonable
+
+[20:55] <brrt> why is it reasonable? because people depend on industry a): for their jobs b): for their goods
+
+[20:55] <brrt> it is in social terms more useful to have industry use energy than people
+
+[20:56] <brrt> who would use it for warming their pools
+
+[20:56] <timotimo> people have legit reasons for wanting cheap energy
+
+[20:57] <brrt> i.... am a resident of a country which has both expensive energy *and* a natural abundance of it
+
+[20:57] <brrt> i find it personally difficult to accept the notion of fuel poverty in an advanced economy
+
+[21:01] <brrt> i mean, you can change lightbulbs to LEDs for 5 euros, save 90% of energy used for lighting
+
+[21:04] <timotimo> what percentage of energy use comes from lighting
+
+[21:04] <timotimo> ?
+
+[21:04] <brrt> significant amounts, if you use incandescent light bulbs :-)
+
+[21:05] <timotimo> hm
+
+[21:05] <timotimo> what about halogen light bulbs?
+
+[21:07] <timotimo> and energy saving lamps?
+
+[21:07] <brrt> halogens are only a little better than incandescent light bulbs
+
+[21:08] <brrt> LEDs are by far preferable
+
+[21:22] <brrt> not entirely sure about energy saving lamps
+
+[21:22] <brrt> maybe the netherlands is just exceptionally rich (in european terms)
+
+[21:25] <dalek> MoarVM/even-moar-jit: 8572a73 | brrt++ | src/jit/expr (3 files):
+
+[21:25] <dalek> MoarVM/even-moar-jit: Define expression op structure
+
+[21:25] <dalek> MoarVM/even-moar-jit:
+
+[21:25] <dalek> MoarVM/even-moar-jit: Add a new (idx) address computation mode for finding the index
+
+[21:25] <dalek> MoarVM/even-moar-jit: of an array (used e.g. by getting data from the frame args array).
+
+[21:25] <dalek> MoarVM/even-moar-jit: review: https://github.com/MoarVM/MoarVM/commit/8572a730f3
+
+[21:25] <dalek> MoarVM/even-moar-jit: 9ce6c1f | brrt++ | src/jit/expr. (2 files):
+
+[21:25] <dalek> MoarVM/even-moar-jit: Initial traverser algorithm
+
+[21:25] <dalek> MoarVM/even-moar-jit: review: https://github.com/MoarVM/MoarVM/commit/9ce6c1f5f9
+
+[21:26] <dalek> Heuristic branch merge: pushed 38 commits to MoarVM/even-moar-jit by bdw
+
+[21:28] <brrt> i'm going to remove the option of specifying your own lua
+
+[21:28] <brrt> it can do no good things
+
+[21:29] <brrt> and creates problems when you want, e.g. to use system lua and the build system wants to *build* it
+
+[21:29] <brrt> (Makefile)
+
+[21:31] <brrt> ..... hmmm
+
+[21:32] <timotimo> huh
+
+[21:43] *** dalek joined
+[21:48] <brrt> bbiab
+
+[22:00] *** TEttinger joined
+[22:15] *** colomon_ joined
+[23:45] *** vendethiel joined

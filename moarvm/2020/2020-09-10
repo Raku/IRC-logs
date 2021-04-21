@@ -1,0 +1,225 @@
+[00:56] *** squashable6 left
+[00:58] *** squashable6 joined
+[01:48] *** leont left
+[03:08] *** linkable6 left
+[03:08] *** evalable6 left
+[03:08] *** MasterDuke left
+[03:08] *** evalable6 joined
+[03:10] *** linkable6 joined
+[05:18] *** Util left
+[05:26] *** Util joined
+[05:26] <nwc10> good *, #moarvm 
+
+[07:16] *** Altai-man joined
+[07:19] *** sena_kun joined
+[07:21] *** Altai-man left
+[07:51] *** zakharyas joined
+[08:59] *** sena_kun left
+[08:59] *** sena_kun joined
+[09:07] <jnthn> morning o/
+
+[09:07] <nwc10> \o
+
+[09:22] *** brrt joined
+[09:29] *** brrt left
+[10:17] *** raku-bridge left
+[10:17] *** raku-bridge joined
+[10:17] *** raku-bridge left
+[10:17] *** raku-bridge joined
+[10:31] *** zakharyas1 joined
+[10:33] *** zakharyas left
+[10:33] *** zakharyas2 joined
+[10:36] *** zakharyas1 left
+[11:15] *** zakharyas2 left
+[11:18] *** Altai-man joined
+[11:21] *** sena_kun left
+[12:09] *** leont joined
+[12:09] *** zakharyas joined
+[13:28] *** dogbert17 joined
+[15:05] *** brrt joined
+[15:06] <brrt> \o
+
+[15:07] <[Coke]> o/
+
+[15:20] *** sena_kun joined
+[15:21] *** Altai-man left
+[15:47] *** zakharyas1 joined
+[15:47] *** zakharyas left
+[15:52] *** squashable6 left
+[15:53] *** squashable6 joined
+[16:56] *** zakharyas1 left
+[17:03] *** domidumont joined
+[17:05] *** ggoebel joined
+[17:39] *** MasterDuke joined
+[17:51] *** rypervenche left
+[17:55] <MasterDuke> anybody have any suggestions after looking at this backtrace https://gist.github.com/MasterDuke17/9a7e3892dcab4f3b051226ab6714f873 ?
+
+[17:56] *** rypervenche joined
+[18:03] *** ggoebel_ joined
+[18:06] *** ggoebel left
+[18:22] *** squashable6 left
+[18:24] *** squashable6 joined
+[18:36] <MasterDuke> i get the occasional panic when building nqp, but the build does succeed sometimes. the rakudo build always panics
+
+[18:36] <nine> Can you catch such a panic in rr?
+
+[18:37] <timotimo> masterduke doesn't have access to rr; i have rr but at the moment not the time/energy to investigate sufficiently
+
+[18:37] <MasterDuke> i'd have to switch to my laptop
+
+[18:38] <MasterDuke> which would be slow going right now (i only have one hand free and can't easily move)
+
+[18:40] <MasterDuke> will be able to later
+
+[18:49] *** domidumont left
+[19:04] <MasterDuke> kids fell asleep faster than expected. trying to get a rr recording on the laptop now
+
+[19:07] <nine> I managed to do so with rakudo build. The item in the work list is a candidate->spesh_slots[i] that's completely zeroed out
+
+[19:12] <MasterDuke> huh, how does it get zeroed?
+
+[19:13] <MasterDuke> did you build with MVM_GC_DEBUG set at all?
+
+[19:13] <nine> yes 2
+
+[19:17] <MasterDuke> hm, i don't see any obvious memsets of candidates
+
+[19:18] <nine> It's the object put into a spesh slot that's zeroed out
+
+[19:18] *** Altai-man joined
+[19:19] <nine> which is odd as you did not change anything about spesh slots
+
+[19:21] *** sena_kun left
+[19:22] <MasterDuke> can you run it backwards and see if it was ever non-zero?
+
+[19:24] <nine> trying to
+
+[19:26] <jnthn> But when you allocate the candidate, is anything keeping the spesh slots alive?
+
+[19:26] <tellable6> 2020-09-10T18:55:31Z #raku-dev <vrurg> jnthn Could you have another look at https://github.com/Raku/problem-solving/issues/227? It might have consequences for RakuAST too.
+
+[19:27] <jnthn> There wasn't a GC allocation on that path before
+
+[19:28] <nine> Well the object gets collected
+
+[19:30] <MasterDuke> i'm not sure i understand the question. are you suggesting another MVM_ASSIGN_REF is needed for the slots to the candidate?
+
+[19:31] <nine> MasterDuke: no, you need to MVMROOT the spesh slots when allocating the candidate
+
+[19:31] <nine> they are stored in the spesh graph at that time
+
+[19:32] <jnthn> Right, but iirc the spesh graph is held for some time in a place the GC knows about, so it may be a case of moving that later
+
+[19:32] <jnthn> Will glance the PR again in a moment, just gotta take care of some home task.
+
+[19:35] <MasterDuke> well, `MVMROOT(tc, sg->spesh_slots, { candidate = (MVMSpeshCandidate *)MVM_repr_alloc_init(tc, tc->instance->SpeshCandidate); });` causes a quick and consistent panic when building nqp
+
+[19:35] <jnthn> Yes, that makes no sense, alas.
+
+[19:35] <nine> More like for(int i = 0; i < sg->num_spesh_slots; i++) MVM_gc_root_temp_push(tc, (MVMCollectable **)&sg->spesh_slots[i]); candidate = (MVMSpeshCandidate *)MVM_repr_alloc_init(tc, tc->instance->SpeshCandidate); MVM_gc_root_temp_pop_n(tc, sg->num_spesh_slots);
+
+[19:36] <jnthn> aha, yes
+
+[19:36] <jnthn>     /* Clear active graph; beyond this point, no more GC syncs. */
+
+[19:36] <jnthn>     tc->spesh_active_graph = NULL;
+
+[19:36] <jnthn> Try to move that after the line:
+
+[19:36] <jnthn> candidate = (MVMSpeshCandidate *)MVM_repr_alloc_init(tc, tc->instance->SpeshCandidate)
+
+[19:37] <jnthn> What nine suggests is an alternative, but just moving the nulling probably does it and is less code
+
+[19:38] <MasterDuke> nqp built...
+
+[19:39] <MasterDuke> but rakudo dies the same way
+
+[19:39] <MasterDuke> with just moving the nulling
+
+[19:39] <MasterDuke> i'll try nine's suggestion now
+
+[19:40] <jnthn> .tell vrurg I did read through the posts today; it's quite a bit to think about (in a week with a lot else to think about at work... :))
+
+[19:40] <tellable6> jnthn, I'll pass your message to vrurg
+
+[19:40] <jnthn> .tell vrurg Will mull it over some and try and get back to you soon.
+
+[19:40] <tellable6> jnthn, I'll pass your message to vrurg
+
+[19:42] <jnthn> MasterDuke: One other thing to try: make it allocate in gen2
+
+[19:42] <jnthn> I forget the exact function name to set/clear that mode
+
+[19:42] <vrurg> jnthn: ok, thanks! Just didn't want it to be overlooked. Even if the experiment considered a failure it reveals a few rough edges worth considering for the future.
+
+[19:43] <jnthn> vrurg: Yeah, fixing coercions is certainly something we need to do.
+
+[19:43] <jnthn> Plus fully implementing them, so they can work on assignments too
+
+[19:43] <MasterDuke> moved nulling plus nine's suggestions dies same way in rakudo build. investigating gen2 alloc now
+
+[19:44] <jnthn> So I'm very glad to see it worked on
+
+[19:44] <jnthn> MasterDuke: https://github.com/MoarVM/MoarVM/blob/master/src/gc/allocation.h#L12 fwiw
+
+[19:44] <MasterDuke> wrap the candidate allocing in MVM_gc_allocate_gen2_default_set + MVM_gc_allocate_gen2_default_clear ?
+
+[19:44] <jnthn> Yesa
+
+[19:44] <jnthn> *yes
+
+[19:47] <MasterDuke> well all three things combined dies with a panic in the nqp build, just moved nulling plus gen2 alloc causes `moar: src/spesh/arg_guard.c:104: add_type_check_node: Assertion `type->st != NULL' failed. make: *** [Makefile:394: gen/moar/stage1/QRegex.moarvm] Aborted (core dumped)`
+
+[19:47] <jnthn> wow
+
+[19:48] <MasterDuke> and only the gen2 alloc also panics in the nqp build
+
+[19:48] <MasterDuke> if it matters, this is all with MVM_GC_DEBUG set to 1
+
+[19:48] *** brrt left
+[19:53] <jnthn> OK, last idea before I'll probably need to actually get out a debugger: move candidate = (MVMSpeshCandidate *)MVM_repr_alloc_init(tc, tc->instance->SpeshCandidate); to the very start of the function, then push it as a temp root, and pop it at the end
+
+[19:53] <MasterDuke> k
+
+[19:54] <jnthn> So that the allocation of it is done before we need to go marking things
+
+[19:54] <jnthn> Though given how many things haven't worked yet, I fear our problems are not about the candidate allocation.
+
+[19:57] <MasterDuke> nqp built
+
+[19:58] <MasterDuke> but rakudo panicked the same way
+
+[20:00] *** ggoebel_ left
+[20:00] <jnthn> OK, I think it probably is not about that candidate allocation, but about some other missing marking, then.
+
+[20:03] *** ggoebel joined
+[20:04] <MasterDuke> hm, i'll keep looking
+
+[20:05] <nine> There are probably a couple issues left. So even if something doesnt help immediately (or seems to make things worse) it can still be correct
+
+[20:06] <MasterDuke> think any of those things suggested should stay?
+
+[20:08] <jnthn> Probably the move of the NULLing of the graph attached to the tc
+
+[20:11] <MasterDuke> i'll add that to the pr
+
+[20:39] *** Altai-man left
+[21:28] *** mst left
+[22:12] <MasterDuke> oh, i'm pretty sure the unmanaged_size i added is not 100% correct. but that shouldn't cause serious problems, right?
+
+[22:23] <jnthn> No
+
+[22:27] <jnthn> It's used for heap snapshots and to help make decisions about when to do full collections, but it's not important for correct execution.
+
+[22:28] <MasterDuke> thanks
+
+[22:30] * jnthn just took 3 attempts to calculate .arity and .count correctly after adding slurpy param support to RakuAST, and is now glad he decided to do something relatively easy...
+
+[22:43] <jnthn> sleep o/
+
+[22:43] <MasterDuke> same
+
+[23:00] *** pamplemousse joined
+[23:42] *** mst joined
+[23:42] *** ChanServ sets mode: +o mst
+

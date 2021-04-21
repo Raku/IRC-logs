@@ -1,0 +1,129 @@
+[00:02] *** japhb left
+[00:02] *** japhb joined
+[00:27] *** japhb left
+[00:27] *** japhb joined
+[00:37] *** squashable6 left
+[00:39] *** squashable6 joined
+[00:53] *** frost-lab joined
+[01:15] *** lucasb left
+[01:55] *** frost-lab left
+[02:03] *** sortiz left
+[03:49] *** squashable6 left
+[03:52] *** squashable6 joined
+[05:17] *** notable6 left
+[05:17] *** statisfiable6 left
+[05:17] *** bloatable6 left
+[05:17] *** squashable6 left
+[05:17] *** quotable6 left
+[05:17] *** bisectable6 left
+[05:17] *** linkable6 left
+[05:17] *** tellable6 left
+[05:17] *** sourceable6 left
+[05:17] *** evalable6 left
+[05:17] *** committable6 left
+[05:17] *** benchable6 left
+[05:17] *** unicodable6 left
+[05:17] *** nativecallable6 left
+[05:17] *** coverable6 left
+[05:17] *** releasable6 left
+[05:17] *** shareable6 left
+[05:17] *** greppable6 left
+[05:18] *** evalable6 joined
+[05:18] *** quotable6 joined
+[05:18] *** committable6 joined
+[05:18] *** linkable6 joined
+[05:19] *** notable6 joined
+[05:19] *** bloatable6 joined
+[05:19] *** releasable6 joined
+[05:19] *** bisectable6 joined
+[05:20] *** statisfiable6 joined
+[05:20] *** shareable6 joined
+[05:20] *** coverable6 joined
+[05:20] *** sourceable6 joined
+[05:20] *** tellable6 joined
+[05:20] *** nativecallable6 joined
+[05:20] *** squashable6 joined
+[05:20] *** benchable6 joined
+[05:20] *** unicodable6 joined
+[05:20] *** greppable6 joined
+[05:58] *** frost-lab joined
+[06:15] *** frost-lab left
+[06:41] *** frost-lab joined
+[07:15] *** frost-lab left
+[08:13] *** frost-lab joined
+[08:15] <nwc10> jnthn: it seems the most obvious explanation - "I'm sure that there used to be more liquid in this bottle"
+
+[09:09] <nwc10> well, better phrased as "I'm sure that the level of the liquid in this bottle has gone down all by itself since I last looked"
+
+[09:10] *** frost-lab left
+[09:14] <nwc10> Always goes down for me. Apparently it can go up: https://www.youtube.com/watch?v=Qc65xFWhTIY
+
+[09:33] <MasterDuke> i'm stumped (and sure it's something blindingly obvious i'm just overlooking). valgrind points to https://github.com/MoarVM/MoarVM/pull/1426/files#diff-651fd580717e78e6edebd0e8bca68377ec2f665d843c91b180dc75f45e3230cbR348 as being indirectly lost, but i'm freeing it here
+
+[09:34] <MasterDuke> https://github.com/MoarVM/MoarVM/pull/1426/files#diff-dc4b9c7ebbbfb9721e35a3893cfc82c4f4aa5ce71c4fd5029540fada86974510R48-R49
+
+[09:39] <nine_> Could it be an omission in full-cleanup? When is that free_at_safepoint handled anyway?
+
+[09:43] <MasterDuke> i don't think so, since the direct loss is here https://gist.github.com/MasterDuke17/428539a1b1d2581a5d42bd171b92ff5b#file-valgrind-log-L153
+
+[09:44] <MasterDuke> and https://gist.github.com/MasterDuke17/428539a1b1d2581a5d42bd171b92ff5b#file-valgrind-log-L119-L129 i guess
+
+[09:47] <MasterDuke> ha, does it even for -e ''
+
+[09:49] <nine_> MasterDuke: I'd still try adding a MVM_gc_enter_from_allocator(instance->main_thread); or two before the call to MVM_gc_global_destruction
+
+[09:49] <nine_> Just to be sure
+
+[09:55] <MasterDuke> nope
+
+[09:56] <MasterDuke> there is already one, i added two more https://github.com/MoarVM/MoarVM/blob/master/src/moar.c#L645-L651
+
+[10:34] <nine_> I notice that MVM_fixed_size_destroy does not do anything about the free list. Maybe try a MVM_fixed_size_safepoint at the start of MVM_fixed_size_destroy?
+
+[10:35] *** nine_ is now known as nine
+
+[11:27] *** domidumont joined
+[11:43] <nine> f/win 10
+
+[11:55] <MasterDuke> oh! adding `MVM_fixed_size_safepoint(instance->main_thread, instance->fsa);` right before `MVM_fixed_size_destroy(instance->fsa);` has fixed the leak
+
+[12:00] *** leont joined
+[12:03] <MasterDuke> even with the larger/longer example
+
+[12:03] <MasterDuke> how has this not come up before?
+
+[12:23] <MasterDuke> but, now that the leak finding yak shave has concluded, now to try to figure out/fix the extra memory churn...
+
+[12:39] <MasterDuke> all from MVM_fixed_size_alloc_zeroed in allocate_frame, so must be either/both https://github.com/MasterDuke17/MoarVM/blob/remove_spesh_optimization_if_it_has_too_many_deopts/src/core/frame.c#L303 and https://github.com/MasterDuke17/MoarVM/blob/remove_spesh_optimization_if_it_has_too_many_deopts/src/core/frame.c#L315
+
+[12:52] <nine> My guess is that the usual stuff we use the fixed size allocator for is small enough to fall into the bins that MVM_fixed_size_destroy takes care of. And all the large stuff get freed earlier than those spesh cands
+
+[15:12] *** patrickb joined
+[15:28] <nine> jnthn: I'm more and more sure that in the mis-spesh of is_type (leading to a NULL result of a decont) we already screw up during ssa creation. I'm stepping through rename_locals and it already believes that there's just one assigning node which is the one covered by the handler. It's ignoring the block before the handler area that initializes that register.
+
+[15:41] <patrickb> good *, o/
+
+[15:43] <patrickb> nwc10: Did you notice my ping in https://github.com/MoarVM/MoarVM/pull/1385#issuecomment-782059178 ?
+
+[16:03] <nine> I wonder why we don't treat throwish instructions more like branches in spesh. If an instruction can throw and we have a handler, why is the handler's block not a successor of the throwish op's block? And why does BB 1 not dominate the handler even though we must pass through it to even get to a throwish op?
+
+[17:39] *** sena_kun left
+[17:40] *** sena_kun joined
+[17:43] * cog_ notes that MVM_spesh_plan_gc_describe is defined but not called anywhere in MoarVM. Do I miss something ?
+
+[17:46] <cog_> part of other *gc_describe* , probably an unfinished attempt to do stats on Spesh related things
+
+[17:57] *** Altai-man_ joined
+[17:57] *** sena_kun left
+[18:25] *** domidumont left
+[19:21] *** zakharyas joined
+[19:34] *** MasterDuke left
+[19:37] *** MasterDuke joined
+[19:47] *** MasterDuke left
+[19:50] *** MasterDuke joined
+[21:06] *** patrickb left
+[22:15] *** zakharyas left
+[22:55] *** dogbert17 joined
+[22:56] *** dogbert11 left
+[23:30] *** Altai-man_ left
+[23:33] *** sena_kun joined

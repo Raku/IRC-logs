@@ -1,0 +1,602 @@
+[00:16] *** brrt joined
+[01:18] <Geth> ¦ MoarVM/make_unbox_removal_available: 7 commits pushed by (Bart Wiegmans)++, (Timo Paulssen)++
+
+[01:18] <Geth> ¦ MoarVM/make_unbox_removal_available: 35fb97618e | [Spesh] remove object boolification from optimize_iffy
+
+[01:18] <Geth> ¦ MoarVM/make_unbox_removal_available: 1146ddfa38 | [Spesh] Optimize known values for istrue
+
+[01:18] <Geth> ¦ MoarVM/make_unbox_removal_available: 32822d3b77 | [Spesh] optimize more cases of istrue known type
+
+[01:18] <Geth> ¦ MoarVM/make_unbox_removal_available: ff1d01286c | [Spesh] unbreak rakudo by not optimizing isconcrete in istrue
+
+[01:18] <Geth> ¦ MoarVM/make_unbox_removal_available: 212e3f86ae | [Spesh] Switch order of insert
+
+[01:18] <Geth> ¦ MoarVM/make_unbox_removal_available: 743a6d8315 | [Spesh] Add optimize_unbox
+
+[01:18] <Geth> ¦ MoarVM/make_unbox_removal_available: 2eae3bd9e4 | make optimize_unbox functional.
+
+[01:18] <Geth> ¦ MoarVM/make_unbox_removal_available: review: https://github.com/MoarVM/MoarVM/compare/35fb97618e53^...2eae3bd9e48f
+
+[01:19] <timotimo> it's not based off of the spesh-refactor-iffy branch because that doesn't have the getrusage change so "make test" fails
+
+[01:20] <timotimo> i didn't yet inspect spesh logs to see if this actually works properly and eliminates boxing actually
+
+[01:39] <timotimo> i found a frame from BOOTSTRAP that uses the optimization. neat. it doesn't actually remove the boxing, just decides based on the result of atpos_i instead of the result of box_i
+
+[01:40] <timotimo> oh, it's find_best_dispatchee
+
+[01:40] <timotimo> interestingly it is marked as still having 18 usages
+
+[01:42] <timotimo> it's only that one routine multiple times in the speshlog %)
+
+[01:53] <timotimo> more on this tomorrow i guess
+
+[01:55] *** ilbot3 joined
+[02:03] <MasterDuke> ooh, speeding up find_best_dispatchee would be nice, i know i've seen it toward the top of profiles before
+
+[02:17] *** brrt joined
+[02:19] *** AlexDaniel joined
+[04:18] *** brrt joined
+[05:29] *** domidumont joined
+[05:37] *** domidumont joined
+[05:42] *** brrt joined
+[05:44] <Geth> ¦ MoarVM: bdw++ created pull request #826: Refactor optimize_iffy
+
+[05:44] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/826
+
+[05:44] <brrt> \o
+
+[05:59] *** domidumont joined
+[07:02] *** brrt joined
+[07:18] <brrt> .tell timotimo that refactor-iffy should be based on top of the latest master so that shouldn't be a problem
+
+[07:18] <yoleaux> brrt: I'll pass your message to timotimo.
+
+[07:19] <brrt> also, if you feel possitive that this optimize_unbox actually works, feel free to add it to the refactor-iffy branch :-)
+
+[07:26] *** robertle joined
+[08:10] *** zakharyas joined
+[08:21] *** zakharyas joined
+[09:26] *** zakharyas joined
+[10:21] *** committable6 joined
+[10:42] <timotimo> as i see it, the optimization works, but is essentially worthless because the boxed data is - in the few examples i looked at - always held alive by other pieces of the spesh graph
+
+[10:42] <yoleaux> 07:18Z <brrt> timotimo: that refactor-iffy should be based on top of the latest master so that shouldn't be a problem
+
+[10:43] <timotimo> and bailing out immediately when i see a PHI node makes it only ever work during the first few BBs, which is very rare
+
+[10:56] <timotimo> grmbl, i see a bunch of PHI nodes with only two arguments ... i wonder what happens if i consider these harmless
+
+[11:02] <lizmat> timotimo: if I profile 'Nil for ^1000000', I see 2 strange things
+
+[11:02] <timotimo> uh oh
+
+[11:02] <lizmat> 1. it allocates almost a million Ints
+
+[11:02] <lizmat> 2. but not quite (999985) so it looks like it's lost a few (perhaps in the final nursery?)
+
+[11:03] <timotimo> the allocation tracking happens immediately after a thing gets allocated, but it's not entirely accurate, since a little heuristic is still involved
+
+[11:04] <lizmat> ok, so that would explain the 15 missing  :-)
+
+[11:04] <timotimo> there's ops that we don't know whether they actually do allocate or just give back something that had been allocated earlier
+
+[11:04] <lizmat> I guess I will have to look at Optimizer.nqp to see why the Int's are allocated ?
+
+[11:04] <timotimo> so what i did was check the memory address and only count it if it's in the newest few bytes of the nursery
+
+[11:04] <timotimo> you should be able to see it in the spesh log
+
+[11:05] <timotimo> since the profiler tells you which routine allocates them you can narrow it down in the spesh log by filename:linenumber
+
+[11:05] <timotimo> and then there'll be ops like add_I or [p6]?box_i
+
+[11:06] <timotimo> oh, the unbox optimization doesn't follow set instructions
+
+[11:06] <timotimo> well, that's dumb :)
+
+[11:07] <timotimo> oh, huh. we can't just blindly follow just any set
+
+[11:11] <brrt> timotimo: we can still reduce the unbox operation (evne if not the box operation)
+
+[11:11] <brrt> and that in turn might give us a KNONW_VALUE etc
+
+[11:12] <timotimo> fair enough
+
+[11:19] <lizmat> timotimo: looking at optimize_for_range in Optimizer.nqp: what is the reason we bind rather than assign ?
+
+[11:20] <lizmat> m: use nqp; my int $i = -1; nqp::while(nqp::islt_i(($i = nqp::add_i($i,1)),1000000),nqp::null); say now - INIT now
+
+[11:20] <camelia> rakudo-moar 5db9ebc45: OUTPUT: «0.0180523␤»
+
+[11:20] <lizmat> m: use nqp; my $i = -1; nqp::while(nqp::islt_i(($i := nqp::add_i($i,1)),1000000),nqp::null); say now - INIT now
+
+[11:20] <camelia> rakudo-moar 5db9ebc45: OUTPUT: «0.103382␤»
+
+[11:20] <lizmat> roughly 5.5x slower
+
+[11:21] <timotimo> huh, where's the check for int boundaries? i.e. where int goes over into Int?
+
+[11:22] <timotimo> m: int64.Range.say
+
+[11:22] <lizmat> get_bound
+
+[11:22] <camelia> rakudo-moar 5db9ebc45: OUTPUT: «-9223372036854775808..9223372036854775807␤»
+
+[11:22] <timotimo> ah, good
+
+[11:22] <lizmat> m: Int32.Range.say
+
+[11:22] <camelia> rakudo-moar 5db9ebc45: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Undeclared name:␤    Int32 used at line 1. Did you mean 'int32', 'uint32'?␤␤»
+
+[11:22] <lizmat> m: int32.Range.say
+
+[11:22] <camelia> rakudo-moar 5db9ebc45: OUTPUT: «-2147483648..2147483647␤»
+
+[11:22] <lizmat> that are the values in get_bound
+
+[11:23] <lizmat> I guess we need to restrict that because of 32bit builds ?
+
+[11:23] <timotimo> no, int is always 64bit
+
+[11:23] <lizmat> also on 32bit builds ?
+
+[11:23] <timotimo> yes
+
+[11:23] * lizmat has learned
+
+[11:23] <timotimo> ... at least i believe so?
+
+[11:24] <lizmat> was pretty sure it isn't
+
+[11:24] <timotimo> huh.
+
+[11:25] <timotimo> i mean we always reserve 64 bit of storage for int registers in our frames
+
+[11:25] <timotimo> and every _i reprop takes an MVMint64
+
+[11:25] <timotimo> and all the _i math ops use the .i64 member of the register struct
+
+[11:26] <brrt> anyway, i'm decently sure the right way to do it, is not to do the chase the code between the box and unbox operation, but to have a set to a unique register inserted prior to the unbox, and use that unique registers' value
+
+[11:27] <timotimo> but then our frames will grow :(
+
+[11:30] <timotimo> i mean, if the chase fails we can still do that
+
+[11:40] <lizmat> so how does one create the equivalent of 'my int $i' in QAST ?
+
+[11:40] <lizmat> QAST::Var.new( :name($it_var), :scope('local'), :decl('var'), :returns(int) )   ??
+
+[11:41] <timotimo> i think :returns is it, yeah
+
+[11:42] <lizmat> m: my int $i; $i := 42
+
+[11:42] <camelia> rakudo-moar 5db9ebc45: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Cannot bind to natively typed variable '$i'; use assignment instead␤at <tmp>:1␤------> my int $i; $i := 42⏏<EOL>␤»
+
+[11:42] <lizmat> so how come we're binding in the optimizer then ?
+
+[11:43] <lizmat> (line 1950)
+
+[11:43] <timotimo> not sure, maybe := isn't exactly what the bind op does?
+
+[11:45] <lizmat> m: use nqp; my int $i; nqp::assign($i,42); say $i   # works
+
+[11:45] <camelia> rakudo-moar 5db9ebc45: OUTPUT: «42␤»
+
+[11:45] <lizmat> m: use nqp; my int $i; nqp::bind($i,42); say $i   # doesn't work
+
+[11:45] <camelia> rakudo-moar 5db9ebc45: OUTPUT: «===SORRY!===␤Cannot bind to non-reference QAST::Var '$i'␤»
+
+[11:46] <lizmat> m: use nqp; my $i; nqp::assign($i,42); say $i  # does work, but isn't native
+
+[11:46] <camelia> rakudo-moar 5db9ebc45: OUTPUT: «42␤»
+
+[11:52] <timotimo> not sure what's up with that
+
+[11:53] <lizmat> ok, I guess I'll leave it for another time
+
+[11:53] <timotimo> i mean, nqp has native ints and you bind these, so some kind of binding must be possible there
+
+[11:54] <lizmat> ok, so maybe something else is generating the Ints
+
+[11:54] <lizmat> (I couldn't see in the spesh log  :-)
+
+[11:55] <timotimo> that's still Nil for ^1000000 right?
+
+[11:55] <lizmat> yup
+
+[11:55] <lizmat> it allocates N-15 Ints
+
+[11:57] <lizmat> Nil for ^1000000 takes 156 msecs in my profile
+
+[11:57] <lizmat> the equivalent with native ints in nqp takes 12 msecs (and basically *no* allocations)
+
+[11:58] <lizmat> so it feels to me we are missing out on a good optimization opportunity
+
+[11:58] <lizmat> but I just can't seem to find where the Int is actually allocated
+
+[12:02] <timotimo> the block with the Nil in it gets a native int argument and stores it in a box
+
+[12:02] <timotimo> puts it into $_ and returns
+
+[12:03] <lizmat> ah, so you're saying it's actually an artefact ?
+
+[12:04] <timotimo> no, it totally allocates the Ints
+
+[12:04] <timotimo> just not in the iterator machinery
+
+[12:04] <timotimo> it happens after the call, so to say
+
+[12:04] <timotimo> or "as part of"
+
+[12:06] <lizmat> ah, indeed
+
+[12:07] <lizmat> m: for ^100000 -> int $ { }   # much faster
+
+[12:07] <camelia> rakudo-moar 5db9ebc45: ( no output )
+
+[12:07] <timotimo> it's nice to see that the body gets inlined for the Nil for ^foo case
+
+[12:07] <timotimo> we don't really do any kind of lexical analysis in spesh yet
+
+[12:08] <lizmat> m: for ^100000 -> { }
+
+[12:08] <camelia> rakudo-moar 5db9ebc45: OUTPUT: «Too many positionals passed; expected 0 arguments but got 1␤  in block <unit> at <tmp> line 1␤␤»
+
+[12:08] <timotimo> perhaps the static optimizer would be able to throw out the $_ in the block? or at least turn it into a local ... it's marked "is dynamic", though, so that's only ever safe if no calls are made etc
+
+[12:10] <lizmat> perhaps we should just support "for ^100000 -> { }" in the mean time
+
+[12:11] <timotimo> probably quite possible
+
+[12:18] *** brrt joined
+[12:18] <lizmat> timotimo: profiling "my @a = ^1000; for ^1000 { my $b = @a.min }" seems to generate a broken HTML-file
+
+[12:19] <lizmat> "The average nursery collection time was NaNms" and stuff like that
+
+[12:19] <brrt> .
+
+[12:19] <lizmat> timotimo: should I just make tickets for things like that?
+
+[12:24] <brrt> i think the cost of making the frame a bit bigger is totally not a problem
+
+[12:24] <brrt> especially if that avoids doing a repr op (function call)
+
+[12:25] *** AlexDaniel joined
+[12:46] <jnthn> m: for ^100000 -> { }
+
+[12:46] <camelia> rakudo-moar 5db9ebc45: OUTPUT: «Too many positionals passed; expected 0 arguments but got 1␤  in block <unit> at <tmp> line 1␤␤»
+
+[12:47] <jnthn> That error is correct; it's surely a thinko
+
+[12:47] <lizmat> jnthn: my point was: if I just want to repeat something N times
+
+[12:47] <lizmat> and not interested in the iteration number
+
+[12:47] <jnthn> for ^N { }
+
+[12:47] <jnthn> foo xx N
+
+[12:48] <lizmat> that would still pass $_ to the block, with its associated overhead
+
+[12:48] <jnthn> Yeah, that isn't optimized out yet.
+
+[12:48] <lizmat> you mean, if $_ isn't referenced in the block ?
+
+[12:49] <jnthn> Just write a `loop` if wanting to squeeze that much out
+
+[12:49] <jnthn> I think it's tricky-ish in that $_ is marked dynamic
+
+[12:49] <jnthn> Perhaps something for spesh that can see lack of $_ usage though
+
+[12:49] <jnthn> (Like, some layers deep)
+
+[12:50] <lizmat> but you don't like "for ^100000 -> { }" as a valid syntax
+
+[12:51] <lizmat> I don't see it as a thinko, but as a compiler hint that I'm not interested in the iterator value
+
+[12:51] <jnthn> No
+
+[12:52] <jnthn> I've sure made the thinko after forgetting to stick a variable there and been glad of the error
+
+[12:52] <jnthn> Not often, but still...
+
+[12:56] *** zakharyas joined
+[13:00] *** zakharyas joined
+[13:06] <lizmat> jnthn: understood
+
+[13:16] <timotimo> lizmat: seems like the profiler is not expecting no GCs at all to happen ;) ;)
+
+[13:16] <lizmat> aha!  :-)
+
+[13:16] <lizmat> perhaps a nqp::force_gc is in order then  :-)
+
+[13:17] <timotimo> haha, no :)
+
+[13:17] <timotimo> oh!
+
+[13:17] <timotimo> now i see what you meant
+
+[13:17] <lizmat> just the one, at the end, if there were  none yet, indeed
+
+[13:18] <timotimo> holy wow
+
+[13:18] <lizmat> ?
+
+[13:18] <timotimo> the call graph
+
+[13:24] <timotimo> it seems to somehow infinitely recurse or something like that
+
+[13:28] <timotimo> OK, this time it's an example of actually wrong inlining
+
+[13:28] <timotimo> i mean in the profiler report
+
+[13:28] <timotimo> it's thinking -e:1 is calling itself over and over, and so the call graph balloons up to gigantic sizes
+
+[13:30] <lizmat> ok, glad to have been able to provide you with a test case  :-)
+
+[13:30] <jnthn> OSR-sensitive?
+
+[13:31] <jnthn> timotimo: It just occurred to me that if we're in an inline (or nested inline) and we deopt, then we never fall out of the inlines
+
+[13:31] <jnthn> timotimo: Or more like, never reach a natural end of them and hit the profiler op saying we're leaving them
+
+[13:31] <jnthn> I'm not sure how well the profiler copes with that
+
+[13:32] <jnthn> Of course we will leave things but they won't be inlined any more :)
+
+[13:32] <timotimo> there's only one prof_exit, though, right?
+
+[13:32] <timotimo> so as long as deopt doesn't change the current profile call node, the prof_exit should still hit the right data?
+
+[13:33] <jnthn> You'd hit prof_exit, but not from an inline, I guess
+
+[13:33] <jnthn> Hmm, do we actually have separate ops for that?
+
+[13:34] <timotimo> we only have different enter ops, only one kind of exit
+
+[13:34] <jnthn> I can't remember whether exit is sensitive to inline or not. If not, well, ignore all I said :P
+
+[13:36] <timotimo> MVM_frame_unwind_to is the only other place we'd ever call "log exit"
+
+[13:36] <timotimo> and the implementation of the exit op is really just going back one step back the call graph
+
+[13:38] <jnthn> Hmm, ok
+
+[13:40] <timotimo> there are 292 deopt_one's in the min function, though
+
+[14:01] <jnthn> hah, there's a MoreVMs workshop... :P https://2018.programming-conference.org/track/MoreVMs-2018
+
+[14:49] *** ggoebel joined
+[15:00] *** zakharyas joined
+[15:05] <timotimo> the call graph begins going further and further to the right as soon as the enter mode for this particular staticframe goes from 0 (i.e. regular interpreted entry) to 4 (inlined & jitted entry)
+
+[15:06] <timotimo> actually, it goes to 3 once in between, which is regular jit entry
+
+[15:08] <timotimo> with jit disabled it also starts going further and further to the right, but this time it goes to entry mode 2, which is spesh_inline
+
+[15:08] <timotimo> so at least the jit isn't at fault :)
+
+[15:13] <[Coke]> I hope someone submits a moarvm morevm paper
+
+[15:15] <timotimo> i wouldn't want more VMS in my life
+
+[15:15] <timotimo> (this is a joke about VMS, which i know next to nothing about)
+
+[15:18] <timotimo> jnthn: there's an FH around the inlined portion and the prof_exit is one BB before the FH Goto; could this be our issue?
+
+[15:20] <jnthn> ooh
+
+[15:20] <jnthn> Yes, it maybe could be that we rewrite control exceptions into gotos
+
+[15:20] <jnthn> Across inline boundaries
+
+[15:20] <jnthn> Which is very clever but...maybe very bad for the poor profiler :)
+
+[15:20] <timotimo> poor profiler indeed
+
+[15:20] <jnthn> Easy way to find out: disable that opt :)
+
+[15:21] <timotimo> aye
+
+[15:22] <timotimo> is that only optimize_throwcat?
+
+[15:22] <timotimo> no other opt with a goto in it
+
+[15:23] <jnthn> Yeah, believe so
+
+[15:24] <timotimo> i put in a very early return and that didn't help
+
+[15:24] <timotimo> if we have anything that unwinds the stack, it'll allegedly also prof_exit for us
+
+[15:27] <timotimo> barely any cases where prof_log_unwind happens, though. perhaps it isn't that after all
+
+[15:28] <timotimo> i should already have bisected this %)
+
+[15:30] *** zakharyas joined
+[15:31] *** zakharyas joined
+[15:35] *** FROGGS joined
+[15:35] <timotimo> that didn't work so well :|
+
+[15:40] <timotimo> with an FH_GOTO we are supposed to unwind, so why is this going so wrong ...
+
+[16:19] *** zakharyas joined
+[16:22] *** robertle joined
+[16:23] *** zakharyas joined
+[17:03] <timotimo> this is not relevant to this particular bug, but we can remove quite a few more prof_allocated than we do so far, for example when returning from an inlinee we prof_allocated the return value; i think that's superfluous at least some of the time.
+
+[17:25] *** domidumont joined
+[18:23] *** bisectable6 joined
+[18:31] *** ggoebel joined
+[19:07] *** committable6 joined
+[19:28] *** AlexDaniel joined
+[19:52] *** ggoebel joined
+[19:56] *** committable6 joined
+[20:02] <AlexDaniel> https://github.com/perl6/nqp/issues/431#issuecomment-376655247
+
+[20:02] <robertle> I think I have some sort of patch to get moar/nqp work on armhf: NQP#431 not sure it's the right strategy though, any input welcome...
+
+[20:02] <synopsebot> NQP#431 [open]: https://github.com/perl6/nqp/issues/431 Bus error on armhf during t/moar/02-qast-references.t test
+
+[20:03] <AlexDaniel> timotimo: by the way, what should be done with your patch here? https://github.com/rakudo/rakudo/issues/1257#issuecomment-372052002
+
+[20:03] *** releasable6 joined
+[20:08] <robertle> I'll check on the
+
+[20:08] <robertle> state of that one once I get the armhf build to work...
+
+[20:16] *** committable6 joined
+[20:18] <AlexDaniel> robertle: TL;DR on that one is that the patch actually fixes the issue on big endian systems, but I think dod38fr applied the patch manually, and so it's not in master
+
+[20:19] <robertle> that's my understanding as well, but also that there is a remaining problem around t/02-rakudo/08-slangs.t that isn't understood yet
+
+[20:19] <robertle> but getting confidence in that patch and it into master would be fab
+
+[20:20] <robertle> i'll try to find out what is going on in 08-slangs.t next
+
+[20:20] <[Coke]> if we get it as a PR, would that trigger some automatic testing?
+
+[20:53] *** AlexDaniel joined
+[22:25] *** ggoebel joined
+[22:37] <timotimo> through painstaking single-stepping through bytecode and the interpreter i have come to the following conclusion:
+
+[22:38] <timotimo> throwpayloadlexcaller doesn't cause an unwind, so no exit is logged. this causes the call graph to become lopsided, or possibly popsicle-shaped i guess
+
+[22:48] <timotimo> OK, so, we're reaching MVM_frame_unwind_to and the frame to unwind to is actually the tc->cur_frame
+
+[22:54] <timotimo> so i suppose the LocatedHandler should include how many layers of inlines it went through so that the unwind can call MVM_profile_log_exit the right number of times
+
+[23:00] <jnthn> Aha
+
+[23:01] *** Voldenet joined
+[23:01] *** Voldenet joined
+[23:04] <timotimo> i'm not deep in the handler and exception stuff
+
+[23:04] <timotimo> could you have a look?
+
+[23:05] <timotimo> you surely have a good inkling of what line to put a ++ of some variable into that'd count this?
+
+[23:06] <timotimo> i've found one spot that makes no difference, and one that gives me too many exits
+
+[23:10] <jnthn> Well, in theory, every time you cross an inline boundary, that's a frame one
+
+[23:10] <jnthn> *gone
+
+[23:10] <jnthn> Though at this point we're just finding the handler, not unwinding
+
+[23:10] <timotimo> right
+
+[23:10] <jnthn> Which could come somewhat later
+
+[23:11] <timotimo> i think there might be some hypothetical parts to the search, too? there's multiple while loops involved
+
+[23:12] <jnthn> Does unwind_to know the address etc. we're unwinding from?
+
+[23:12] <jnthn> If so, it would be possible to call the profiler and have it walk the inlines table or some such
+
+[23:12] <jnthn> Thing is
+
+[23:12] <timotimo> it has the abs_addr and the rel_addr parameters
+
+[23:13] <jnthn> I think this could happen:
+
+[23:13] <jnthn> 1) Throw happens. We locate the handler, counting frames along the way
+
+[23:13] <jnthn> 2) Stash that count away
+
+[23:13] <jnthn> 3) Invoke the handler
+
+[23:13] <jnthn> 4) Handler does something that does global deopt
+
+[23:13] <jnthn> That'd perhaps invalidate the count stashed away in step 2?
+
+[23:14] <jnthn> (Handlers run on the stack top, in general)
+
+[23:14] <timotimo> right, they would
+
+[23:14] <timotimo> well, if it does a global deopt, we don't have any inlines active any more, right?
+
+[23:14] <jnthn> So it might be more robust to try and do the figuring out at unwind time
+
+[23:14] <jnthn> Correct
+
+[23:14] <timotimo> right
+
+[23:15] <timotimo> this should happen not only if unwind_to gets passed a frame that's equal to tc->cur_frame, right?
+
+[23:15] <jnthn> Indeed, that's what I was about to mention
+
+[23:15] <jnthn> But as I was going to do so I realized you'd walk over all the inline boundaries down the stack anyway
+
+[23:16] <jnthn> So probably still have a sensible number...in absence of deopt
+
+[23:16] <timotimo> we wouldn't ever step *into* an inlinee with this, right?
+
+[23:16] <timotimo> like, i wouldn't have to find the staticframe to MVM_profiler_log_enter for this case?
+
+[23:16] <jnthn> No, calling the handler is always a standard invocation at this point if it's a block handler
+
+[23:17] <jnthn> I don't see that changing any time soon
+
+[23:17] <timotimo> good
+
+[23:17] <jnthn> So I don't think there's any trouble in that direction
+
+[23:17] <jnthn> My gut feeling is it'd be more robust to do it at unwind time, however
+
+[23:17] <timotimo> right, i'll try that
+
+[23:18] <timotimo> i.e. near the end of MVM_frame_unwind_to where it changes the actual address
+
+[23:18] <jnthn> I guess you can perhaps look at the current PC or JIT label or return address to figure out "where am I"
+
+[23:18] <jnthn> Yes, exactly
+
+[23:18] <timotimo> hm, but also counting all inlines active in frames we completely skip
+
+[23:18] <jnthn> Nice think about this approach is it's also one nicely branch-predictable conditional to call into the profiler code
+
+[23:18] <jnthn> *thing
+
+[23:19] <jnthn> Or, in the non-profiling case, not call it
+
+[23:19] <timotimo> yeah, if not profiling, we'd ideally do nothing
+
+[23:19] <jnthn> Probably whatever logic is used for dynamic variable search is also somewhat applicable
+
+[23:20] <jnthn> That's probably a somewhat relevant bit of prior art in the "reconstruct call stack as if it wasn't inlined" area
+
+[23:20] <timotimo> the find_contextual_by_name function mentions that what it's doing "isn't correct for leaf frames" because that'd never happen with getdynlex
+
+[23:20] <jnthn> .oO( Some day we need to do this for stack traces too... )
+
+[23:20] <timotimo> so can't steal it as easily it seems
+
+[23:20] <jnthn> *nod*
+
+[23:21] <jnthn> Yeah, this is true
+
+[23:21] <jnthn> iirc exceptions stash away a throw_address or something though, which may help with the leaf frame?
+
+[23:21] <timotimo> i remember seeing that from dump_stacktrace
+
+[23:22] <jnthn> :)
+
+[23:22] <jnthn> OK, sleep time for me...good luck! :)
+
+[23:24] <timotimo> good night!
+
+[23:24] <timotimo> i might not stay up very late today (famous last words)
+
+[23:29] <timotimo> OK, so throw_address is actually only available if we have an exception object, which we don't have in the case of throwpayload. however, existing code also just uses tc->interp_cur_op instead in that case.
+
+[23:39] <timotimo> omfg it seems to work
+
+[23:44] <timotimo> untested for more than one nested inline
+
+[23:49] *** MasterDuke joined
+[23:51] <MasterDuke> timotimo: no more giant profiles?
+
+[23:54] <timotimo> hopefully!
+
+[23:58] <MasterDuke> ++timotimo

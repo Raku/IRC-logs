@@ -1,0 +1,273 @@
+[00:13] *** leont left
+[04:10] *** frost-lab joined
+[04:34] *** jdv79 joined
+[07:09] *** kanopis joined
+[07:40] <nwc10> good *, #moarvm 
+
+[08:09] <MasterDuke> ah ha. turn on a bunch of debug defines and now i get a `Invalid owner in item added to GC worklist`. these are so much fun to debug...
+
+[08:10] <nwc10> debugging is hard, let's go, oh, erk, lockdown. Debugging it is then.
+
+[08:10] <nwc10> rr?
+
+[08:11] <MasterDuke> yes, lockdown 3.0. going to be a fun time for all
+
+[08:11] <MasterDuke> i'll probably end up in rr, but i haven't added all that much code since it was working fine. maybe i'll be able to see what needs fixing directly
+
+[08:31] *** domidumont joined
+[08:33] *** brrt joined
+[08:50] *** zakharyas joined
+[09:19] *** Altai-man joined
+[09:29] *** kanopis left
+[11:13] <nine> Huh....it seems like objects can end up in the deserialization workloop multiple times. This can cause memory leaks as the deserialize REPR functions usually assume that they are called on uninitialized objects (repossession, which is a cause for multiple deserialize calls, calls gc_free before deserialize)
+
+[11:14] <brrt> \o nine
+
+[11:15] *** ilogger2 joined
+[11:25] <jnthn> nine: I think the only case that should ever happen is repo
+
+[11:25] <jnthn> (Which as you note does clean up first)
+
+[11:38] <jnthn> Could try disabling lazy deserialization to see if it goes away; if yes, that at least narrows it down
+
+[11:40] <MasterDuke> jnthn: i suspect my current panics are due to a missing MVM_ASSIGN_REF for dealing with the new pointer that i now use to access the arg guards and candidates. i'm afraid i still don't completely understand MVM_ASSIGN_REF, but you likely know if/where/how a new one (or more) is needed
+
+[11:41] <MasterDuke> something like ASSIGNing the candidate list and the arg guard to the new struct?
+
+[11:45] <nine> jnthn: taking it from the other direction, what mechanism is there to actually prevent this? E.g. we serialize an object that references a closure which references the same object.
+
+[11:47] <jnthn> MasterDuke: It's needed for each new object that is being referenced
+
+[11:48] <jnthn> MasterDuke: I don't think the number of MVM_ASSIGN_REF needs to change, nor the second argument (which collectable owns it), just the final argument (where the reference can be found)
+
+[11:49] <jnthn> nine: My recollection (it's been a while since I looked at this) is that we have a stub step that happens immediately upon first mention, and that only happens once
+
+[11:49] <jnthn> (per object)
+
+[11:49] <jnthn> So if it's stubbed we know it's already scheduled for deserialization or some such
+
+[11:49] <jnthn> In non-lazy mode we just unconditionally stub every object
+
+[11:49] <jnthn> And so they all end up on the worklist
+
+[11:50] <jnthn> Lazy is stub on first reference and add to worklist at that point
+
+[11:51] <nine> Yes, the stub step is run only once for the object. Otherwise we'd end up with 2 distinct objects after all. Then we deserialize and use MVM_sc_get_object for getting referenced objects. Ordinarily this will get deserialized objects from the root objects array and only run deserialization if necessary. But if we're already deserializing this check is skipped and we always deserialize.
+
+[11:52] <nine> https://github.com/MoarVM/MoarVM/blob/master/src/6model/sc.c#L216
+
+[11:58] *** sena_kun joined
+[11:59] <MasterDuke> jnthn: maybe it doesn't need to change (it was added when MVMSpeshCandidate was made a REPR). `MVM_ASSIGN_REF(tc, &(spesh->common.header), new_candidate_list[spesh->body.num_spesh_candidates], candidate); spesh->body.spesh_candidates = new_candidate_list;` the ASSIGN was added. now that second line is instead
+
+[11:59] <MasterDuke> `new_cands_and_arg_guards->spesh_candidates = new_candidate_list; spesh->body.spesh_cands_and_arg_guards = new_cands_and_arg_guards;`
+
+[12:03] <jnthn> MasterDuke: No, probably no need there
+
+[12:16] <nine> Ah, of course, we cannot rely on the object we find in the roots array, as that may still be a stub
+
+[12:17] <nine> But then I wonder what actually keeps us from running into an endless loop there.
+
+[12:20] <jnthn> Probably because we don't always demand objects?
+
+[12:50] <nine> Simply checking the worklist for presence of the index before blindly adding it seems to get around this issue
+
+[13:59] *** zakharyas joined
+[14:01] <nine> A simple rakudo-m -e 'signal(SIGINT).tap: &exit' will not be able to close the event loop because of the active singal handle, causing asan to complain. I wonder which layer is the appropriate place for forcing that handle to close.
+
+[14:02] *** brrt joined
+[14:03] <nwc10> good *, brrt 
+
+[14:03] <nwc10> I read that Ruby 3.0 is out. But is it still using the JIT that is "fork gcc, generate a .so, and the dlopen() that .so back into the process?" - I couldn't find out if they've improved on that.
+
+[14:06] <brrt> good * nwc10 - I think it was
+
+[14:06] <brrt> I'm not sure that's going to make a lot of people happy to run it in production
+
+[14:10] <nwc10> from what I read, and this was a while back, and might be out of date, this JIT did not actually pass the "but does it run Rails?" test
+
+[14:10] <nwc10> (well, "does it run Rails faster?" in this case)
+
+[14:11] <nwc10> because in the end, this approach runs out of address space to map in the shared objects.
+
+[14:15] <jnthn> nwc10: afaict, yes, that's still the approach
+
+[14:15] <jnthn> nine: The event loop has a list of all active handles, I believe
+
+[14:16] <jnthn> nine: I forget exactly what's in there, but in theory iterating through that and closing things would do it
+
+[14:16] <jnthn> Would need to arrange for it to happen on the event loop thread
+
+[14:18] <nine> Hm...yes, it does. That's how uv_loop_close notices that there are open handles and refuses closing
+
+[14:19] <jnthn> nine: Ah, I wasn't clear. I mean that MoarVM also has its own active handles list
+
+[14:20] <nine> Oh....I guess that would be tc->instance->event_loop_active
+
+[14:21] <jnthn> yeah, sounds about right
+
+[14:22] <nwc10> jnthn: ah OK. That seems about as sound a strategy for a JIT as Perl 5.6 was for Unicode.
+
+[14:24] <brrt> (what was the problem with perl 5.6 and unicode?)
+
+[14:24] <nwc10> probably ticks the box on "can run a mandlebrot much faster" which seems to be the use case for several JITs and code generators which add static typing to a dynamic language and declare this useful to be "faster"
+
+[14:24] <jnthn> I've not read up on what the larger strategy is. For example if it's to batch things
+
+[14:24] <jnthn> I'm not sure how you get from where they are to "in-process"
+
+[14:25] <nwc10> brrt: 1) no IO, 2) no Unicode in has keys 3) /./ and everything else in regexes often actually acted upon the underltying internal represetation (ie UTF-8)
+
+[14:25] <nwc10> and a load of other bugs
+
+[14:25] <jnthn> Oh, maybe load libclang or something and then get the machine code output in memory?
+
+[14:25] <nwc10> jnthn: good point, me neither. The compiler-and-shared-object approach appears to be a dead end
+
+[14:25] <nwc10> I have no idea what libclang can do
+
+[14:25] <nwc10> but
+
+[14:25] <jnthn> I don't know if it can do *that*
+
+[14:26] <brrt> llvm has not yet ever worked well for JITs
+
+[14:26] <jnthn> But it wouldn't surprise me if it could
+
+[14:26] <nwc10> I don't yet remember anyone writign a blog post to say "We used LLVM for our dynamic language JIT and it worked really well first time"
+
+[14:26] <brrt> lol
+
+[14:26] <nwc10> Both Pyston (the first version) and Safari both found that they needed to add another layer before LLVM, didn't they?
+
+[14:27] <jnthn> Pretty sure I remember reading about a JavaScript JIT where they found this, at least.
+
+[14:27] <nwc10> brrt: you said it more accurately. I was maybe a bit cynical
+
+[14:27] <nwc10> OK, it was a JS JIT, but we can't remmber which oen
+
+[14:27] <jnthn> They had to tier it because the llvm approach was good for high quality code
+
+[14:27] <jnthn> But not latency
+
+[14:27] <jnthn> And that matters in a browser context
+
+[14:28] <nwc10> yes, thanks for typing tht for me, and better than me
+
+[14:32] <jnthn> But yeah, the whole "things using X are fast, so use X and you'll be fast too" is one of those annoying over-simplifications.
+
+[14:33] <brrt> :-)
+
+[14:41] <MasterDuke> wait, what?! gluing a giant wing onto the back of my automatic, diesel, french minivan won't make it go faster? /me goes off to cancel that order...
+
+[14:48] *** brrt left
+[14:50] * jdv79 goes back into lurking via the public logger
+
+[14:53] *** lucasb joined
+[14:58] <nine> Some cases are easy to fix, but it's not clear if a fix is correct, or if there's something better we could do. E.g. Supply.interval(1).tap(-> { say "hi" }); sleep 3; will fail with an arity error and we'll leak tc->active_handlers. Now it's easy to implement cleanup of active handlers when we destroy a thread. But is it OK for them to still be there in the first place?
+
+[15:06] <jnthn> I don't understand the "when we destroy a thread" part
+
+[15:06] <jnthn> All handlers for async things are processed by the event loop thread
+
+[15:06] <jnthn> So destroying that is a global operation
+
+[15:07] <nine> This is about exception handlers
+
+[15:07] <jnthn> If you have a timer that you just want to have run until shutdown, then you'll leak it anyway
+
+[15:07] <jnthn> Even without the exception
+
+[15:07] <jnthn> Well, "leak", because if it's application lifetime you don't really care
+
+[15:08] <jnthn> But yes, it's easy to mess up and leak things when doing async if you call .tap directly, which is why I push react/supply so strongly.
+
+[15:08] <jnthn> In this particular case you'd get the exception handled, have the subscription cleaned up, then have it rethrown outside of the `react`
+
+[15:09] <nine> In this case we're leaking the MVMActiveHandler allocated here: https://github.com/MoarVM/MoarVM/blob/master/src/core/exceptions.c#L362
+
+[15:10] <jnthn> oh, sigh, we talked about another thing called active some minutes ago
+
+[15:10] <nine> Yeah...and both things have handlers
+
+[15:10] <jnthn> Yeah, that's something else. I don't know what to do about that :)
+
+[15:10] <nine> The English language clearly has too few words :)
+
+[15:10] <nwc10> rename it, to avoid the confusion! :-)
+
+[15:11] <jnthn> Are we in this situation because we call "exit"?
+
+[15:11] <nwc10> (that was a reply to jnthn half in jest, but nine appears to have made it seem sensible)
+
+[15:11] <jnthn> I don't think active handlers should generally leak, but if the exception handler itself does an `exit` then we never unwind the stack
+
+[15:12] <nine> Ah, yes, something's doing an nqp::exit
+
+[15:14] <Geth> ¦ MoarVM/asan_fixes: 4a7b65bd2c | (Stefan Seifert)++ | src/core/threadcontext.c
+
+[15:14] <Geth> ¦ MoarVM/asan_fixes: Clean up active exception handlers when garbage collecting a thread
+
+[15:14] <Geth> ¦ MoarVM/asan_fixes: review: https://github.com/MoarVM/MoarVM/commit/4a7b65bd2c
+
+[15:14] <nine> So that's probably a sensible approach
+
+[15:14] <MasterDuke> btw, wouldn't it be good to move the malloc down to where `ah` is first used since MVM_frame_find_invokee can throw?
+
+[15:18] <nine> Indeed. Good thing, we're no longer bound by C89's shackles
+
+[15:26] <MasterDuke> oh, the MVM_frame_find_invokee call could also be moved down
+
+[15:27] <nine> But then we could end up leaking that MVMActiveHandler again?
+
+[15:33] <MasterDuke> yeah, that was just sort of talking/thinking out loud
+
+[15:55] <[Coke]> was there a recent change to which C standard we're adhering to?
+
+[15:55] * [Coke] not a C developer
+
+[15:57] *** Altai-man joined
+[15:59] <nine> We switched to C99 a year ago
+
+[15:59] *** sena_kun left
+[16:13] *** brrt joined
+[16:48] <[Coke]> Danke.
+
+[17:17] <brrt> I never write enough C anymore :-(
+
+[17:32] <nine> brrt: you're young. Plenty of time left to write C :0
+
+[17:32] <nine> :)
+
+[17:36] <cog> Or rust, which is, at last, a clean C
+
+[17:37] <moon-child> rust is a bastard child of c++ and ocaml
+
+[17:37] <moon-child> zig somewhat closer to a clean c
+
+[17:38] <brrt> lol, I wonder if we can discuss rust without things turning it into a flamewar
+
+[17:38] <moon-child> :)
+
+[17:38] <brrt> I too think rust is much, much more like C++, in design and intended usage, than to C
+
+[17:38] <moon-child> (rust also has sprinklings of clean and cyclone)
+
+[17:39] <brrt> C is a fairly raw language at the end of the day
+
+[17:40] <nine> I fear the commit about active exception handlers is a bit too focused after all. There are plenty of other kinds of special return data that we can leak.
+
+[17:51] *** patrickb joined
+[17:51] *** patrickb left
+[18:12] *** brrt left
+[19:13] *** zakharyas left
+[19:58] *** sena_kun joined
+[20:00] *** Altai-man left
+[20:02] *** lucasb left
+[20:28] *** brrt joined
+[20:59] *** hankache joined
+[21:26] *** zakharyas joined
+[21:36] *** zakharyas left
+[22:14] *** sena_kun left
+[22:24] *** hankache left
+[22:27] *** brrt left
+[23:15] *** tobs joined

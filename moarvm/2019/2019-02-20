@@ -1,0 +1,419 @@
+[00:19] *** MasterDuke joined
+[00:19] *** MasterDuke left
+[00:19] *** MasterDuke joined
+[00:40] *** AlexDaniel left
+[01:26] <timotimo> in theory we could support Blob inside of a CStruct with "never read back" semantics, i.e. whatever the C side does, you ain't gonna see it, but you also don't have to pay for copying back and forth
+
+[06:41] *** brrt joined
+[07:52] *** yoleaux joined
+[07:59] *** brrt left
+[12:39] *** scovit joined
+[12:40] <scovit> timotimo: why would you allow that?
+
+[12:41] <timotimo> i dunno, copying is expensive? and blob is supposed to be immutable
+
+[12:46] <scovit> But then why wouldn't one use Pointer instead?
+
+[12:47] <timotimo> interop with "native" p6 types
+
+[12:48] <scovit> are you talking about inlined blobs or not?
+
+[12:49] <timotimo> i was thinking of blobs that appear as a pointer in the struct
+
+[12:49] <scovit> Ok, in that case, I think that the only problem would be the elems field in the Repr, right?
+
+[12:50] <timotimo> how do you mean "problem"?
+
+[12:50] <scovit> Like why owuld you need to copy the content?
+
+[12:51] <timotimo> hm. are you suggesting we actually give the memory address of the buffer the blob itself uses to C?
+
+[12:51] <scovit> yes
+
+[12:51] <scovit> and the opposit
+
+[12:51] <scovit> e
+
+[12:51] <scovit> the buffer of
+
+[12:51] <scovit> C you can give to the Blob
+
+[12:51] <scovit> right?
+
+[12:52] <timotimo> well, there the elems are the problm :)
+
+[12:52] <scovit> elems = -1 :)
+
+[12:52] <scovit> then deal with it if you want :)
+
+[12:52] <timotimo> Blob is supposed to be immutable, which includes having a fixed size ...
+
+[12:53] <scovit> In that case I think it might be a bad idea to allow them
+
+[12:53] <timotimo> right, it'd also be hard to support that in nativecast
+
+[12:54] <timotimo> since then there's no original Blob object to get the proper size from
+
+[12:54] <timotimo> then you're winning nothing over a CArray
+
+[12:54] <scovit> agreed
+
+[12:55] <scovit> on the other end, a fast cast from blob to CArray might be nice to have (don't remember if it is already there)
+
+[12:55] <timotimo> i hate that we can't make any of this safer
+
+[13:11] <dogbert2_> timotimo: running './perl6--profile t/spec/S02-types/sethash.t' end with a SEGV
+
+[13:12] *** AlexDaniel joined
+[13:17] <dogbert2_> the number of blockers is quite low now
+
+[13:18] <timotimo> well, it better be :)
+
+[13:18] <dogbert2_> :)
+
+[13:19] <dogbert2_> I wonder where nine and brrt are hiding today
+
+[13:30] * jnthn should maybe be hiding in bed with his cold, but is here anyway :)
+
+[13:30] <jnthn> Though I ain't quite sure what I trust myself to touch :)
+
+[13:30] <timotimo> oh nose!
+
+[13:32] <dogbert2_> jnthn: want suggestions ?
+
+[13:33] * timotimo is watching "Making C Less Dangerous in the Linux kernel" to see if anything is interesting for moarvm
+
+[13:37] <MasterDuke> timotimo: in dogbert2_'s example, STABLE(type) is NULL here https://github.com/MoarVM/MoarVM/blob/master/src/profiler/instrument.c#L516
+
+[13:37] <timotimo> i'm already in rr :)
+
+[13:38] <MasterDuke> excellent, i shall leave it to your more capable hands
+
+[13:38] <timotimo> the st pointer got nulled out in a nursery copy step, i.e. the type pointer somehow didn't cause the type to be rooted?
+
+[13:38] <timotimo>    at gen/moar/Metamodel.nqp:2750  (/home/timo/perl6/install/share/nqp/lib/Perl6/Metamodel.moarvm:!produce_parameterization)
+
+[13:38] <timotimo> this is where that type got logged for the first time
+
+[13:39] <dogbert2_> although I'm not sure it's related, that test file seems to contain a nasty MoarVM bug
+
+[13:40] <dogbert2_> M#1035
+
+[13:40] <synopsebot> M#1035 [open]: https://github.com/MoarVM/MoarVM/issues/1035 Mysterious error when running t/spec/S02-types/sethash.t with FSA_SIZE_DEBUG=1
+
+[13:41] <nwc10> oooh,
+
+[13:41] <nwc10> ASAN is excited by that
+
+[13:41] <timotimo> that isn't multithreaded, is it?
+
+[13:42] <nwc10> http://paste.scsys.co.uk/583170
+
+[13:42] <nwc10> can't say when that started, sorry
+
+[13:43] <timotimo> that looks like someone's iterating while another place is deleting keys maybe
+
+[13:44] <MasterDuke> i don't see anything obviously multithreaded at a quick glance
+
+[13:45] <MasterDuke> other than (lives|dies)-ok perhaps?
+
+[13:45] <timotimo> i think only something like "run-ok" or so will use threads
+
+[13:46] <MasterDuke> none of those
+
+[13:47] <timotimo> ok, so
+
+[13:47] <timotimo> the one with FSA_SIZE_DEBUG=1 triggers the invalid read in a test that iterates over the hash and removes items from the hash
+
+[13:48] <timotimo> perhaps delete_key should use fixed_size_free_at_safepoint
+
+[13:48] <timotimo> though it could be that that just makes it harder to hit the bug, not impossible
+
+[13:48] <jnthn> I think just harder
+
+[13:48] <timotimo> dose the hash iterator keep a pointer directly into the hash?
+
+[13:48] <timotimo> it must, right?
+
+[13:48] <jnthn> Since GC can happen during the iteration
+
+[13:49] <jnthn> timotimo: I figure perhaps yes, but I don't know exactly; samcv++ probably does
+
+[13:49] <timotimo> MVMHashEntry *cur, *next;
+
+[13:49] <timotimo> that's troublesome
+
+[13:50] <timotimo> but given that iterating over the hash while changing its size can not be sane, since rehashing happens during resizing ...
+
+[13:50] <timotimo> what are we to do? force iterators over hashes to eagerly get all the keys?
+
+[13:51] <timotimo> perhaps hold a pointer to the hash "body", so that we can find out when the resize has happened (since the pointer changes) and then throw an exception or start from the beginning?
+
+[13:52] <jnthn> There is a #define that I think detects the case that can be switched on in src/string/uthash_types.h
+
+[13:52] <jnthn> (It's not on by default)
+
+[13:53] <timotimo> it's "after_add_key", but i reckon it'll also understand delete_key?
+
+[13:59] <dogbert2_> the bug tends to show up around test 235-6, i.e. 'Can use $_ from .values to remove items from SetHash (2)' followed by 'Can use $_ from .values to restore items in SetHash'
+
+[14:06] <timotimo> yeah, that's consistent with "the hash iterator holds on to a pointer into the hash data while changing the hash moves the hash data away"
+
+[14:13] *** lucasb joined
+[15:48] <samcv> timotimo, hello
+
+[15:49] <samcv> timotimo, yeah i believe it does keep a pointer
+
+[15:49] <samcv> at least while the iteration is happening
+
+[16:28] *** brrt joined
+[16:35] <brrt> ohai #moarvm
+
+[16:38] <timotimo> yeah, it does :(
+
+[16:38] <timotimo> samcv: how do you feel about adding one more pointer to the object itself so we can ensure the pointer stays correct for each access? :|
+
+[16:42] <MasterDuke> making every hash one pointer bigger? or every iterator one pointer bigger?
+
+[16:48] *** lucasb left
+[16:51] <samcv> well that will make it slower
+
+[16:51] <samcv> but correctness matters more i think
+
+[16:52] <samcv> so what is getting freed?
+
+[16:54] <samcv> the object that stores the hash right?
+
+[16:55] <samcv> timotimo, so uthash.h:766 ?
+
+[16:56] <samcv> so then the next is not available?
+
+[17:07] <timotimo> hold on, i was afk for a bit
+
+[17:08] <timotimo> i'd imagine the hash_state in MVMIterBody to grow a new pointer, yeah
+
+[17:09] <timotimo> and i don't think HASH_ITER would need that, since we don't usually have user code run in its body?
+
+[17:10] <timotimo> i think HASH_ITER_NEXT_ITEM needs it. though perhaps only where we actually come from an MVMIter object's "shift" repr-method
+
+[17:24] *** brrt left
+[17:27] *** brrt joined
+[17:29] <dogbert11> oh, it's brrt
+
+[17:31] <dogbert11> brrt: did you see this conversation from yesterday? https://colabti.org/irclogger/irclogger_log/moarvm?date=2019-02-19#l173
+
+[17:32] <lizmat> jnthn timotimo samcv: wrt to this delete key from hash business while we has an iterator on it...  I'll gladly change the code in SetHash / BagHash / MixHash to handle that differently should you decide that you shouldn't do that
+
+[17:39] <timotimo> i think it's difficult to handle inside rakudo unless we make iterator functions on hashes always eager
+
+[17:57] *** patrickb joined
+[18:00] <lizmat> well, in that case, wouldn't it be just a matter of creating a list_s with an iterator on that ?
+
+[18:01] <lizmat> hmmm... well, with some sugar to handle the key_s and value functions on the iterator  :-)
+
+[18:29] <timotimo> yeah, that would be possible
+
+[19:00] *** Kaiepi joined
+[19:03] <brrt> dogbert11: no, didn't see
+
+[19:03] <brrt> oh, I can explain
+
+[19:04] <brrt> nine++ can explain better, though
+
+[19:04] <brrt> roughly; there's two modus-operandi for the nativecall-jit
+
+[19:04] <brrt> one is for interpreted code
+
+[19:05] <brrt> one for JITted code
+
+[19:05] <brrt> the JIT knows the addresses of the operands, the interpreter doe snot
+
+[19:05] <brrt> *does not
+
+[19:10] <brrt> so the MVM_JIT_ARG_I64 is, I think, an indirect reference looked up via the interpreter bytecode buffer
+
+[19:16] <samcv> timotimo, do you have code to trigger your issue WRT the hash thing
+
+[19:42] *** Kaiepi left
+[19:43] *** Kaiepi joined
+[19:49] <nine> brrt: not sure I can explain that better after all :)
+
+[20:19] *** brrt left
+[20:41] <dogbert11> nine, brrt: is there anything in the recently added code that strikes you as odd? https://github.com/MoarVM/MoarVM/commit/efdf568975cf38c2b711c3c9c6c2bb741bf89460
+
+[20:43] <dogbert11> the above change seems to be the cause of R#2706
+
+[20:43] <synopsebot> R#2706 [open]: https://github.com/rakudo/rakudo/issues/2706 [⚠ blocker ⚠] Some weird issue exposed by Font::FreeType
+
+[20:50] *** brrt joined
+[21:05] *** robertle joined
+[21:36] <nine> dogbert11: no, quite the opposite. It looks entirely sane to me. So I concur with jnthn++ that the commit just unlocked JIT compilation of more code and we hit a troublesome piece that's been there for quite a while.
+
+[21:36] <nine> dogbert11: I've been a bit under the weather the past few days and wasn't really up to debugging anything. But I'm getting better
+
+[21:38] *** nebuchadnezzar left
+[22:01] <timotimo> samcv: it's in t/spec/S02-types/SetHash.t
+
+[22:07] <timotimo> ha, fun. i found a relatively simple way to get a BOOTContext into the serialized blob of my module so it explodes when trying to precomp
+
+[22:07] <timotimo> (because BOOTContext doesn't have a serialize function)
+
+[22:08] <samcv> timotimo, how many times do i have to run it to get the issue?
+
+[22:08] <timotimo> oh, er, valgrind it
+
+[22:08] <timotimo> i think we FSA the hash body?
+
+[22:08] <timotimo> so even when it's freed it's still technically valid memory
+
+[22:09] <samcv> yeah
+
+[22:10] <timotimo> so it might actually not even explode in valgrind unless you add --valgrind to moar's Configure.pl
+
+[22:11] <brrt> =/quit
+
+[22:11] *** brrt left
+[22:11] <samcv> or maybe change it to fsa debug?
+
+[22:12] <dogbert11> nine: get well soon
+
+[22:13] <samcv> i'm still sick after more than a week :(
+
+[22:13] <dogbert11> samcv: turn on FSA_SIZE_DEBUG
+
+[22:15] <timotimo> btw why would FSA_SIZE_DEBUG make this properly asplode?
+
+[22:15] <dogbert11> good question
+
+[22:15] <nine> samcv: oh, that sucks :/
+
+[22:16] <dogbert11> but it does
+
+[22:16] <timotimo> oooh
+
+[22:16] <timotimo> because using size debug makes it use malloc directly
+
+[22:16] <samcv> nine, yeah. i have only taKen two days off. but days when i get tired i've just worked from home the rest of the day after doing what i need to do
+
+[22:16] <timotimo> instead of the fsa pools
+
+[22:16] <samcv> i am getting better but vvery slowly
+
+[22:16] <samcv> i got sick after fosdem and my friend from malaysia got sick. he was only sick 2 days. but i am still sick
+
+[22:17] <timotimo> bah, got the short end of the stick :( :(
+
+[22:17] <samcv> pretty often people catch things after going through airports. so no clue whatever it is
+
+[22:17] <timotimo> or ... the long end of the sick maybe
+
+[22:17] *** robertle left
+[22:17] <samcv> whichever is the least common of the types of sticks
+
+[22:17] <samcv> is what i got :-)
+
+[22:19] <dogbert11> flu ?
+
+[22:20] <samcv> guessing flu
+
+[22:20] <dogbert11> that's usually quite uncomfortable
+
+[22:20] <samcv> feels like the flu at least. i find cold usually is more symptoms and flu makes you more likely to feel "sick"
+
+[22:20] <samcv> tired, sore etc
+
+[22:21] <dogbert11> :(
+
+[22:22] <dogbert11> for me it takes around a week to recover from a flu
+
+[22:24] <timotimo> There were 49,514,936 object allocations. The dynamic optimizer was able to eliminate the need to allocate 645,212 additional objects (that's 1.29%)
+
+[22:25] <timotimo> the hard work paid off!!
+
+[22:25] <tadzik> wow!
+
+[22:25] <timotimo> (but yay moarperf now shows that in the overview)
+
+[22:27] <timotimo> (100% Scalars were replaced)
+
+[22:30] *** MasterDuke left
+[22:31] <nine> samcv: sudden onset of high fever that will stay for days is a good indicator of the flu. Got me down for a week on a vacation in Japan.
+
+[22:31] <timotimo> damn, i hope you had some vacation left after that
+
+[22:33] <nine> I did have a week and a half before that. I was just glad that I got a little better in time for the flight home. 12 hour flights are bad enough without sickness.
+
+[22:33] <timotimo> oh yeah
+
+[22:33] <timotimo> and with a flu on an airplane, owch, you'd be infecting 100% of the passengers
+
+[22:34] <nine> Well, Japan was at least the right place for getting disposable face masks to prevent exactly that :)
+
+[22:36] <nine> Well, off to bed now. Good night!
+
+[22:37] <timotimo> aye
+
+[22:37] <timotimo> good night!
+
+[22:44] <jnthn> Goodness, everyone seems to be getting it this winter
+
+[22:45] * jnthn currently has a cold-ish thing that doesn't feel like it's going to turn into flu, but has given him some days of sore throat, ears, etc.
+
+[22:45] <timotimo> i've only got a super mildly sore throat, maybe even just my imagination
+
+[22:49] <jnthn> Mine was a bit too strong for imagination. But on the first day I had it, I went out for some spicy Indian food. Maybe it helped. :)
+
+[22:49] *** Kaiepi left
+[22:49] *** Kaiepi joined
+[22:53] <samcv> nine, yeah that's prolly what i had. i don't have a thermometer. but during the peak of it i did feel warm
+
+[23:00] <samcv> talked to sawyerX and stevan today about PerlCon 2020 Amsterdam. now i need to look for a venue and get quotes
+
+[23:06] <jnthn> samcv++
+
+[23:06] <jnthn> I'd like to come to that :)
+
+[23:13] <samcv> jnthn, keynote speaker? (just kidding :) unless you're offering)
+
+[23:13] <samcv> also theme suggestions would be nice. since i have no clue what i want
+
+[23:14] <jnthn> I dunno, I'm a keynote speaker this year, won't folks be bored of me by then? :)
+
+[23:14] <samcv> you you're keynote at riga?
+
+[23:17] <jnthn> Yeah
+
+[23:18] <jnthn> At least, https://perlcon.eu/ thinks so :)
+
+[23:18] <samcv> nice!
+
+[23:19] <samcv> We start at 10:00 and continue the main program until 18:00. The extended program begins at 18:00 and continues till 02:00. T
+
+[23:19] <samcv> 02:00 :o
+
+[23:19] <samcv> what.
+
+[23:19] <timotimo> is that like ... including social dinner event?
+
+[23:20] <samcv> party and after party and after after partyp
+
+[23:20] <samcv> including dance floor and DJ
+
+[23:20] <timotimo> post-after-party-chillout and optional pyjama party
+
+[23:20] <lizmat> .oO( perljama party)
+
+[23:21] <samcv> one thing we'll be exploring for PerlCon 2020 is if we can use Booking offices for the tutorials on weekend
+
+[23:21] <samcv> do wed-fri for the confernece and weekend do tutorials at booking offices to cut costs
+
+[23:26] <jnthn> I'm quite certain I won't be parting until 2am on the Thursday :P
+
+[23:27] <lizmat> .oO( partying ? )
+
+[23:29] <jnthn> uh, yes :)
+
+[23:29] <jnthn> Apparently tonight I'm too cold-y to type, let alone party :)
+
+[23:30] <samcv> we can instead cut costs by having all training's being ftrom 6pm to 12. and then dance club from 24:00-02:00 charging entry for not perl antendees
+

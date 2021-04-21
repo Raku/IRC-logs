@@ -1,0 +1,254 @@
+[01:48] *** ilbot3 joined
+[04:55] <konobi> jnthn: there's an extremely efficient algo in zfs for doing that shared space stuff, since it's the main thing behind the dmu
+
+[07:32] *** domidumont joined
+[07:37] *** domidumont joined
+[07:53] *** lizmat joined
+[08:06] <konobi> also... https://github.com/lovasko/bc_thesis
+
+[08:31] *** Ven joined
+[10:16] <konobi> and... https://queue.acm.org/detail.cfm?id=2492433
+
+[10:52] <konobi> which leads to... http://concurrencykit.org/
+
+[11:07] *** diakopter joined
+[11:26] *** zakharyas joined
+[11:29] *** Ven joined
+[11:55] *** Util joined
+[12:01] *** brrt joined
+[12:08] <brrt> ehm, i'm looking for something, and i can't explain why this has never crashed before
+
+[12:08] <timotimo> oh my :)
+
+[12:09] <brrt> https://github.com/MoarVM/MoarVM/blob/master/src/jit/emit_x64.dasc#L162
+
+[12:09] <brrt> this
+
+[12:09] <brrt> we cmp ref with 0x0
+
+[12:09] <brrt> and then
+
+[12:09] <brrt> we proceed to dereference it anyway
+
+[12:09] <brrt> wtf
+
+[12:11] <brrt> this has been here for over 2 years
+
+[12:13] <lizmat> maybe we never reach that code ?
+
+[12:15] <brrt> we reach it, it's just never zero
+
+[12:16] <brrt> it's supposed to be the same  as https://github.com/MoarVM/MoarVM/blob/master/src/gc/wb.h#L8
+
+[12:16] <brrt> but it's not shortcircuiting
+
+[12:16] <timotimo> maybe because we make sure to have VMNull everywhere?
+
+[12:16] <timotimo> and never use nulled out objects registers unless we explicitly handle it in the code itself?
+
+[12:19] <brrt> probably
+
+[12:19] <brrt> this value comes from getdynlex
+
+[12:19] <brrt> anyway, will investigate later
+
+[12:19] <timotimo> 'k
+
+[12:19] <brrt> (it's reframe-jit speciifc afaik)
+
+[12:38] <konobi> is there much use of COW semantics in GCs?
+
+[12:39] <timotimo> in general, you mean?
+
+[12:44] <konobi> yeah
+
+[12:44] <timotimo> i bet there's some papers on that already. no clue about implementations "in the wild", though
+
+[12:49] <konobi> seems to me like an implementation similar to how the ZFS DMU does COW and it's GC would be very fitting for memory and GC in dynamic languages
+
+[13:11] <konobi> huh... and i just thought of a cheap way of doing GC with COW semantics
+
+[13:17] <lizmat> konobi: PR's are accepted by jnthn on a regular basis  :-)
+
+[13:19] <timotimo> i'm not sure file systems have to deal with as much traffic from little files as a dynamic language's memory management would
+
+[13:19] <timotimo> but i'd gladly be corrected :)
+
+[13:51] *** brrt joined
+[14:14] <brrt> fairly sure this is probably a case of a missing MVMROOT... :-(
+
+[14:15] <brrt> or, write barrier check somewher
+
+[14:16] <timotimo> you haven't told us yet what exactly you're hunting
+
+[14:20] <brrt> i'm getting a SEGV on running rakudo tools/build/install-core-dist.pl under reframe-jit
+
+[14:21] <brrt> i'm also getting a 'cannot invoke this type' error on building CORE.setting
+
+[14:21] <brrt> i'm kind of hoping the former is easier to find than the latter
+
+[14:21] <timotimo> you should merge the newest moar commits that give you more info for the "cannot invoke this type" error
+
+[14:55] *** dalek joined
+[15:17] <brrt> hmm, maybe, but i imagine jnthn will want to merge that too, and i try to base off reframe
+
+[15:27] <timotimo> OK, but you can also just merge it temporarily locally-only :)
+
+[15:27] <timotimo> just to make your life easier for finding this problem out
+
+[15:32] <brrt> true..
+
+[15:32] <brrt> also possible that it is just a NULL pointer error
+
+[15:34] <timotimo> you mean a VMNull?
+
+[15:42] <brrt> hmm, yeah, the think we're looking at is VMNull
+
+[15:42] <brrt> so why
+
+[15:47] <brrt> theory; jit_entry_label is borked
+
+[15:50] <timotimo> it's not moving right?
+
+[16:29] <brrt> well, it's a negative offset from the function entry
+
+[16:29] <timotimo> that's weird, yeah
+
+[16:31] <timotimo> https://gist.github.com/timo/5843f49fe287e1edd2276e78743e6d0c  -  do you see this shit? %)
+
+[16:32] <brrt> what's bad about it?
+
+[16:33] <timotimo> boxing an int, just to unbox it again in order to box it into an int again
+
+[16:34] <brrt> ah, the last parts
+
+[16:34] <brrt> how difficult would it be to eliminate that using spesh?
+
+[16:34] <timotimo> it's the lost parts, yeah
+
+[16:34] <timotimo> this particular thing should be quite doable
+
+[16:35] <brrt> better theory
+
+[16:35] <brrt> (you can look at decont, and see if it's source input is a boxing op?)
+
+[16:36] <brrt> we're in the wrong frame altogether
+
+[16:36] <brrt> we're not looking at the right frame
+
+[16:36] <brrt> how even
+
+[16:36] <timotimo> we have a "known box source" fact
+
+[16:36] <timotimo> o_O
+
+[16:37] <timotimo> this particular part of the whole thing isn't interesting for performance, though ... this is right before the return, it seems like
+
+[16:37] <brrt> we are somehow, jumping into this frame, with the wrong jit_entry_label set
+
+[16:43] <timotimo> boy am i glad p6bool doesn't allocate %)
+
+[16:44] <timotimo> i don't think we actually have an op that does the same as unboxing a bool that got boxed from an int
+
+[16:44] <timotimo> we can't just use the int, because that may have any value :$
+
+[16:44] <timotimo> we'd have to +& 1 basically
+
+[16:48] <timotimo> ah, so every instance of me using rand is followed up by a p6box_n usually followed shortly by a decont_n
+
+[16:52] *** Ven joined
+[17:09] <dalek> MoarVM: 6559c2c | timotimo++ | tools/graph_spesh.p6:
+
+[17:09] <dalek> MoarVM: spesh graph: rescue a few missing writer-reader arrows
+
+[17:09] <dalek> MoarVM:
+
+[17:09] <dalek> MoarVM: by waiting until the end of the file to find if a given
+
+[17:09] <dalek> MoarVM: register's writer is anywhere to be found.
+
+[17:09] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/6559c2c034
+
+[17:47] *** zakharyas joined
+[18:11] *** zakharyas joined
+[18:28] <dalek> MoarVM: b69f894 | timotimo++ | tools/graph_spesh.p6:
+
+[18:28] <dalek> MoarVM: fix extops not getting their args pointed at
+
+[18:28] <dalek> MoarVM:
+
+[18:28] <dalek> MoarVM: a GLR regression lying in hiding for a loooong time
+
+[18:28] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/b69f89405a
+
+[18:31] *** dalek joined
+[19:25] *** zakharyas joined
+[20:26] <dalek> MoarVM: 4aa9c76 | timotimo++ | tools/graph_spesh.p6:
+
+[20:26] <dalek> MoarVM: spesh_graph: colored BBs
+
+[20:26] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/4aa9c76d62
+
+[20:26] <dalek> MoarVM: 818f485 | timotimo++ | tools/graph_spesh.p6:
+
+[20:26] <dalek> MoarVM: graph_spesh: a little "mini map" for dominance and CFG
+
+[20:26] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/818f485435
+
+[20:27] <timotimo> m)
+
+[20:27] <timotimo> the tool changes its name every commit
+
+[20:29] <masak> talk about agile development!
+
+[20:30] <timotimo> excellent turn-around
+
+[20:32] <timotimo> i think i need a optipng version that uses multiple CPU cores ...
+
+[20:32] <timotimo> 6768x25391 pixels, 4x8 bits/pixel, RGB+alpha
+
+[20:32] <timotimo> this might not actually be a very good candidate for getting optipngd
+
+[20:57] <timotimo> http://t.h8.lv/fully_operational.png  -  look at all the pretty lights!
+
+[20:59] <lizmat> hmmm.. my browser only shows this too small or too large  :-(
+
+[21:00] <timotimo> yeah, you'll have to be panning around a lot
+
+[21:00] <timotimo> but at the top right there's a little "mini-map" :)
+
+[21:00] <timotimo> i could just export it as SVG instead, which should work much better
+
+[21:01] <timotimo> http://t.h8.lv/fully_operational.svg
+
+[21:02] <lizmat> scales better, but not really good yet  :-(
+
+[21:03] <timotimo> :\
+
+[21:03] <timotimo> well, it is a huge crapton of content ... :\
+
+[21:07] <timotimo> i wish i could make things sensibly clickable there so that navigation becomes possible
+
+[21:08] <timotimo> i put the "mini maps" on the top left now. reuploading ...
+
+[21:14] <dalek> MoarVM: 4b23cc7 | timotimo++ | tools/graph_spesh.p6:
+
+[21:14] <dalek> MoarVM: graph_spesh: expect debugnames sometimes
+
+[21:14] <dalek> MoarVM:
+
+[21:14] <dalek> MoarVM: like when we have a wval instruction.
+
+[21:14] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/4b23cc74fe
+
+[21:14] <dalek> MoarVM: c3e8bef | timotimo++ | tools/graph_spesh.p6:
+
+[21:14] <dalek> MoarVM: move mini maps to the left
+
+[21:14] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/c3e8bef104
+
+[22:32] <dalek> MoarVM: 592cbb4 | timotimo++ | tools/graph_spesh.p6:
+
+[22:32] <dalek> MoarVM: graph spesh: vary saturation as well as hue
+
+[22:32] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/592cbb4df5

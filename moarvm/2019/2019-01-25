@@ -1,0 +1,364 @@
+[00:54] <timotimo> not a single spectest trips the oops
+
+[00:55] *** Kaiepi left
+[01:27] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #1038: Add smrt intify op
+
+[01:27] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1038
+
+[01:46] <MasterDuke> that one wasn't too bad. rakudo won't be terrible either, but nqp...
+
+[02:18] *** Kaiepi joined
+[02:26] *** Kaiepi left
+[02:44] *** AlexDani` joined
+[02:45] *** AlexDaniel left
+[03:14] *** Kaiepi joined
+[03:18] *** lizmat left
+[03:50] *** ufobat_ joined
+[03:54] *** ufobat left
+[04:08] *** AlexDani` is now known as AlexDaniel
+
+[04:14] *** Kaiepi left
+[04:17] *** Kaiepi joined
+[04:43] *** Kaiepi left
+[04:44] *** Kaiepi joined
+[06:51] *** domidumont joined
+[07:27] *** domidumont1 joined
+[07:31] *** domidumont left
+[07:54] *** patrickb joined
+[07:59] *** patrickb left
+[08:57] *** scovit joined
+[08:58] <scovit> Hello, how do you free a MVMObject in MoarVM? Or hint it to be GCed?
+
+[09:00] *** lizmat joined
+[09:21] *** zakharyas joined
+[09:42] *** robertle joined
+[10:06] <jnthn> scovit: You don't explicitly free them
+
+[10:06] <jnthn> scovit: The GC does a reachability analysis each time it runs, and anything not reachable is freed
+
+[10:07] <jnthn> The only way to make that happen sooner is to trigger GC; there's an op for that
+
+[10:39] <lizmat> jnthn: can you explain the difference between these two:
+
+[10:39] <lizmat> m: dd Array.HOW; Array.^compose; dd Array.HOW
+
+[10:39] <camelia> rakudo-moar 4fd8e8731: OUTPUT: «(Perl6::Metamodel::ClassHOW+{<anon>} without .perl method)␤Perl6::Metamodel::ClassHOW+{<anon>}+{<anon>}.new␤»
+
+[10:39] <lizmat> it looks like .^compose is mixing in yet another role ?
+
+[10:40] <lizmat> is Array not composed then ??
+
+[10:42] <jnthn> Hmm, interesting
+
+[10:42] <jnthn> No, though I wonder if Array has any metamethods?
+
+[10:42] <jnthn> (method ^foo() { })
+
+[10:42] <lizmat> it has a ^parameterize
+
+[10:42] <jnthn> If I remember correctly, those get mixed in at compose time
+
+[10:42] <lizmat> this is about R#2640
+
+[10:42] <synopsebot> R#2640 [open]: https://github.com/rakudo/rakudo/issues/2640 [⚠ blocker ⚠] Some sort of regression in Red module
+
+[10:43] <jnthn> And it's possible it does it repeatedly
+
+[10:43] <jnthn> As in, once per .^compose call
+
+[10:44] <lizmat> m: Array.^compose for ^10; dd Array.HOW   # looks like it
+
+[10:44] <camelia> rakudo-moar 4fd8e8731: OUTPUT: «Perl6::Metamodel::ClassHOW+{<anon>}+{<anon>}+{<anon>}+{<anon>}+{<anon>}+{<anon>}+{<anon>}+{<anon>}+{<anon>}+{<anon>}+{<anon>}.new␤»
+
+[10:44] <jnthn> lol
+
+[10:44] <jnthn> Nice
+
+[10:44] <jnthn> Yeah, probably we want to somehow drain those at compose time
+
+[10:45] <lizmat> this seems to fix R#2640
+
+[10:45] <synopsebot> R#2640 [open]: https://github.com/rakudo/rakudo/issues/2640 [⚠ blocker ⚠] Some sort of regression in Red module
+
+[10:45] <lizmat> # temporary fix for R#2640
+
+[10:45] <lizmat> +BEGIN .^compose for Set,SetHash,Bag,BagHash,Mix,MixHash;
+
+[10:46] <lizmat> in core_epilogue
+
+[10:46] <lizmat> but that feels like a bandaid
+
+[10:51] <lizmat> jnthn: the only reason to allow multiple ^compose calls, is augment right ?
+
+[10:51] <lizmat> perhaps augment should reset the $!composed flag, and have ^compose be a noop if the $!composed flag is set ?
+
+[10:52] <lizmat> :q
+
+[10:54] <jnthn> I'm not sure what would be recomposing it
+
+[11:10] <jnthn> Certainly all of .^compose should not be a no-op
+
+[11:11] <lizmat> datapoint: not doing anything in compose if the class is already composed, breaks the setting
+
+[11:11] <jnthn> That's no surprise
+
+[11:11] <jnthn> It means it would totally ignore every augmented in method, and the setting is built out of augments
+
+[11:11] <lizmat> then what use is composing an already composed class ?
+
+[11:11] <lizmat> ok
+
+[11:12] <lizmat> but shouldn't an augment then not reset the $!composed flag ?
+
+[11:12] <lizmat> and *then* do nothing if already composed ?
+
+[11:13] <jnthn> There's nothing in the MOP API for that, not to mention that there's already lots of code that just calls things like .^add_method followed by .^compose in the wild
+
+[11:14] <jnthn> I'd just look for where it applies the meta-methods and see if we can discard them at compose time after mixing them in, so we won't repeat it next time around
+
+[11:14] <lizmat> well, I guess add_method should reset the flag as well then ?
+
+[11:14] <jnthn> No, because then you have to do this in numerous methods
+
+[11:15] <lizmat> and what would be against that ?
+
+[11:15] <jnthn> I don't know why you're trying to change the entire way the API works when there's a single specific problem to solve
+
+[11:16] <lizmat> I'm not sure either... I thought I found an LTA situation that could be fixed
+
+[11:16] <jnthn> Sure, it can be, by doing what I'm suggesting.
+
+[11:17] <jnthn> See Perl6::Metamodel::MetaMethodsContainer
+
+[11:18] <lizmat> ok, thanks for the hints
+
+[11:18] <jnthn> I suggest adding a %!uncomposed_meta_methods hash, have add_meta_method poke them in to that, and then have compose_meta_methods read from that
+
+[11:19] <jnthn> Alternatively, we can just have a flag and not allow one to augment in further metamethods
+
+[11:19] <lizmat> nah, the first suggestion seems better and more flexible
+
+[11:33] *** MasterDuke left
+[11:55] *** brrt joined
+[12:01] <scovit> jnthn: thanks, I am looking at the object res.o in static char callback_handler, for how long it's content will be reachable?
+
+[12:07] <scovit> in other words, what holds its reference?
+
+[12:08] <jnthn> Well, we're invoking user code there, so in general we can't know if that code stashes a reference somewhere that keeps it alive. But if it's just a return value, then it doesn't look like the code in callback_handler references it any further
+
+[12:09] <jnthn> Also it doesn't root it in callback_handler, and just relies on the code not itself triggering GC :)
+
+[12:10] <jnthn> So technically it could be unreachable after MVM_interp_run, and we just rely on nothing else that follows entering GC
+
+[12:20] <scovit> then I wonder if also the C function that get the return value might get invalid pointers if the object got GCd?
+
+[12:21] <scovit> for instance when we pass it the pointer of a vmarray in MVM_nativecall_unmarshal_vmarray
+
+[12:21] <jnthn> If another thread was to trigger GC while that C code was running, then yes
+
+[12:21] <scovit> is it a bug?
+
+[12:21] <jnthn> Well, what can we do about it?
+
+[12:22] <scovit> copy all the objects
+
+[12:22] <jnthn> That sounds rather costly
+
+[12:22] <scovit> also it might be a leak
+
+[12:22] <jnthn> Right
+
+[12:22] <jnthn> That too
+
+[12:23] <jnthn> I don't think it's reasonable to expect to write C bindings without at least some knowledge of memory management
+
+[12:23] <jnthn> In this case, I'd probably make sure that whatever I return remains referenced for long enough.
+
+[12:23] <jnthn> But we can't in general know what "long enough" means
+
+[12:23] <jnthn> Sometimes copy might be a good behavior, and we could offer it too
+
+[12:24] <scovit> I am playing with the idea of a is copy trait, but I was doing it for CStruct passed and received by value.
+
+[12:25] <jnthn> Yeah, I guess it'd be applying to the callback's return value here
+
+[12:26] <jnthn> lunch, bbiab
+
+[12:26] <scovit> that would make it become a more general concept, in that case "is copy" alone would not be enough for the "passing by value" stuff
+
+[12:26] <scovit> ok, good lunch!
+
+[12:36] <lizmat> m: class A { method ^a() {} }   # looks like this isn't actually calling ^compose anywhere
+
+[12:36] <camelia> rakudo-moar 4fd8e8731: ( no output )
+
+[12:37] <lizmat> hmmm... or?
+
+[12:44] *** zakharyas left
+[12:49] *** brrt left
+[12:59] *** domidumont joined
+[13:02] *** domidumont1 left
+[13:18] <jnthn> At compile time on the closing } it would
+
+[13:23] *** brrt joined
+[13:28] *** lucasb joined
+[14:18] *** zakharyas joined
+[15:02] <brrt> \o
+
+[15:09] <nwc10> o/
+
+[15:12] <jnthn> o/
+
+[15:32] <brrt> of all pieces of the JIT, I'm by far least fond of the register allocator
+
+[15:33] <timotimo> can we just have it all done by the google cloud or something
+
+[15:33] <brrt> hehe
+
+[15:33] <brrt> POST https://cloud.google.com/simple-register-allocator?arch=x86-64
+
+[15:34] <jnthn> RAaaS
+
+[15:34] <brrt> funny how we never call things 'enterprise' anymore
+
+[15:34] <jnthn> I'm sure we can get funded
+
+[15:34] <jnthn> :P
+
+[15:35] <brrt> ..oO( Machine Learning optimized register allocation. On the blockchain! )
+
+[15:35] <jnthn> I'm sure some things still do get called "enterprise", but I think the "enterprisey means it's crap" meme kinda killed it off. :)
+
+[15:35] <brrt> hehe
+
+[15:36] <brrt> speaking of which, I had a half-assed plan to write a testing tool for MoarVM that'd directly build spesh graphs from a description. With s-expressions of course.
+
+[15:36] <brrt> So the name of this tool should be 'meme'
+
+[15:37] <timotimo> excuse me, why would it be "meme"?
+
+[15:37] <brrt> moarvm scheme
+
+[15:37] <timotimo> ooh
+
+[15:38] <jnthn> haha
+
+[15:39] <jnthn> Nice
+
+[15:40] <timotimo> what makes it more interesting to create spesh graphs than to simply create moar bytecode and have it turned to a spesh graph by the usual method?
+
+[15:40] <timotimo> easier to connect BBs and place handlers maybe?
+
+[15:40] <timotimo> than to work with labels?
+
+[15:41] <brrt> I want to circumvent the whole usual process, is the thing. That's why it'd be a testing tool
+
+[15:41] <timotimo> OK
+
+[15:42] <brrt> Maybe add a way to specify facts
+
+[15:42] <timotimo> ooh, to go *that* deep into the internals
+
+[15:42] <brrt> pretty much
+
+[15:42] <brrt> is this a decent GSoC project, or is it too small?
+
+[15:43] <brrt> (I don't care that much about the s-expr syntax, so a student could choose something else)
+
+[15:43] <timotimo> all i know is projects are always bigger than you expect ;)
+
+[15:43] *** domidumont1 joined
+[15:46] <brrt> this is true
+
+[15:46] *** domidumont left
+[15:48] <jnthn> I think being able to write unit tests for spesh and JIT would be very helpful
+
+[15:49] <jnthn> Of course we cover a huge amount with the NQP and Perl 6 test suite
+
+[15:53] <brrt> this is true. The problem is more that I never quite know which parts are tested
+
+[15:53] <brrt> I kind of just hope for the best
+
+[15:55] <jnthn> The whole approach of spesh is to record stats and hpoe for the best :P
+
+[15:55] <timotimo> true
+
+[15:55] <jnthn> But yeah, it's true
+
+[15:55] <jnthn> Probably there's coverage tools that can tell us a bit more
+
+[15:55] <timotimo> with more specific tests we can check not only "it doesn't blow up" and "it doesn't misbehave", but also "it does the optimization i was hoping for"
+
+[15:56] <timotimo> which will also allow us to see what effects a new optimization has, for example to prevent other kinds
+
+[15:56] <timotimo> though it needs more context for that purpose
+
+[15:56] <timotimo> for those tests i suppose it'd be enough to run it through spesh and not code-gen and run the code
+
+[15:56] <timotimo> which lets us have much more self-contained pieces of code
+
+[15:57] <timotimo> hm. it's the old unit test vs integration test thing again
+
+[15:57] <brrt> yeah. We solely do integration tests, from the perspective of spesh
+
+[15:58] <timotimo> right. but only the first two kinds i've mentioned earlier
+
+[15:58] <brrt> jnthn: is our GC concurrent, or is it parallel?
+
+[15:58] <brrt> or is it both...
+
+[15:59] <jnthn> Parallel
+
+[16:00] <timotimo> concurrent GC would be a *great* GSoC project!!
+
+[16:00] <jnthn> Ouch :)
+
+[16:05] <brrt> heheeh
+
+[16:05] <nwc10> for some value of summer, possibly Neptune's
+
+[16:07] <brrt> I'm not sure if neptune has a an orbital inclination
+
+[16:07] <timotimo> right, i think there's only a small number of planets in our solar system that do
+
+[16:08] <brrt> inclination is actually not the word I'm looking for
+
+[16:16] *** robertle left
+[16:17] <nwc10> I checked. 30 degrees, apparently
+
+[16:41] *** domidumont1 left
+[16:42] *** zakharyas left
+[17:23] <AlexDaniel> nwc10: haha
+
+[17:45] *** robertle joined
+[17:57] <robertle>  ls
+
+[17:57] <robertle> sorry
+
+[18:09] *** Kaiepi left
+[18:13] *** Kaiepi joined
+[18:16] *** brrt left
+[18:16] *** brrt joined
+[18:28] *** Kaiepi left
+[18:29] *** Kaiepi joined
+[19:09] *** Kaiepi left
+[19:09] *** Kaiepi joined
+[19:15] *** Kaiepi left
+[19:22] *** Kaiepi joined
+[19:27] <AlexDaniel> robertle: a directory with just one file named “sorry”? :)
+
+[19:28] *** Kaiepi left
+[19:29] *** Kaiepi joined
+[19:35] *** lizmat left
+[19:46] *** brrt left
+[20:12] *** brrt joined
+[20:21] *** AlexDani` joined
+[20:23] *** AlexDaniel left
+[20:29] *** lizmat joined
+[20:52] *** AlexDani` left
+[20:53] *** AlexDani` joined
+[21:13] *** AlexDani` is now known as AlexDaniel
+
+[21:17] *** brrt left
+[21:58] *** lucasb left
+[22:02] *** sivoais joined

@@ -1,0 +1,178 @@
+[00:42] <jnthn> Well, the alternative would be that they're mutable and we have to enforce locking on every single time a string is even just read. :)
+
+[02:20] *** mtj_ joined
+[02:56] *** ilbot3 joined
+[03:02] *** unicodable6 joined
+[03:34] *** colomon joined
+[05:09] *** MasterDuke joined
+[05:10] <MasterDuke> are there plans to make grammars/regexes/etc work on strands?
+
+[05:28] <Geth> ¦ MoarVM/master: 4 commits pushed by MasterDuke17++, (Samantha McVey)++
+
+[05:28] <Geth> ¦ MoarVM/master: ed704fac9f | Optimize MVM_string_concat when the RHS is a...
+
+[05:28] <Geth> ¦ MoarVM/master: b5fdbd9b78 | Add an additional check that the "bases" of the...
+
+[05:28] <Geth> ¦ MoarVM/master: 4b2f261ed7 | Fix+add comments for strand concat optimization
+
+[05:28] <Geth> ¦ MoarVM/master: b37905067d | Merge pull request #750 from MasterDuke17/optimize_concatting_strands
+
+[05:28] <Geth> ¦ MoarVM/master: review: https://github.com/MoarVM/MoarVM/compare/d3655ff7b5...b37905067d
+
+[05:28] <samcv> MasterDuke: well i mean they can work on strands if you just remove nqp::optimizedindexing or edit moarvm to always return the same string when you call that op
+
+[05:29] <samcv> it's gotten much closer now than it used to be since all the speedups i did during my grant
+
+[05:29] <samcv> i know that it was still slower when running a regex on something but i'm curious if you concat then do a regex on a string and then concat again and then regex again it may be faster not to flatten
+
+[07:03] *** geospeck joined
+[07:51] *** geospeck joined
+[08:02] *** geospeck joined
+[09:10] <nine> jnthn: yes, I've seen the link and read deopt.c but other than the comment I can't find anything in there that's actually specific to gotos. At least nothing that I'd understand as such.
+
+[09:25] *** japhb joined
+[10:48] *** domidumont joined
+[10:50] *** lizmat joined
+[10:54] *** domidumont joined
+[10:58] *** domidumont joined
+[11:40] *** robertle joined
+[13:20] *** AlexDaniel joined
+[13:56] <MasterDuke> samcv: i don't think you can just the nqp::indexingoptimized here https://github.com/perl6/nqp/blob/master/src/QRegex/Cursor.nqp#L417
+
+[13:56] <MasterDuke> i'm pretty sure jnthn has said (that at least for now), flattening is required for regexes
+
+[13:57] <MasterDuke> it just causes lots of memory use in the case of something like this:
+
+[13:57] <MasterDuke> c: HEAD use snapper; my $a = "a" x 1_000_000; for ^1_000 { $a ~~ /./ }
+
+[13:57] <committable6> MasterDuke, https://gist.github.com/8d626a2023014dad6326dc6800940570
+
+[13:58] <MasterDuke> because it creates a new flattened $a every iteration
+
+[15:04] <timotimo> it's not required as in "it won't work if we don't do it", it'll just probably have a severe performance impact
+
+[15:06] * jnthn also points out that strands are an *optimization* that saves memory in a bunch of cases; the non-stand behavior is the baseline.
+
+[15:07] <jnthn> *non-strand
+
+[15:08] <MasterDuke> right, i'm trying to see if strands can be used in more cases
+
+[15:12] <jnthn> Yeah, but I think regexes are a place where it's a pretty good assumption that we don't want that. We want to index as fast as possible.
+
+[15:13] *** tangible6 joined
+[15:15] <MasterDuke> very true, but this case (though artificial), isn't all that fast and it spends a lot of its time mallocing and grapheme iterating the strand into the flat buffer
+
+[15:15] <MasterDuke> m: my $a = "a" x 1_000_000; for ^1_000 { $a ~~ /./ }; say now - INIT now
+
+[15:15] <camelia> rakudo-moar f87d8ef8e: OUTPUT: «3.3505512␤»
+
+[15:16] <MasterDuke> m: use nqp; my $a = "a" x 1_000_000; my $b = nqp::indexingoptimized($a); for ^1_000 { $b ~~ /./ }; say now - INIT now
+
+[15:16] <camelia> rakudo-moar f87d8ef8e: OUTPUT: «0.02798563␤»
+
+[15:17] <jnthn> That benchmark is artificial in a number of ways, yes.
+
+[15:18] <jnthn> It'd be unusual to apply a regex to the same string a lot of times for one
+
+[15:18] <MasterDuke> hm. any way to make the grapheme iterator smarter? when it sees a strand with repetitions, is there a faster way to create the flat string?
+
+[15:18] <jnthn> And I struggle to think of a real-world situation where one would use the x operator and then do a regex match.
+
+[15:19] <jnthn> Quite possibly, yes
+
+[15:19] <jnthn> I mean, if we were to be creating an 8-bit string, then it is just a memset :)
+
+[15:19] <MasterDuke> heh, was just going to ask if was as simple as that
+
+[15:20] <jnthn> We could detect this case in indexingoptimized I guess
+
+[15:20] *** lizmat joined
+[15:20] <jnthn> Though it feels like we're doing it for the sake of an artificial benchmark :)
+
+[15:20] <jnthn> otoh, that's how many people measure performance...
+
+[15:21] <MasterDuke> and it's practically a philosophy question whether there are any non-artificial benchmarks...
+
+[15:21] <jnthn> This is true
+
+[15:23] <jnthn> And it's not like benchmarks that meausre features or small numbers of features in isolation don't have some value. This one just feels like it's testing a combination that I'm struggling to see how up in a real program :)
+
+[15:23] <jnthn> *show
+
+[15:24] <timotimo> jnthn: when you regex match a unary number to figure out if it's a prime :)
+
+[15:26] <MasterDuke> i could imagine something more like: my $a = $some-variable-string x $some-variable-count; for @list-of-regexes -> $r { die "this is still kind of artificial" if $a ~~ $r }
+
+[15:42] <MasterDuke> hm. to collape strands, would it likely be faster in general to just loop over each strand, memsetting or memcpying as required, with a re_nfg at the end, instead of using the grapheme iterator?
+
+[15:57] *** domidumont joined
+[16:11] *** zakharyas joined
+[17:08] *** MasterDuke joined
+[17:48] *** geospeck joined
+[18:18] *** geospeck joined
+[18:22] <lizmat> m: say $*THREAD.app_lifetime   # shouldn't that need to be True ?
+
+[18:22] <camelia> rakudo-moar 38f51db9f: OUTPUT: «False␤»
+
+[18:31] <lizmat> not that it would technically make a difference, but informationally that would be more correct, no ?
+
+[18:32] <samcv> timotimo: MasterDuke not flattening has like 2x less performance impact compared to before for most of the ops
+
+[18:32] <samcv> since my changes during my grant
+
+[18:32] <samcv> i believe the thing that made me not decide to do it was the performance of it with INTERPOLATE or something i forget
+
+[18:34] <samcv> for my string benchmarks i usually will take a long book like tolsky and then cut it into 8ths and then concatenate them together
+
+[18:34] <samcv> after altering moarvm so indexingoptimized doesn't actually flatten and compare to normally
+
+[18:36] <timotimo> can you run a comparison between a regular string and that same string but with "(" in front and ")" in the back as a string with three strands? i.e. we'll always be hitting the same strand effectively, but we'll still have to do a bit of calculation each time we index into the whole string?
+
+[18:37] <samcv> just 3 strands? yeah i can do that
+
+[18:38] <samcv> i mean i made it faster for moving to the right index point for strands as well as making functions use grapheme iterator instead of grapheme_at, and made grapheme_at faster by speeding up the seeking
+
+[18:38] <samcv> and many other changes, but let me see if i remembered correctly if it was interpolated things that were slow that made me think it wasn't a good idea to change it
+
+[18:39] <samcv> we could also not flatten if it's only one strand that's repeated
+
+[18:44] <timotimo> i'd also be interested to see how regexes that have to go back and forth a bunch will perform
+
+[18:44] <timotimo> if you have a cached grapheme iterator, going forwards is really fast, but going backwards isn't
+
+[18:46] * timotimo afk for a few hours
+
+[18:47] <samcv> still much faster than it used to be :) but yeah i'm curious too
+
+[18:48] <samcv> i still haven't gotten it to be able to go backward with just a move_to maybe something worth thinking about after some benchmarks. timotimo if you're still there what would be the best way to make something that has to go backwards
+
+[18:52] <timotimo> you could have lookaheads and lookbehinds
+
+[18:52] <timotimo> though i think one of these reverses the string and matches "forwards" anyway
+
+[18:57] <lizmat> which reminds me of @a.reverse using an iterator that starts at the end and goes back
+
+[18:57] <lizmat> without actually reversing anything
+
+[18:57] <lizmat> not sure how applicable that would be here
+
+[18:59] <samcv> someone else may be better to write a regex that will for sure backtrack or something idk. i mean not all look behinds have to reverse? or do they
+
+[19:15] *** zakharyas joined
+[19:17] *** dogbert17 joined
+[19:23] <jnthn> lizmat: app_lifetime being False for the main thread is actually correct, in that the meaning of app_lifetime is "doesn't block termination"
+
+[19:23] <jnthn> lizmat: And the main thread decidedly *does* block that
+
+[19:25] <lizmat> ok, reverted,
+
+[19:25] <lizmat> really afk now&
+
+[19:25] <jnthn> Thanks
+
+[19:25] <jnthn> The VM exits when the only threads left are app_lifetime
+
+[21:48] *** ggoebel joined
+[22:44] *** evalable6 joined
+[23:36] *** MasterDuke joined
+[23:40] *** MasterDuke_ joined

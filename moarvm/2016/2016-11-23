@@ -1,0 +1,312 @@
+[01:17] *** pyrimidine joined
+[01:26] *** pyrimidine joined
+[02:12] *** vendethiel- joined
+[02:18] *** FROGGS joined
+[02:48] *** ilbot3 joined
+[02:59] *** FROGGS_ joined
+[03:40] *** flaviusb joined
+[06:19] *** domidumont joined
+[06:26] *** domidumont joined
+[07:00] *** domidumont joined
+[08:02] *** brrt joined
+[08:10] <brrt> \o #moarvm
+
+[08:10] <brrt> I've forgotten what exactly I wanted to write for my blog post on the register allocation algorithm and now I have to start over again... :-(
+
+[08:12] <brrt> specifically, I'm not sure how to describe linear scan well
+
+[08:29] *** domidumont joined
+[08:30] <brrt> oh, in response to a more or less random conversation i had
+
+[08:31] <brrt> we should organise moarconf
+
+[08:31] <moritz> brrt: write up something, even if you think it's not quite clear; then let #perl6 folks read it and give some feedback
+
+[08:31] <brrt> and we should organise it sufficiently far into the future
+
+[08:31] *** zakharyas joined
+[08:32] <brrt> moritz: good idea.... I guess I haven't done that yet because I hadn't thought of it
+
+[08:33] *** Ven_ joined
+[08:33] <nwc10> what is the advantage of moarconf over (say) a room with a bar near YAPC::Europe?
+
+[08:34] <brrt> Well.... ehm...
+
+[08:34] <brrt> I'm not sure
+
+[08:34] <brrt> depends on what you plan
+
+[08:35] <brrt> well, one of the difference would be that if you'd give it a name and announced it, people not already on this channel could join
+
+[09:02] <brrt> or to put it another way
+
+[09:02] <brrt> if we're just going to have a room near a bar near YAPC::EU,
+
+[09:02] <brrt> then we should organise that
+
+[09:02] <brrt> :-)
+
+[09:22] *** xtt joined
+[09:23] *** Ven_ joined
+[09:47] <jnthn> morning o/
+
+[09:47] <nwc10> \o
+
+[09:49] *** Ven_ joined
+[09:51] * jnthn is going to look into the Rakudo phasers scope mis-handling issue first today
+
+[10:04] <masak> which issue is that, ooc?
+
+[10:05] <jnthn> masak: Some phasers like LAST and QUIT are never cloned
+
+[10:05] <jnthn> Meaning the moment you get into recursion or concurrency you can end up in bother.
+
+[10:06] <jnthn> This is a particular problem with LAST/QUIT in supply/react blocks
+
+[10:13] <jnthn> I guess NEXT is vulnerable also...
+
+[10:13] <jnthn> But seems just those 3
+
+[10:14] <masak> oki
+
+[10:14] <masak> is there a failing case or an RT ticket?
+
+[10:15] <brrt> is it JIT sensitive?
+
+[10:15] <brrt> I ask because last I recall phasers are typically implemented as exceptions with goto
+
+[10:15] <brrt> and those are tricky
+
+[10:16] <jnthn> masak: Two fudged tests in S17-procasync/encoding.t for starters
+
+[10:16] <jnthn> brrt: Phasers are implemented in quite a range of ways thanks to their varying timings etc.
+
+[10:16] <brrt> oh, yes
+
+[10:18] <jnthn> m: sub foo($a) { for ^$a { LAST say $a; foo($a - 1) } }; foo(3)
+
+[10:18] <camelia> rakudo-moar b597b7: OUTPUT«1␤1␤1␤1␤1␤1␤1␤1␤1␤1␤»
+
+[10:18] <jnthn> m: sub foo($a) { for ^$a { NEXT say $a; foo($a - 1) } }; foo(3)
+
+[10:18] <camelia> rakudo-moar b597b7: OUTPUT«1␤1␤1␤1␤1␤1␤1␤1␤1␤1␤1␤1␤1␤1␤1␤»
+
+[10:18] <jnthn> m: sub foo($a) { for ^$a { FIRST say $a; foo($a - 1) } }; foo(3)
+
+[10:18] <camelia> rakudo-moar b597b7: OUTPUT«3␤2␤1␤1␤2␤1␤1␤2␤1␤1␤»
+
+[10:18] <jnthn> masak: ^^ is a repro without concurrency fwiw
+
+[10:20] <masak> yes, that looks wrong
+
+[10:22] <jnthn> It's a bit tricky to work out a good fix
+
+[10:22] <jnthn> m: react { whenever Supply.from-list() { .say; LAST say "done!" } }
+
+[10:22] <camelia> rakudo-moar b597b7: OUTPUT«done!␤»
+
+[10:23] <jnthn> m: react { my $x = 42; whenever Supply.from-list() { .say; LAST say $x } }
+
+[10:23] <camelia> rakudo-moar b597b7: OUTPUT«(Any)␤»
+
+[10:23] <jnthn> This one is the "worst" case (and QUIT has the same)
+
+[10:24] <jnthn> Basically, we never even *did* an iteration of the loop to have chance to capture an appropriate outer for the LAST thunk.
+
+[10:24] <jnthn> But we still want it to somehow point to the correct things outside of the loop
+
+[10:28] <jnthn> Which is a problem all the LEAVE-time phasers don't have (because we run them in the exit handler when their surroudning scope still exists), CATCH doesn't have (it's in dynamic scope too), ENTER doesn't have (easiest phaser - just call it at block entry!), FIRST doesn't have (we set a flag and it's called inside of the block), BEGIN/CHECK/INIT/END don't have (no expectation of closure semantics)
+
+[10:28] <jnthn> POST/KEEP/UNDO are all cases of LEAVE. PRE is a case of ENTER.
+
+[10:29] <jnthn> NEXT can assume there always was at least one value so it only has half the problem
+
+[10:31] <jnthn> Also, note that all the LEAVE ones work out because the exit_handler does a clone and then we've got a special instruction that says "go and look some frames down to dynamic scope for the thing that should be the outer"
+
+[10:32] <jnthn> In summary: making phasers Just Work How People Expect is surprisingly hard.
+
+[10:32] <jnthn> (And yes, I'm partly writing this out to help me think through the problem :))
+
+[10:45] *** TimToady joined
+[10:46] * brrt never does that, you know :-P
+
+[11:02] *** xtt joined
+[11:31] *** Ven_ joined
+[12:10] *** Dunearhp joined
+[12:32] <jnthn> OK, I need to clean up a bit after lunch, but I seem to have fixed the phaser scope thing
+
+[12:33] <nwc10> ilmari: ^^^ (well, 1 word in there)
+
+[12:33] <jnthn> Those encoding.t tests pass. Will check those LAST/NEXT recursion things above but expect those are fixed too
+
+[12:33] <ilmari> nwc10: thanks. soon
+
+[12:34] <jnthn> And, my $dayjob code that makes heavy use of Proc::Async is no longer explosive in its tests.
+
+[12:34] <jnthn> lunch &
+
+[12:36] *** xtt joined
+[12:36] <timotimo> that's great news
+
+[12:46] *** vendethiel joined
+[13:10] <brrt> what happens if we don't have bugs anymore? :-o
+
+[13:11] <brrt> (and when perl6 is already fast?)
+
+[13:11] <brrt> lizmat and jnthn will be out of a job
+
+[13:11] <timotimo> you can still become a consultant for perl6
+
+[13:43] <nwc10> odd, I don't think that this blog post was actually put live on https://blog.pyston.org/2016/11/11/pyston-0-6-released/
+
+[13:44] <nwc10> nope
+
+[13:44] <nwc10> https://github.com/dropbox/pyston/releases/tag/v0.6 -- undingen released this Nov 21, 2016 · 4 commits to master since this release
+
+[13:53] *** Ven_ joined
+[14:05] * jnthn back
+
+[14:05] <nwc10> and fed?
+
+[14:06] <jnthn> Fed. Washing machine repair guy came. And food/beer/whisky delivery after that.
+
+[14:10] <brrt> 'instructions follow each other in memory' - that's cute :-)
+
+[14:17] <jnthn> Yay, seems my fix also fixes the various other busted examples I wrote out here earlier
+
+[14:17] <jnthn> And doesn't regress any spectests
+
+[14:27] <dalek> MoarVM: 0f7277a | jnthn++ | / (8 files):
+
+[14:27] <dalek> MoarVM: Implement captureinnerlex op.
+
+[14:27] <dalek> MoarVM:
+
+[14:27] <dalek> MoarVM: Used to fix scoping issues with LAST/QUIT phasers in Perl 6.
+
+[14:27] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/0f7277a670
+
+[14:31] <ilmari> nwc10: mm, burrito
+
+[14:31] <ilmari> jnthn: I first read "Fed." as an abbreviation for Federal and boggled until I read nwc10's previous line
+
+[14:34] <jnthn> No, the government isn't so big as to have federal washing machine repair guys yet :)
+
+[15:53] *** Ven_ joined
+[15:54] <japhb> "yet"
+
+[15:55] <timotimo> japhb: jnthn has a little business venture planned in that space
+
+[15:55] <japhb> .oO( "You will accept your federal washing machine parts and your designated federal repair interval and YOU WILL LIKE IT." )
+
+[15:56] <japhb> .oO( "I don't want my hard-earned tax money going into somebody else's washing machine!  No washing machine freeloaders!" )
+
+[15:56] <timotimo> no, only frontloaders and toploaders
+
+[15:57] <timotimo> when i was little(r) i thought toploader washing machines would rotate "like a turntable", and i always thought that was stupid
+
+[15:57] <timotimo> now i have a toploader washing machine myself and realize it rotates like a wheel
+
+[15:58] <timotimo> just like frontloaders, except the hole to put clothes in rotates around, too, rather than being located on the rotational axis
+
+[15:58] <ilmari> timotimo: that's the european style toploader. the american style does rotate around the vertical axis
+
+[15:58] <timotimo> oh, really?
+
+[15:59] <ilmari> https://en.wikipedia.org/wiki/Washing_machine#Top-loading
+
+[15:59] <timotimo> okay. i still think that's stupid. but it must have some raison d'etre
+
+[15:59] <ilmari> it is stupid
+
+[15:59] <japhb> timotimo: back and forth for clean and rinse, spinning like a salad spinner (really high speed around the vertical axis) for drain/spin.
+
+[16:00] <japhb> Aside from the fact that the agitator gets in the way of loading clothes, how is the axis of rotation stupid?
+
+[16:01] <timotimo> it's probably because i know nothing about how a washing machine actually washes
+
+[16:01] <ilmari> japhb: the very fact that there is an agitator makes the mechanism inherently more complicated than a front-loader
+
+[16:01] <timotimo> i seem to believe it's important that the clothes wiggle around and push up against each other and rub and such, but i don't think they usually do that in washing machines
+
+[16:02] <ilmari> timotimo: the wikipedia article explains it pretty well
+
+[16:02] <japhb> timotimo: I think figuring out how to do that reliably in a front-loader is how we got HE (High water Efficiency) washing machines
+
+[16:03] <timotimo> ah, yes!
+
+[16:03] <timotimo> washing machines with horizontal axis don't have to immerse the whole drum in water to get good washing results
+
+[16:09] <timotimo> well, i'm glad we had a talk about real machines in the channel for a virtual machine
+
+[16:09] <timotimo> helps to have a bit of connection to the real world every now and then, you know?
+
+[16:10] <timotimo> i'm glad moarvm is a european-style virtualing machine.
+
+[16:36] * jnthn back
+
+[16:43] <japhb> jnthn: What's next on your agenda?
+
+[16:44] <timotimo> good bugnuggets always fall before jnthn's feet :P
+
+[16:44] <timotimo> maybe next up is race/hyper weirdnesses? i know that's in there somewhere
+
+[16:46] <jnthn> race/hyper is something I always mean to get to, then something "more terribly broken" takes its place
+
+[16:46] <timotimo> right
+
+[16:46] <jnthn> Right now I'm investigating a rather weird issue with a test I tried to write to cover the earlier fix
+
+[16:47] <jnthn> In the QUIT case
+
+[16:47] <jnthn> Seems I tickled another oddity
+
+[16:47] <timotimo> you must have plumage, because wow, you're tickling lots of things ;)
+
+[17:31] *** domidumont joined
+[18:31] *** FROGGS joined
+[18:33] <FROGGS> o/
+
+[18:38] <jnthn> o/ FROGGS
+
+[20:40] *** viki joined
+[20:41] <viki> Any clues to how to print out the value of this thing: mp_int *ia = force_bigint(ba, tmp); ? Looking at libtommath docs, I see int mp_toradix (mp_int * a, char *str, int radix);
+
+[20:42] <viki> and I tried doing:  char *str1; mp_toradix(ia, str1, 10); printf("Z: %s", str1); but I'm getting a segfault
+
+[20:43] <viki> I just wanna see what number is in ia
+
+[20:43] <nine> viki: just "p *ia" in gdb
+
+[20:44] <viki> hm..
+
+[20:44] * viki goes to look up how to use gdb
+
+[20:46] <viki> ...
+
+[20:46] <nine> The segfault is because you declared the str1 pointer variable but didn't initialize it to point to a buffer that could take the value
+
+[20:46] * viki goes to look up how to *install* gdb :)
+
+[20:47] <viki> OK. Thanks. I'll look into learning gdb and stuff
+
+[20:47] <viki> and maybe re-read K&R, while I'm at it :)
+
+[21:13] <stmuk_> K&D is the new K&R :)
+
+[21:15] <moritz> apt-get install gdb?
+
+[22:03] *** zakharyas joined
+[22:10] *** mtj_ joined
+[22:34] *** mtj_ joined
+[22:43] <timotimo> what are we doing wrong?
+
+[22:43] <viki> About what?
+
+[22:44] <timotimo> something related to bigints, clearly
+
+[22:45] <viki> hehe
+
+[22:45] <viki> It's a secret :) I wanna debug it on my own, so I could unlock MoarVM Hacking achievement :)
+
+[22:48] <timotimo> cool

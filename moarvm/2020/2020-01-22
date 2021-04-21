@@ -1,0 +1,160 @@
+[00:06] *** lucasb left
+[02:10] *** Kaiepi left
+[02:12] *** Kaiepi joined
+[02:42] *** squashable6 left
+[02:43] *** squashable6 joined
+[02:55] *** bonsaikitten left
+[06:53] *** domidumont joined
+[07:18] *** brrt joined
+[07:27] *** domidumont left
+[07:38] *** squashable6 left
+[07:40] *** squashable6 joined
+[07:48] *** patrickb joined
+[07:50] <brrt> \o
+
+[07:54] <nwc10> o/
+
+[07:59] *** xiaomiao joined
+[08:15] *** sena_kun joined
+[08:35] <sena_kun>  
+
+[08:37] <brrt> ohai sena_kun
+
+[08:50] <sena_kun> o/
+
+[09:00] *** zakharyas joined
+[09:25] *** sena_kun left
+[09:29] *** brrt left
+[10:11] <timotimo> o/
+
+[10:45] *** zakharyas left
+[10:54] *** zakharyas joined
+[11:02] *** zakharyas left
+[11:07] *** zakharyas joined
+[12:13] *** zakharyas left
+[12:40] *** sena_kun joined
+[13:36] *** lizmat left
+[13:38] *** lizmat joined
+[13:49] *** dogbert11 joined
+[13:51] *** dogbert17 left
+[13:54] *** zakharyas joined
+[14:43] *** sena_kun left
+[14:44] *** lucasb joined
+[14:58] *** sena_kun joined
+[15:33] *** MasterDuke left
+[16:18] *** patrickb left
+[16:44] *** sena_kun left
+[16:52] *** zakharyas left
+[16:54] *** zakharyas joined
+[16:58] *** sena_kun joined
+[17:06] *** patrickb joined
+[17:09] *** domidumont joined
+[18:20] *** MasterDuke joined
+[18:37] *** zakharyas left
+[18:43] *** sena_kun left
+[18:57] *** sena_kun joined
+[20:18] *** zakharyas joined
+[20:27] *** domidumont left
+[20:33] *** lucasb left
+[20:44] *** sena_kun left
+[20:58] *** sena_kun joined
+[21:16] *** moritz left
+[21:16] *** zakharyas left
+[21:18] *** moritz joined
+[22:39] *** MasterDuke left
+[22:43] *** sena_kun left
+[22:46] *** MasterDuke joined
+[22:47] <MasterDuke> any idea why `strace -c perl6 -e 'say "Hello world"'` reports ~320 calls to brk (half of the total number of syscalls)?
+
+[22:50] <japhb> MasterDuke: Just guessing, but perhaps libc malloc wants more heap space?
+
+[22:51] <japhb> We do so much allocation, that I have to assume we're going to push the underlying libc allocation to demand more from the OS pretty regularly.  Mind you, we could probably arrange to request more from the OS all at once ....
+
+[22:51] <MasterDuke> is that something easy to optimize?
+
+[22:52] <japhb> MasterDuke: I dunno about easy, but I assume some well chosen mmap and mprotect and such calls would cut that down quite a bit.
+
+[22:52] <MasterDuke> know how to figure out where they would go?
+
+[22:53] <MasterDuke> hm, guess something like heaptrack could be useful here...
+
+[22:53] <japhb> I'm not going to do much better at that question than just reading the relevant code ...
+
+[22:59] *** sena_kun joined
+[22:59] <japhb> Successfully nerd sniped -- a little searching tells me that Linux malloc(3) uses mmap for allocations larger than MMAP_THRESHOLD (by default, 128KiB), and brk for smaller allocations.  So perhaps this represents space taken by lots of small mallocs.
+
+[23:01] <MasterDuke> looks like the place with the single largest number of allocations is https://github.com/MoarVM/MoarVM/blob/master/src/6model/reprs/VMArray.c#L1247
+
+[23:02] <MasterDuke> 67k of them. but only 3.3mb allocated
+
+[23:08] <MasterDuke> timotimo: you've just been playing with serialization/deserialization. any thoughts on how to malloc in larger chunks?
+
+[23:11] <japhb> The classical answer is "allocate a pool, and then suballocate from that" -- which is exactly what our GC does.  But since GC'ables can move, and IIRC Gen2 things have some overhead to pay attention to inter-generational pointers, not all structures can use the GC directly.  But things that are only allocated once and never freed could certainly use a simple bump-the-pointer pool allocation.
+
+[23:15] <MasterDuke> that's what i understand our fixed_size_allocator to be. wonder if there's a reason it isn't used for deserialization?
+
+[23:21] <japhb> Wonder if it has anything to do with the laziness of deserialization
+
+[23:21] <japhb> Or perhaps that bit (allocation of deserialization allocation) just never got an optimization pass.
+
+[23:21] <japhb> Actually, do you know that all the brk calls happen in deserialization for sure, or just an educated guess?
+
+[23:26] <MasterDuke> just a guess based on heaptrack telling me that was where the most number of allocations happened
+
+[23:35] <MasterDuke> heh. some very rough hacking has ./src/6model/reprs/VMArray.c using the MVM_fixed_size_* functions in enough places that `perl6 -e 'say "Hello world"'` doesn't segv
+
+[23:35] <MasterDuke> but...it didn't change the number of brk calls
+
+[23:36] <samcv> releasing
+
+[23:37] <MasterDuke> huh. heaptrack does now reports a ton fewer calls to allocation functions...
+
+[23:39] <MasterDuke> hm, then what's a good way to tell where those brks happen?
+
+[23:39] <jnthn> Ultimately, though, the fixed size allocator will call malloc when it wants another page for the pool
+
+[23:40] <jnthn> So it may well be less calls to malloc, while still asking for the same-ish amount
+
+[23:40] <jnthn> And I think that's what drives the brk calls
+
+[23:40] <jnthn> same-ish amount of memory overall, I mean
+
+[23:41] *** patrickb left
+[23:43] <jnthn> If we want to reduce the amount of brk calls, we probably need to ask for a bigger chunk up front
+
+[23:43] <MasterDuke> hm. so for the fixed size allocator we could possibly create more buckets up front? anything we could do otherwise?
+
+[23:45] <jnthn> Probably, but...one has to be careful not to end up over-allocating. I mean, if we can predict how much we'll need, we can probably do the brk call in advance
+
+[23:46] <MasterDuke> well, even `strace -c perl6 -e ''` calls brk ~300 times
+
+[23:46] <jnthn> I guess a really hacky way, if we know the amount Rakudo ends up asking for whatever you do, is to stick it into the code generated for the perl6 executable ;)
+
+[23:47] <MasterDuke> MVM_malloc is only called ~288 times by MVM_fixed_size_realloc, so it may not be the problem
+
+[23:47] <samcv> nine, nice automating more of the MoarVM release ++
+
+[23:47] <samcv> well thet one i noticed was not having to edit index.html, but i saw some other changes in the logs
+
+[23:48] <MasterDuke> jnthn: ha, that seems kind of hacky, but easy to do...
+
+[23:48] <samcv> though i have not tried the tools/release script
+
+[23:50] <MasterDuke> add an argument to MVM_vm_create_instance()?
+
+[23:51] <jnthn> MasterDuke: Probably neater as another function
+
+[23:51] <jnthn> MasterDuke: Also so as not to bust stuff for any existing embedders, who will surely call that
+
+[23:52] <MasterDuke> something like MVM_vm_set_size()?
+
+[23:53] <MasterDuke> takes an MVMInstance and a size?
+
+[23:53] <samcv> release is done
+
+[23:54] <samcv> guess the bot is gone
+
+[23:58] <samcv> bed time. ping me if there's any releasy things needed to be done, but everything should be good
+
+[23:59] <samcv> i did not update the wikipedia page fyi
+

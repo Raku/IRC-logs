@@ -1,0 +1,274 @@
+[00:00] *** lucasb left
+[00:11] *** sena_kun joined
+[00:12] *** Altai-man_ left
+[02:09] *** Altai-man_ joined
+[02:12] *** sena_kun left
+[02:25] *** sena_kun joined
+[02:27] *** squashable6 left
+[02:27] *** Altai-man_ left
+[02:29] *** squashable6 joined
+[03:09] *** Altai-man_ joined
+[03:12] *** sena_kun left
+[05:10] *** sena_kun joined
+[05:11] *** Altai-man_ left
+[07:09] *** Altai-man_ joined
+[07:12] *** sena_kun left
+[09:10] *** sena_kun joined
+[09:12] *** Altai-man_ left
+[09:17] *** zakharyas joined
+[09:53] *** zakharyas left
+[09:54] *** zakharyas joined
+[10:16] <timotimo> https://imgur.com/TSTDsGd - entropy of CORE.c.setting; brighter means more entropy, the bytes are hilbert-curve-ordered
+
+[10:19] <timotimo> it's sooo pretty
+
+[10:22] <timotimo> it randomly occurs to me that maybe there's value in having really really short constant strings live literally in the bytecode rather than as a reference to the string heap; means less re-use of string objects, though
+
+[10:23] <timotimo> hey brrt, how hard would it be to allow hot (or cold at first) replacement of jitted functions? if we could replace individual jitted functions with hand-optimized versions we could figure out how much more performance we could gain from implementing specific optimizations, and what's still slow after optimizing the crap out of some jitted code
+
+[10:29] <timotimo> okay what are those multiple kilobytes of 00 80 00 80 00 80 00 80 near the start of CORE.c.setting.moarvm
+
+[10:36] *** robertle joined
+[10:38] <nine> timotimo: is https://gist.github.com/niner/63a718023aba72e0dffc39c1ccd84e32 helpful for finding that out?
+
+[10:39] <timotimo> probably!
+
+[10:40] <nine> I guess I really ought to put this into a proper module
+
+[10:41] <nine> The ByteReader as well
+
+[10:42] <timotimo> ok ill introduce a new string heap storage type: number
+
+[10:43] <timotimo> theres like 16k numbers in the string heap
+
+[10:44] <timotimo> from 0 up by ones probably
+
+[10:44] <nine> Makes one wonder where we actually need stringified numbers in the setting?
+
+[10:44] <timotimo> ids
+
+[10:44] <timotimo> cuuids maybe
+
+[10:45] <timotimo> cannot type well atm
+
+[10:45] <timotimo> cat stole one of my hands
+
+[10:58] *** zakharyas1 joined
+[10:59] *** zakharyas left
+[11:02] <timotimo> hum. this seems to be frames data
+
+[11:07] <timotimo> frames data includes handlers, maybe that's where a lot of space goes
+
+[11:08] <timotimo> C8: <unit-outer> (cuid: 16383), bytecode at 85F480
+
+[11:08] <timotimo> 106: <unit> (cuid: 16384), bytecode at 85F4B8
+
+[11:09] <timotimo> 5F4E:  (cuid: 1), bytecode at 8764E0
+
+[11:09] <timotimo> m: say 0x5f4e - 0x106
+
+[11:09] <camelia> rakudo-moar 348d54dfa: OUTPUT: «24136␤»
+
+[11:09] <timotimo> that's one enormous frame
+
+[11:09] *** Altai-man_ joined
+[11:10] <timotimo> it does have boatloads of lexical vars
+
+[11:12] *** sena_kun left
+[11:17] <lizmat> perhaps some unicode related data ?
+
+[11:17] <lizmat> or the magic increment table ?
+
+[11:22] <timotimo> i think that'd be a lot smaller than anything we see here
+
+[11:24] <lizmat> ah, interesting...
+
+[11:32] <timotimo> btw that entropy picture was generated with binvis.io, a very pretty tool
+
+[11:41] <timotimo> so all these 0080 (really 0008) values are definitely present in the "local variable types" data segment; it just says "all those registers are obj typed"
+
+[11:42] <timotimo> that one frame has 5264 locals, each of which take 2 bytes
+
+[11:42] <timotimo> that's already 10 kilobytes
+
+[11:43] <timotimo> there's also 753 lexicals, which first get a list of names (string references, which are 4 bytes each) and then entries of 6 bytes each
+
+[11:44] <timotimo> so 10 bytes times 753 is 7530 bytes, another ~7 kilobytes
+
+[11:45] <timotimo> and then there's the 94248 bytes of bytecode
+
+[11:49] <timotimo> they live in another region, though
+
+[11:50] <timotimo> as i understand it, the bytecode of the unit frame is a long row of getcode + capturelex or something like that
+
+[11:52] <timotimo> OK, first a long row of getcode + capturelex, then a long row of getcode + takeclosure
+
+[11:53] <timotimo> after that it gets less monotonous; getcodes to store frames in locals, some calls to "resolve" methods, stuff being called, stuff having sink called on it, ...
+
+[11:54] <timotimo> may be interesting to have a look what all of these frames are that are just called in void context
+
+[11:56] <lizmat> indeed... :-)
+
+[11:57] <timotimo> i see some empty class bodies
+
+[11:58] <timotimo> the code on the other hand is not empty :)
+
+[11:59] <timotimo> it generates a getcode + takeclosure for another frame (that's even emptier), then checkarity, paramnamesused, then saves the outer $_ to a register and returns after that
+
+[11:59] <timotimo> the inner frame that's even emptier does just checkarity, paramnamesused, wval (for what i assume to be Nil) and return_o on the value
+
+[12:02] <timotimo> there's also a frame full of "getcode, push_o" for a whole bunch of frames, perhaps all of them
+
+[12:03] <timotimo> it's called by the "<dependencies+deserialize>" frame
+
+[12:06] <nine> Sounds like the static optimizer could do some good work here
+
+[12:07] <timotimo> i wonder if we can figure out "this class body is completely empty" much earlier
+
+[12:08] <timotimo> nine: what do you think of the idea to allow users (only meant for devs, really) to supply moar with hand-optimized assembly for frames?
+
+[12:09] <nine> I kinda like it
+
+[12:18] <timotimo> just make it hard to use in production :D
+
+[12:19] <lizmat> hmmm... I smell some XS here
+
+[12:20] <timotimo> no, not for users!
+
+[12:20] <timotimo> bad liz! :)
+
+[12:21] <lizmat> https://www.reddit.com/r/rakulang/comments/eou2zy/how_do_you_use_file_system_sockets/  # isn't that what Kaipei is working on ?
+
+[12:21] <lizmat> users will find out  :-)
+
+[12:21] <timotimo> we have to make the tool clumsy enough so that it's not even worth attempting
+
+[12:22] <timotimo> but still usable for a core dev
+
+[12:22] <timotimo> torture the implementors for the sake of the users :) :) :)
+
+[12:22] <lizmat> and you think XS is not clumsy ?
+
+[12:22] <lizmat> :-)
+
+[12:22] <timotimo> could be clumsier
+
+[12:22] <lizmat> I'm just saying, let us be careful what we're doing here
+
+[12:22] <lizmat> I'm not against it  :-)
+
+[12:23] <timotimo> it'll be a compile-time option that's off by default, at the very least
+
+[12:26] <timotimo> so, storing the types of local variables in some more efficient format will make skipping through frames (so that lazy deserialization can skip some work) a little more complex, as it's got to figure out the size of the local var types blob somehow
+
+[12:27] <timotimo> of course, the local var type blob can start with a size
+
+[12:28] *** zakharyas1 left
+[12:35] <timotimo> highly scientific waffling gives me the following data point: there's 187_803 locals in total in core.c.setting
+
+[12:35] <timotimo> only 29_578 of those are not obj typed
+
+[12:37] <timotimo> m: say 187803 * 2 / 1024; say (187803 - 29578) * 2 / 1024
+
+[12:37] <camelia> rakudo-moar 7b0751884: OUTPUT: «366.802734␤309.033203␤»
+
+[12:38] <timotimo> if there were zero overhead to storing non-obj locals, this is how much smaller core.c.setting.moarvm could become
+
+[12:38] <timotimo> (though my rakude is a little out of date)
+
+[13:10] *** sena_kun joined
+[13:12] *** Altai-man_ left
+[13:55] *** benchable6 left
+[13:56] *** greppable6 left
+[13:56] *** shareable6 left
+[13:56] *** nativecallable6 left
+[13:56] *** unicodable6 left
+[13:56] *** evalable6 left
+[13:56] *** tellable6 left
+[13:56] *** notable6 left
+[13:57] *** reportable6 left
+[13:57] *** quotable6 left
+[13:58] *** squashable6 left
+[13:58] *** bisectable6 left
+[13:58] *** releasable6 left
+[13:58] *** committable6 left
+[13:58] *** sourceable6 left
+[13:59] *** statisfiable6 left
+[13:59] *** coverable6 left
+[13:59] *** bloatable6 left
+[14:11] *** lucasb joined
+[14:11] *** zakharyas joined
+[14:20] *** shareable6 joined
+[14:20] *** greppable6 joined
+[14:20] *** nativecallable6 joined
+[14:20] *** benchable6 joined
+[14:37] *** quotable6 joined
+[14:38] *** tbrowder joined
+[14:38] *** unicodable6 joined
+[14:38] *** reportable6 joined
+[14:38] *** notable6 joined
+[14:40] *** evalable6 joined
+[14:41] *** tellable6 joined
+[14:51] <Guest78373> libuv 1.34.1 is out: https://github.com/libuv/libuv/blob/v1.x/ChangeLog
+
+[14:56] *** bloatable6 joined
+[14:56] *** coverable6 joined
+[14:57] *** statisfiable6 joined
+[14:57] *** bisectable6 joined
+[14:57] *** sourceable6 joined
+[14:58] *** releasable6 joined
+[14:58] *** committable6 joined
+[14:58] *** squashable6 joined
+[15:09] *** Altai-man_ joined
+[15:12] *** sena_kun left
+[16:06] <timotimo> dang, getting serialization not to blow up is ... a thing
+
+[16:35] *** domidumont joined
+[17:03] <timotimo> nine: you don't happen to want to help debug my dreck? :) :)
+
+[17:08] *** zakharyas left
+[17:10] *** sena_kun joined
+[17:11] *** Altai-man_ left
+[17:13] *** zakharyas joined
+[17:13] <nine> timotimo: ah, sorry, I'm on my way out
+
+[17:18] <timotimo> that's no problem
+
+[17:18] <timotimo> i'll take a nap, maybe things will look clearer after that
+
+[17:24] *** zakharyas left
+[18:01] *** zakharyas joined
+[18:23] *** sena_kun left
+[18:24] *** MasterDuke joined
+[18:26] <MasterDuke> i now have nqp building and passing `make m-test` (minus one test where a negative value is no longer allowed in the libtommath function, but that's an easy fix) with my use_libtommath_v1.20 moarvm branch. rakudo builds and passes most spectests, but only if i set MVM_JIT_DISABLE=1
+
+[18:29] *** SmokeMachine left
+[18:30] <MasterDuke> if i don't disable the jit, i get a segv in MVM_p6bigint_store_as_mp_int, at https://github.com/MasterDuke17/MoarVM/blob/use_libtommath_v1.2.0_for_real_maybe/src/6model/reprs/P6bigint.c#L107
+
+[18:30] <MasterDuke> anybody up for helping to debug
+
+[18:31] *** kawaii left
+[18:33] *** sena_kun joined
+[18:33] *** Geth left
+[18:33] *** zakharyas left
+[18:34] *** kawaii joined
+[19:06] <MasterDuke> i assume it must be one of my changes to the mp_(g|s)et_* functions, but i haven't figured out which one yet
+
+[19:11] *** sena_kun left
+[19:26] *** sena_kun joined
+[19:30] <MasterDuke> also, timotimo++, glad to see you're back
+
+[19:51] *** domidumont left
+[20:37] *** Geth joined
+[20:42] *** zakharyas joined
+[20:55] *** AlexDaniel left
+[21:05] *** MasterDuke left
+[21:12] *** sena_kun left
+[21:27] *** sena_kun joined
+[21:38] *** lucasb left
+[21:45] *** zakharyas left
+[22:01] *** AlexDaniel joined
+[22:01] *** AlexDaniel left
+[22:01] *** AlexDaniel joined
+[22:40] *** sena_kun left
+[22:56] *** sena_kun joined

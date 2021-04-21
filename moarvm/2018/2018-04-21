@@ -1,0 +1,270 @@
+[01:28] *** Kaiepi joined
+[01:55] *** ilbot3 joined
+[01:57] *** FROGGS_ joined
+[02:04] *** MasterDuke joined
+[03:59] *** MasterDuke joined
+[05:03] *** robertle_ joined
+[05:59] *** lizmat joined
+[07:43] <nine> I seem to remember fixing some FSA_SIZE_DEBUG related bug of the "how could this ever have worked" variety a couple weeks back
+
+[08:21] *** domidumont joined
+[08:27] *** domidumont joined
+[10:04] *** domidumont joined
+[10:20] <dogbert17> nine: I'm reasonably certain that the problem we're hunting was introduced in https://github.com/MoarVM/MoarVM/commit/a7bb6f0d2797e9eeb049ae05bf8f8caa9d3ba86b
+
+[10:25] <dogbert17> the location of the changes in the commit seems to match the ASAN output posted by nwc10++
+
+[10:25] <dogbert17> http://paste.scsys.co.uk/577152
+
+[10:26] <AlexDaniel> is that revertable?
+
+[10:28] <dogbert17> it would be nice if nine, jnthn, brrt or jnthn gave it a once over. With any luck it's a 'doh' problem :)
+
+[10:29] <dogbert17> oops meant timotimo instead of jnthn twice
+
+[10:30] <AlexDaniel> dogbert17: can you ticket it?
+
+[10:32] <dogbert17> I guess so, to you want it in the rakudo repo?
+
+[10:32] <dogbert17> s/to/do/
+
+[10:32] <AlexDaniel> yes probably
+
+[10:33] <AlexDaniel> it's hard for me to tell how critical that is, especially given that I haven't seen any crashes lately
+
+[10:34] <AlexDaniel> but would be great if someone can take an educated look :)
+
+[10:38] <dogbert17> AlexDaniel: https://github.com/rakudo/rakudo/issues/1752
+
+[10:42] <AlexDaniel> dogbert17++
+
+[10:50] <jnthn> Does it only happen under the FSA debug flag, or does it show up without it?
+
+[10:51] <timotimo> could be an off-by-one, though
+
+[10:51] <timotimo> ah, no, it only does that ++ on the very first alloc
+
+[10:51] <jnthn> The change is quite isolated, though, so we can easily revert it, though we'd gain back a different bug
+
+[10:52] <jnthn> I can perhaps have a closer look later on today
+
+[10:52] <jnthn> gotta afk for a bit now
+
+[10:52] <timotimo> i might be looking at it right now
+
+[10:52] <jnthn> .oO( Heisendebugging? :P )
+
+[10:53] <nine> jnthn: I think it's just with the debug flag. I've seen those, too. But considering that FSA was completely broken before my fix, I didn't think it all that important
+
+[10:54] <timotimo> jnthn: we don't increment the index atomically, but that's not likely an issue, right?
+
+[10:54] <timotimo> oh, we still have the lock for writing
+
+[10:54] <nine> IOW I think the all_scs commit just exposed more bugs already existing in FSA debug
+
+[11:06] <timotimo> add all scs entry: next idx vs alloc: 63 64
+
+[11:07] <timotimo> ==9729== Invalid write of size 8
+
+[11:07] <timotimo> ==9729==    at 0x5087047: MVM_sc_add_all_scs_entry (sc.c:80)
+
+[11:11] <timotimo> ==9729==  Address 0x846e288 is 0 bytes after a block of size 520 alloc'd
+
+[11:11] <timotimo> m: say (520 - 8) / 64
+
+[11:11] <camelia> rakudo-moar 8f3237c28: OUTPUT: «8␤»
+
+[11:14] <timotimo> i think i got it
+
+[11:20] <timotimo> somehow it now ends up putting the memory body instead of the debug struct (i.e. with the size info in front) into the safepoint free queue
+
+[11:22] <nine> timotimo: there was (and apparently still is) some confusion about whether pointers point to the body or the whole struct in the FSA debug code
+
+[11:22] <timotimo> yeah, a little
+
+[11:22] <timotimo> gotta grab some hayfever meds from the only pharmacy that's still open at this hour :P
+
+[11:23] <timotimo> oh, hm.
+
+[11:25] <timotimo> yeah, fixed_size_realloc_at_safepoint currently uses fixed_size_alloc to create the new spot, but returns the debug blob's inner memory pointer plus one size entry
+
+[11:25] <timotimo> i should have the right fix this time when i return
+
+[11:33] <nine> timotimo++
+
+[12:04] <timotimo> that test file now runs without errors
+
+[12:06] <timotimo> there it is
+
+[12:06] <Geth> ¦ MoarVM: 05d589e5cd | (Timo Paulssen)++ | src/core/fixedsizealloc.c
+
+[12:06] <Geth> ¦ MoarVM: fix confused pointer offsetting from FSA DEBUG
+
+[12:06] <Geth> ¦ MoarVM:
+
+[12:06] <Geth> ¦ MoarVM: it forgot to go back from the allocated struct to
+
+[12:06] <Geth> ¦ MoarVM: get access to the allocation size, but ended up
+
+[12:06] <Geth> ¦ MoarVM: returning a pointer 8 bytes to the right of what
+
+[12:06] <Geth> ¦ MoarVM: it got from fixed_size_alloc, which caused us to
+
+[12:06] <Geth> ¦ MoarVM: write past the end.
+
+[12:06] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/05d589e5cd
+
+[12:41] <AlexDaniel> timotimo: is that it? These were the files: t/p5regex/01-p5regex.t t/qregex/01-qregex.t t/serialization/01-basic.t
+
+[12:41] <timotimo> i only checked the third one
+
+[12:42] <AlexDaniel> can you check the other ones also?
+
+[12:42] <timotimo> p5regex is fine
+
+[12:42] <AlexDaniel> and close R#1752 if they're ok :)
+
+[12:42] <synopsebot> R#1752 [open]: https://github.com/rakudo/rakudo/issues/1752 [regression][⚠ blocker ⚠] Multiple errors/crashes when running nqp tests and spectest with FSA_SIZE_DEBUG=1
+
+[12:43] <timotimo> why is that a blocker? :)
+
+[12:43] <timotimo> ==3692== ERROR SUMMARY: 0 errors from 0 contexts (suppressed: 0 from 0)
+
+[12:44] <timotimo> closed
+
+[12:44] <AlexDaniel> timotimo: thank you!
+
+[12:48] <timotimo> YW
+
+[12:48] <timotimo> releasable6: status
+
+[12:48] <releasable6> timotimo, Next release in ≈6 hours. 2 blockers. 224 out of 248 commits logged
+
+[12:48] <releasable6> timotimo, Details: https://gist.github.com/aebbcee88230ff646da4cdcf6a06229f
+
+[12:49] <timotimo> OK, so that was the third blocker
+
+[12:49] * AlexDaniel looks at results from toaster right now
+
+[13:41] <dogbert17> timotimo++ (bugfix)
+
+[13:49] <nine> timotimo: I guess it was just marked as blocker because no one knew it it was affecting actual users and it surfaced due to a recent change
+
+[14:50] <timotimo> OK
+
+[15:42] *** ggoebel joined
+[15:55] <AlexDaniel> nine: correct
+
+[15:55] *** ggoebel joined
+[15:57] <AlexDaniel> btw I try to leave a comment whenever anything is marked or unmarked
+
+[15:58] <AlexDaniel> in that case I just pinged a bunch of people, which is probably LTA :)
+
+[16:03] *** ggoebel joined
+[16:03] <AlexDaniel> btw if somebody has any complaints about the release process and stuff, feel free.
+
+[16:03] <AlexDaniel> Like, “hey AlexDaniel, why is this iterable issue wasn't spotted earlier?”
+
+[16:03] <AlexDaniel> I know, I know, I should run toaster more often :)
+
+[16:11] *** zakharyas joined
+[16:14] *** zakharyas joined
+[16:29] *** ggoebel joined
+[16:30] *** zakharyas joined
+[16:44] <MasterDuke> it should get run automatically at some interval. maybe after every nqp bump?
+
+[16:52] *** colomon joined
+[17:00] *** ggoebel joined
+[17:09] *** MasterDuke joined
+[17:15] *** robertle_ joined
+[17:35] <AlexDaniel> MasterDuke: well, if someone makes it faster by not installing already-tested dependencies, then maybe
+
+[17:35] <AlexDaniel> like, then it'd be possible to set up a weak VM to do the job
+
+[17:35] <AlexDaniel> (maybe?)
+
+[17:53] <Geth> ¦ MoarVM: 876aa90ee7 | (Stefan Seifert)++ | 2 files
+
+[17:53] <Geth> ¦ MoarVM: Ensure memory blocks in the nursery are aligned where necessary
+
+[17:53] <Geth> ¦ MoarVM:
+
+[17:53] <Geth> ¦ MoarVM: Some architectures are really picky about memory alignment (e.g. armhf for 64
+
+[17:53] <Geth> ¦ MoarVM: bit floats). We already ensure alignment of fields in structs but if we
+
+[17:53] <Geth> ¦ MoarVM: first allocate a memory block with uneven size, the next memory block
+
+[17:53] <Geth> ¦ MoarVM: can end up unaligned and thus all field alignments are off. So round up
+
+[17:53] <Geth> ¦ MoarVM: the block size. Thanks to robertle++ who debugged this and wrote the
+
+[17:53] <Geth> ¦ MoarVM: initial version of the patch.
+
+[17:53] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/876aa90ee7
+
+[17:59] *** zakharyas joined
+[18:29] <MasterDuke> timotimo: did you get a segv when trying to --profile that MQTT test file?
+
+[18:29] <timotimo> i think i did
+
+[18:29] <timotimo> unless of course i ran it with valgrind :)
+
+[18:31] <MasterDuke> did your backtrace look like this? https://gist.github.com/MasterDuke17/40aa0d88f0767684d50c61aebfd54f4c
+
+[18:32] <timotimo> well, that's just a "the jit is active and backtraces are pretty much complete blatant lies" situation
+
+[18:33] <MasterDuke> fwiw, i don't get a segv if i disable the jit
+
+[18:33] <MasterDuke> but i do get `MoarVM panic: Internal error: zeroed target thread ID in work pass` when it actually start to write the profile
+
+[18:34] <timotimo> yeah, it somehow has trouble writing out the profile, even though it should be straightforward code at that point
+
+[18:34] <timotimo> that'll definitely be interesting to figure out :)
+
+[18:34] <MasterDuke> gist updated with a backtrace
+
+[18:39] <timotimo> backtraces for this kind of panic are rarely helpful :(
+
+[18:39] <timotimo> most of them look the exact same
+
+[18:41] <MasterDuke> just got `MoarVM panic: Heap corruption detected: pointer 0x7f203a7a29a0 to past fromspace` even with the jit disabled
+
+[18:43] <timotimo> yeah
+
+[18:44] <MasterDuke> if i catch that again would a backtrace be useful?
+
+[18:45] <timotimo> perhaps, but unlikely :(
+
+[18:49] <MasterDuke> gist updated
+
+[18:51] <timotimo> this is the kind of error that hopefully gc debugging can more easily find
+
+[18:53] <MasterDuke> you mean enable GC_DEBUG?
+
+[18:54] <timotimo> yes
+
+[19:03] <MasterDuke> gist updated with a new segv and a couple new panics
+
+[19:17] <AlexDaniel> MasterDuke: what is this MQTT thingie? I don't think I've seen it
+
+[19:18] <timotimo> a message queue or publish/subscribe thing that's used in IoT a lot
+
+[19:18] <AlexDaniel> no I mean the segv
+
+[19:19] <timotimo> oh
+
+[19:19] <timotimo> trying to profile a module from the ecosystem
+
+[19:19] <timotimo> that's what that has to do with that
+
+[19:20] <AlexDaniel> that's not a new issue right?
+
+[19:58] *** zakharyas joined
+[20:24] *** domidumont joined
+[21:04] <Kaiepi> if i wanted to write some code to handle casting between char and wchar_t strings, where would be the most appropriate place to put it?
+
+[21:04] <Kaiepi> a few copies of the same functions exist, but they're all static iirc
+
+[21:17] *** Kaiepi joined
+[21:57] *** lizmat joined

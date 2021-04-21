@@ -1,0 +1,355 @@
+[05:52] *** vendethiel joined
+[07:17] *** brrt joined
+[08:15] *** kjs_ joined
+[08:16] *** vendethiel joined
+[08:18] * JimmyZ is blocked on alias_analysis branch because luajit using trace compiler and he does't know how to search the related ops in cfg to use alias analysis in a cheap way.
+
+[08:24] <brrt> ok, JimmyZ, I think I can help you there a bit
+
+[08:25] <brrt> although my knowledge of this is purely theorethical
+
+[08:25] <brrt> (is it theorethical or theoretical?)
+
+[08:26] <brrt> spesh computes the SSA 'form' of the graph
+
+[08:27] <brrt> which means that each register operand of each instruction has the original register index as well as the ssa-register index
+
+[08:28] *** rurban joined
+[08:28] <brrt> this ssa register index is really the same as a identifier to when the value was last set
+
+[08:30] <brrt> so if you have an instruction with a source register operand and whish to know where this was computed, you walk back to find an instruction with a destination register operand with the same ssa index
+
+[08:31] <brrt> i... think this is always possible walking back
+
+[08:31] <brrt> but jnthn might know better
+
+[08:31] <brrt> (because of phi nodes)
+
+[08:34] <brrt> it is potentially possible, if a basic block is out of order, to use a ssa register which was defined later, but at least it must be on the list of predecessors
+
+[08:34] <brrt> in fact, that seems to be only possible if there is a single predecessor, otherwise there must be a phi node?
+
+[08:35] <brrt> or the code would use an undefined register
+
+[08:35] <brrt> e.g. suppose we have the following linear sequence: a -> b -> c
+
+[08:35] <brrt> and the following code sequence (using unconditional jumps): a -> c -> b
+
+[08:36] <brrt> and b uses register 42, which has been set in c but not in a
+
+[08:37] <brrt> then you should be able to find register 42's (only) assignment by walking from b to it's predecessor c, but not in a
+
+[08:38] <brrt> now what i'm not sure of, is if the linear predecessor is necessarily a predecessor in spesh, i think not
+
+[08:40] *** LLamaRider joined
+[08:41] *** vendethiel joined
+[09:09] <JimmyZ> It's really hard :)
+
+[09:12] <JimmyZ> brrt: I want to exchange orig and i in MVMSpeshOperand, but it cause segfault in jit
+
+[09:13] <JimmyZ> disable jit works fine
+
+[09:13] <brrt> don't excahnge orig and i
+
+[09:13] <brrt> that doesn't make sense
+
+[09:13] <JimmyZ> why?
+
+[09:14] *** vendethiel joined
+[09:14] <brrt> for one thing, because some i's start from (1 << 16) and upward
+
+[09:15] <brrt> which is much larger than the register size
+
+[09:15] <brrt> if any code uses the reg.i in the JIT, then that is very much a bug
+
+[09:15] <brrt> (moarvm register array size that is)
+
+[09:15] <JimmyZ> I want to do it because I want to cover reg to lit_i64 for esay test is two Oprerand is equal or not
+
+[09:15] <brrt> but also because the orig refer to actual locations  that are actually allocated, and i is really an identifier
+
+[09:16] <brrt> cover = convert?
+
+[09:16] <JimmyZ> yeah
+
+[09:16] <brrt> hmmm
+
+[09:16] <brrt> when do you do that?
+
+[09:17] <JimmyZ> alias analysis
+
+[09:18] <brrt> but... i'm not sure i get it
+
+[09:18] <brrt> how do you wish to do that?
+
+[09:18] <brrt> is there a commit that does this?
+
+[09:18] <JimmyZ> brrt: https://github.com/MoarVM/MoarVM/blob/alias_analysis/src/spesh/mem.c#L77
+
+[09:22] <brrt> uhm... why'd you do that
+
+[09:22] <brrt> there are plenty of cases in which the upper bits of the i64 are not set :-)
+
+[09:22] <brrt> you might accidently see them as equal, or not as equal
+
+[09:23] <JimmyZ> I need test orig and i together?
+
+[09:23] <brrt> hmmm
+
+[09:23] <brrt> why not check for equality of reg
+
+[09:23] <brrt> and have the compiler figure the details out
+
+[09:25] <JimmyZ> test.c:21:11: error: invalid operands to binary == (have ‘struct <anonymous>’ and ‘struct <anonymous>’)
+
+[09:25] <JimmyZ> if(test.r == test2.r) {
+
+[09:25] <JimmyZ> y
+
+[09:25] <JimmyZ> like this?
+
+[09:25] <brrt> hmmm
+
+[09:25] <brrt> ok, when i'm wrong i'm wrong
+
+[09:25] <brrt> yes like that :-)
+
+[09:26] <JimmyZ> luajit does the way by  convert it to a value
+
+[09:26] <brrt> luajit makes a whole lot of assumptions about luajit
+
+[09:27] <brrt> mostly because it was made by one man
+
+[09:27] <brrt> but yeah, does this crash in the JIT?
+
+[09:27] <JimmyZ> brrt, it crash if I changed it
+
+[09:27] <brrt> hmmm
+
+[09:28] *** carlin_ joined
+[09:28] *** FROGGS__ joined
+[09:28] <brrt> if this code would crash the JIT it would be a JIT error :-) so that's one thing
+
+[09:28] <JimmyZ> and LARGE_INTEGER on windows does same thing like covert two small int to big int
+
+[09:34] <brrt> ok, let's suppose it is ok :-)
+
+[09:35] *** synopsebot joined
+[09:36] <brrt> i would think that having the same i would imply the same orig
+
+[09:37] <JimmyZ> but same version not means same orig
+
+[09:38] <JimmyZ> is i means version?
+
+[09:44] <brrt> no, i is identifier
+
+[09:44] <brrt> and it identifies an assignment :-)
+
+[09:45] <brrt> so - unless something like set is special cased and keeps i equal over different registers - same i means same orig
+
+[09:45] <brrt> but i really doubt that set is special cased
+
+[09:48] *** vendethiel joined
+[09:50] <JimmyZ> for r(1) ,Is i = 1?
+
+[09:51] <JimmyZ> looking at codes in rename_locals, looks like it is
+
+[09:52] <JimmyZ> r2(1)
+
+[09:53] <brrt> yes
+
+[09:53] <brrt> hmmm
+
+[09:53] <brrt> ok, maybe jnthn can shed some light there
+
+[09:53] <brrt> because that is very much true :-)
+
+[09:53] <brrt> maybe i is really only an identifier for the same register
+
+[09:55] <JimmyZ> yeah, but I still need to test if it's the same reg, convert them into a value means I only need to test once
+
+[09:55] <JimmyZ> if I exchange orig/i then I can do it,but it breaks jit :(
+
+[10:14] <brrt> how do you wish to exchange orig and i
+
+[10:16] <brrt> if i understand it like you say it, then it doesn't make sense, not just for the JIT
+
+[10:17] <JimmyZ> better memory algin
+
+[10:17] <brrt> ah..a
+
+[10:17] <brrt> as in, in the struct
+
+[10:18] <brrt> ok, that's pretty wrong
+
+[10:18] <brrt> :-)
+
+[10:18] <brrt> ok, can you file a github issue with a patch so that i can test it?
+
+[10:18] <JimmyZ> https://gist.github.com/zhuomingliang/6c25e5aadcfcf4d538ad
+
+[10:19] <JimmyZ> brrt: I have a test, if int32 is after int16, then .r is not the same
+
+[10:20] <JimmyZ> what patch? exchange?  alias_analysis branch has the patch
+
+[10:20] <JimmyZ> so you could test it on that branch
+
+[10:21] <brrt> ok, let me read that :-)
+
+[10:21] <JimmyZ> https://github.com/MoarVM/MoarVM/commit/e791ce3647363a857c68e0ce8fde7f5fbee31c1c#diff-5a998eb2acce5ca1acb151cd03bb2d52L198
+
+[10:23] <brrt> quite right
+
+[10:23] <brrt> if you change them, they're not equal
+
+[10:24] <brrt> huh
+
+[10:24] <brrt> doesn't that add two orig fields
+
+[10:24] <brrt> oh no
+
+[10:24] <brrt> i'm wrong
+
+[10:24] <brrt> nm
+
+[10:25] <brrt> hmm
+
+[10:25] <brrt> i still don't like the sneaky conversion to lit_i64 for comparison :-)
+
+[10:25] <brrt> but still
+
+[10:25] <brrt> if that breaks the JIT, that's a JIT bug
+
+[10:25] <brrt> and I have to investigate
+
+[10:25] <brrt> the JIT should be reading .orig at all times
+
+[10:30] <JimmyZ> brrt: I don't like conversion too, but since it saves a test op ... and others does the same way :P
+
+[10:30] <JimmyZ> decommute
+
+[10:37] <brrt> that doesn't convince me though
+
+[10:37] <brrt> but i'll change it and see what happens
+
+[10:54] <jnthn> Do NOT compare MVMSpeshOperand.reg by converting it. Just write a function that compraes the orig and the i. Too much risk of screw-up on machines of different endianness etc otherwise. Not to mention confusing code.
+
+[10:54] <jnthn> This stuff is hard enough already. Being more clever than you need to be in the code is just unhelpful.
+
+[10:55] <jnthn> I read the allocation sinking stuff on the plane. It's not especially clear how to apply it in a MoarVM scenario.
+
+[10:55] <jnthn> Because it is muchly defined in terms of trace JIT things.
+
+[10:57] *** vendethiel joined
+[10:57] <brrt> (on the plane? flying again)
+
+[10:58] <jnthn> A few days ago :)
+
+[10:58] <brrt> :-)
+
+[10:58] <jnthn> To family, for Christmas
+
+[10:58] <brrt> nice
+
+[10:58] <brrt> i'll have to go by train tomorrow
+
+[10:58] <brrt> and i'll be reading a long reader on system analysis and design rather than code :-)
+
+[10:59] <jnthn> Doing that after Christmas to get to other bit of family. :)
+
+[10:59] <brrt> i suspect the JIT uses lit_i16 where it should use reg.orig somewhere
+
+[10:59] <jnthn> Yeah, that is possible
+
+[11:00] <jnthn> orig is the actual register in the original bytecode, and i is the SSA version. We actually do this just like the paper, that is write variables with a version index.
+
+[11:00] <jnthn> Then conversion out of SSA form just involves dropping the versions again.
+
+[11:00] <brrt> so i is a version index? why do some of them get so large
+
+[11:01] <brrt> or is that an artefact of the proces
+
+[11:01] <jnthn> Usually because long routine + compiler tries to re-use registers, and SSA is unpicking all of that.
+
+[11:01] <brrt> aha
+
+[11:01] <brrt> hmm
+
+[11:02] <brrt> so when i said that some start counting from 1<<16 up, i was wrong?
+
+[11:02] <brrt> :-)
+
+[11:02] <jnthn> I thought it went from 0 for versions
+
+[11:02] <jnthn> And they're numbered via the dominance tree iirc
+
+[11:03] <jnthn> Anyways, seems family have food ready for me so I should go and eat it :)
+
+[11:03] <jnthn> Have a nice Christmas, y'all :)
+
+[11:05] <brrt> yes, you too
+
+[11:05] <brrt> merry christmas
+
+[11:05] <brrt> (also, how is everybody already celebrating christmas, /me is still at work)
+
+[11:06] <FROGGS__> I'm off work since monday, which was a good decision because there was so much to prep
+
+[11:35] *** FROGGS[mobile] joined
+[11:48] <JimmyZ> jnthn: merry christmas
+
+[12:00] * JimmyZ still is at work too
+
+[12:58] *** kjs_ joined
+[14:32] *** kjs_ joined
+[15:14] <JimmyZ> jnthn: about Because it is muchly defined in terms of trace JIT things.  Didn't we have a roadmap about Trace JIT? ;)
+
+[15:15] <timotimo> JimmyZ: what does the alias analysis thing do so far? or what can it already do/what can be implemented using it?
+
+[15:17] <JimmyZ> timotimo: the Allocation sinking need it. and I find moarvm's alias analysis is much more complex than luajit :(
+
+[15:18] <timotimo> i feared as much :(
+
+[15:19] <JimmyZ> well, not only Allocation sinking need it, itself is very nice thing
+
+[15:20] <timotimo> right
+
+[15:20] <JimmyZ> i.e: x = obj.x; .....; y = obj.x + i;   and make the later obj.x a alias to x is very nice
+
+[15:21] <JimmyZ> or, e = @a[x+1]; ..... ;  y = @a[x+1] + i;
+
+[15:21] <timotimo> ah
+
+[15:22] <timotimo> so it's a tiny bit like common subexpression elimination
+
+[15:26] <JimmyZ> oh yeah, a bit like
+
+[15:27] <JimmyZ> x+1 part is cse and @a[x] is aa, me thinks.
+
+[15:27] <JimmyZ> and sometimes I'm confused ...
+
+[15:31] <JimmyZ> timotimo: alias analysis mostly is for two object, cse is not
+
+[15:33] <JimmyZ> like obj1.x and obj2.x, is obj1 and obj2 may be ailas
+
+[15:36] *** kjs_ joined
+[15:46] <JimmyZ> so the two example is actullay cse .... and ojb1 vs obj2 is aa
+
+[15:54] <dalek> MoarVM/alias_analysis: 8f5a7ab | (Jimmy Zhuo)++ | src/spesh/mem.c:
+
+[15:54] <dalek> MoarVM/alias_analysis: Add basic alias analysis for object
+
+[15:54] <dalek> MoarVM/alias_analysis: review: https://github.com/MoarVM/MoarVM/commit/8f5a7ab181
+
+[15:54] <JimmyZ> timotimo: http://en.wikipedia.org/wiki/Alias_analysis
+
+[16:24] *** rurban joined
+[16:49] *** Ven joined
+[16:50] *** Ven joined
+[17:03] *** Ven joined
+[17:36] *** kjs_ joined
+[19:30] *** kjs_ joined
+[19:48] *** FROGGS_ joined
+[21:16] *** kjs_ joined
+[21:49] *** zakharyas joined
+[23:13] *** Ven joined

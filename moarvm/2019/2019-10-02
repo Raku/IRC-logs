@@ -1,0 +1,432 @@
+[00:18] *** anatofuz joined
+[01:02] *** anatofuz left
+[01:16] *** anatofuz joined
+[02:24] *** anatofuz left
+[03:05] *** anatofuz joined
+[03:52] *** anatofuz_ joined
+[03:54] *** anatofuz left
+[03:56] *** anatofuz_ left
+[03:57] *** anatofuz joined
+[03:57] *** anatofuz left
+[03:58] *** anatofuz joined
+[04:18] *** anatofuz_ joined
+[04:18] *** anatofuz_ left
+[04:19] *** anatofuz_ joined
+[04:20] *** anatofuz left
+[04:20] *** anatofuz_ left
+[04:22] *** anatofuz joined
+[04:25] *** anatofuz left
+[04:25] *** anatofuz joined
+[04:38] *** AlexDaniel left
+[04:43] *** jnthn joined
+[05:11] *** anatofuz_ joined
+[05:13] *** anatofuz left
+[05:14] *** anatofuz_ left
+[05:15] *** anatofuz joined
+[05:32] *** nebuchadnezzar left
+[05:34] *** nebuchadnezzar joined
+[05:37] *** anatofuz left
+[05:43] *** anatofuz joined
+[06:00] *** anatofuz left
+[06:01] *** anatofuz joined
+[06:19] *** domidumont joined
+[06:33] *** domidumont left
+[06:34] *** domidumont joined
+[06:58] *** AlexDaniel joined
+[06:58] *** AlexDaniel left
+[06:58] *** AlexDaniel joined
+[07:14] *** anatofuz_ joined
+[07:16] *** anatofuz_ left
+[07:17] *** anatofuz left
+[07:24] *** sena_kun joined
+[07:25] *** anatofuz joined
+[07:30] *** anatofuz left
+[07:34] *** anatofuz joined
+[07:34] *** anatofuz left
+[07:34] *** anatofuz joined
+[07:51] *** zakharyas joined
+[08:53] *** anatofuz_ joined
+[08:57] *** anatofuz left
+[08:58] *** anatofuz_ left
+[09:07] *** anatofuz joined
+[09:33] <nine> The object gets moved by the GC as a spesh log entry's param.type. At that point MVMProfileCallNode referring to it as alloc->type already exists and seems to be part of tc->prof_data's call_tree. Still no idea why it didn't get marked as such at that point.
+
+[09:36] *** domidumont left
+[09:39] *** domidumont joined
+[09:51] <nine> Actually there's a bit of a trap in rr: when you reverse-execute a program it will not clear memory past a malloc, i.e. data written to that memory block later on will already be there before the malloc. So my assessment that the MVMProfileCallNode already exists as is part of the call_tree may be wrong.
+
+[09:52] <nine> I haven't got definitive proof of that yet, as the node is several dozen layers deep in the call_tree and traversing that manually doesn't sound attractive.
+
+[09:55] <nine> Ah, there's rwatch for trapping that read. And...it doesn't fire. But with that I can probably bisect the predecessor chain to find out at which point it misses.
+
+[09:58] <nine> It's between ((MVMProfileCallNode *) 0x6471420)->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->num_succ
+
+[09:58] <nine> and ((MVMProfileCallNode *) 0x6471420)->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->num_succ
+
+[09:58] <nine> Err ((MVMProfileCallNode *) 0x6471420)->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->pred->num_succ rather
+
+[10:07] *** anatofuz left
+[10:08] *** anatofuz joined
+[10:13] *** anatofuz left
+[10:13] *** anatofuz joined
+[10:19] <nine> OMG it is so blaringly obvious!
+
+[10:20] <jnthn> I was about to ask if there's a cat on your keyboard... :)
+
+[10:21] <nine> How on earth can almost a century of combined programming experience miss this?
+
+[10:21] <jnthn> :)
+
+[10:21] * jnthn looks forward to the commit
+
+[10:21] <nine> We reallocate the list to make more space: https://github.com/MoarVM/MoarVM/blob/master/src/profiler/instrument.c#L23
+
+[10:21] <nine> But we never add the node to the list in that case!
+
+[10:23] <jnthn> Oops
+
+[10:23] <nine> I immediately spotted the harmless off-by-one which is usually hard to find. I saw the unused code. But this simple beginner's mistake escaped me :)
+
+[10:29] *** anatofuz left
+[10:29] *** domidumont left
+[10:30] *** anatofuz joined
+[10:34] *** anatofuz left
+[10:55] <Geth_> ¦ MoarVM: 81f9ccdfa5 | (Stefan Seifert)++ | src/profiler/instrument.c
+
+[10:55] <Geth_> ¦ MoarVM: Fix profiler's call graph node getting missed by the GC
+
+[10:55] <Geth_> ¦ MoarVM:
+
+[10:55] <Geth_> ¦ MoarVM: When the NodeWorklist hit its allocated size, add_node would reallocate
+
+[10:55] <Geth_> ¦ MoarVM: the list but then not actually add the node to the resized list. This
+
+[10:55] <Geth_> ¦ MoarVM: made us miss this node during the GC's mark run and led to outdated
+
+[10:55] <Geth_> ¦ MoarVM: object pointers in the allocation list.
+
+[10:55] <Geth_> ¦ MoarVM:
+
+[10:55] <Geth_> ¦ MoarVM: <…commit message has 5 more lines…>
+
+[10:55] <Geth_> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/81f9ccdfa5
+
+[10:57] *** anatofuz joined
+[10:58] <nine> Is there a ticket for this?
+
+[11:07] *** AlexDaniel` left
+[11:12] *** anatofuz left
+[11:12] *** anatofuz joined
+[11:13] *** zakharyas left
+[11:14] *** MasterDuke left
+[11:15] *** anatofuz left
+[11:15] *** anatofuz joined
+[11:19] *** robertle joined
+[11:21] *** AlexDaniel` joined
+[11:31] *** Altai-man_ joined
+[11:32] *** sena_kun left
+[11:35] *** MasterDuke joined
+[11:38] *** domidumont joined
+[11:42] <MasterDuke> nine++
+
+[11:43] *** anatofuz left
+[12:12] *** domidumont left
+[12:13] *** domidumont joined
+[12:23] <Guest23744> nine++, I believe that there are several issues relating to crashing/broken profiles
+
+[12:23] <Guest23744> perhaps they have been fixed by your commit
+
+[12:24] <Guest23744> for example M#1023
+
+[12:24] <synopsebot> M#1023 [open]: https://github.com/MoarVM/MoarVM/issues/1023 SEGV during a --profile
+
+[12:25] <MasterDuke> nine, timotimo: i can now complete a profile of the mqtt test file that's always failed before. however, when i open it in moarperf i see `Error: near line 11: out of memory` and the .sql file seems broken. it's 223mb, but only 19 lines
+
+[12:26] <nine> Guest23744: yes, looks likely
+
+[12:26] <MasterDuke> that's the one i'm talking about
+
+[12:27] <MasterDuke> and yeah, even trying to open the .sql in sqlite on the command line gave the out of memory error (and i have 32gb)
+
+[12:28] <nine> I also think there's an issue in the profiler in general and that disabling inlining helps sort of confirms this. Because why would a call_graph even be more than 256 levels deep in a one liner program? Yes it involves EVAL and the compiler really does create pretty large call stacks. But > 256 is somewhat excessive.
+
+[12:29] <nine> So I'm quite sure that there's still an inlining related callstack growth issue in the profiler. That would probably also explain the extreme memory usage in those examples and the huge profile sizes.
+
+[12:29] *** lucasb joined
+[12:31] <MasterDuke> yeah, that test files runs much much faster when inlining is disabled (while profiling_
+
+[12:37] <Guest23744> M#1019
+
+[12:37] <synopsebot> M#1019 [open]: https://github.com/MoarVM/MoarVM/issues/1019 Code generates huge broken profile
+
+[12:38] <Guest23744> R#3006
+
+[12:38] <synopsebot> R#3006 [open]: https://github.com/rakudo/rakudo/issues/3006 Crash while generating profiling data.
+
+[12:39] <jnthn> nine++
+
+[12:41] <Guest23744> jnthn: you were right, you suspected add_node from the beginning
+
+[12:42] <Guest23744> and now we're officially out of fromspace errors :-)
+
+[12:43] <nine> known ones at least :)
+
+[12:48] <MasterDuke> the example in R #3006 now completes, but it does create a large profile even when disabling inlining
+
+[12:48] <MasterDuke> but maybe it's legitimately large
+
+[12:56] *** zakharyas joined
+[12:59] <MasterDuke> does
+
+[13:00] <MasterDuke> Data::Dump::Tree using threading? or Dom::Tiny or Terminal::ANSIColor?
+
+[13:01] <MasterDuke> because a profile of that example says there were 6 threads active at the end
+
+[13:02] <MasterDuke> and the top 5 functions by inclusive are all Thread and ThreadPoolScheduler stuff
+
+[13:05] *** anatofuz joined
+[13:07] *** anatofuz left
+[13:10] *** anatofuz joined
+[13:13] *** anatofuz_ joined
+[13:17] *** anatofuz left
+[13:26] *** anatofuz_ left
+[13:37] *** anatofuz joined
+[14:00] *** anatofuz left
+[14:21] *** anatofuz joined
+[14:34] *** anatofuz left
+[14:52] <timotimo> nine: thanks for spotting that, that was good
+
+[14:52] <timotimo> i should have just used MVM_VECTOR from the start
+
+[15:02] <nine> Oh, true, that's a thing!
+
+[15:02] <timotimo> well, i'm glad that a more competent engineer (namely nine) is now having a look at the "profile becomes huge when inlining" issue
+
+[15:03] <timotimo> one thing i have identified is that sometimes when doing a throwpayload that "does" a goto, it can skip a prof_leave call
+
+[15:04] <timotimo> maybe prof_enter and prof_leave should just write a value to a register and when doing prof_leave see if it matches, and if not just leave more until it's correct
+
+[15:04] <timotimo> like the address of the profiler node
+
+[15:06] *** robertle left
+[15:39] *** lucasb left
+[15:59] *** domidumont left
+[16:00] *** domidumont joined
+[16:00] *** zakharyas left
+[16:05] *** Kaiepi left
+[16:06] <MasterDuke> timotimo: this look good to you? https://github.com/MoarVM/MoarVM/pull/1185
+
+[16:07] *** Kaiepi joined
+[16:08] *** Kaiepi left
+[16:08] <timotimo> huh, i could have sworn i've put that in in the past
+
+[16:09] <timotimo> but yeah, i think that looks good
+
+[16:09] <MasterDuke> cool
+
+[16:09] <Geth_> ¦ MoarVM: 9f24debe21 | (Daniel Green)++ | src/profiler/instrument.c
+
+[16:09] <Geth_> ¦ MoarVM: Check if subtracting a successor's exclusive...
+
+[16:09] <Geth_> ¦ MoarVM:
+
+[16:09] <Geth_> ¦ MoarVM: time would cause the total exclusive time to underflow. If so, just set
+
+[16:09] <Geth_> ¦ MoarVM: it to 0 instead.
+
+[16:09] <Geth_> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/9f24debe21
+
+[16:09] <Geth_> ¦ MoarVM: 44811cab69 | MasterDuke17++ (committed using GitHub Web editor) | src/profiler/instrument.c
+
+[16:09] <Geth_> ¦ MoarVM: Merge pull request #1185 from MasterDuke17/fix_underflowing_exclusive_times_in_profiles
+
+[16:09] <Geth_> ¦ MoarVM:
+
+[16:09] <Geth_> ¦ MoarVM: Check if subtracting a successor's exclusive...
+
+[16:09] <Geth_> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/44811cab69
+
+[16:18] <MasterDuke> timotimo: btw, any idea why https://gist.github.com/nkh/f8d41e0748c325efc64dae0b0f24f142 (minus the LWP::Simple call) would have 6 threads active?
+
+[16:23] <timotimo> no. try the debug env var for the thread pool scheduler maybe?
+
+[16:23] <MasterDuke> ah right, i knew there was something that would give me more info
+
+[16:26] <MasterDuke> RAKUDO_SCHEDULER_DEBUG_STATUS?
+
+[16:28] <Altai-man_> RAKUDO_SCHEDULER_DEBUG?
+
+[16:28] <MasterDuke> hm, neither RAKUDO_SCHEDULER_DEBUG nor RAKUDO_SCHEDULER_DEBUG_STATUS seem to be useful here
+
+[16:28] <Altai-man_> ah, and STATUS is valid one too, then ignore me
+
+[16:30] <timotimo> the status one is extremely spammy
+
+[16:36] <MasterDuke> i think part of the problem is that the profiling itself is causing some of the symptoms?
+
+[16:38] <MasterDuke> but i thought there was some env var that would log when threads get started and such. but RAKUDO_SCHEDULER_DEBUG creates a log that just says it's creating an affinity worker thread and a general worker thread
+
+[16:42] *** robertle joined
+[17:10] *** domidumont left
+[18:13] <timotimo> profiling shouldn't cause user code threads to be spawned unless the threadpoolscheduler already does something
+
+[18:22] *** Kaiepi joined
+[18:22] <Kaiepi> valgrind's finally usable on openbsd amd64!!
+
+[18:23] <timotimo> \o/
+
+[18:24] <timotimo> now there's no longer any need for anybody to use linux :\
+
+[18:24] *** area51stormer joined
+[18:32] *** area51stormer left
+[18:33] *** lucasb joined
+[18:33] <Kaiepi> can someone review and merge https://github.com/MoarVM/MoarVM/pull/1166 at some point this week?
+
+[18:39] <nine> Kaiepi: I could have a look at the code but I'm not sure about the architectural parts. Having low level operations in the VM try multiple addresses before reporting any error to me sounds too magical for that layer.
+
+[18:40] <nine> Btw. there seem to be leftover debug statements: https://github.com/MoarVM/MoarVM/pull/1166/commits/c6efedda95978174971555487c33c0a9176c1594#diff-97843f97c0e6c89e3949eb42b6a3dcf9R325
+
+[18:41] <Kaiepi> the problem is trying only the first record makes it so you can't connect to addresses you're able to in other languages if it's ipv6 and ipv6 is misconfigured on the machine used
+
+[18:41] <Kaiepi> that was removed in one of the later commits i think
+
+[18:42] <Kaiepi> yeah
+
+[18:43] <Kaiepi> there aren't any printfs left over from while i was writing it
+
+[18:44] <nine> Oh, I clearly see the need for trying multiple addresses. I just wonder if that shouldn't be implemented in a higher layer, e.g. rakudo's IO::Socket::INET::!initialize
+
+[18:46] <nine> Personally I very much prefer reviews where the commits are cleaned up already, i.e. the commits should not reflect your development history with all the detours but should tell the story of how to get from the previous state of the repository to the new state in small, distinct and self-contained steps.
+
+[18:46] <Kaiepi> hm, like giving struct addrinfo a repr and letting rakudo handle them instead?
+
+[18:46] <MasterDuke> timotimo: even if i set RAKUDO_MAX_THREADS=1, the profile still says 6 threads active
+
+[18:47] <Kaiepi> yeah this was originally meant to be just the first 3 but i got kinda sidetracked
+
+[18:47] <nine> yes, that sounds like a way to do it
+
+[18:47] <nine> That way the user could easily override the default by subclassing.
+
+[18:47] <timotimo> could set a breakpoint on the "start" feature
+
+[18:48] <nine> I love the Linux kernel developer's mantra here: the kernel should provide mechanism, not policy. To try those addresses in the order they are returned is a policy. That's subject to change. That we get access to all the addresses is a mechanism that can be used to implement any policy.
+
+[18:49] <MasterDuke> timotimo: ah, good idea
+
+[18:50] <nine> Kaiepi: I now realized that I could have raised these concerns any time in the past few weeks but always thought that I'd have to spend considerable time to dig into the networking stuff first :/ Sorry for the delay
+
+[18:50] <Kaiepi> is that something that could be dealt with after i complete the grant? this wasn't originally part of it since i thought just making the socket op use families/socket types/protocols alone would fix what this addresses at the time of writing
+
+[18:52] <nine> I'd guess yes. I can also just turn this around: if you assure me that this policy thing can be raised to upper layers in a backwards compatible way after a merge, I'm fine with the PR :)
+
+[18:52] <nine> This way you won't have to do it now, just see a clear way how it can be done.
+
+[18:52] <Kaiepi> i can make a problem solving issue for it so i don't forget
+
+[18:54] <timotimo> MasterDuke: can you see any user code being executed on the other threads?
+
+[18:54] <MasterDuke> mostly no
+
+[18:54] <timotimo> you can also search the call graph for "start"
+
+[18:54] <nine> timotimo: what's parent_id in the calls table exactly?
+
+[18:54] <timotimo> that could give you the place where something's done
+
+[18:54] <timotimo> nine: points to another node in the calls table
+
+[18:54] <Kaiepi> one's probably needed anyway since if we're going to be making ops for dns-related stuff there are other ops that could be added as well
+
+[18:54] <timotimo> except i guess for the thread's root node
+
+[18:55] <MasterDuke> timotimo: can i send you a profile?
+
+[18:55] <timotimo> sure
+
+[18:56] <MasterDuke> it's 15mb compressed, how do you want it?
+
+[18:57] <timotimo> sharedrop.io?
+
+[18:57] <timotimo> https://www.sharedrop.io/rooms/802ab925-d8e2-4864-ad3e-ee68f7adedff
+
+[19:00] <timotimo> aha
+
+[19:01] <timotimo>  Thread list <unit-outer> <unit> ddt get_dump get_dump_lines <anon> render_root reset QX shell spawn-internal start
+
+[19:02] <MasterDuke> ah
+
+[19:06] <MasterDuke> `my $width= %+((qx[stty size] || '0 80') ~~ /\d+ \s+ (\d+)/)[0] ;`
+
+[19:07] <MasterDuke> any better way to do that?
+
+[19:08] <timotimo> all ways we have to call out to programs will launch threads because they are all internally implemented with react blocks
+
+[19:09] <timotimo> (unless you use nqp ops)
+
+[19:17] <MasterDuke> wow. i hardcoded the output of `stty size` in my terminal in instead of the qx call. didn't really make anything faster. but `GC runs have taken 32.88% of total run time`
+
+[19:21] <MasterDuke> timotimo: i just got a big red frowny face
+
+[19:22] <MasterDuke> with lots of text in a hover-over that starts with`TypeError: routine is undefined`
+
+[19:23] *** Altai-man_ left
+[19:26] *** Ven`` joined
+[19:42] <dogbert17> is everyone debugging the profiler tonight?
+
+[19:47] <dogbert17> timotimo: are you around?
+
+[19:48] <dogbert17> have an interesting gist, profiling related, for you or anyone else who might be interested: https://gist.github.com/dogbert17/d6291bfbc9b69130a8cd5761f56ba704
+
+[19:49] <MasterDuke> wow, lots going on there
+
+[19:50] <dogbert17> yeah, something suspicious going on there
+
+[19:52] <dogbert17> I am running with the very latest MoarVM as well, i.e. 44811cab69
+
+[19:56] <dogbert17> there problem remains even if spesh is disabled
+
+[19:57] <MasterDuke> any different output if you build moarvm with --valgrind?
+
+[19:57] <dogbert17> let me try
+
+[20:00] <MasterDuke> i can't repro btw
+
+[20:00] <dogbert17> could be because I'm running with an 8k nursery and MVM_GC_DEBUG=1
+
+[20:12] *** AlexDaniel left
+[20:15] *** AlexDaniel joined
+[20:15] *** AlexDaniel left
+[20:15] *** AlexDaniel joined
+[20:26] <nine> timotimo: if you need to reliably detect when a frame was exited again, isn't that what MVMFrameExtra's special_return and special_unwind are for?
+
+[20:48] *** ggoebel left
+[20:52] *** MasterDuke left
+[20:58] *** Kaiepi left
+[21:35] *** anatofuz joined
+[22:02] *** anatofuz left
+[22:03] *** anatofuz joined
+[22:08] *** Kaiepi joined
+[22:08] <timotimo> using special_return is maybe a bit expensive, and i'm not sure if special_return prevents inlining, it might want to
+
+[22:19] <jnthn> I think it's more like "nothing that can have special return can be inlined"
+
+[22:20] <jnthn> But that's no good for profiling, since "how much is inlined" is one of the most interesting things to find out when profiling :)
+
+[22:23] <timotimo> ayup
+
+[22:23] *** anatofuz left
+[22:27] *** Ven`` left
+[22:34] *** anatofuz joined
+[22:39] *** anatofuz left
+[22:45] *** anatofuz joined
+[22:53] *** lucasb left
+[23:12] *** anatofuz left
+[23:15] *** anatofuz joined
+[23:27] *** anatofuz left
+[23:28] *** anatofuz joined
+[23:28] *** anatofuz left
+[23:28] *** anatofuz joined
+[23:44] *** anatofuz left
+[23:44] *** anatofuz joined
+[23:50] *** anatofuz left

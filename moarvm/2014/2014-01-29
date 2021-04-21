@@ -1,0 +1,903 @@
+[00:23] *** tgt joined
+[00:41] *** cognominal joined
+[00:48] *** tgt joined
+[01:32] *** jnap joined
+[01:48] *** tgt joined
+[02:03] *** jnap joined
+[02:21] *** FROGGS_ joined
+[02:31] *** benabik joined
+[02:49] *** tgt joined
+[03:06] *** krunen joined
+[03:50] *** tgt joined
+[04:15] *** dagurval joined
+[04:51] *** tgt joined
+[05:51] *** tgt joined
+[07:22] *** camelia joined
+[07:33] *** camelia joined
+[07:37] *** FROGGS joined
+[08:02] *** tgt joined
+[08:26] *** odc joined
+[09:23] <timotimo> could it be that storing a flag where a pointer used to be is a Very Bad Idea if you don't tell the GC about that quirk?
+
+[09:24] <timotimo> i'm looking at a segfault i'm getting and my first suspicion is that there's a smallbigint inlined into a P6opaque and the gc is being told "follow this pointer and clean up stuff there!"
+
+[09:24] <timotimo> but i'm not sure
+
+[09:26] <timotimo> i'd like to wait for jnthn or diakopter to give an opinion on that
+
+[09:26] <timotimo> but maybe in the mean time i can just make P6bigint uninlinable
+
+[09:27] <timotimo> "This type cannot box a native integer" :\
+
+[09:28] *** krunen joined
+[09:33] <timotimo> i think it *might* be a better idea to re-use the "sign" integer for a flag and alloc or used for the number data
+
+[09:33] <timotimo> and leave the pointer alone, or set it to 0?
+
+[09:34] <timotimo> er, wait
+
+[09:34] <timotimo> what am i saying.
+
+[09:34] <timotimo> the pointer only gets the flag, not the data
+
+[09:49] <timotimo> ah, "this type cannot box a native integer" was coming from not cleaning the serialized data
+
+[09:55] <timotimo> somehow 0x4000000009 lands in whatever "data" is
+
+[09:55] <timotimo> that is, a pointer to that address
+
+[09:56] <timotimo> the offset is "8", so the original data value has got to be 0x4000...0001
+
+[09:57] <timotimo> which could conceivably be a too-wide reading of data followed by the flag
+
+[09:58] <timotimo> i think get_boxed_ref returning (mp_int *)&(data->body.i) might be problematic for that reason?
+
+[10:03] <timotimo> hm. maybe the data is just being serialized wrong? that could be a possibility
+
+[10:04] <hoelzro> parallel conversations!
+
+[10:05] <timotimo> hm. the data remains at that curious value
+
+[10:05] <timotimo> i think i may very well be barking up the wrong tree.
+
+[10:05] <dalek> MoarVM/small_big_ints: dfd5e77 | (Timo Paulssen)++ | src/ (3 files):
+
+[10:05] <dalek> MoarVM/small_big_ints: trying more things to make this work. segfaults.
+
+[10:05] <dalek> MoarVM/small_big_ints: review: https://github.com/MoarVM/MoarVM/commit/dfd5e7730f
+
+[10:05] <timotimo> maybe someone else can step in?
+
+[10:23] *** ggoebel1113 joined
+[11:15] <jnthn> timotimo: What does the P6bigintBody structure look like now?
+
+[11:29] <jnthn> timotimo: uh...I didn't want you to inline mp_int...
+
+[11:29] <jnthn> That wsa meant to stay as mp_int *
+
+[11:30] <jnthn> So that Int doesn't get any bigger memory wise than it is today on 64-bit...
+
+[11:30] <jnthn> So the small bigint body is just a 32-bit flag set to 0xFFFFFFFF and then the 32-bit int storage.
+
+[11:30] <jnthn> teaching &
+
+[12:55] <timotimo> oh, but wasnt mp_int always inlined
+
+[12:58] * timotimo reviews his patches
+
+[12:59] <timotimo> jnthn: https://github.com/MoarVM/MoarVM/compare/small_big_ints#diff-6e3ed7dacdfde2d3ae35dabea91aeebaR17
+
+[13:01] * moritz patches his reviews
+
+[13:25] *** krunen joined
+[13:44] <timotimo> ah, i think one of the mistakes that lead to my stuff not working at all is that i don't create bigints to store the results of ops into at all.
+
+[13:45] <timotimo> so i'll have to rethink the way i allocate p6bigint or the way i handle the result objects
+
+[14:02] <diakopter> timotimo: but..
+
+[14:03] <diakopter> timotimo: but the union doesn't save any storage
+
+[14:12] <diakopter> timotimo: what's the goal of the branch
+
+[14:12] <timotimo> it does not?
+
+[14:12] <timotimo> why not?
+
+[14:15] <diakopter> I retract that assertion until I understand what you aim to do
+
+[14:15] <diakopter> mp_int is 3 ints and a pointer
+
+[14:16] <timotimo> i am supposed to store the flag in the lowest bits of the pointer
+
+[14:17] <timotimo> and a 32 bit value somewhere in there
+
+[14:17] <diakopter> so just do that with the mp_int directly
+
+[14:19] <timotimo> it was very hard to write a literal 1 into the pointer.
+
+[14:21] <diakopter> why..  *(ptr) = 1 works
+
+[14:21] <timotimo> if you can tell me exactly how to treat mp_digit *dp as if it were a number i can change
+
+[14:21] <timotimo> i'm pretty sure that would write a 1 to where the pointer points
+
+[14:21] <diakopter> er, right.
+
+[14:21] <timotimo> you see my problem now? :))
+
+[14:21] <diakopter> *kickself*
+
+[14:21] <tadzik> what about ptr = 1? :P
+
+[14:21] <diakopter> yes, what I meant
+
+[14:21] <timotimo> tadzik: i have no idea.
+
+[14:21] <tadzik> that should work alright
+
+[14:21] <diakopter> yes, ptr = 1 is fine
+
+[14:22] <timotimo> if that's all i have to do, then i can make my code a bit simpler, aye.
+
+[14:22] <tadzik> I can't imagine a platform where 1 is outside the address space :P
+
+[14:22] <diakopter> but since jnthn thought that mp_int was a pointer and not already inlined
+
+[14:22] <diakopter> then your "I was supposed to" understand is probably invalid
+
+[14:23] <diakopter> *understanding
+
+[14:24] <diakopter> when did jnthn say that's what you were supposed to do
+
+[14:26] <dalek> MoarVM/little_big_int: ce20922 | (Timo Paulssen)++ | src/ (7 files):
+
+[14:26] <dalek> MoarVM/little_big_int: get rid of unhelpful union, s/small/little/
+
+[14:26] <dalek> MoarVM/little_big_int: review: https://github.com/MoarVM/MoarVM/commit/ce20922297
+
+[14:26] <timotimo> uh
+
+[14:26] <timotimo> not sure?
+
+[14:27] <tadzik> haha, that's like a civil war outcome
+
+[14:27] <tadzik> get rid of unhelpful union
+
+[14:27] <timotimo> the way it is now will still save storage and cpu time, because we don't have the indirect pointer and malloc/free workload
+
+[14:27] <timotimo> at least if we are dealing with little big ints only
+
+[14:27] <timotimo> if we have mixtures, we won't get around that after all.
+
+[14:28] *** jnap joined
+[14:30] <dalek> MoarVM/little_big_int: 6d10d0a | (Timo Paulssen)++ | build/Makefile.in:
+
+[14:30] <dalek> MoarVM/little_big_int: one more small->little rename i missed.
+
+[14:30] <dalek> MoarVM/little_big_int: review: https://github.com/MoarVM/MoarVM/commit/6d10d0a4c6
+
+[14:31] <timotimo> that branch will get a cleanup before it gets merged to get rid of the back&forth
+
+[14:31] <hoelzro> timotimo++ # rename to LBI
+
+[14:32] <moritz> if it's small enough, you can merge it with --squash to create a single commit
+
+[14:34] <timotimo> it'll be a bit bigger than that
+
+[14:34] <timotimo> i'll make sensible commits that individually not-break the build hopefully
+
+[14:38] <diakopter> if (0 && (
+
+[14:39] <timotimo> yeah, that'd not break the build :)
+
+[14:40] <diakopter> ?
+
+[14:41] <timotimo> if it's turned off, it wouldn't break the build
+
+[14:42] <diakopter> I know what you meant, I was saying it's turned off
+
+[14:42] <diakopter> also the branch mentions MVMP6littlebigintBody
+
+[14:42] <timotimo> yes, i'm fixing as we speak
+
+[14:42] <timotimo> i'm not immediately pushing my stuff
+
+[14:42] <timotimo> i'm a bit distracted at the moment, so i'm not working at full speed
+
+[14:46] <timotimo> interestingly i'm getting a few outputs of "get_int on a SBI" where that really shouldn't happen since i don't build any SBIs at the moment
+
+[14:47] <timotimo> ah, of course
+
+[14:51] <timotimo> i'm thinking of starting from scratch now %)
+
+[14:53] <timotimo> i wonder how i got to "'0' is not a valid number"
+
+[14:55] *** benabik joined
+[14:56] <diakopter> if (!IS_SBI(src))
+
+[14:56] <diakopter> why is that in copy_to
+
+[14:57] <timotimo> i just looked at that, too
+
+[14:57] <timotimo> it's not executed yet when i hit that point
+
+[14:57] <timotimo> it's because i thought it was only for copying the dp
+
+[14:57] <timotimo> when in fact it's supposed to copy all of the struct as well as the dp
+
+[14:59] <timotimo> i'm pretty sure i have a much improved clarity of the whole situation now
+
+[14:59] <timotimo> thank you, diakopter :)
+
+[14:59] <diakopter> what's the purpose of CLEANUP_*
+
+[14:59] <jnthn> timotimo: um, I didn't realize we didn't store mp_int*...
+
+[15:00] <jnthn> I guess we can leave it as mp_int
+
+[15:00] <jnthn> Though we may find that *most* programs are much more memory efficient with it being mp_int *, since most integers will be small.
+
+[15:00] <jnthn> Sorry for the confusion.
+
+[15:01] <timotimo> i can do that, too, if you'd like
+
+[15:01] <diakopter> that would also add an additional malloc per big bigint, of course
+
+[15:01] <diakopter> (which may be worth it, of course)
+
+[15:01] <timotimo> say, jnthn, how do you feel about this idea:
+
+[15:01] <timotimo> when we create a p6bigint, we wrcreate the data for dp directly after the structure if we already know the size
+
+[15:02] <timotimo> that way it can be prefetched without indirection until it has to be realloc'd
+
+[15:02] <timotimo> (in which case it will explode in our faces, because that pointer doesn't have a malloc header in front of its data
+
+[15:02] <timotimo> but mayhaps we could handle that somehow if it's more efficient that way?)
+
+[15:02] <jnthn> diakopter: I think it would be worth it because people doing stuff with bigints will be the exception, not the norm...
+
+[15:02] <timotimo> i have to get off this train in a minute
+
+[15:03] <jnthn> timotimo: I don't think we easily can do that, REPRs are meant to have a fixed size for a given type.
+
+[15:03] <jnthn> And it'd make Int even bigger.
+
+[15:03] <diakopter> jnthn: I don't know. :) a *lot* of crypto code uses bigints
+
+[15:03] <jnthn> Well, actually not really...
+
+[15:03] <diakopter> and a lot of code is becoming crypto code
+
+[15:03] <jnthn> diakopter: Yes, that's (a) not typical, and (b) you shoudln't implement your own crypto in 99.99999% of cases :)
+
+[15:04] <jnthn> diakopter: I suspect a bunch of it will be delegated to well-trusted libraries.
+
+[15:04] <diakopter> (a) what's not typical
+
+[15:04] <jnthn> diakopter: Writing crypto code is not typical.
+
+[15:04] <diakopter> I had just said the contrary
+
+[15:05] <jnthn> I'm saying I don't agree wiht you.
+
+[15:05] <benabik> Rule #1 of writing crypto code: Don't.  Rule #2: See rule #1
+
+[15:06] <diakopter> why would using p6bigint mean you are "implementing your own crypto"
+
+[15:06] <diakopter> why wouldn't the well-trusted libraries use it
+
+[15:06] <benabik> Generally they want speed.  Variable sized and dynamically allocated integers is not really a good idea there.
+
+[15:06] <jnthn> Because the well-trusted libraries largely already exist and they're probably written in native code.
+
+[15:07] <jnthn> diakopter: Oh, did you mean code using bigints is becoming mroe common?
+
+[15:07] <diakopter> benabik: wut. how do you use multiple/arbitrary precision integers without dynamically allocated
+
+[15:07] <diakopter> and variable sized
+
+[15:08] * jnthn should go to the airport...
+
+[15:08] <jnthn> bbl
+
+[15:08] <benabik> Cryptography is usually on fixed sized integers?
+
+[15:08] <diakopter> no
+
+[15:08] <diakopter> never
+
+[15:09] <moritz> depends, really
+
+[15:09] <diakopter> every crypto library I've seen uses very large integers
+
+[15:09] <moritz> lots of symmetric cryptography uses fixed-sized buffers or ints
+
+[15:10] <moritz> asymmetric crypto usually uses variable-sized integers
+
+[15:10] <diakopter> ok
+
+[15:10] <moritz> in fact, libtommath is used as the base for libtomcrypt
+
+[15:11] <diakopter> .. which uses large integers
+
+[15:11] <moritz> aye
+
+[15:11] <moritz> it does asymmetric crypto too :-)
+
+[15:13] <diakopter> it also provides its own pooling/custom allocator as an option (libtommath)
+
+[15:14] <diakopter> for its *dp allocation
+
+[15:14] <diakopter> but we're not using it
+
+[15:19] <diakopter> libgcrypt uses a fork of GNU MP Library, but the JS version from emscripten uses fast_mpi.js
+
+[15:26] <diakopter> openssl uses libcrypto's BIGNUM
+
+[15:28] <diakopter> timotimo: just make copy_to do a set_int(get_int(  since those will already have the checks you need
+
+[15:31] <diakopter> benabik: ok, it was my understanding most cryptography was asymmetric; maybe that's wrong
+
+[15:31] <benabik> Asymmetric encryption tends to be just long enough to negotiate a shared key for symmetric encryption.  :-D
+
+[15:31] <benabik> Symmetric is MUCH faster.
+
+[15:32] <diakopter> oh
+
+[15:32] <masak> right. the reason to use asymmetric is to share the key safely for the symmetric, I guess.
+
+[15:33] <masak> a bit like a secure courier showing up with the encryption key in a sealed envelope, and then you downgrade to the fast mechanism.
+
+[15:33] <benabik> Right.  SSL and SSH both work that way.  I think PGP might be pure asymmetric by default, but I haven't actually looked.
+
+[15:34] <timotimo> in case the program is getting a big hit from little_big_int overhead, we could have a counter that short-circuits any LBI stuff
+
+[15:42] <timotimo> hm.
+
+[15:43] <timotimo> although it'd not work to replace mp_int *i with mp_int i at run time, except if we transform REPRs
+
+[15:54] <timotimo> jnthn: so ... should i try transforming P6bigintbody to have an mp_int* in it?
+
+[15:54] <timotimo> i think the amount of big integers you can even come up with at all will vastly be drowned out by all the Ints that rakudo constructs around you
+
+[15:54] <timotimo> except you can still use int if you know you only need 64 bits
+
+[16:32] *** FROGGS joined
+[16:35] *** jnap joined
+[16:37] <diakopter> timotimo: I think you should do what jnthn was suggesting (transforming P6bigintbody to have an mp_int* in it)
+
+[16:39] <diakopter> then on 32-bit platforms, make the body a union { struct { a 32-bit int (for the fast/small int value) and a 32-bit int to store the flag of whether to use the pointer }, and dp *
+
+[16:40] <diakopter> but then on 64-bit, simply use dp * only
+
+[16:40] <diakopter> er
+
+[16:40] <diakopter> actually duh. use the union I said on both...
+
+[16:41] <diakopter> (that's what I dreamt it up..)
+
+[16:41] <diakopter> er sorry, argh
+
+[16:41] <diakopter> I don't mean dp*, I meant mp_int*
+
+[16:41] <timotimo> :)
+
+[16:41] <diakopter> anyway yes, it should work out correctly on both 32 and 64
+
+[16:41] <diakopter> if you use that union
+
+[16:42] <diakopter> no matter how the compiler lays out the union or struct
+
+[16:42] <timotimo> thank you :)
+
+[16:42] <diakopter> do you agree?
+
+[16:43] <timotimo> i didn't think much about it, but it seemed right
+
+[16:43] <diakopter> [that that's a good application of what jnthn was suggesting?]
+
+[16:43] <timotimo> the thing i find annoying is i have to make a new struct for the two 32 bit integers to plug in there
+
+[16:43] <timotimo> otherwise the union won't fly
+
+[16:43] <timotimo> i could "just cast" it instead, but ... >_>
+
+[16:43] <diakopter> it's safer,ish, to use the union
+
+[16:43] <diakopter> ish
+
+[16:44] <diakopter> ish ish
+
+[17:03] <timotimo> but then i have to make like 10 structs and add lots of names everywhere
+
+[17:03] <diakopter> er wut
+
+[17:03] <timotimo> because one of the platforms we target doesn't support anonymous structs
+
+[17:03] <diakopter> it doesn't need to be anonymous
+
+[17:04] <timotimo> yeah, but then i have to put lots of stuff into the access code :)
+
+[17:25] <diakopter> why do you need 10 structs
+
+[17:26] <diakopter> what's wrong with the 1 I mentioned
+
+[17:27] <tadzik> which platform we target doesn't support anon structs?
+
+[17:27] <tadzik> I thought moarvm has those already
+
+[17:27] <tadzik> I seem to have seen them here and there
+
+[17:29] <timotimo> someone told me it wouldn't fly
+
+[17:29] <diakopter> I've used them in moar
+
+[17:30] <timotimo> 15:11 < JimmyZ> timotimo: union needs a name, solaris doesn't support anonymous union
+
+[17:32] <diakopter> yeah, sure enough, andy has been sending in patches to get rid of anon unions
+
+[17:32] <diakopter> but those are anonymous unions, not structs
+
+[17:33] <diakopter> besides, it's supported them for years, just gives warnings
+
+[17:35] <diakopter> sun studio that is
+
+[17:40] <timotimo> oh, huh
+
+[17:47] *** FROGGS joined
+[18:07] <[Coke]> moar is passing one more test today.
+
+[18:07] <tadzik> 1 moar test
+
+[18:07] <[Coke]> warnings free is nice.
+
+[18:19] *** tgt joined
+[18:46] <benabik> One of these days I'm going to remove the const/signed mismatch warnings I keep getting.
+
+[18:59] <FROGGS> jnthn: I've got a deal for you... I implement openpipe when you fix that STable bug :o)
+
+[19:00] <benabik> ...  Stable bug?  That sounds ominous.
+
+[19:01] <FROGGS> STable, that it not a typo :o)
+
+[19:02] <benabik> No less ominous, given how central STables are.
+
+[19:07] *** raiph joined
+[19:09] <diakopter> what was the stable bug
+
+[19:11] <raiph> I've built a rakudo/moarvm. what's the incantation to spectest nqp/moarvm?
+
+[19:12] <timotimo> TEST_JOBS=n make m-spectest
+
+[19:13] <[Coke]> you can't spectest nqp.
+
+[19:14] <timotimo> well, you spectest it indirectly :)
+
+[19:20] <FROGGS> diakopter: I can't even explain
+
+[19:21] <FROGGS> diakopter: I just know it happens in v5, when you load a module like Config that depends on Perl5::Terms (which is like v5's setting)
+
+[19:25] <FROGGS> diakopter: and this exception is thrown in that case: https://github.com/MoarVM/MoarVM/blob/master/src/6model/serialization.c#L2044
+
+[19:26] <raiph> [Coke], timotimo: s/spectest/run nqp's own tests against/
+
+[19:26] <diakopter> apporpriate
+
+[19:26] <diakopter> reposession
+
+[19:26] <FROGGS> raiph: make m-test
+
+[19:27] <[Coke]> if moar is the only one you built, I'd expect make test to work, but I could be mistaken.
+
+[19:27] <FROGGS> it will work, yes
+
+[19:28] <FROGGS> if you built the others too, it will run the test for every backend in order
+
+[19:29] <FROGGS> exactly like there is a make install and a make m-install
+
+[19:33] <FROGGS> diakopter: besides NYI'd openpipe() this bug hinders me running v5 on moar :o(
+
+[19:33] <FROGGS> diakopter: would be nice to spectest in about 8 minutes instead of 35
+
+[19:34] <hoelzro> FROGGS: I'm working on openpipe() right now!
+
+[19:34] <FROGGS> uhh!!
+
+[19:34] <hoelzro> speaking of which...I'm guessing that #ifdef _WIN32 #error "openpipe is NYI on Windows" wouldn't be very nice, right?
+
+[19:34] <hoelzro> what would be the preferred course of action?
+
+[19:34] <FROGGS> hoelzro: damn it, now how should I convince jnthn to hack for me? :o)
+
+[19:35] <hoelzro> (no one else is working on it, are they?)
+
+[19:35] <hoelzro> FROGGS: get him to make sure it works on Windows? =P
+
+[19:35] <FROGGS> hoelzro: I can make it work on windows then...
+
+[19:35] <FROGGS> hoelzro: if you can implement it on linux, that this is awesome on its own
+
+[19:35] <hoelzro> ok
+
+[19:35] <benabik> hoelzro: #error << throw_adhoc < working
+
+[19:36] <hoelzro> yeah, I came across it when vetting Perl 6 modules on Mokudo
+
+[19:36] <hoelzro> I guess I can throw in a throw_adhoc
+
+[19:37] <benabik> Not allowing Moar to build on a platform just because one thing is NYI is LTA.
+
+[19:37] <hoelzro> that's why I ask =)
+
+[19:41] <hoelzro> should I create a new .c file for pipe stuff? or shoehorn it into fileops?
+
+[19:42] <FROGGS> what about procops.?
+
+[19:43] <FROGGS> procops.c*
+
+[19:43] <PerlJam> hoelzro: a new pipe.c file with references to magritte "Ceci n'est pas une pipe"  :-)
+
+[19:43] <FROGGS> *g*
+
+[19:44] <hoelzro> heh
+
+[20:13] <hoelzro> hmm...if I close() a pipe, should that just close my side of the pipe?
+
+[20:13] <hoelzro> because the child will get a SIGPIPE, won't it?
+
+[20:15] *** tgt joined
+[20:30] <hoelzro> MoarVM has a uv loop per thread, right?
+
+[20:31] <hoelzro> I take it to mean that if I create a handle on one thread, it can only ever be picked up by the corresponding thread?
+
+[20:36] <diakopter> eh
+
+[20:36] <diakopter> not yet
+
+[20:36] <diakopter> but actually I thought uv loops sat on top of another thread system in libuv, so you can have handle sharing across loops... or is that wrong?
+
+[20:37] <hoelzro> heh, I have no idea =/
+
+[20:37] <hoelzro> this is my first exposure to libuv
+
+[20:37] <hoelzro> =)
+
+[20:37] <hoelzro> MVM_repr_alloc_init actually allocates data, right?
+
+[20:38] <diakopter> i think jnthn said he wanted to do the io stuff
+
+[20:38] <hoelzro> and you have to free() it yourself?
+
+[20:38] <hoelzro> diakopter: should I leave openpipe to him?
+
+[20:38] <diakopter> because he has some designs/plans in mind he hasn't communicated [because it would be faster to implement them than write them out, I'm sure]
+
+[20:39] <hoelzro> damn
+
+[20:39] <diakopter> well I just mean don't feel bad if he redoes all that :) but please explore and learn and try
+
+[20:39] <diakopter> it's pretty complex
+
+[20:39] <hoelzro> alright
+
+[20:39] <hoelzro> good to know =)
+
+[20:40] <diakopter> I spent a lot of time thinking/talking with him about it last summer? spring?
+
+[20:51] <jnthn> hoelzro: I'm fine with you putting in openpipe
+
+[20:52] <jnthn> I *will* be shuffling IO stuff around a bunch, but I'll be doing it step by step rather than throwing everything out.
+
+[21:13] <hoelzro> ok
+
+[21:13] <hoelzro> very good =)
+
+[21:41] <hoelzro> is nqp::closefh($pipe) not supposed to throw an exception the second time?
+
+[21:41] * hoelzro is looking at the JVM pipes test
+
+[21:44] <nwc10> jnthn: is the MVMSTable written to disk as is? I assume not
+
+[21:44] <nwc10> basically, I have sizeof(MSMStable) down by 8
+
+[21:44] <nwc10> but it seems that something wrote out REPR_data etc at the old offsets
+
+[21:45] <jnthn> nwc10: No, it's not written out directly...
+
+[21:45] <jnthn> nwc10: I think the thing responsible is called serialize_stable
+
+[21:48] <nwc10> OK, there has to be a structure initialiser somewhere...
+
+[21:48] <jnthn> They're typiccally allocated by the stable allocation function in srf/gc/allocate.t
+
+[21:48] <jnthn> uh
+
+[21:48] <jnthn> src/gc/allocate.c
+
+[21:52] <nwc10> that's not what i'm trying to describe.
+
+[21:52] * nwc10 flails harder
+
+[21:52] <nwc10> I see things like  MVM_REPR_DEFAULT_ATTR_FUNCS in reprs.h
+
+[21:52] <nwc10> which looks like text that gets stiched together to be inside {...} to be used a struct initialiser
+
+[21:53] <hoelzro> alright, openpipe work is here: https://github.com/hoelzro/MoarVM
+
+[21:53] <hoelzro> it's not done yet, but it's a good start =)
+
+[21:55] <nwc10> so I think I'm looking for a struct initialiser for an stable
+
+[21:57] <jnthn> Ooh, Moar stage parse crept under 40s for the first time ever on my box
+
+[21:58] <jnthn> With the nwc10++ GC patch
+
+[21:58] <nwc10> yay
+
+[21:58] <jnthn> nwc10: OK, I didn't think we had any STables statically initialized, if that's what you mean
+
+[21:58] <jnthn> nwc10: Can you describe the symptoms a little more?
+
+[21:59] <nwc10> with a bit of pasting
+
+[21:59] <nwc10> correct working STable looks like this:
+
+[21:59] <nwc10> (gdb) p *((MVMObject *)c)->st$5 = {header = {owner = 4154457015, flags = 32767, size = 0,     forwarder = 0x7ffff79ffba2 <allocate>, sc_forward_u = {sc = 0x0,       st = 0x0}}, REPR = 0x7ffff79ffb90 <copy_to>,   REPR_data = 0x7ffff79f4884 <MVM_REPR_DEFAULT_GET_ATTRIBUTE>,
+
+[21:59] <nwc10> gah.
+
+[21:59] <nwc10> tmux goes om nom nom :-(
+
+[22:01] <jnthn> That...REPR and REPR_data seem to be poitning to odd places
+
+[22:01] <nwc10> hangon
+
+[22:01] <nwc10> this is working:
+
+[22:01] <nwc10> http://paste.scsys.co.uk/296447
+
+[22:02] <nwc10> however ugly and wrong that looks, it is from working MoarVM
+
+[22:03] <nwc10> better paste http://paste.scsys.co.uk/296448
+
+[22:03] <jnthn> And first sub-300s spectest (299s) for me too :)
+
+[22:04] <dalek> MoarVM: 4c8452a | nicholas++ | src/gc/collect.c:
+
+[22:04] <dalek> MoarVM: process_worklist() only needs to enforce the GC invariant if the object moved.
+
+[22:04] <dalek> MoarVM:
+
+[22:04] <dalek> MoarVM: The comment notes "In moving an object to generation 2"... but the code had
+
+[22:04] <dalek> MoarVM: been doing the work for *all* objects in generation 2, not just those moved
+
+[22:04] <dalek> MoarVM: there. We know whether we have just moved an object from the nursery to gen2,
+
+[22:04] <dalek> MoarVM: so track that, and only walk the recently marked items for a newly moved
+
+[22:04] <dalek> MoarVM: object.
+
+[22:04] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/4c8452a0a8
+
+[22:05] <jnthn> $5 = {header = {owner = 4154457015, flags = 32767, size = 0,
+
+[22:05] <jnthn> All of those fields are bogus. The owner should be 0 or maybe 1, but certainly that size of a number. And size should not be 0
+
+[22:05] <nwc10> and not working http://paste.scsys.co.uk/296450
+
+[22:05] <nwc10> OK
+
+[22:05] <nwc10> interesting
+
+[22:05] <jnthn> Oh, you know waht this looks like?
+
+[22:06] <jnthn> Like something has confused st and a REPR
+
+[22:06] <nwc10> please tell :-)
+
+[22:06] <nwc10> OK, this is on a somewhat variant branch
+
+[22:07] <jnthn> st = 0x7ffff7dd4be0 <this_repr>
+
+[22:07] <jnthn> That st point is pointing to a REPR table
+
+[22:07] <jnthn> One of the static things in a src/6model/reprs/
+
+[22:07] <jnthn> *pointer
+
+[22:07] <nwc10> ah OK
+
+[22:08] <nwc10> that would explain a bit. And we got away with it due to chance
+
+[22:08] <nwc10> (assuming it's not stupid I added)
+
+[22:08] <jnthn> p *(MVMStable *)c
+
+[22:08] <timotimo> hey jnthn :)
+
+[22:08] <nwc10> c is 0
+
+[22:09] <jnthn> nwc10: Youv'e cast c to MVMObject *
+
+[22:09] <timotimo> jnthn: should i go ahead with the mp_int * change? that is, un-inlining mp_int from P6bigintbody
+
+[22:09] <jnthn> nwc10: But the flags indicate it's an MVMStable *
+
+[22:09] <nwc10> oh, I must be somewhere else
+
+[22:09] <jnthn> flags = 10
+
+[22:09] <jnthn> I'm at the very top of what you pasted
+
+[22:09] <jnthn> 10 = MVM_CF_STABLE = 2 + MVM_CF_SECOND_GEN = 8
+
+[22:10] <jnthn> timotimo: I'm fine with that.
+
+[22:10] <timotimo> sounds good
+
+[22:10] <timotimo> but not right now.
+
+[22:10] <jnthn> timotimo: It'll make the majority of programs memory-lighter.
+
+[22:10] <timotimo> do we have any way of using a different REPR if we detect a crapton of bigints being used?
+
+[22:11] <nwc10> aha OK
+
+[22:11] <jnthn> timotimo: Not at present
+
+[22:11] <nwc10> jnthn: this is me trying to work out why I later have garbage in the gen2 roots
+
+[22:12] <nwc10> so this particular one *is* me being stupid, I think
+
+[22:12] <jnthn> nwc10: Oh
+
+[22:12] <nwc10> sorry to be a small waste of time
+
+[22:12] <jnthn> nwc10: Well, I know there's code that used to use the presence of a forwarder as a mark bit.
+
+[22:12] <jnthn> nwc10: In order to compact the gen2 roots
+
+[22:12] <nwc10> this is sort of X Y
+
+[22:12] <jnthn> nwc10: After a full collect.
+
+[22:12] <nwc10> found that, that's patched locally
+
+[22:12] <jnthn> nwc10: No, you're not being a waste of time at all. You're saving a lot of memory ;)
+
+[22:12] <nwc10> I haven't *yet*
+
+[22:13] <jnthn> timotimo: I'm not saying we have to follow this approach for all time, simply that I think it's the right way for now.
+
+[22:14] <timotimo> right. will do.
+
+[22:14] <timotimo> is somebody already working on putting the forwarding pointer into the rest of the object?
+
+[22:14] <jnthn> timotimo: Additionally, once we get escape analysis in place, given we know about bigints and stuff at VM level, I'm hoping we can do stuff like, doing operations on mp_int without all the box/unbox
+
+[22:14] <timotimo> that would be lovely
+
+[22:14] <jnthn> timotimo: Yes, that's what nwc10++ is talking about/debugging righ tnow :)
+
+[22:14] <timotimo> ah, great!
+
+[22:15] <timotimo> saves one int for every single object, that's 8 bytes, yes?
+
+[22:15] <timotimo> do we have any heap/allocation/... statistics at the moment?
+
+[22:15] <jnthn> Correct.
+
+[22:15] <timotimo> i remember i wanted to build the gdb thing that can output statistics without having to put lots of conditional C in place
+
+[22:16] <timotimo> it may be easiest to have a "startup script" that gdb sources that says "put this breakpoint in this function, step until you reach this line, collect these locals and continue
+
+[22:16] <timotimo> that way, i wouldn't even have to walk worklists myself at all, i'd just observe what the GC does anyway
+
+[22:22] <timotimo> okay, nwc10++ will be removing 8 bytes from all objects, i'll hopefully remove 24 bytes from almost every Int
+
+[22:24] <timotimo> i'll be excited to see how big the "say 1" program running on rakudo-moar will be after we finish this particular piece of work
+
+[22:24] <nwc10> jnthn: OK, the bug may be these 2 lines in MVM_gc_root_add_gen2s_to_worklist
+
+[22:25] <nwc10> if (!num_in_nursery && REPR(gen2roots[i])->refs_frames)
+
+[22:25] <nwc10> num_in_nursery = 1;
+
+[22:25] <nwc10> specifically that use of the REPR() macro
+
+[22:25] <nwc10> on a collectable, that turns out to be an STable
+
+[22:25] <nwc10> *not* verified
+
+[22:25] <jnthn> Oh, ouch
+
+[22:26] <jnthn> I can confirm with quite high confidence that that's wrong.
+
+[22:26] <nwc10> shall I try locally fixing my REPR macro to assert that it's only used on Objects, not STables, and see what breaks? :-)
+
+[22:26] <nwc10> actully, scrub that
+
+[22:26] <nwc10> I am going to go to bed
+
+[22:26] <nwc10> but if nothing has changed, I will try that sort of thing tomorrow
+
+[22:26] <jnthn> Yes, try that. But above isn't right. In fact, it's potentially a performance bug today
+
+[22:27] <nwc10> anyway, that's why I've been asking questions about why my assertions with REPR() fail, when I shouldn't even be using REPR() on them
+
+[22:27] <nwc10> because I was trying to work out why that REPR() there ended up as a NULL pointer de-ref
+
+[22:28] <nwc10> we have probably been getting away with it due to alignment chance between two different structures
+
+[22:28] <timotimo> a performance bug! \o/
+
+[22:33] <jnthn> nwc10: aye, seems likely
+
+[22:34] <jnthn> To clarify why it may be a performance bug: if we find anything but NULL at that address, we'll have been considering refs_frames to be true.
+
+[22:34] <jnthn> On STable
+
+[22:34] <jnthn> And so not letting them leave the gen2 roots list
+
+[22:39] <dalek> MoarVM: ffa4cb1 | nicholas++ | src/6model/reprs/P6opaque.c:
+
+[22:39] <dalek> MoarVM: In P6opaque's compose(), zero the freshly allocated repr_data->unbox_slots.
+
+[22:39] <dalek> MoarVM:
+
+[22:39] <dalek> MoarVM: Not all the slots are used, but serialize_repr_data() will serialise all of
+
+[22:39] <dalek> MoarVM: them, and hence write out garbage to disk. This doesn't cause crashes, because
+
+[22:39] <dalek> MoarVM: the unuused slots are never accessed, but it does conceal other problems.
+
+[22:39] <dalek> MoarVM: valgrind reports an awful lot of warnings, concealing real problems, and the
+
+[22:39] <dalek> MoarVM: generated bytecode files will not be byte-for-byte identical, preventing easy
+
+[22:39] <dalek> MoarVM: consistency checking.
+
+[22:39] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ffa4cb166e
+
+[22:46] <timotimo> nwc10++ # removing unnecessary garbage reads/writes
+
+[22:49] * diakopter thinks that fix might not have detectable improvement
+
+[22:50] <diakopter> but I'm hoping to be surprised
+
+[22:50] <jnthn> diakopter: ffa4cb1 almost certainly ain't. 4c8452a was for me.
+
+[22:51] <jnthn> ffa4cb1 eliminates most of valgrind's sadness
+
+[22:51] <diakopter> I meant the repr frames one
+
+[22:51] <jnthn> diakopter: Oh
+
+[22:52] <jnthn> Yeah, I dunno about that. Marking STables isn't profile-expensive in any I've done.
+
+[22:52] <jnthn> But adding gen2 roots is.
+
+[22:52] <jnthn> Oh, and it wouldn't show up in there...
+
+[22:52] <jnthn> We'll see :)
+
+[22:52] * diakopter leaves it to you
+
+[22:52] <diakopter> since I don't have my phone dev env set up yet
+
+[22:53] <jnthn> ETOOTINYTODEV
+
+[22:53] <jnthn> :P
+
+[22:55] <timotimo> cpython takes 4116 maxresidentk for print("hello world")
+
+[22:55] <timotimo> will we reach that? :3
+
+[22:56] <timotimo> if you think about it, using more than one floppie's worth of space in RAM just to print "hello world" is pretty crazy
+
+[22:59] <jnthn> So is thining "hello world" is a useful benchmark :P
+
+[22:59] <jnthn> *thinking

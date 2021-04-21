@@ -1,0 +1,552 @@
+[01:23] *** lizmat_ joined
+[01:55] *** ilbot3 joined
+[03:48] *** releasable6 joined
+[06:02] *** domidumont joined
+[06:09] *** domidumont joined
+[06:45] *** domidumont joined
+[07:13] <nwc10> good *, #moarvm
+
+[07:23] *** robertle joined
+[07:35] <samcv> good *
+
+[07:45] *** AlexDaniel joined
+[08:11] *** zakharyas joined
+[08:24] *** zakharyas joined
+[08:27] <nine> I think I've got the code together for adding inlined frames to backtraces but somehow it always fails to find the matching inline candidates. But I got the code from deopt_all where it clearly works?
+
+[08:28] <Geth> ¦ MoarVM/backtrace_uninline: bfe75cfdbd | (Stefan Seifert)++ | src/core/exceptions.c
+
+[08:28] <Geth> ¦ MoarVM/backtrace_uninline: Add inlined frames to backtraces
+
+[08:28] <Geth> ¦ MoarVM/backtrace_uninline:
+
+[08:28] <Geth> ¦ MoarVM/backtrace_uninline: Not yet working. The machinery is there but it fails to find the actual
+
+[08:28] <Geth> ¦ MoarVM/backtrace_uninline: inlined candidate.
+
+[08:28] <Geth> ¦ MoarVM/backtrace_uninline: review: https://github.com/MoarVM/MoarVM/commit/bfe75cfdbd
+
+[08:29] <nine> If anyone has some idea or advice, I'd be grateful.
+
+[08:32] <nwc10> 0) moar coffee
+
+[08:32] <nwc10> 1) step away from the keyboard for a bit
+
+[08:32] <nwc10> 2) valgrind?
+
+[08:32] <nwc10> or did you want useful advice?
+
+[08:32] <nwc10> (I feel your pain, but I'm not sure how to help)
+
+[08:44] <nine> WTF? The test actually passes if I comment out this loop: https://github.com/MoarVM/MoarVM/blob/master/src/core/exceptions.c#L576
+
+[08:44] <nine> So the test failure may not be about inlined frames at all but because it somehow identifies the missing frame as a thunk and skips it
+
+[08:46] <nwc10> This is really beyond my undestanding of stuff. The obvious question here (which likely you've already started answering) is "can you prove whether it's mis-identifying thunks?"
+
+[08:46] <nine> But only in my reduced test case. The original test file with lots of unrelated code still fials.
+
+[08:47] <nwc10> (and can you demonstrate it without your relevant change, or am I failing to understand and the misidentification is only relevant once your change is present?)
+
+[09:37] *** domidumont joined
+[10:28] *** brrt joined
+[10:28] <brrt> \o
+
+[10:28] <timotimo> maybe brrt knows something about this :P
+
+[10:29] <timotimo> maybe something like "the jit doesn't actually tell us exactly what bytecode position we're currently supposed to be at"
+
+[10:29] <brrt> ohai timotimo
+
+[10:29] <brrt> oh, nine++ is busy again
+
+[10:29] <brrt> yeah, that's correct
+
+[10:30] <brrt> jit doesn't tell you that
+
+[10:35] <timotimo> i think i also need that feature to make that other thing not break, where we used to do throwpayloadlexcaller and end up not knowing we've been inside an inline
+
+[10:37] <brrt> oh, but we can figure out if we are in an inline
+
+[10:38] <brrt> this all needs a major refactor though
+
+[10:38] <timotimo> mhm
+
+[10:41] <timotimo> jnthn: how does my read of that situation sound: we've entered the frame with one callsite, but when we hit the osrpoint we actually see a different callsite every time; however, since the callsite is only signalled when we enter a frame, not when we hit an osrpoint, that causes it to never make the right specialization and to endlessly log hits for the wrong callsite?
+
+[11:30] <nine> timotimo: the even weirder thing is that the frame missing from the callstack is not even JITed. So it should be easy!
+
+[11:30] <timotimo> ah
+
+[11:36] <nine> I'm also baffled that completely unrelated changes to the test file cause a different outcome. With MVM_SPESH_BLOCKING and MVM_SPESH_NODELAY this should be predictable and consistent.
+
+[12:00] <jnthn> timotimo: Maybe, but OSR hits are logged under callsite, so I wonder why it'd miss the correct callsite?
+
+[12:08] *** brrt joined
+[12:15] <timotimo> jnthn: my assumption is that the correlation id is getting desynced, since the osr log doesn't contain the cs, it just has the correlation id that *should* point at the right cs, but doesn't in this case
+
+[12:27] *** zakharyas joined
+[12:50] <nine> jnthn: any idea for my inlined backtrace weirdness?
+
+[13:13] *** lizmat joined
+[13:33] <jnthn> nine: Is the frame it fails to find the most inlined one?
+
+[13:33] <jnthn> A deopt assumes that we're at a deopt point
+
+[13:34] <jnthn> e.g. it doesn't expect we might do it at just any arbitrary point
+
+[13:36] <nine> jnthn: so the issue is not the finding of the inline candidate but finding the deopt and it's just coincidence that some parts of the call stack are at a deopt point?
+
+[13:36] <nine> They are kind of common...
+
+[13:37] <jnthn> Well, every call is a deopt point
+
+[13:37] <jnthn> For the sake of global deopt
+
+[13:37] <jnthn> What I should have asked is "is it the top-most stack frame" or some such
+
+[13:40] <nine> jnthn: test case is: sub s1 { sub s2 { fail("failed") }; s2(); }; s1(); CATCH { default { like $_.gist, /sub\ss2/ } } }
+
+[13:40] <nine> jnthn: sub s2 doesn't appear in the backtrace. Backtrace reads: foo in s1 in block <unit>
+
+[13:43] <timotimo> you have to run that in a loop, though, right?
+
+[13:43] <nine> timotimo: why?
+
+[13:43] <timotimo> so that inlining happens at all?
+
+[13:43] <timotimo> oh, wait
+
+[13:43] <timotimo> NODELAY, right?
+
+[13:44] <nine> right
+
+[13:46] * jnthn currently a bit absorbed with https://github.com/rakudo/rakudo/issues/1689
+
+[13:47] <nine> jnthn: that's definitely more important, yes
+
+[13:59] <dogbert2_> jnthn: and [Tux] will rejoice
+
+[14:10] <nine> What does happen at a deopt point? I think of them as "at this point a deoptimization may happen", but what is it about them that is necessary for deopt?
+
+[14:10] <jnthn> They make entries into a deopt table, which is used to determine where to jump to
+
+[14:11] <jnthn> Well, more precisely, where to position the interpreter
+
+[14:11] <jnthn> We also used to do a lookup in that table for the current position, but then started to pass that in explicitly
+
+[14:13] *** FROGGS joined
+[14:15] <nine> So for my purpose finding the most recent deopt point should suffice. After all I'm not trying to reconstruct an exact position but only find the static code ref. But when I do that I end up with a cur_frame->work NULL pointer in uninline
+
+[14:26] <jnthn> I think I have a fix for the Test::CSV crash
+
+[14:27] <jnthn> Spectesting to make sure no fallout
+
+[14:30] <nine> But! If I don't try to supply the code ref (the Backtrace::Frame's $!code), both affected test files pass when ran with a disabled JIT. So I guess, I'm not that far off.
+
+[14:35] <Geth> ¦ MoarVM: 80fe576e57 | (Jonathan Worthington)++ | src/core/frame.c
+
+[14:35] <Geth> ¦ MoarVM: Correct lazy static lexical deserialization
+
+[14:35] <Geth> ¦ MoarVM:
+
+[14:35] <Geth> ¦ MoarVM: It would write the deserialized lexical into the wrong static frame's
+
+[14:35] <Geth> ¦ MoarVM: static environment when the lexical was first accessed through the
+
+[14:35] <Geth> ¦ MoarVM: inline.
+
+[14:35] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/80fe576e57
+
+[14:36] <jnthn> That resolves https://github.com/rakudo/rakudo/issues/1689
+
+[14:37] <timotimo> oh wow
+
+[14:37] <nwc10> how much else does it fix? :-)
+
+[14:38] <jnthn> It need an inline of something that visited a codepath that touched a lexical only after the inline took place
+
+[14:38] <jnthn> e.g. an inline of something partially cold
+
+[14:38] <jnthn> That's likely why it didn't surface for so long
+
+[14:43] <timotimo> it doesn't seem to match up with any other problems i've seen
+
+[14:48] <brrt> jnthn++
+
+[14:49] <brrt> heh, wonder why i didn't see that one, have been looking at that file for a while
+
+[14:55] <nine> Why...am I even trying to find a deopt point? I don't even need it in the non-JITed case. All I'm trying to find is whether I'm in an inline.
+
+[14:57] <Geth> ¦ MoarVM: e88b24b4b9 | (Jonathan Worthington)++ | 3 files
+
+[14:57] <Geth> ¦ MoarVM: Mark thread blocked around getaddrinfo
+
+[14:57] <Geth> ¦ MoarVM:
+
+[14:57] <Geth> ¦ MoarVM: Resolves #708.
+
+[14:57] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/e88b24b4b9
+
+[14:58] <nine> Indeed I can throw that out and it still works. That leaves just the JITed case
+
+[15:00] <nine> A JIT label is a pointer to executable code, isn't it?
+
+[15:00] <timotimo> i don't know for sure, but i'd expect that
+
+[15:06] *** brrt joined
+[15:10] <brrt> correct
+
+[15:11] <brrt> nine: it is a pointer calculated from the offset
+
+[15:13] <brrt> you can compare the jit_entry_label with the labels in a jitcodes' inline[] to determine if the JIT is visiting that inline
+
+[15:13] <brrt> it'd be a good idea to make that into a function of its own though
+
+[15:15] <brrt> something like MVM_jit_get_inline_of_code(tc, jitcode, pointer);
+
+[15:15] <brrt> together with MVM_jit_get_inline_of_frame(tc, jitcode, frame);
+
+[15:15] <brrt> just so we have something of an API to wrapi ti
+
+[15:15] <brrt> *wrap it
+
+[15:15] <brrt> ... on the other hand
+
+[15:15] <brrt> inlines can nest
+
+[15:35] *** lizmat joined
+[15:55] *** gtodd joined
+[16:00] <Geth> ¦ MoarVM/more-op-opts: b8cd9cab69 | (Jonathan Worthington)++ | src/spesh/optimize.c
+
+[16:00] <Geth> ¦ MoarVM/more-op-opts: Specialize isnull
+
+[16:00] <Geth> ¦ MoarVM/more-op-opts:
+
+[16:00] <Geth> ¦ MoarVM/more-op-opts: It can sometimes turn into a constant integer, which may lead to some
+
+[16:00] <Geth> ¦ MoarVM/more-op-opts: branch elimination.
+
+[16:00] <Geth> ¦ MoarVM/more-op-opts: review: https://github.com/MoarVM/MoarVM/commit/b8cd9cab69
+
+[16:00] <Geth> ¦ MoarVM/more-op-opts: e56901549a | (Jonathan Worthington)++ | src/spesh/optimize.c
+
+[16:00] <Geth> ¦ MoarVM/more-op-opts: Set type facts on a resolved method
+
+[16:00] <Geth> ¦ MoarVM/more-op-opts:
+
+[16:00] <Geth> ¦ MoarVM/more-op-opts: This enables the isnull opt to deal with non-nullness of a resolved
+
+[16:00] <Geth> ¦ MoarVM/more-op-opts: method.
+
+[16:00] <Geth> ¦ MoarVM/more-op-opts: review: https://github.com/MoarVM/MoarVM/commit/e56901549a
+
+[16:01] <Geth> ¦ MoarVM: deaffb2de3 | (Jonathan Worthington)++ | src/6model/6model.c
+
+[16:01] <Geth> ¦ MoarVM: Make tryfindmeth not throw in some cases it did
+
+[16:01] <Geth> ¦ MoarVM:
+
+[16:01] <Geth> ¦ MoarVM: It should always reliably return null if it can't resolve a method.
+
+[16:01] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/deaffb2de3
+
+[16:10] <timotimo> oh, at least i can see that the crash i was getting from the profiler came from a legitc stack overflow
+
+[16:10] <timotimo> legit*
+
+[16:11] <timotimo> dump_call_graph_node was piling up extremely deep
+
+[16:12] <timotimo> that's likely due to the problem with not returning from inlines properly in the profiler
+
+[16:13] <nine> an old acquaintance
+
+[16:18] *** brrt joined
+[16:18] <nine> Will tc->cur_frame->jit_entry_label be updated during JIT execution of a call frame?
+
+[16:23] <nine> IOW does jit_entry_label point to the most recently passed label during execution? In that case it should actually already work like I previously described as finding the most recent deopt point. Which begs the question why it doesn't work already.
+
+[16:25] *** robertle joined
+[16:25] <nine> I guess it could be because there are 27 labels in the JITed code while there are only 2 deopt points
+
+[16:34] <brrt> hang on, i missed messaged
+
+[16:34] <timotimo> hm, parse-string is bailing because of unless_s
+
+[16:35] <brrt> yes, jit_entry_label is updated on every basic block entry (much to my dismay)
+
+[16:35] <timotimo> we have neither if_s nor unless_s in the jit/graph.c, maybe it'd be good
+
+[16:35] <brrt> i'm not sure that's right though :-o
+
+[16:36] <brrt> and it is also updated whenever we pass by something invokish, and something throwish
+
+[16:36] <brrt> nine: my intention (as it has been for a few months or more) is to replace the regular update with stack-walking to find a return address, and use that in the (rare) cases where we *need* it for the current frame
+
+[16:41] <brrt> the difficulty is actually one of tooling; i need to make sure that an assembly-language fragment is correctly compiled and parsed on windows, linux, os x, and some other unixes
+
+[16:41] <brrt> s/parsed/linked/
+
+[16:43] <brrt> also, as i'm sure you know, jit logging is a mess :-)
+
+[16:43] <nine> kinda :)
+
+[16:44] <Geth> ¦ MoarVM/spesh-limit-debug-log: 466a59af7a | (Bart Wiegmans)++ | 6 files
+
+[16:44] <Geth> ¦ MoarVM/spesh-limit-debug-log: [Spesh] Wrap debug printing
+
+[16:44] <Geth> ¦ MoarVM/spesh-limit-debug-log:
+
+[16:44] <Geth> ¦ MoarVM/spesh-limit-debug-log: The intention is that MVM_spesh_debug_enabled(tc) can be made more
+
+[16:44] <Geth> ¦ MoarVM/spesh-limit-debug-log: specific than just having a spesh log file handle or not.
+
+[16:44] <Geth> ¦ MoarVM/spesh-limit-debug-log:
+
+[16:44] <Geth> ¦ MoarVM/spesh-limit-debug-log: Specifically, setting MVM_SPESH_LIMIT in conjunction with MVM_SPESH_LOG
+
+[16:44] <Geth> ¦ MoarVM/spesh-limit-debug-log: will restrict the log to that particular frame.
+
+[16:44] <Geth> ¦ MoarVM/spesh-limit-debug-log: review: https://github.com/MoarVM/MoarVM/commit/466a59af7a
+
+[16:44] <Geth> ¦ MoarVM/spesh-limit-debug-log: 5e26e25c49 | (Bart Wiegmans)++ | src/spesh/optimize.c
+
+[16:44] <Geth> ¦ MoarVM/spesh-limit-debug-log: [Spesh] Log graph of inlinee prior to inlining
+
+[16:44] <Geth> ¦ MoarVM/spesh-limit-debug-log:
+
+[16:44] <brrt> ^ rebase, though
+
+[16:44] <Geth> ¦ MoarVM/spesh-limit-debug-log: Now that we can restrict the amount of logging done, no longer such a
+
+[16:44] <Geth> ¦ MoarVM/spesh-limit-debug-log: problem to log the entire graph.
+
+[16:44] <Geth> ¦ MoarVM/spesh-limit-debug-log: review: https://github.com/MoarVM/MoarVM/commit/5e26e25c49
+
+[16:59] <timotimo> i have an impl of if_s and unless_s, but it's not correct, though going through it step-by-step makes much sense
+
+[16:59] <timotimo> this'll be fun ...
+
+[16:59] *** domidumont joined
+[17:00] <timotimo> so ... first we check if the argument is a null pointer. if it is, we do the branch if it's unless_s and skip the branch if it's if_s
+
+[17:02] <Geth> ¦ MoarVM: bdw++ created pull request #842: Restrict spesh debug logging to selected frames
+
+[17:02] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/842
+
+[17:03] <nine> I fear the remaining issue is that the most recent deopt point is outside the inline I'm currently in. So I don't find the appropriate inlined candidate.
+
+[17:03] <timotimo> https://gist.github.com/timo/1ea6c284dab832a7dab9e7f3ac6905ec - could one of you be so kind as to have a look?
+
+[17:04] <timotimo> then we check if it has 0 graphs or != 0 graphs
+
+[17:04] <timotimo> if it has 0 graphs and it's unless_s, we do the branch, otherwise we skip; if it has other than 0 graphs and it's if_s we do the branch
+
+[17:10] <nine> timotimo: that....looks correct?
+
+[17:12] <timotimo> my sweet-ass segfault begs to differ
+
+[17:12] <nine> timotimo: to be 100 % there's not some logic error, you could split it into different code blocks for if_s and unless_s
+
+[17:12] <brrt> timotimo: it looks correct, but if you change the order of assignment to ARG1 and ARG2, you don't have to load WORK[val] from memory twice
+
+[17:13] <timotimo> right, that's just for safety
+
+[17:13] <timotimo> i used to use ARG1 and ARG2 for everything and didn't have TMP1 at all
+
+[17:13] <timotimo> if you want to test it locally, also put in the if_s and unless_s in graph.c
+
+[17:13] <timotimo> this is from emit.dasc
+
+[17:13] <timotimo> BBIAB
+
+[17:14] <brrt> uhuh
+
+[17:20] <brrt> .ask timotimo can you make a branch, i'll check it out tomorrow
+
+[17:20] <yoleaux> brrt: I'll pass your message to timotimo.
+
+[17:23] <nine> timotimo: funny...the split version actually works :D
+
+[17:23] <nine> I do not have the slightest idea why
+
+[17:38] <timotimo> something wrong with semicolons perhaps?
+
+[17:38] <yoleaux> 17:20Z <brrt> timotimo: can you make a branch, i'll check it out tomorrow
+
+[17:39] <timotimo> aha
+
+[17:39] <timotimo> i added braces for the if and else blocks
+
+[17:40] <timotimo> and that fixed it
+
+[17:40] <timotimo> that might mean that if_s0 and unless_s0 have the same kind of problem, but i believe neither of those are even in use by anything any more
+
+[17:45] <timotimo> hum. install-core-dists is taking a really long time now, though
+
+[17:46] <timotimo> OK, i'm stracing the moar processes that take CPU and they all exit after a few seconds
+
+[17:46] *** lizmat joined
+[17:48] *** FROGGS joined
+[17:51] <timotimo> (also takes ages with MVM_JIT_DISABLE=yes, so that's not it?)
+
+[17:51] <FROGGS> huh, I found a spesh related bug...
+
+[17:52] <nine> timotimo: did you compile with --debug?
+
+[17:52] <FROGGS> when you have an native integer that "is rw", you get zero back after a while
+
+[17:52] <timotimo> FROGGS: can you run it against a few different versions of rakudo?
+
+[17:52] <FROGGS> dunno
+
+[17:52] <timotimo> nine: i always do
+
+[17:53] <timotimo> FROGGS: use committable6 or bisectable6
+
+[17:53] <FROGGS> the bots you mean?
+
+[17:53] <nine> timotimo: that's usually the reason for me when rakudo is unbelievably slow :)
+
+[17:53] <timotimo> i still always pass --optimize=3 though
+
+[17:54] <timotimo> yes, the bots
+
+[17:55] <timotimo> maybe i'll grab very latest moar, nqp, and rakudo, and retry
+
+[18:06] <FROGGS> timotimo: I can reproduce it by modifying a test file from rakudo which compiles its own .so, but I cannot reproduce with a function from glibc
+
+[18:07] <FROGGS> so, I dont I can use the bots at all
+
+[18:07] <FROGGS> m: use NativeCall; sub frexp(num64 $x, int32 $exp is rw) is native { * }; my int32 $exp = 0; for (0..100000) { frexp(3.14e0, $exp); die $_ unless  $exp }
+
+[18:07] <camelia> rakudo-moar 9e6ae276a: ( no output )
+
+[18:12] <nine> FROGGS: Inline::Perl5 does use quite a few rw ints
+
+[18:12] *** Ven`` joined
+[18:13] <FROGGS> nine: in tight loops?
+
+[18:14] <FROGGS> loop over the SetChar here a thousand times... $c will become zero: https://github.com/rakudo/rakudo/blob/master/t/04-nativecall/15-rw-args.t#L34-L35
+
+[18:14] <FROGGS> (I declared $c outside of the loop)
+
+[18:15] <FROGGS> I just stumbled over this because I get the mouse coordinates in my game loop using rw args (int*)
+
+[18:16] <nine> FROGGS: does it still happen with a disabled JIT?
+
+[18:17] <FROGGS> nine: no, a disabled jit "fixes" it
+
+[18:18] <FROGGS> sometimes the 150th loop iteration yields a zero, sometimes it gets to about 240 loop iterations
+
+[18:19] <lizmat> that sounds like a smoking gun  :-)
+
+[18:27] <FROGGS> valgrind is silent fwiw
+
+[18:36] *** patrickz joined
+[18:42] <lizmat> https://gist.github.com/lizmat/b5c00327b405c8ab463169de735b8115
+
+[18:42] <lizmat> stack trace of ^Inf .hyper.grep( *.is-prime ).skip(10000).head.say
+
+[18:43] <lizmat> this fails about 1/6 times for me  :-(
+
+[18:43] <lizmat> the stack trace is *really* deep, which suprises me
+
+[18:54] *** Ven`` joined
+[19:07] *** Ven` joined
+[19:07] *** Ven`` joined
+[19:09] <patrickz> HI everyone.
+
+[19:16] *** committable6 joined
+[19:16] <japhb> Hello patrickz.  o/
+
+[19:23] *** zakharyas joined
+[19:26] <timotimo> .tell lizmat we've seen the stack elongation from the thread pool scheduler before; not entirely sure what's up with it, though
+
+[19:26] <yoleaux> timotimo: I'll pass your message to lizmat.
+
+[19:46] *** MasterDuke joined
+[19:56] <MasterDuke> timotimo: re install-core-dist.pl taking a long time, https://irclog.perlgeek.de/moarvm/2017-10-01#i_15241998
+
+[19:57] *** harrow joined
+[19:58] <patrickz> jnthn, timotimo, brrt: I think https://github.com/perl6/nqp/issues/431 is mostly waiting on a core dev giving some input. Could one of you have a look?
+
+[20:05] *** Ven`` joined
+[20:16] <timotimo> i don't know the exact intent behind MVMStorageSpec.align, but i thought storage spec is really only for when something is (potentially) embedded in another class (usually p6opaque)
+
+[20:17] <timotimo> and i'm still convinced we can do something better than align all accesses to nursery and such and only pay the price of alignment for actual P6num objects
+
+[20:33] <nine> timotimo: what about the performance benefit of aligned pointers?
+
+[20:34] <timotimo> for the situation we're talking about, the only performance hit (or potential crashes?) are for doubles, which require double the alignment as everything else, but i could be mistaken
+
+[20:57] *** Ven`` joined
+[21:11] *** releasable6 joined
+[21:14] *** lizmat joined
+[21:31] *** committable6 joined
+[21:53] *** committable6 joined
+[22:07] <dogbert17> lizmat: you awake?
+
+[22:12] <lizmat> sorta
+
+[22:12] <yoleaux> 19:26Z <timotimo> lizmat: we've seen the stack elongation from the thread pool scheduler before; not entirely sure what's up with it, though
+
+[22:12] <lizmat> about to call it a night, actually
+
+[22:13] <dogbert17> lizmat: not important but you were experimenting with a hyper bug a few hours ago
+
+[22:13] <lizmat> yeah, I was hoping to not see that anymore
+
+[22:13] <dogbert17> you said it failed one time in six or some such
+
+[22:13] <lizmat> yeah
+
+[22:13] <dogbert17> did you ever see it complete albeit with the wrong result?
+
+[22:17] *** Ven`` joined
+[22:17] <lizmat> no
+
+[22:17] <lizmat> either it completes successfully, or it appears to go off into lala land
+
+[22:18] <lizmat> I suspect some race condition on the continuation logic
+
+[22:19] <dogbert17> I can make it return the wrong result sometimes and so far only with MVM_SPESH_NODELAY=1
+
+[22:21] <lizmat> for a moment I was suspecting the v6.c awaiter logic
+
+[22:21] <lizmat> but it fails the same way with use v6.d.PREVIEW;
+
+[22:21] <dogbert17> aha
+
+[22:25] <lizmat> now I'm checking the nativeness of some of the Worker attributes
+
+[22:25] <lizmat> specifically $!working
+
+[22:26] <dogbert17> I hope I'm not keeping you up too late :)
+
+[22:26] <lizmat> making $!working an Int doesn't make a difference
+
+[22:35] <lizmat> making $!total or $!times-nothing-completed an Int also doesn't make the pb go away
+
+[22:35] <lizmat> and that concludes my checking for today
+
+[22:35] <lizmat> sleep&
+
+[22:54] *** greppable6 joined
+[22:54] *** quotable6 joined
+[22:54] *** bloatable6 joined
+[22:54] *** reportable6 joined
+[22:54] *** unicodable6 joined
+[22:54] *** benchable6 joined
+[22:54] *** releasable6 joined
+[22:54] *** squashable6 joined
+[22:54] *** shareable6 joined
+[22:54] *** nativecallable6 joined
+[22:54] *** bisectable6 joined
+[22:54] *** committable6 joined
+[22:54] *** notable6 joined
+[22:54] *** evalable6 joined
+[22:54] *** coverable6 joined
+[22:55] *** undersightable6 joined
+[22:55] *** statisfiable6 joined
+[23:54] *** Kaiepi joined

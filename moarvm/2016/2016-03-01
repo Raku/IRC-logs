@@ -1,0 +1,344 @@
+[00:00] <timotimo> gnite jnthn :)
+
+[01:07] *** synopsebot6 joined
+[02:26] <dalek> MoarVM/moar-gdb.py-python3: 4263b71 | timotimo++ | tools/moar-gdb.py:
+
+[02:26] <dalek> MoarVM/moar-gdb.py-python3: [moar-gdb.py] fix up lots of more stuff for py3 and such
+
+[02:26] <dalek> MoarVM/moar-gdb.py-python3: review: https://github.com/MoarVM/MoarVM/commit/4263b71422
+
+[02:26] <dalek> MoarVM/moar-gdb.py-python3: 6df338e | timotimo++ | tools/moar-gdb.py:
+
+[02:26] <dalek> MoarVM/moar-gdb.py-python3: [moar-gdb.py] throw out "reached" crutch
+
+[02:26] <dalek> MoarVM/moar-gdb.py-python3: review: https://github.com/MoarVM/MoarVM/commit/6df338e287
+
+[02:51] *** colomon joined
+[07:05] *** domidumont joined
+[07:08] *** domidumont joined
+[08:00] *** vendethiel- joined
+[08:19] *** TimToady joined
+[08:32] *** zakharyas joined
+[09:09] *** kjs_ joined
+[09:24] <arnsholt> jnthn: Python 3 has betterer Unicode, but it's still a bit weird I think
+
+[09:27] *** vendethiel joined
+[09:41] *** kjs_ joined
+[10:13] *** vendethiel joined
+[10:35] *** JimmyZ_ joined
+[10:50] *** kjs_ joined
+[11:53] *** vendethiel- joined
+[12:13] *** vendethiel joined
+[12:16] *** kjs_ joined
+[12:17] *** kjs_ joined
+[12:34] *** vendethiel- joined
+[12:52] *** colomon joined
+[13:37] *** kjs_ joined
+[13:58] <timotimo> jnthn: i see the p6opaque reprdata mallocs/frees a bunch of things separately. like total_attrs times sizeof MVMuint16, then of MVMSTable*, then MVMObject*, then MVMuint16 again
+
+[13:58] <timotimo> and then total_attrs + 1 times three MVMuint16s
+
+[13:59] <timotimo> not only could i make all this use the FSA, i could probably also pack all this stuff into one memory region that gets allocated and freed in one go, and then just store pointers into that region (including some alignment, of course)
+
+[13:59] <timotimo> how does that sound?
+
+[14:01] <timotimo> i suspect that'll also make things a tiny bit more cache-friendly, because then there won't be malloc headers in between those fields
+
+[14:01] <timotimo> though i haven't checked if that's actually the case. i could, though!
+
+[14:04] <arnsholt> Sounds plausible to me, at least =)
+
+[14:05] <timotimo> also, every REPROps struct is called "this_repr", and gdb only displays that
+
+[14:05] <timotimo> how do we feel about going through all the reprs and renaming that variable to hold the name of the actual repr?
+
+[14:06] <timotimo> that'd make it immediately visible in the debugger
+
+[14:06] <timotimo> rather than having to print out the reprops and look for the "name" field
+
+[14:06] <timotimo> (which, incidentally and thankfully is at the very bottom)
+
+[14:15] <timotimo> hm. how do i best make this "visible" to the naked eye, what's going on?
+
+[14:24] <timotimo> are we against alloca in mvm?
+
+[14:24] <timotimo> the only mention i see of it is in spesh dump, where i placed it myself
+
+[14:34] <timotimo> annoying that "print alignof(...)" doesn't seem to work in the gdb shell
+
+[14:48] * timotimo went with a little "bump the pointer" allocation scheme with a separate virtual preparing stage and a "realization" stage
+
+[14:48] <timotimo> soon i'll find out if it actually works or not
+
+[14:49] <timotimo> hm. so what FSA should i be using for this, i wonder ...
+
+[14:49] <timotimo> i probably have to build a new one?
+
+[14:52] <timotimo> nope, instance has a "global" one
+
+[14:58] <timotimo> hm. the FSA free function wants to be told the size
+
+[15:21] <jnthn> Yes, that you know the size you're freeing is *why* it doesn't have to keep track of it
+
+[15:21] <jnthn> That's half the point :)
+
+[15:21] <timotimo> oke :)
+
+[15:22] <timotimo> gets rid of the necessity of headers
+
+[15:22] <timotimo> though an expensive search operation could be built to figure out what exact bin something has landed in, and from there "guess" the size
+
+[15:22] <jnthn> Right :)
+
+[15:22] <jnthn> urgh, no
+
+[15:22] <jnthn> Just stick with malloc if it's too annoying to easily know the size
+
+[15:26] <timotimo> nah, it's okay. i put a field into MVMP6OpaqueREPRData
+
+[15:26] <timotimo> what type would i use for a memory offset to be added to a pointer?
+
+[15:27] <geekosaur> ptrdiff_t?
+
+[15:27] <timotimo> thanks
+
+[15:28] <timotimo> src/6model/reprs/P6opaque.c:691:90: error: ‘MVMP6opaqueREPRData {aka struct MVMP6opaqueREPRData}’ has no member named ‘name_to_index_mappin’
+
+[15:29] <geekosaur> is that missing a letter?
+
+[15:30] <timotimo> nah, just mappin'
+
+[15:30] <timotimo> for some reason, though, C doesn't accept that name
+
+[15:30] <timotimo> other fields of this struct: flattened_stable_hoppin' as well as gc_mark_boppin'
+
+[15:32] <timotimo> man, if only it were easier to get the exact amount of memory being "wasted" by mallocing those small fields
+
+[15:32] <timotimo> so i could get a more precise hint as to how much my code would save
+
+[15:33] <timotimo> d'oh, i'll also have to do this work in deserialize_repr_data
+
+[15:35] <timotimo> urgh, i may just have to write the size field into the serialization blob in order to do all of this right
+
+[15:36] <timotimo> or i can malloc the data for "in transit" storage and later memcpy it to the right addresses in the fixed_size blob and free the "in transit" stuff in between
+
+[15:36] <timotimo> no, there's an MVM_ASSIGN_REF in there that'd probably blow things up
+
+[15:37] * timotimo sits in front of tumble dryer and watches
+
+[15:37] <timotimo> perfect representation of thoughts in my head right now
+
+[15:37] <timotimo> (also it's comfy and warm there)
+
+[15:38] <jnthn> Urgh, no, don't store the size in the serialization blob...
+
+[15:39] <jnthn> What if we get a bogus file?
+
+[15:39] <jnthn> Buffer overrun exploit waiting to happen.
+
+[15:39] <timotimo> oh, hmm.
+
+[15:39] <jnthn> Not to mention bloating the serializatin blob
+
+[15:41] <timotimo> OK, so for the compact blob approach for storing all the data for p6opaquereprdata i'll have to juggle a lot of code around in the deserialize_repr_data function
+
+[15:42] * jnthn wonders if it'll be worth it...
+
+[15:42] <timotimo> i couldn't come up with something clever to visualize the spread of fields of the reprdata
+
+[15:46] <timotimo> m: ay minmax 0x24371a0, 0x2437180, 0x2436f70, 0x2436f90, 0x2436fb0, 0x2436fd0, 0x24371c0, 0x24371e0, 0x2437200
+
+[15:46] <camelia> rakudo-moar b9a79e: OUTPUT«===SORRY!=== Error while compiling /tmp/Ay_qY2QGzB␤Undeclared routine:␤    ay used at line 1␤␤»
+
+[15:46] <timotimo> m: say minmax 0x24371a0, 0x2437180, 0x2436f70, 0x2436f90, 0x2436fb0, 0x2436fd0, 0x24371c0, 0x24371e0, 0x2437200
+
+[15:46] <camelia> rakudo-moar b9a79e: OUTPUT«37973872..37974528␤»
+
+[15:47] <timotimo> m: .bounds.fmt("%x").say given minmax 0x24371a0, 0x2437180, 0x2436f70, 0x2436f90, 0x2436fb0, 0x2436fd0, 0x24371c0, 0x24371e0, 0x2437200
+
+[15:47] <camelia> rakudo-moar b9a79e: OUTPUT«2436f70 2437200␤»
+
+[15:47] <timotimo> m: say [-] @(.bounds) given minmax 0x24371a0, 0x2437180, 0x2436f70, 0x2436f90, 0x2436fb0, 0x2436fd0, 0x24371c0, 0x24371e0, 0x2437200
+
+[15:47] <camelia> rakudo-moar b9a79e: OUTPUT«-656␤»
+
+[15:47] <timotimo> this is the spread of pointers from a reprdata with just one attribute
+
+[15:48] <timotimo> though to be fair, this includes pointers that my "packed" approach will not put into the package, so let me re-do that list
+
+[15:50] <timotimo> m: say [-] @(.bounds) given minmax 0x2437180, 0x2436f70, 0x2436f90, 0x24371a0, 0x2436fd0, 0x24371c0, 0x24371e0, 0x2437200
+
+[15:50] <camelia> rakudo-moar b9a79e: OUTPUT«-656␤»
+
+[15:50] <timotimo> seems like there's only a single pointer i pasted that wasn't in that bunch
+
+[15:51] *** ggoebel16 joined
+[15:52] <timotimo> for a P6opaque with 1 num_attributes, we'll build a blob of size 208
+
+[15:52] <timotimo> ^- i can't tell if this is the same kind of p6opaque as seen above
+
+[15:52] <timotimo> for a P6opaque with 1 num_attributes, we'll build a blob of size 176
+
+[15:53] <timotimo> ^- but there's also some that'll end up smaller
+
+[15:53] <timotimo> for a P6opaque with 10 num_attributes, we'll build a blob of size 464
+
+[15:55] <timotimo> now, how do i calculate if we'd end up just mallocing that blob because it doesn't fit into a bin?
+
+[15:56] <timotimo> we discard the first 3 bits, after that, each value gets its own bin; we hold 96 bins
+
+[15:56] <timotimo> so the biggest we'd be having is 63 << 3?
+
+[15:56] <timotimo> m: say 63 +< 3
+
+[15:56] <camelia> rakudo-moar b9a79e: OUTPUT«504␤»
+
+[15:56] <timotimo> neat. that'll hold many of these blobs
+
+[15:57] <timotimo> for a P6opaque with 11 num_attributes, we'll build a blob of size 504
+
+[15:57] <timotimo> ^- up to this
+
+[15:57] <timotimo> for a P6opaque with 14 num_attributes, we'll build a blob of size 504
+
+[15:58] <timotimo> ^- this one probably doesn't have a big mro or something?
+
+[15:59] <timotimo> does that analysis seem sane at all?
+
+[16:02] *** hoelzro joined
+[16:02] *** virtualsue joined
+[16:03] <timotimo> moar-gdb.py should probably learn about the FSA, too, and show some details about that
+
+[16:22] <timotimo> jnthn: does MVMP6opaqueREPRData seem like a good candidate to be fixed_size_alloc'd, too? it's 70 bytes big (because i added the size_t fsa_allocated_bytes field at the end)
+
+[16:23] <timotimo> i'd think so
+
+[16:26] *** kjs_ joined
+[16:31] <timotimo> jnthn: alloca, yay or nay?
+
+[16:40] * masak .oO( alloc-aye! )
+
+[16:41] <jnthn> http://stackoverflow.com/questions/1018853/why-is-the-use-of-alloca-not-considered-good-practice has some warnings on it
+
+[16:42] <timotimo> OK, i'll use malloc and free instead
+
+[16:52] <timotimo> oh, neat. when deserializing i can even make the storage of the name_to_index_mapping contiguous
+
+[17:15] <timotimo> nice. the code in its current state seems valgrind-clean
+
+[17:16] <timotimo> alas, it's wrong
+
+[17:17] * timotimo takes a break
+
+[17:41] <timotimo> 173,432 bytes in 3,097 blocks are possibly lost in loss record 1,582 of 1,620  /  0x5037B4B: generate_unicode_property_values_hashes (unicode.c:48476)
+
+[17:41] <timotimo> is this known? will we clean up our unicode database upon shutdown?
+
+[17:42] <timotimo> (perhaps this just happens because moar exited with a traceback and failure state?)
+
+[17:44] <jnthn> timotimo: Yeah, I know that one
+
+[17:44] <jnthn> One of the things I want to get clean :)
+
+[17:44] <timotimo> good to know :)
+
+[17:45] <timotimo> now i wonder where my code b0rks the compilation
+
+[17:48] <timotimo> Cannot look for method 'Num' on a null object - clearly something's been corrupted
+
+[17:56] *** kjs_ joined
+[18:19] <dalek> MoarVM/p6opaque_packed: 3b5a50d | timotimo++ | src/6model/reprs/P6opaque. (2 files):
+
+[18:19] <dalek> MoarVM/p6opaque_packed: WIP on having P6opaque store its reprdata in one FSA'd blob
+
+[18:19] <dalek> MoarVM/p6opaque_packed:
+
+[18:19] <dalek> MoarVM/p6opaque_packed: instead of mallocing a bunch of tiny fields for its arrays, which
+
+[18:19] <dalek> MoarVM/p6opaque_packed: are all likely padded to 32byte sized blocks and include a piece
+
+[18:19] <dalek> MoarVM/p6opaque_packed: of header info.
+
+[18:19] <dalek> MoarVM/p6opaque_packed: review: https://github.com/MoarVM/MoarVM/commit/3b5a50d5d7
+
+[18:29] *** domidumont joined
+[18:37] <timotimo> i resisted the urge to call the branch "p6opaque_paqued"
+
+[18:38] *** kjs_ joined
+[18:39] <ilmari> p6opackqued
+
+[19:06] *** ilbot3 joined
+[19:06] <nwc10> timotimo: patch on branch MoarVM/p6opaque_packed ?
+
+[19:06] <timotimo> yup
+
+[19:06] <nwc10> I'll try, but there's rather a lot going on
+
+[19:06] <nwc10> small minion has just been put into bed, but is not asleep
+
+[19:06] <timotimo> oh, okay
+
+[19:06] <nwc10> and is *nearly* capable of climbing out
+
+[19:06] <timotimo> don't worry about it, then :)
+
+[19:07] <nwc10> I'll try to get a good look at it
+
+[19:07] <timotimo> i'll put some debugspam into the code to see if things are getting wrongly overwritten
+
+[19:07] <nwc10> but I can't promise a timescale, sorrt
+
+[19:17] *** virtualsue joined
+[19:31] *** flussence joined
+[19:31] *** harrow joined
+[19:31] *** timotimo joined
+[19:31] *** BinGOs joined
+[19:32] *** geekosaur joined
+[19:32] <timotimo> nwc10: https://gist.github.com/timo/bcb99fb065b739edc94e - here's offsets into the memory blob as well as a little hexdump (modified to show nullbytes as underscores )
+
+[19:33] *** harrow joined
+[19:34] <timotimo> it's a little disconcerting to have so many unused nullbytes at the beginning in so many cases
+
+[19:34] <timotimo> oh, wait
+
+[19:35] <timotimo> no, don't wait!
+
+[19:36] <timotimo> in any case, i can detect that all values from a section are zeroes and collapse multiple all-zeroes-sections into a single one that all share a pointer
+
+[19:36] <timotimo> for ALL ZE GAINS
+
+[19:40] * timotimo makes the hexdump a bit nicer to look at
+
+[19:47] <timotimo> updated the gist with a new revision
+
+[19:49] <timotimo> and again
+
+[19:52] <timotimo> that was fun, but i didn't actually debug anything with that
+
+[19:56] <timotimo> now with ` instead of _ for null bytes
+
+[19:56] <timotimo> much less noisy
+
+[19:57] <timotimo> so, who fixes my crappy code now? :D
+
+[20:13] <dalek> MoarVM/p6opaque_packed: 9a121a4 | timotimo++ | src/6model/reprs/P6opaque.c:
+
+[20:13] <dalek> MoarVM/p6opaque_packed: super debug spam: output a hexdump of the packed blob
+
+[20:13] <dalek> MoarVM/p6opaque_packed: review: https://github.com/MoarVM/MoarVM/commit/9a121a48cf
+
+[20:26] <timotimo> i'm now building a simple little second branch that just replaces every malloc in there with a fixed_size_alloc, which may still be better than what we had with malloc
+
+[20:27] *** Ven joined
+[20:38] *** zakharyas joined
+[20:55] <timotimo> dinner dinner
+
+[21:23] <timotimo> i wonder why the memory usage of perl6 -e 'say "hi"' is so unstable
+
+[21:27] *** pyrimidine joined
+[21:32] *** ggoebel16 joined
+[22:14] *** virtualsue joined
+[22:57] *** geekosaur joined
+[23:13] *** kjs_ joined
+[23:41] *** lizmat joined
+[23:41] *** khagan joined

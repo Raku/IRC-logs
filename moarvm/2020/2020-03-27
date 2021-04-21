@@ -1,0 +1,499 @@
+[00:37] *** Kaiepi left
+[00:37] *** Kaiepi joined
+[01:08] *** dogbert17 joined
+[01:11] *** dogbert11 left
+[02:35] *** JessiWilde joined
+[02:39] *** JessiWilde left
+[02:44] *** [Coke] joined
+[05:02] *** linkable6 joined
+[05:02] *** evalable6 joined
+[07:40] *** Kaiepi left
+[07:41] *** Kaiepi joined
+[08:09] <nine> It looks more and more like my memory leaks are in fact a rakudo issue rather than caused by Inline::Perl5
+
+[08:13] <MasterDuke> rakudo or moarvm?
+
+[08:20] <nine> Well rakudo includes moarvm and the leak could be caused by anything in there
+
+[08:22] <nine> Now the question is: how do I find out what those things are that are never freed?
+
+[08:22] <nine> heaptrack could tell me if I could disable the nursery (thus keeping us from moving stuff around in memory)
+
+[08:23] <MasterDuke> i feel that's a setup for a whole bunch of jokes, but i think they'd all be pretty dark (re finding things that are never freed)
+
+[08:24] <MasterDuke> didn't you do a whole bunch of related experiments recently? setting a giant gen2 or something like that?
+
+[08:25] <nine> Well I did spend a lot of time with the GC, indeed.
+
+[08:26] <nine> Actually disabling the nursery seems trivial. I just have to override the allocate_in_gen2 check in MVM_gc_allocate. But then I need a way to trigger a GC run (which is usually done when the nursery is full), otherwise it'll show all memory as leaked.
+
+[08:27] <MasterDuke> nqp::force_gc(), right?
+
+[08:29] <nine> Ha! What an excellent idea :)
+
+[08:33] <MasterDuke> jnthn: talking about heaptrack reminds me that i checked what valgrind reports as leaking when doing `raku --full-cleanup -e ''`. most seem to be spesh related. there are a couple small things, but then two big ones (12k and 411k) seem to be spesh worker related
+
+[08:35] <MasterDuke> the comment at https://github.com/MoarVM/MoarVM/blob/master/src/moar.c#L560-L562 suggests workers are being cleaned up, but is  there more that should be done?
+
+[08:42] <MasterDuke> oh, and if i run valgrind with MVM_SPESH_DISABLE=1 it only reports leaks in two places (instead of the nine with spesh enabled)
+
+[08:45] <MasterDuke> nine: don't want to distract you from finding big leaks, but you may know something about the two remaining ones. one is related to serialization, there's a chain of rakudo_scalar_set_container_spec, deserialize_stable, ... . the other is just MVM_load_bytecode_buffer_to_cu
+
+[08:57] *** zakharyas joined
+[09:11] <nwc10> good *, #moarvm
+
+[09:39] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #1260: Free compunits loaded from bytecode upon dealloc
+
+[09:39] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1260
+
+[09:53] *** Geth left
+[09:53] *** Geth joined
+[10:12] <MasterDuke> oh, the one remaining leak (with spesh disabled) is from rakudo's src/vm/moar/ops/container.c
+
+[10:31] *** sena_kun joined
+[10:36] *** AlexDaniel left
+[10:50] *** Altai-man_ joined
+[10:53] *** sena_kun left
+[10:53] <MasterDuke> huh, rakudo_scalar_set_container_spec https://github.com/rakudo/rakudo/blob/master/src/vm/moar/ops/container.c#L173-L177 is being called twice, but rakudo_scalar_gc_free_data https://github.com/rakudo/rakudo/blob/master/src/vm/moar/ops/container.c#L82-L84 is only being called once, when running `raku  --full-cleanup -e ''`
+
+[10:55] <nwc10> MoarVM oops: Malformed DU chain: writer takenextdispatcher of 5(1) in BB 86 is incorrect
+
+[10:55] <nwc10> Spesh of 'EVAL' (cuid: 12669, file: SETTING::src/core.c/ForeignCode.pm6:27)
+
+[10:55] <nwc10> That's t/spec/integration/eval-and-threads.t
+
+[10:56] <nwc10> master/master/296fbcf46 (because Rakudo has just moved on...)
+
+[10:58] <MasterDuke> vrurg: ^^^
+
+[11:02] <jnthn> ooh, that's a good catch
+
+[11:02] <jnthn> (DU chain checker)++
+
+[11:03] <MasterDuke> what is a DU chain?
+
+[11:05] <nwc10> jnthn: there were a couple of other spectest failures but I didn't dig into them when I hit that one
+
+[11:05] <nwc10> and at times, spectests seem to be left in a state of fail, which irks me
+
+[11:06] <nwc10> well, the spec test is probably correct, but it isn't TODO
+
+[11:12] <jnthn> MasterDuke: Define-Use
+
+[11:13] <jnthn> Basically links an SSA var with all of the places that use it
+
+[11:33] *** MasterDuke left
+[12:39] *** MasterDuke joined
+[12:42] <MasterDuke> jnthn: does a du-chain error usually indicate a problem in the implementation or optimization?
+
+[12:51] *** sena_kun joined
+[12:53] *** Altai-man_ left
+[13:05] *** MasterDuke left
+[13:09] <jnthn> MasterDuke: It means that something in spesh is transforming the program graph inconsistently, e.g. it doesn't update things properly
+
+[13:09] <tellable6> jnthn, I'll pass your message to MasterDuke
+
+[13:09] <jnthn> And so leaves the graph in an inconsistent state, which can cause other analyses/optimizations to do the wrong thing
+
+[13:22] *** MasterDuke joined
+[13:26] <MasterDuke> fyi, the du chain error in t/spec/integration/eval-and-threads.t disappears if you set MVM_SPESH_INLINE_DISABLE=1
+
+[13:26] <tellable6> 2020-03-27T13:09:23Z #moarvm <jnthn> MasterDuke: It means that something in spesh is transforming the program graph inconsistently, e.g. it doesn't update things properly
+
+[13:29] <jnthn> Then there's a high chance the mistake is in inline.c
+
+[13:31] <MasterDuke> yep. if i comment out just these lines https://github.com/MoarVM/MoarVM/blob/master/src/spesh/inline.c#L653-L656 the error stays, just is reported in a different location (Spesh of 'AT-KEY' (cuid: 6608, file: SETTING::src/core.c/Hash.pm6:35)), but i comment out the else if entirely everything is fine
+
+[13:45] <Geth> ¦ MoarVM: edb6f87261 | (Daniel Green)++ | src/core/loadbytecode.c
+
+[13:45] <Geth> ¦ MoarVM: Free compunits loaded from bytecode upon dealloc
+
+[13:45] <Geth> ¦ MoarVM: 
+
+[13:45] <Geth> ¦ MoarVM: Before this, `MVM_SPESH_DISABLE=1 valgrind --leak-check=full raku
+
+[13:45] <Geth> ¦ MoarVM: --full-cleanup -e ''` would report 'definitely lost: 1,560 bytes in 2
+
+[13:45] <Geth> ¦ MoarVM: blocks', after it reports 'definitely lost: 32 bytes in 1 blocks'.
+
+[13:45] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/edb6f87261
+
+[13:45] <Geth> ¦ MoarVM: 8ed5e7f5c6 | niner++ (committed using GitHub Web editor) | src/core/loadbytecode.c
+
+[13:45] <Geth> ¦ MoarVM: Merge pull request #1260 from MasterDuke17/cleanup_compunits_loaded_from_bytecode
+
+[13:45] <nine> MasterDuke: good catch!
+
+[13:45] <Geth> ¦ MoarVM: 
+
+[13:45] <Geth> ¦ MoarVM: Free compunits loaded from bytecode upon dealloc
+
+[13:45] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/8ed5e7f5c6
+
+[13:46] *** MasterDuke left
+[13:58] <[Coke]> ... I saw "free compunits" and was thinking something else. :)
+
+[13:58] <[Coke]> like, $0.
+
+[13:58] *** MasterDuke joined
+[14:00] <MasterDuke> nine: thanks. btw, did you see my question about the rakudo container spec?
+
+[14:16] <nine> See yes, understand no :)
+
+[14:17] <nine> Who calls rakudo_scalar_set_container_spec?
+
+[14:18] <MasterDuke> i think 6model code in moarvm
+
+[14:19] <MasterDuke> maybe just nqp::setcontspec and deserialize_stable()
+
+[14:26] <MasterDuke> however, by far the bigger leaker is the jit
+
+[14:31] <MasterDuke> wait, hmm
+
+[14:31] <jnthn> Does it leak as it works, or just not free pages at process end?
+
+[14:33] *** lucasb joined
+[14:36] <MasterDuke> i'm just checking `valgrind raku --full-cleanup -e ''`
+
+[14:39] <MasterDuke> and i get oddly different report with MVM_JIT_DISABLE or MVM_SPESH_DISABLE
+
+[14:41] <MasterDuke> so i'm not 100% sure it's the jit. i think spesh working are definitely causing problems, and maybe also casting blame on the jit
+
+[14:42] <MasterDuke> e.g., 411,444 definitely lost, with a stack trace of MVM_vm_create_instance, MVM_spesh_worker_start, MVM_thread_new, MVM_tc_create, calloc
+
+[14:43] <jnthn> Hm, does full cleanup actaully close down the spesh worker, so there's chance to clear its thread context up?
+
+[14:43] <jnthn> Normally we'd just never care, 'cus it runs all process
+
+[14:44] <MasterDuke> that's what these are supposed to do, right? https://github.com/MoarVM/MoarVM/blob/master/src/moar.c#L561-L562
+
+[14:45] <jnthn> Yeah, that joins it. 
+
+[14:45] <jnthn> And the GC global cleanup comes after that
+
+[14:50] *** Altai-man_ joined
+[14:51] <Geth> ¦ MoarVM: 48da6b2918 | (Stefan Seifert)++ | src/6model/reprs/CArray.c
+
+[14:51] <Geth> ¦ MoarVM: Implement calculation of unmanaged size for CArray
+
+[14:51] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/48da6b2918
+
+[14:53] *** sena_kun left
+[16:15] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #1261: Free some memory calloc'ed when making spesh plans
+
+[16:15] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1261
+
+[16:27] <Geth> ¦ MoarVM: 09b88efb00 | (Daniel Green)++ | src/spesh/plan.c
+
+[16:27] <Geth> ¦ MoarVM: Free some memory calloc'ed when making spesh plans
+
+[16:27] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/09b88efb00
+
+[16:27] <Geth> ¦ MoarVM: b178623ce5 | niner++ (committed using GitHub Web editor) | src/spesh/plan.c
+
+[16:27] <Geth> ¦ MoarVM: Merge pull request #1261 from MasterDuke17/cleanup_leak_when_planning_for_certain_specialization
+
+[16:27] <Geth> ¦ MoarVM: 
+
+[16:27] <Geth> ¦ MoarVM: Free some memory calloc'ed when making spesh plans
+
+[16:27] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/b178623ce5
+
+[16:28] <MasterDuke> thanks
+
+[16:29] <MasterDuke> i think most of the rest is from add_nodes_for_typed_argument()
+
+[16:31] <MasterDuke> https://github.com/MoarVM/MoarVM/blob/master/src/spesh/arg_guard.c#L189 and https://github.com/MoarVM/MoarVM/blob/master/src/spesh/arg_guard.c#L195
+
+[16:51] *** sena_kun joined
+[16:53] *** Altai-man_ left
+[17:03] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #1262: Destroy vectors that were previously init'ed
+
+[17:03] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1262
+
+[17:04] <MasterDuke> a little less sure of ^^^, i've never used MVM_VECTOR_* before
+
+[17:05] <MasterDuke> valgrind does still report `indirectly lost: 410,767 bytes in 36 blocks` and `still reachable: 1,677 bytes in 5 blocks`
+
+[17:07] *** zakharyas left
+[17:08] <MasterDuke> that's with jit disabled though
+
+[17:08] <MasterDuke> `MVM_SPESH_BLOCKING=1 MVM_SPESH_NOELAY=1 valgrind --leak-check=full ./install/bin/raku --full-cleanup -e ''` has `definitely lost: 3,064 bytes in 20 blocks` and `indirectly lost: 427,165 bytes in 95 blocks`
+
+[17:18] *** zakharyas joined
+[18:18] <Geth> ¦ MoarVM: c82ff9d739 | (Daniel Green)++ | src/spesh/arg_guard.c
+
+[18:18] <Geth> ¦ MoarVM: Destroy vectors that were previously init'ed
+
+[18:18] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/c82ff9d739
+
+[18:18] <Geth> ¦ MoarVM: ed3e7cb984 | niner++ (committed using GitHub Web editor) | src/spesh/arg_guard.c
+
+[18:18] <Geth> ¦ MoarVM: Merge pull request #1262 from MasterDuke17/cleanup_leak_when_creating_nodes_to_check_argument_types
+
+[18:18] <Geth> ¦ MoarVM: 
+
+[18:18] <Geth> ¦ MoarVM: Destroy vectors that were previously init'ed
+
+[18:18] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ed3e7cb984
+
+[18:28] <Geth> ¦ MoarVM: ae71ac80dd | (Stefan Seifert)++ | src/6model/reprs/NativeCall.c
+
+[18:28] <Geth> ¦ MoarVM: Fix NativeCall leaking sym_name on cleanup
+
+[18:28] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ae71ac80dd
+
+[18:50] *** Altai-man_ joined
+[18:53] *** sena_kun left
+[18:53] *** patrickb joined
+[18:54] *** zakharyas left
+[18:59] *** patrickb left
+[19:01] *** lucasb left
+[19:07] *** AlexDaniel joined
+[19:08] *** AlexDaniel left
+[19:08] *** AlexDaniel joined
+[19:32] <nine> I know why the spesh thread's tc doesn't get freed!
+
+[19:32] <MasterDuke> oh!
+
+[19:33] *** MasterDuke left
+[19:38] <nine> A thread object's tc doesn't get freed in it's gc_free as you'd expect. Instead it's handled by logic in the GC itself. It actually takes 2 GC runs to reach that as we need to keep stuff alive for finalizers to run. This second run simply doesn't happen for the spesh thread.
+
+[19:39] <nine> It only affects the spesh thread as we run the GC after joining a thread. So all threads but the very last to be joined will get at least 2 runs. This means that when spesh is disabled, we'd just leak another thread (unless there is none).
+
+[19:39] *** MasterDuke joined
+[19:41] <MasterDuke> so we need to run a another gc after what now is the last?
+
+[19:41] <MasterDuke> or is there a better solution?
+
+[19:42] <Geth> ¦ MoarVM: ada1cadaa7 | (Stefan Seifert)++ | src/moar.c
+
+[19:42] <Geth> ¦ MoarVM: Don't leak a (spesh) thread when running with --full-cleanup
+
+[19:42] <Geth> ¦ MoarVM: 
+
+[19:42] <Geth> ¦ MoarVM: A thread object's tc doesn't get freed in it's gc_free as you'd expect. Instead
+
+[19:42] <Geth> ¦ MoarVM: it's handled by logic in the GC itself. It actually takes 2 GC runs to reach
+
+[19:42] <Geth> ¦ MoarVM: that as we need to keep stuff alive for finalizers to run. This second run
+
+[19:42] <Geth> ¦ MoarVM: simply doesn't happen for the spesh thread.
+
+[19:42] <Geth> ¦ MoarVM: 
+
+[19:42] <Geth> ¦ MoarVM: <…commit message has 6 more lines…>
+
+[19:43] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ada1cadaa7
+
+[19:43] <nine> Yeah, we'll just run the GC one more time. As we do this only with --full-cleanup this won't hurt
+
+[19:45] <[Coke]> nine++
+
+[20:08] <MasterDuke> nine++
+
+[20:10] <MasterDuke> not quite 0, but much less now. `definitely lost: 2,192 bytes in 19 blocks`, `indirectly lost: 16,398 bytes in 59 blocks`
+
+[20:12] <nwc10> Stage parse      : 393.582
+
+[20:12] <nwc10> that is ASAN, spesh no delay and full paranoia.
+
+[20:13] <nwc10> I don't remember it being below 400. It used to be above 500
+
+[20:13] <nwc10> Someone(s0
+
+[20:13] <nwc10> Someone(s) have been doing good stuff
+
+[20:13] <nwc10> (probably not nine, who does other good stuff)
+
+[20:13] <nine> Haha! We leak all JIT code because.....of an off by 1 error in the reference count (yes we do that)
+
+[20:14] <nwc10> failure do down-karma the reference :-)
+
+[20:14] <MasterDuke> ha. it did look to me like stuff was supposed to be freed, didn't think to look for off-by-ones
+
+[20:15] <nine> And fixing that uncovered a segfault...
+
+[20:15] <MasterDuke> doh
+
+[20:30] *** patrickb joined
+[20:31] <Geth> ¦ MoarVM: 92f1935d7a | (Stefan Seifert)++ | src/jit/compile.c
+
+[20:31] <Geth> ¦ MoarVM: Fix potential segfault when failing to compile JIT code
+
+[20:31] <Geth> ¦ MoarVM: 
+
+[20:31] <Geth> ¦ MoarVM: When we abort JIT compilation (due to a negative offset for dynamic label) not
+
+[20:31] <Geth> ¦ MoarVM: all fields in the MVMJitCode struct are initialized, so the MVM_free call on
+
+[20:31] <Geth> ¦ MoarVM: them may cause invalid memory access. Fix by initializing the struct with 0 on
+
+[20:31] <Geth> ¦ MoarVM: allocation.
+
+[20:31] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/92f1935d7a
+
+[20:31] <Geth> ¦ MoarVM: 282989882d | (Stefan Seifert)++ | src/jit/compile.c
+
+[20:31] <Geth> ¦ MoarVM: No longer leak all JIT code
+
+[20:31] <Geth> ¦ MoarVM: 
+
+[20:31] <Geth> ¦ MoarVM: JIT code starts with a reference count of 1. AO_fetch_and_sub1 used to check
+
+[20:31] <Geth> ¦ MoarVM: the reference count in MVM_jit_code_destroy returns the original value. So we
+
+[20:31] <Geth> ¦ MoarVM: need to compare with 1 instead of 0.
+
+[20:31] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/282989882d
+
+[20:34] <MasterDuke> nine++++, down to only leaking `32 bytes in 1 blocks`!
+
+[20:36] <timotimo> that's -e '', right?
+
+[20:36] <MasterDuke> yep, with `MVM_SPESH_BLOCKING=1 MVM_SPESH_NOELAY=1`
+
+[20:36] <timotimo> right
+
+[20:36] <timotimo> very cool
+
+[20:37] <timotimo> perhaps this should be put on a schedule
+
+[20:37] <timotimo> a week or so before an upcoming release or so
+
+[20:37] <MasterDuke> though now it's the same if you leave them off
+
+[20:37] <timotimo> cool
+
+[20:37] <MasterDuke> you mean, not put it in the release scheduled for tomorrow?
+
+[20:37] <timotimo> oh, no that's not what i mean
+
+[20:38] <MasterDuke> oh, check for new leaks?
+
+[20:38] <timotimo> yes
+
+[20:38] <Geth> ¦ MoarVM: 77484098ff | (Stefan Seifert)++ | 2 files
+
+[20:38] <Geth> ¦ MoarVM: Fix leaking native callback cache on thread exit
+
+[20:38] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/77484098ff
+
+[20:38] <MasterDuke> could be part of ci
+
+[20:39] <MasterDuke> i would like a series of performance ci tests/benchmarks run regularly
+
+[20:39] <timotimo> performance on publically offered CI infrastructure like travis or appveyor is probably a poor choice, unless we measure with like callgrind or cachegrind
+
+[20:41] <MasterDuke> we do have some credits for aws/azure/gcp, right? even just run weekly or something not quite as frequent as every commit would be good
+
+[20:43] <nine> That won't make performance tests much more useful
+
+[20:46] <MasterDuke> it's a start at least. almost always easier to improve something existing than create something new
+
+[20:51] *** sena_kun joined
+[20:53] *** Altai-man_ left
+[21:00] <nine> That leak rakudo_scalar_set_container_spec seems simple enough to plug by just freeing a preexisting st->container_data. That can hardly hurt as we overwrite it anyway. But I'd like jnthn's input on how this was meant to work architecture wise and if multiple calls to that function are to be expected.
+
+[21:04] <MasterDuke> i'm also running a rakudo compile (just CORE.c) through valgrind to see if it picks up anything else. not sure how long this is going to take...
+
+[21:06] <nine> I'd probably give it a night :)
+
+[21:11] <MasterDuke> 943s for stage parse
+
+[21:11] <nine> That's not all that basd
+
+[21:11] <nine> s/basd/bad/
+
+[21:12] <MasterDuke> this ryzen 7 is a great cpu
+
+[21:14] <MasterDuke> 164s for stage optimize
+
+[21:19] <MasterDuke> 236s for stage mast
+
+[21:19] <MasterDuke> 10s for stage mbc
+
+[21:19] <MasterDuke> and of course i forgot to run with --leak-check=full
+
+[21:20] <nine> Good thing it doesn't take a night then :)
+
+[21:20] <Geth> ¦ MoarVM: 768e6c2f30 | (Stefan Seifert)++ | src/core/threadcontext.c
+
+[21:20] <Geth> ¦ MoarVM: Fix invalid reads when freeing native callback cache
+
+[21:20] <Geth> ¦ MoarVM: 
+
+[21:20] <Geth> ¦ MoarVM: Hashes use the fixed size allocator, so we must free the cache before tearing
+
+[21:20] <Geth> ¦ MoarVM: down the allocator.
+
+[21:20] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/768e6c2f30
+
+[21:50] *** zakharyas joined
+[21:51] <MasterDuke> i'll gist the results, there definitely still are some leaks
+
+[21:52] <MasterDuke> https://gist.github.com/MasterDuke17/e9ef9d303d56ab70d7d3e728cf6795a7
+
+[21:53] <MasterDuke> tldr, `definitely lost: 17,312 bytes in 30 blocks`, `indirectly lost: 206,515 bytes in 3,735 blocks`, `possibly lost: 6,038,832 bytes in 1 blocks`, `still reachable: 1,708 bytes in 6 blocks`
+
+[21:57] <nine> MasterDuke: I have a fix for those MVM_cu_callsite_add issues
+
+[21:58] <MasterDuke> nice
+
+[21:59] <nine> Will create a PR as though it works and I do have a vague understanding of why it my be correct, I'm much less certain than with the other fixes
+
+[22:02] <MasterDuke> what about the giant one at the end? looks like you've touched that very line in fact
+
+[22:04] <Geth> ¦ MoarVM: niner++ created pull request #1263: Fix interned callsites getting leaked when fixing up inlines
+
+[22:04] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1263
+
+[22:09] <MasterDuke> btw, looks like https://github.com/MoarVM/MoarVM/blob/master/src/6model/serialization.c#L904-L906 is missing an `MVM_free(output)`, though that isn't the cause of the leak
+
+[22:09] <nine> Yeah, it does
+
+[22:10] *** Kaiepi left
+[22:11] *** Kaiepi joined
+[22:11] <nine> Is it me or is tc->serialized actually never read anywhere
+
+[22:12] <MasterDuke> https://github.com/MoarVM/MoarVM/blob/master/src/core/bytecode.c#L213 ?
+
+[22:14] <lizmat> feels like a MoarVM bump is in order?  or too soon?
+
+[22:15] <nine> MasterDuke: that's a different thing. tc->serialized used to be read by the mast compiler, which no longer exists
+
+[22:15] <MasterDuke> but that's only setting something also. i never see a `serialized` being read...
+
+[22:17] <nine> true
+
+[22:18] <MasterDuke> doing another valgrind run with your PR and https://github.com/MoarVM/MoarVM/blob/master/src/6model/serialization.c#L925 commented out
+
+[22:19] *** harrow joined
+[22:23] <nine> Btw. t/spec/MISC/bug-coverage-stress-6.d.t fails with "continuationinvoke expects an MVMContinuation" when the loop's iterations are bumped like the comments describe
+
+[22:26] <Geth> ¦ MoarVM: 21fa394a8f | (Stefan Seifert)++ | 3 files
+
+[22:26] <Geth> ¦ MoarVM: Remove remnants of the old mast compiler to fix memory leak
+
+[22:26] <Geth> ¦ MoarVM: 
+
+[22:26] <Geth> ¦ MoarVM: tc->serialized* were actually no longer used by anything since the mast
+
+[22:26] <Geth> ¦ MoarVM: compiler was removed. In addition, the memory pointed to by them never
+
+[22:26] <Geth> ¦ MoarVM: got freed.
+
+[22:26] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/21fa394a8f
+
+[22:29] <nine> There seems to be only one leak left according to the valgrind gist. And for that we even have a comment showing how to get rid of it: /* XXX make all the statics members of the global MVM instance instead? */
+
+[22:42] *** nine joined
+[22:44] *** zakharyas left
+[22:45] *** camelia joined
+[22:50] *** Altai-man_ joined
+[22:53] <MasterDuke> huh. still the one in concatenate_outputs
+
+[22:53] *** sena_kun left
+[23:10] *** Altai-man_ left
+[23:19] <MasterDuke> yep. did another run and still the same
+

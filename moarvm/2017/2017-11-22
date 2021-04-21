@@ -1,0 +1,188 @@
+[00:53] <samcv> MasterDuke: does anything seem wrong? or is this just checking the code is alright and you don't notice any problems currently?
+
+[02:56] *** ilbot3 joined
+[03:48] <MasterDuke> i don't notice any problems, but it's curious that memory use is greater, so an overall check would be good
+
+[03:49] <MasterDuke> but off to sleep now...
+
+[06:46] *** brrt joined
+[06:47] <brrt> good * #moarvm
+
+[07:05] *** domidumont joined
+[07:11] *** domidumont joined
+[07:43] *** robertle joined
+[07:49] *** brrt joined
+[08:03] *** zakharyas joined
+[08:56] *** zakharyas joined
+[09:14] *** zakharyas joined
+[09:16] *** zakharyas joined
+[09:23] *** zakharyas joined
+[09:29] *** zakharyas joined
+[09:29] *** zakharyas joined
+[10:01] *** geospeck joined
+[10:11] *** zakharyas joined
+[12:02] *** brrt1 joined
+[13:20] *** markmont joined
+[13:44] *** zakharyas joined
+[16:11] *** brrt joined
+[16:16] *** committable6 joined
+[17:32] *** domidumont joined
+[17:54] *** zakharyas joined
+[17:55] *** AlexDaniel joined
+[19:06] *** robertle joined
+[20:20] *** MasterDuke joined
+[20:42] *** zakharyas joined
+[21:00] *** geospeck joined
+[21:18] *** geospeck joined
+[21:25] *** lizmat joined
+[21:48] *** geospeck joined
+[22:47] <MasterDuke> timotimo: any thoughts as to why my string fsa branch would use more ram?
+
+[22:58] <timotimo> not really; could be overhead from internal fragmentation of the FSA pages perhaps?
+
+[22:59] <MasterDuke> i was also kind of surprised it took the same amount of time. i thought it would be sort of a best case for the fsa and maybe a little faster
+
+[23:00] <timotimo> it might be interesting to see how big the percentage of "direct to malloc" allocations is
+
+[23:01] <MasterDuke> in that code i ran there should have been very few, right?
+
+[23:02] <timotimo> i forgot what your code was :S
+
+[23:03] <MasterDuke> some version of: MVM_SPESH_BLOCKING=1 perl6 -e 'my @ss = "sm.sql".IO.comb; say @ss[*-1]; my @o-ss = @ss.map({ $_ ~ rand.Str }); say @o-ss[*-1];'
+
+[23:03] <MasterDuke> might not have had the second part with rand when i was talking about numbers
+
+[23:04] <jnthn> MasterDuke: The FSA rounds up to its bin size
+
+[23:05] <MasterDuke> arg, i keep forgetting that!
+
+[23:05] <timotimo> m: say rand.Str
+
+[23:05] <camelia> rakudo-moar 2c1a2860b: OUTPUT: «0.920356743167877␤»
+
+[23:05] <timotimo> ok, those are "long" strings from the perspective of my in-situ storage feature
+
+[23:06] <jnthn> Aside from the cost of writing all the additional code-paths to cope with it, timotimo's in-situ storage feature is likely to be more of a win on memory for strings
+
+[23:06] <timotimo> actually, not many code paths :)
+
+[23:07] <timotimo> mainly in the iterator, and a few to check if one should be made
+
+[23:07] <jnthn> Hm...I guess maybe a lot of stuff uses the grapheme or codepoint iterator
+
+[23:07] <timotimo> one of these exists inside "iterate into string" which is used a bunch
+
+[23:07] <timotimo> aye
+
+[23:07] <MasterDuke> right, i guess a small memory increase wouldn't be too surprising. but no speed increase?
+
+[23:07] <timotimo> there's still something missing, though, as a regex match with a certain char class fails with 32bit in-situ-storage added
+
+[23:08] <jnthn> MasterDuke: Well, it's an extra branch every time we free a string, for one...
+
+[23:08] <jnthn> For two, how many string-creating code paths manage to get an FSA hit?
+
+[23:09] <timotimo> i imagine not having to chase a pointer for in situ storage makes a noticable difference
+
+[23:09] <jnthn> Yeah, it's very cache friendly
+
+[23:09] <MasterDuke> jnthn: well, that code i showed should, right? lots of tiny strings created
+
+[23:10] <timotimo> and at some point our gc will support variable sized objects so short strings can have longer in-situ than just 64 bits
+
+[23:10] <jnthn> Perhaps so, but note that's also a trade-off (eat the nursery faster)
+
+[23:10] <timotimo> true
+
+[23:10] <jnthn> (And copy more for survivors)
+
+[23:11] <timotimo> OTOH we already limit the nursery size when strings get allocated
+
+[23:11] <timotimo> not sure what the threshold for that is
+
+[23:11] <MasterDuke> jnthn: that note in reply to me?
+
+[23:11] <jnthn> MasterDuke: The last two were to timotimo :)
+
+[23:11] <timotimo> no, in response to my variable sized thing
+
+[23:11] <MasterDuke> ah
+
+[23:12] <jnthn> #define FSA_SIZE_DEBUG 1
+
+[23:12] <jnthn> I guess you turned that off before timing? :)
+
+[23:12] <timotimo> that's a good idea
+
+[23:12] <jnthn> I figure MasterDuke++ probably did, just askin' just in case :)
+
+[23:12] <timotimo> that'd certainly increase both memory usage and run time
+
+[23:13] <jnthn> MasterDuke: I wasn't to clear a moment ago; I more meant "how many get hit at runtime", which I can't tell from reading the code :)
+
+[23:13] <jnthn> But if it's a low proportion it might explain the low speedup
+
+[23:13] <jnthn> btw, do we currently use the FSA for the strand list?
+
+[23:16] <timotimo> currently no mention of "fixed" inside MVMString.c at least
+
+[23:16] <jnthn> 'cus that strikes me as likely to be a clearer win
+
+[23:17] <timotimo> in particular no free call for that
+
+[23:17] *** markmont joined
+[23:17] <timotimo> there's an additional opportunity for putting in-situ storage inside the strands array where a pointer to an actual string object usually lives
+
+[23:17] <timotimo> that saves chasing *two* pointers
+
+[23:18] <timotimo> but it might also make the code a bit more complex
+
+[23:25] <MasterDuke> jnthn: oh, that may have still been on...
+
+[23:25] <MasterDuke> let me check
+
+[23:26] <MasterDuke> yep it was, rerunning now...
+
+[23:26] <timotimo> wow, ok
+
+[23:27] <timotimo> i wish i had thought of that
+
+[23:29] * MasterDuke does also
+
+[23:36] <MasterDuke> ok. so for this benchmark (where sm.sql is 655k and 10k lines): MVM_SPESH_BLOCKING=1 /usr/bin/time ./install/bin/perl6-m -e 'my @ss = "sm.sql".IO.comb; say @ss[*-1];'
+
+[23:37] <timotimo> i feel like it's time to say this again: you can tell diff to put #ifdef into the code to give either the before or the after for the patch
+
+[23:38] <MasterDuke> master and my branch take the same time, but master averages 209468maxresident and my branch averages 206980maxresident
+
+[23:38] <timotimo> either diff or apply. probably apply
+
+[23:38] <MasterDuke> ?
+
+[23:39] <timotimo> someone might find this useful
+
+[23:39] <timotimo> not necessarily right now
+
+[23:39] <MasterDuke> ah, didn't understand what you meant, but that's cool
+
+[23:40] <MasterDuke> *didn't understand at first
+
+[23:40] <timotimo> mhm
+
+[23:46] <MasterDuke> with a 10x bigger file, time for both is still the same, but master averages 1192376maxresident and my branch averages 1157600maxresident
+
+[23:46] <MasterDuke> gotta go prepare dinner, bbl
+
+[23:46] <timotimo> that's still a surprisingly small improvement
+
+[23:48] <jnthn> We're lucky we're saving, though?
+
+[23:48] <jnthn> In terms of memory size, I mean
+
+[23:48] <timotimo> i'd like to compare against in-situ
+
+[23:49] <jnthn> In that the FSA rounds up
+
+[23:49] <jnthn> So we win when it's round-up beats malloc's overhead
+
+[23:50] <timotimo> malloc has overhead + it rounds up, too

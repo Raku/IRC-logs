@@ -1,0 +1,154 @@
+[00:00] <timotimo> now the code is really messy from my stuff, but i can probably just stash it off to a never-to-be-used-again branch and redo the trivial fix
+
+[00:05] <jnthn> timotimo++ # clearing up after fixing stuff
+
+[00:13] <timotimo> i guess that part of the grant can now begin
+
+[00:13] <MasterDuke> jnthn: is something like https://github.com/retupmoca/P6-Compress-Zlib/pull/19/commits/a1ed2e572d4937f1d02cb4007c7e7a42e1b5dfff what you meant for the module to implement?
+
+[00:15] <timotimo> it'll be an entire can of happy
+
+[00:15] <timotimo> MasterDuke: i'd expect so
+
+[00:16] <MasterDuke> good. run time with that patch for `use Compress::Zlib; my $a = gzslurp("/home/dan/p6/100k.txt.gz"); say $a.lines.elems` decreases from ~9s to ~7s
+
+[00:16] <timotimo> nice
+
+[00:23] <timotimo> ah, of course in the master branch the heapanalyzer was correctly reading the binary format
+
+[00:25] <jnthn> MasterDuke: Yes, but wouldn't the encoding be avoided entirely if it scanned for a newline in the buf before doing the decoding? Of course, that bypasses normalization, but that's not a concern for the default \n
+
+[00:27] <jnthn> Or maybe even better: you can use the decoder API!
+
+[00:27] <jnthn> Like IO::Handle does
+
+[00:27] <jnthn> Which will do the line search and buffer management for you, but in carefully optimized code inside of MoarVM :)
+
+[00:29] <MasterDuke> jnthn: thanks, i'll take a look. i really don't know those APIs, but will try to base off of IO::Handle
+
+[00:30] <MasterDuke> jnthn: no idea why i was just reminded of this, but did you see my comment here? https://github.com/MoarVM/MoarVM/commit/d66c070829ef27861c131b2a347cf4ba173bce40
+
+[00:32] <jnthn> MasterDuke: Pretty sure not; I think it just retrieves it from the STable which stores it as a char * rather than MVMString * since we always need it inside of the VM anyway
+
+[00:33] <timotimo> jnthn: were you aware that we never free CStruct's memory? :o
+
+[00:33] <timotimo> if you use CStruct in any modules in Cro's dependency chain, that might want a looking at
+
+[00:34] <jnthn> timotimo: Uh...ouch o.O
+
+[00:34] <jnthn> That might explain SSL leakage
+
+[00:34] <MasterDuke> jnthn: cool
+
+[00:35] <jnthn> Sorry I missed it, though.
+
+[00:35] <timotimo> no prob
+
+[00:35] <timotimo> i'm working on a patch
+
+[00:35] <jnthn> \o/
+
+[00:35] <timotimo> without the ability to influence whether GC will free a CStruct or not it'll probably be useless
+
+[00:35] <jnthn> It's probably a hard problem...
+
+[00:35] <jnthn> Yes, exactly, there's not a "one answer fits all"
+
+[00:35] <timotimo> so many options
+
+[00:36] <jnthn> Who owns it, etc.
+
+[00:36] <MasterDuke> jnthn: not sure who that sorry was too, but if me, np
+
+[00:36] <timotimo> i was ruminating earlier today or yesterday about the idea of having ownership represented by an object that can be passed around
+
+[00:36] <jnthn> MasterDuke: It was aimed at you, but I'm going to claim it was multicast :P
+
+[00:36] <timotimo> it'd hopefully also make "this CStruct's pointer actually points into another object" situation work out, when the original object gets GC'd
+
+[00:36] <jnthn> timotimo: Hm, and you can attach multiple things to that ownership "context"?
+
+[00:37] <timotimo> i'd expect the pointer to go the other way
+
+[00:37] <timotimo> i.e. objects hold on to the ownership object
+
+[00:37] <timotimo> and you could use nativecast with "transfer", maybe "share", and you could $object.^release-ownership to say "C now takes care of this"
+
+[00:38] <timotimo> BBIAB
+
+[00:41] <timotimo> the ownership object would be very closely tied to the pointer for the buffer, especially for objects inside other objects that don't want to have to carry an offset around all the time
+
+[00:41] <timotimo> but introducing such an API makes me want to make other stuff base on it ...
+
+[00:44] <timotimo> TBH you can at the moment submethod DESTROY { free(self) } in all of your CStructs
+
+[00:46] *** patrickb joined
+[00:50] *** patrickz left
+[00:56] <timotimo> i want to re-engineer the binary format, the index and such are all so ad-hoc
+
+[01:00] <timotimo> but i can totally use buf's read and write functions now. though my own implementation of them would shift the data out of the buf
+
+[01:00] <timotimo> pro: no need to keep an index counter around; con: doesn't work with Blob, unless you use a copy
+
+[01:15] <jnthn> Sorry, as busy packing :)
+
+[01:15] <jnthn> *was
+
+[01:16] <jnthn> Yeah, of course manual free call is an option too, but not ideal
+
+[01:16] <jnthn> Also it can be nice to have it more timely
+
+[01:16] <jnthn> Though of course the consumer has to opt in to that
+
+[01:25] <jnthn> sleep time o/
+
+[01:29] *** lucasb left
+[02:44] *** patrickb left
+[03:33] *** Kaiepi left
+[04:37] *** MasterDuke left
+[05:29] *** Kaiepi joined
+[09:03] *** domidumont joined
+[11:05] *** patrickb joined
+[11:18] *** dogbert21 left
+[11:22] *** lucasb joined
+[14:03] *** domidumont left
+[15:25] <timotimo> would our ConcBlockingQueue benefit from having the nodes allocated with the fixed size allocator? or would the fact that it gets used across threads mean it'd be a bad idea for FSA and perhaps malloc can do a better job? we do have some across-thread-usage-related optimizations in it, though?
+
+[15:39] *** hoelzro_ left
+[15:39] *** hoelzro joined
+[15:45] *** timewasteable6 joined
+[15:45] *** ChanServ sets mode: +o timewasteable6
+
+[15:45] *** timewasteable6 left
+[15:49] <timotimo> i don't quite understand why there's a ConcBlockingQueue with a value in it that has an st pointer of null
+
+[15:51] *** MasterDuke joined
+[15:52] *** MasterDuke left
+[15:52] *** MasterDuke joined
+[15:53] <timotimo> what does the GC do with this object that describe_ref doesn't to cause it to crash, i wonder
+
+[16:05] <timotimo> somehow the node rather than its value ends up in the worklist
+
+[16:05] <timotimo> which ... huh?
+
+[16:17] <timotimo> a node's next is the same as its value ?!!?
+
+[16:18] <timotimo> i haven't heard exherbo in like a decade
+
+[16:19] <MasterDuke> i've been seeing a lot of profiles recently (e.g., from the code rindolf just posted in #perl6) that have identity https://github.com/rakudo/rakudo/blob/master/src/vm/moar/spesh-plugins.nqp#L52 show up pretty high in the routines
+
+[16:22] <MasterDuke> it also has https://github.com/rakudo/rakudo/blob/master/src/Perl6/Metamodel/BOOTSTRAP.nqp#L1607 (which i don't think i've seen before) even higher
+
+[16:36] <timotimo> pah. someone else shall do something about ConcBlockingQueue's refs
+
+[16:40] *** MasterDuke left
+[16:41] *** lucasb left
+[16:49] *** MasterDuke joined
+[16:50] *** MasterDuke left
+[16:50] *** MasterDuke joined
+[18:07] *** domidumont joined
+[18:49] *** domidumont left
+[19:53] *** lucasb joined
+[20:06] *** bartolin left
+[20:21] *** bartolin joined
+[22:15] *** Kaiepi left

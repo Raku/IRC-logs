@@ -1,0 +1,470 @@
+[04:19] *** MasterDuke left
+[05:14] *** harrow left
+[05:24] *** harrow joined
+[06:05] *** harrow left
+[06:15] *** harrow joined
+[06:33] *** domidumont joined
+[07:02] *** domidumont left
+[07:22] *** domidumont joined
+[07:56] *** domidumont left
+[07:58] *** domidumont joined
+[08:50] *** Ulti joined
+[08:57] *** zakharyas joined
+[10:10] <jnthn> morning o/
+
+[10:10] <nwc10> \o
+
+[10:11] <nwc10> I'm seeing DU errors from raduko tests
+
+[10:11] <nwc10> eg
+
+[10:11] <nwc10> MoarVM oops: Malformed DU chain: reading sp_bind_i8 of 1(2) not in graph
+
+[10:11] <nwc10> (...)
+
+[10:12] <nwc10> from t/04-nativecall/14-rw-attrs.t
+
+[10:12] <nwc10> I don't know what change caused this
+
+[10:12] <nwc10> everything is at master
+
+[10:13] <nwc10> MVM_SPESH_NODELAY=1 and friends are set
+
+[10:37] <timotimo> oh my
+
+[10:37] <timotimo> that's most certainly my fault
+
+[10:37] <timotimo> gimme a minnit
+
+[10:39] <timotimo> oh, i notice i should probably also release that temp register again ...
+
+[10:42] <timotimo> nwc10: does that happen reliably?
+
+[10:42] <nwc10> yes, for me
+
+[10:42] <timotimo> ah, i have to turn the DU checker on, of course
+
+[10:43] <timotimo> that's why i didn't see it yet
+
+[10:57] <Geth> ¦ MoarVM: 6ecbeb1f1e | (Timo Paulssen)++ | src/6model/reprs/CStruct.c
+
+[10:57] <Geth> ¦ MoarVM: DU Chain Of CStruct bindattr_i Opt Was Wrong
+
+[10:57] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/6ecbeb1f1e
+
+[10:57] <Geth> ¦ MoarVM: d626337bea | (Timo Paulssen)++ | src/6model/reprs/CStruct.c
+
+[10:57] <Geth> ¦ MoarVM: CStruct bindattr_i Opt Shall Release Its Temp Register
+
+[10:57] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d626337bea
+
+[10:57] <timotimo> nwc10: should be clean now :)
+
+[10:57] <timotimo> thanks for the heads-up
+
+[11:26] *** domidumont left
+[11:40] *** brrt joined
+[11:57] <brrt> \o
+
+[11:57] <nwc10> o/
+
+[11:58] <nwc10> timotimo: we're through the regression tests and into the spectests, so yes, I think that that fixed it
+
+[12:04] <brrt> yay
+
+[12:04] <brrt> I've thought some more about the register allocator. (Famous last words)
+
+[12:04] <brrt> I think I'm going to replace the current algorithm
+
+[12:07] <brrt> We currently have some 4 steps. Five if you count the edit step.
+
+[12:07] <brrt> - computing live ranges (union-find of data values connected by COPY and IF (our PHI))
+
+[12:08] <brrt> - computing holes in the live ranges (so that we don't try to spill a value that isn't actually defined. I'm no longer sure that's actually a problem)
+
+[12:09] <brrt> - allocating registers (and simultaneously trying to resolve register order requirements for CALL)
+
+[12:09] <brrt> - resolving register requirements for x86-64 (2-op form)
+
+[12:09] <brrt> In contrast, luajit does a two-pass register allocation:
+
+[12:10] <brrt> - initialization and computation of modified-register set (not relevant for us since we don't connect traces of machine code, but nevertheless interesting)
+
+[12:10] <brrt> initialization includes computation of register hints.
+
+[12:11] <brrt> - reverse linear scan allocation directly on the SSA form. This is really cute because it means that you allocate on the last use and release on the definition
+
+[12:11] <brrt> because there's no merging of values to create live ranges, there's really only one definition
+
+[12:11] <brrt> this simplifies things a bunch
+
+[12:12] <brrt> their reverse linear scan is happening simultaneously with code generation. I don't want to do that. That complicates things massively
+
+[12:12] <brrt> It may be a bit faster, but we're far away from that being the bottleneck, I think
+
+[12:21] *** domidumont joined
+[12:23] *** domidumont left
+[12:23] <brrt> What we can do, is a three-phase algorithm, consisting of a initialization and hint propagation phase, an allocation phase, and a register assignment and conflict resolution phase. Only the last phase will need to do any tile list editing
+
+[12:23] <brrt> This is nice because it means that we no longer have to address synthetic tiles.
+
+[12:24] <brrt> And we don't have to compute the live range set, don't have to compute the set of affected registers, don't have any interaction between register assignment and allocation decisions
+
+[12:24] <timotimo> neat
+
+[12:24] <timotimo> i hope it's not too much work to implement all that?
+
+[12:26] <brrt> well... :-D
+
+[12:26] <brrt> it's a bunch of work. But I think it is altogether a simpler algorithm
+
+[12:33] <brrt> and I'm kind of hoping it is worth it moving forwards.
+
+[12:38] <brrt> the other thing I'm thinking of; it may be worth it having a setjmp-style exception handler for the JIT
+
+[12:38] <brrt> again taking a hint from luajit; there's a *bunch* of cases that it just doesn't handle
+
+[12:39] <brrt> (that is partly because of its design choice to try and handle most everything in a single pass)
+
+[12:39] <nwc10> this is a handler that goes "oh pants" somewhere in the JIT compilation of some code? (as opposed to a guard system that hits the "oh pants" at the point when the compiled code is run?)
+
+[12:44] *** zakharyas left
+[12:46] <brrt> yes, during JIT compilation
+
+[12:48] <brrt> idea being, if there's something not-yet-implemented, fail cleanly rather than utterly
+
+[12:57] <timotimo> so we're currently more on the "look before you leap" side, but we could go over to a "easier to ask for forgiveness" approach by just spreading the equivalent of "goto fail" with proper cleanup all over the place?
+
+[12:59] *** domidumont joined
+[13:00] *** brrt left
+[13:01] *** lucasb joined
+[13:17] <jnthn> brrt++ # looking for simpler algorithms to do the job
+
+[13:18] <jnthn> So I had another crack at doing more aggressive optimizations on inlined code (of note, making set elimination happen)
+
+[13:19] <jnthn> And it seems the fix(es) I did in the now-merged pea branch helped, in that we get a lot further.
+
+[13:19] <jnthn> Unfortunatley, under blocking mode, we fail a few spectests, though.
+
+[13:19] <jnthn> So soemthing's still not quite right there.
+
+[13:20] <jnthn> Various fail with "Cannot call method 'run_alt' on a null object" which smells of deopt problems
+
+[13:21] <nwc10> have you had lunch yet? (or some other excuse to step away from the keyboard)
+
+[13:23] <jnthn> Yes, I did the spectest run while I was having lunch :)
+
+[13:23] <nwc10> tea? coffee? beer? bracing walk?
+
+[13:24] <nwc10> ooh, never seen that before. Weather is unavailable for some hours: https://www.bbc.co.uk/weather/0/3067696
+
+[13:25] <nwc10> that looks dangerous. the big blue room may or may not be blue. It's undefined.
+
+[13:25] <nwc10> but at least it won't rain :-)
+
+[13:25] <jnthn> It was meant to snow today on the forecast I looked at yesterday, but I ain't seen any of it
+
+[13:25] <nwc10> it has here. Not much. But some was going sideways
+
+[13:27] <jnthn> I've at least bissected it to the frame that we optimize that breaks easily enough
+
+[13:28] <jnthn> And yeah, it's deopt-y
+
+[13:28] <jnthn>     Recreated frame '!alt' (cuid '102')
+
+[13:28] <jnthn> Completed deopt_one in '!alt' (cuid '102') with potential uninlining
+
+[13:28] <jnthn> Cannot call method 'run_alt' on a null object
+
+[13:28] <jnthn>    at gen/moar/stage2/QRegex.nqp:1744  (/home/jnthn/dev/MoarVM/install/share/nqp/lib/QRegex.moarvm:!alt)
+
+[13:29] <jnthn> wtf
+
+[13:29] <jnthn>       sp_getspeshslot   r8(1), sslot(8)
+
+[13:30] <jnthn> shortly after
+
+[13:30] <jnthn>       sp_guardconc     r18(1),   r8(1), sslot(10), litui32(192)
+
+[13:30] <jnthn> It's guarding on a constant, hm.
+
+[14:10] <timotimo> releasable6: status
+
+[14:10] <releasable6> timotimo, Next release in ≈4 days and ≈4 hours. 9 blockers. 163 out of 294 commits logged
+
+[14:10] <releasable6> timotimo, Details: https://gist.github.com/38554c958404cb4acfd15e0a4e53b79f
+
+[14:10] <timotimo> is 4 days and 4 hours enough time for people to test getattr_i support in CStruct's spesh? and perhaps also bindattr_n and getattr_n?
+
+[14:11] <jnthn> I'd leave it for the next release; there's already quite a few blockers
+
+[14:13] <AlexDaniel> timotimo: I'd be away till Monday
+
+[14:13] <timotimo> sure. should i put bindattr_i and getattr_i support into a branch as well?
+
+[14:13] <timotimo> i.e. revert it on master and cherry-pick to a branch
+
+[14:13] <AlexDaniel> timotimo: when was that merged?
+
+[14:14] <timotimo> 2 days ago, directly committed to master
+
+[14:14] <timotimo> hm, no, it was merged, but as a fast-forward
+
+[14:14] <AlexDaniel> so the last Blin run was on Sunday
+
+[14:15] <AlexDaniel> I wonder if that already had your changes
+
+[14:15] <AlexDaniel> if yes then it's OK, if not then we don't know :)
+
+[14:15] <AlexDaniel> I'll run Blin again maybe tomorrow
+
+[14:20] <jnthn> Darn, I think I see what's going on. When we write bytecode and preserve the deopt into, we don't write PHI nodes and so can't preserve it there. But there may be deopt usages of the output of a PHI
+
+[14:20] <AlexDaniel> timotimo: I'd say leave it in for now, we can revert it later
+
+[14:21] <AlexDaniel> unless you're really unsure about these changes x)
+
+[14:22] <timotimo> i think it didn't have the changes yet
+
+[14:27] <AlexDaniel> releasable6: status
+
+[14:27] <releasable6> AlexDaniel, Next release in ≈4 days and ≈4 hours. 6 blockers. 163 out of 295 commits logged
+
+[14:27] <releasable6> AlexDaniel, Details: https://gist.github.com/071cedf05c77af4c1fc4f3b9020ece5a
+
+[14:28] <AlexDaniel> also it's much better now ↑
+
+[14:28] <AlexDaniel> after lizmat++ fixed the CArray issue
+
+[14:28] <lizmat> the original issue in tweenacl is back :-(
+
+[14:28] <yoleaux> 11 Feb 2019 16:32Z <japhb> lizmat: Did you see https://colabti.org/irclogger/irclogger_log/perl6-dev?date=2019-02-08#l164 and followup at https://colabti.org/irclogger/irclogger_log/perl6-dev?date=2019-02-08#l187 ?  I had to go AFK right after that, so didn't file a ticket anywhere, but didn't want the debug effort to go to waste.  :-)
+
+[14:29] <AlexDaniel> oh? Oh…
+
+[14:30] <AlexDaniel> these are somewhat annoying in a sense that I don't know how to get these issues moving: R#2567 R#2576 R#2635
+
+[14:30] <synopsebot> R#2567 [open]: https://github.com/rakudo/rakudo/issues/2567 [SEGV][⚠ blocker ⚠] Non-zero wait status: 11 in testt
+
+[14:30] <synopsebot> R#2576 [open]: https://github.com/rakudo/rakudo/issues/2576 [⚠ blocker ⚠] flapper in t/06-telemetry/01-basic.t on mips
+
+[14:30] <synopsebot> R#2635 [open]: https://github.com/rakudo/rakudo/issues/2635 [severe][⚠ blocker ⚠] moar attempts to allocate huge amounts of memory just after installation
+
+[14:31] *** zakharyas joined
+[14:31] <AlexDaniel> I mean, we can kinda let that one mips issue be for this release, but #2567 is not even on mips :S
+
+[14:32] <AlexDaniel> lizmat: actually, that mips one is related to telemetry, so maybe you know what's going on there?
+
+[14:33] <lizmat> AlexDaniel: no idea
+
+[14:34] <lizmat> and the tweetncl pb becomes more and more obscure
+
+[14:47] *** zakharyas left
+[14:48] *** brrt joined
+[14:49] *** zakharyas joined
+[14:58] <jnthn> So much for "this'll be a slightly easier task before more work on PEA"...
+
+[14:58] * lizmat has been yak shaving for the past 3 weeks  :-(
+
+[14:59] <lizmat> most of it not related to Perl 6, though
+
+[15:03] <jnthn> Hurrah, clean spectest with BLOCKING
+
+[15:08] <jnthn> Though that's only with one case of `set` elimination enabled for within inlines. Now to try the second one also.
+
+[15:10] <jnthn> Geth: why u no report commits?
+
+[15:15] <AlexDaniel> I've noticed it too
+
+[15:15] <AlexDaniel> sometimes it does, sometimes it doesn't
+
+[15:19] <jnthn> Hurrah, it's good with the full liberalization of set elimination
+
+[15:22] <jnthn> Pushed set elimination within inlines, anyways
+
+[15:22] <jnthn> (To a postrelease-opts branch.)
+
+[15:23] <jnthn> (I don't want to make any more blockers this month. :))
+
+[15:26] <jnthn> Cool, I think we've now got rid of nearly all places where we blocked an optimization becuase a block was inlined.
+
+[15:27] <brrt> \o/
+
+[15:27] <brrt> (isn't Geth supposed to dignify that with a message?)
+
+[15:28] <jnthn> Yes.
+
+[15:28] <brrt> hmm
+
+[15:29] <jnthn> I wonder what the best way is to try and run optimize_bb over basic blocks that we inline
+
+[15:43] <jnthn> m: say 2928 - 2692
+
+[15:43] <camelia> rakudo-moar 84ed8548f: OUTPUT: «236␤»
+
+[15:43] <timotimo> bytecode size?
+
+[15:45] <jnthn> Yeah
+
+[15:45] <jnthn> From a hash read benchmark that had those null/isnull sequences due to the takedispatcher opt
+
+[15:45] <timotimo> lovely
+
+[15:45] <jnthn> In both the AT-POS and postcircumfix:<{ }> and it did each twice
+
+[15:45] <timotimo> that sin & cos one i had was similarly doing it for every one of the operators i think
+
+[15:46] <jnthn> Alas, since the branch wasn't taken, it's not a big improvement at runtime
+
+[15:46] <jnthn> But it might help more stuff inline
+
+[15:48] <jnthn> Yeah, I see very little runtime improvement
+
+[15:49] <brrt> every little helps :-)
+
+[15:50] <jnthn> True
+
+[15:50] <jnthn> And it's a bit less bytecode for the JIT to make too
+
+[15:50] <timotimo> mhm, less time spent in spesh & jit also means earlier entry into the optimized code
+
+[15:51] <timotimo> mind rebasing postrelease-opts on latest master, jnthn?
+
+[15:51] <jnthn> Hm, I only made the branch this morning...
+
+[15:52] <timotimo> ha
+
+[15:52] <timotimo> i fixed that stuff this morning, too :)
+
+[15:53] *** domidumont left
+[15:53] *** domidumont joined
+[15:59] <jnthn> timotimo: Pushed a rebase of it on master
+
+[16:02] <timotimo> thanks
+
+[16:05] *** domidumont left
+[16:06] *** domidumont joined
+[16:08] <timotimo> the BBs are not numbered by linear order any more, should i perhaps look into that?
+
+[16:13] <timotimo> mhhh, this is some fine specialized code right here ...
+
+[16:14] <timotimo> oh, huh, i must have neglected to put sp_get_i32 into the jit?!
+
+[16:14] <timotimo> same for bind, and same for the other smaller sizes
+
+[16:15] <timotimo> also i didn't invent these ops, only the p6oget/bind ones for smaller ints
+
+[16:19] <japhb> Build from ~1 hour ago fails:
+
+[16:19] <japhb> ===> Testing: IO::Socket::Async::SSL:ver<0.7.3>
+
+[16:19] <japhb> MoarVM panic: Corrupt multi dispatch cache: cur_node != 0, re-check == 0x55f69ed31da0
+
+[16:19] <timotimo> asan or something?
+
+[16:24] <japhb> timotimo: When building from Rakudo (perl Configure.pl --backends=moar --gen-nqp --gen-moar && make && make test && make install), how do you enable asan?
+
+[16:28] <timotimo> oh, hm. --moar-option=--asan maybe?
+
+[16:28] <timotimo> otherwise surely valgrind will not be a problem at all! lolololol
+
+[16:30] <timotimo> interesting, the param_rp_o that gets the self (argument 0, which is in the plan as "RW Scalar (Conc) of SDL2::Raw::Rect (Conc)" gets 0 flags set for some reason, and so there's a hllize left in the post-spesh code
+
+[16:39] <timotimo> m: use NativeCall; nativecast(int64, Pointer); # should we allow this to segfault, or should we catch the null pointer usage?
+
+[16:39] <camelia> rakudo-moar 84ed8548f: OUTPUT: «(signal SEGV)»
+
+[16:43] <timotimo> huh. if i see a materialization "Scalar from r16, r17", shouldn't the writer of r16 and r17 both be in the spesh graph somewhere?
+
+[16:51] *** lucasb left
+[16:53] <jnthn> Um, maybe, unless the attributes were never written
+
+[16:59] <timotimo> that could be; how will we be sure a proper null ends up in there then?
+
+[17:05] <jnthn> I think the we can rely on them being, though should probably check that.
+
+[17:08] <timotimo> brrt: could you check a piece of assembly code for me? it's for jitting sp_get_i32 and sp_bind_i32
+
+[17:09] <timotimo> brrt: https://gist.github.com/timo/57a034a32526b4a5f8d13d196d86b562
+
+[17:11] <timotimo> actually now that i look at it again, i'll probably have to limit that optimization to only signed integer attributes
+
+[17:14] <brrt> timotimo: I'll have a look
+
+[17:18] <timotimo> m: my int32 $foo = -2671722170; say $foo
+
+[17:18] <camelia> rakudo-moar 84ed8548f: OUTPUT: «1623245126␤»
+
+[17:18] <timotimo> OK, this is expected, then
+
+[17:21] <timotimo> i'm too tired right now to figure out how to test if that code is right
+
+[17:23] *** domidumont left
+[17:28] <jnthn> Pushed a couple more bits to postrelesae-opts, including some streamlining of hash access that gets about 5% CPU cycle reduction on that
+
+[17:53] <brrt> timotimo: on my first reading, that seems correct
+
+[18:33] <japhb> (terminal scrollback buffer completely blown)  Woah, asan isn't quiet, is it?  Sheesh.
+
+[18:37] *** domidumont joined
+[18:51] *** brrt left
+[19:04] *** bisectable6_ joined
+[19:04] *** reportable6 left
+[19:04] *** bisectable6 left
+[19:04] *** reportable6 joined
+[19:04] *** evalable6 left
+[19:04] *** masak left
+[19:04] *** dalek left
+[19:04] *** dalek joined
+[19:05] *** masak joined
+[19:06] *** masak is now known as Guest32385
+
+[19:21] <japhb> Rebuilding from scratch, this time capturing the build output with --moar-option=--asan, it doesn't get very far and ends with:
+
+[19:22] <japhb> SUMMARY: AddressSanitizer: 823829 byte(s) leaked in 3877 allocation(s).
+
+[19:22] <japhb> Makefile:254: recipe for target 'gen/moar/stage1/nqpmo.moarvm' failed
+
+[19:36] *** domidumont left
+[19:54] *** patrickb joined
+[19:54] <dogbert17> japhb: try with     ASAN_OPTIONS=detect_leaks=0 <whatever you did before>
+
+[19:56] *** evalable6 joined
+[20:11] *** zakharyas left
+[20:21] <japhb> dogbert17: will do
+
+[20:25] *** brrt joined
+[20:34] <japhb> OK, at least now it's getting into the zef installs, we'll see if it blows up on IO::Socket::Async::SSL again
+
+[20:35] <japhb> (It seems like that module is quite sensitive to bugs in the stack, FWIW.)
+
+[20:36] <brrt> japhb: rename it to Acme::DetectBugs ?
+
+[20:37] <japhb> Heh
+
+[20:57] <brrt> hmmpf. I've of half a mind to implement a expr jit tester myself
+
+[20:57] <brrt> because I don't feel like building a new register allocator without a proper test suite
+
+[20:58] <brrt> and despite what the internet may think, memory safety isn't really my primary worry
+
+[21:04] *** d4l3k_ joined
+[21:06] *** reportable6 left
+[21:06] *** dalek left
+[21:06] *** d4l3k_ is now known as dalek
+
+[21:22] *** lizmat left
+[21:25] <japhb> Um ... the full build *worked* with both --moar-option=--asan and ASAN_OPTIONS=detect_leaks=0 .  No zef install failures at all.
+
+[21:28] <brrt> that's not so bad
+
+[21:35] *** lizmat joined
+[21:37] *** brrt left
+[21:50] *** brrt joined
+[22:02] *** reportable6 joined
+[22:28] *** brrt left
+[22:30] *** robertle left
+[23:02] *** patrickz joined
+[23:05] *** patrickb left
+[23:13] <japhb> Yeah, but the sanitizer should not make a broken thing work, it should locate the broken thing
+

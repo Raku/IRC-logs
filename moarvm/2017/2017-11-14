@@ -1,0 +1,895 @@
+[00:00] <timotimo> i believe so
+
+[00:00] <MasterDuke> even if the string has a bunch of strands with weird combinations of combiners and such?
+
+[00:01] <timotimo> yeah
+
+[00:01] <timotimo> when we have strands we always* make sure that combiners work properly
+
+[00:02] <jnthn> Yes, we make sure that is always correct
+
+[00:02] <timotimo> if necessary we add an extra strand that combines combiners from one strand with a character from another and move the beginning and end points of the other strands so we don't have duplicates
+
+[00:03] <jnthn> 'night o/
+
+[00:03] <timotimo> night jnthn
+
+[00:03] <MasterDuke> hm, i have questions about possible optimizations to collapse_strands, but need to go try to put a baby to sleep
+
+[00:04] <MasterDuke> hopefully back soon...
+
+[00:04] <timotimo> now i kind of want to go through the whole heap of a random moarvm program and see if any big strings are only being kept alive by a tiny substr being placed on it ... or something
+
+[00:05] <timotimo> actually, the heap analyzer could do this
+
+[00:05] <timotimo> no, not quite
+
+[00:06] <timotimo> a query like "select * from collectables where incidents == 1 and repr == "VMString"
+
+[00:24] <timotimo> string 0x46ee340 usage: 38.161694% - 1285 wasted, 2078 graphs
+
+[00:24] <timotimo> string 0x7f31da977438 usage: 40.658800% - 1207 wasted, 2034 graphs
+
+[00:24] <timotimo> string 0x7f31dd3f01a0 usage: 71.388368% - 305 wasted, 1066 graphs
+
+[00:31] *** MasterDuke joined
+[00:31] <MasterDuke> timotimo: that's cool, how are you generating those numbers?
+
+[00:32] <timotimo> https://gist.github.com/timo/2fd64d7aab2f088a4b1ba75ddf6007ec
+
+[00:38] <MasterDuke> think a heuristic in substr to create flat strings instead of strands if the ratio between the substring and the full string is too great makes sense?
+
+[00:45] <timotimo> doesn't sound bad, no
+
+[00:46] <timotimo> what this patch+script doesn't handle is when there used to be many things referencing a string but after gc there's only one thing referencing a little part of it
+
+[00:46] <timotimo> so it should have a marker for when gc started or ended, and split by that, and such
+
+[00:51] <timotimo> or maybe only report on what comes after the last marker
+
+[00:52] <MasterDuke> hm, there is already a case in MVM_string_substring that creates a flat buffer, could just add another conditional to the two cases before it so it wins when the ratio is too big
+
+[00:53] <MasterDuke> `if (a->body.storage_type != MVM_STRING_STRAND) { <create strand> } else if (a->body.num_strands == 1 && a->body.storage.strands[0].repetitions == 0) { <create strand> } else { <create blob string> }`
+
+[00:53] <MasterDuke> ^^^ what exists now
+
+[00:54] <timotimo> wait, == 0?
+
+[00:55] <MasterDuke> /* Single strand string; quite possibly already a substring. We'll just produce an updated view. */
+
+[00:56] <timotimo> i thought single repetition would have 1 rather than 0
+
+[00:56] <timotimo> i suppose 0 is better because calloc initializes to taht
+
+[00:57] <MasterDuke> no, that's why i returned repetition + 1 in my recent PR
+
+[00:57] <timotimo> ok, but the if where repetitions == 0 is dead code, then?
+
+[01:24] *** MasterDuke joined
+[01:25] <MasterDuke> ugh, a recent kernel has done bad things to my wifi driver, my connection keeps dropping out
+
+[01:25] <MasterDuke> anyway, no, repetitions gets set to 0 in several places
+
+[01:32] <timotimo> oh? maybe i'm hit by the same thing. i've been experiencing silent connection deaths now for like a month
+
+[01:32] <timotimo> it'd still show that i'm connected to the wifi, but no data comes through
+
+[01:33] <MasterDuke> i used to get something like that occasionally, but this is much more obvious
+
+[01:33] *** MasterDuke_ joined
+[01:33] <MasterDuke_> ugh, there is went again
+
+[01:34] <MasterDuke_> my dmesg shows lots of: wlp2s0: failed to remove key (2, ff:ff:ff:ff:ff:ff) from hardware (-22)
+
+[01:34] <timotimo> i just booted up my laptop a few minutes ago, so it didn't drop yet
+
+[01:35] <MasterDuke_> apparently it's a regression in the most recent ubuntu 17.10 kernel, but i haven't gotten around to attempting any of the workarounds (and am just hoping they put out a new kernel soon)
+
+[01:36] <MasterDuke_> so back to collapse_strands. it currently uses the grapheme iterator
+
+[01:37] <MasterDuke_> any particular reason it couldn't just copy each strand in whole?
+
+[01:37] <MasterDuke_> using something efficient like memset for cases of grapheme_8's with repetitions?
+
+[01:38] <timotimo> memcpy*
+
+[01:38] <MasterDuke_> ?
+
+[01:39] <MasterDuke_> memset only in the case of something like "a" x 100
+
+[01:43] <timotimo> oh
+
+[01:43] <timotimo> right
+
+[01:48] <timotimo> how many places do you have to edit to get a new storage format in, i wonder ...
+
+[01:48] <MasterDuke_> `collapse_strands` just uses `iterate_gi_into_string`, and `iterate_gi_into_string` is just doing `result->body.storage.blob_8 = MVM_string_gi_get_grapheme(tc, gi)`
+
+[01:48] <samcv> MasterDuke_: can't copy it unless all strands are the same bit type
+
+[01:48] <samcv> might be something i should do
+
+[01:49] <MasterDuke_> samcv: right, it already converts to grapheme_32 if it ever hits something that won't fit in _8
+
+[01:50] <samcv> yeah
+
+[01:50] <MasterDuke_> so why not copy strand by strand instead of grapheme by grapheme?
+
+[01:51] <MasterDuke_> i know we can have strands of different bit type, but how common is that actually?
+
+[01:51] <MasterDuke_> of course if it is very common it might make copying strands not a win
+
+[01:59] <samcv> i'm writing some code right now to copy the memory areas instead of by grapheme right now
+
+[01:59] <samcv> MasterDuke_: it's fairly common
+
+[02:00] <samcv> but it's worth writing code to copy the memory instead
+
+[02:01] <MasterDuke_> cool
+
+[02:56] *** ilbot3 joined
+[02:56] <timotimo> (that's memory usage of core setting build)
+
+[03:01] <MasterDuke_> it went up?
+
+[03:01] <timotimo> no, after patch is lower
+
+[03:02] <timotimo> 422171.2  "421204".."423128"
+
+[03:02] <timotimo> 474649.6  "474504".."474860"
+
+[03:03] <timotimo> this is 'my @foo = "gen/moar/CORE.setting".IO.comb; say +@foo;'
+
+[03:03] <timotimo> after patch vs before patch again
+
+[03:04] <MasterDuke_> oh! nice
+
+[03:06] <timotimo> there's test failures in nqp's test suite though
+
+[03:07] <timotimo> m: say "that's a saving of { (474649.6 - 422171.2) / 2119152 } bytes per character combed"
+
+[03:07] <camelia> rakudo-moar d6a3a7a1a: OUTPUT: «that's a saving of 0.0247639 bytes per character combed␤»
+
+[03:07] <timotimo> oh, kilobytes
+
+[03:07] <timotimo> m: say "that's a saving of { (474649.6 - 422171.2) * 1024 / 2119152 } bytes per character combed"
+
+[03:07] <camelia> rakudo-moar d6a3a7a1a: OUTPUT: «that's a saving of 25.3582006 bytes per character combed␤»
+
+[03:10] <MasterDuke_> what's the failure?
+
+[03:10] <timotimo> matching \r and \R in regexes
+
+[03:12] <timotimo> spectest will surely find out more
+
+[03:16] <MasterDuke_> huh
+
+[03:17] <MasterDuke_> think it's an easy fix?
+
+[03:17] <timotimo> probably
+
+[03:17] <timotimo> but not before sleep
+
+[03:17] <MasterDuke_> heh
+
+[03:40] *** colomon joined
+[04:12] <samcv> MasterDuke_: i think i've almost got it. will use memcpy also on substr that have only one strand as well
+
+[04:14] <MasterDuke_> nice
+
+[04:14] <MasterDuke_> done any benchmarking yet?
+
+[04:14] <samcv> took some time to get it working for 1 strand and all different types of strands. and getting that and the traditional way MVMROOTED rightbut going to run spectest now
+
+[04:14] <samcv> *going to spectest now. got nqp tests passing
+
+[04:14] <samcv> ~4x faster
+
+[04:14] <samcv> when it is using the memcpy way
+
+[04:14] <MasterDuke_> !!
+
+[04:15] <MasterDuke_> awesome
+
+[04:15] <samcv> doing a substr will return 32 bit string even if the section it chose had only 8 bits. but the speed improvements is probably worth it i'd think
+
+[04:16] <samcv> for now i have a clause in there that will throw if the result != orig so that should hopefully catch any issues. i thought it was working an hour ago but when i inserted that clause it revealed there *were* issues :P
+
+[04:16] <MasterDuke_> isn't there some sort of convert_to_8bit_if_able function anyway?
+
+[04:16] <samcv> well the spectests didn't pass, but it was hard to debug cause i couldn't tell where it was introducing errors
+
+[04:16] <samcv> MasterDuke_: yeah, well it wouldn't be any faster in that case though
+
+[04:16] <samcv> compared to collapsing traditionally
+
+[04:17] <samcv> since the whole thing regarding this is not to have to access each element individually
+
+[04:17] <MasterDuke_> ah, true
+
+[04:19] <MasterDuke_> well i'm off to sleep, but i'll look forward to backlogging
+
+[04:19] <samcv> :-) o/ night MasterDuke_
+
+[04:21] *** bloatable6 joined
+[04:22] <samcv> woo \o/ clean spectest
+
+[04:33] <Geth> ¦ MoarVM: 8744857ed7 | (Samantha McVey)++ | src/strings/ops.c
+
+[04:33] <Geth> ¦ MoarVM: collapse_strands with memcpy if all strands are same type 4x faster
+
+[04:33] <Geth> ¦ MoarVM:
+
+[04:33] <Geth> ¦ MoarVM: If all the strands to collapse are of the same type (ASCII, 8bit, or
+
+[04:33] <Geth> ¦ MoarVM: 32bit) then use memcpy to collapse the strands. If they are not all the
+
+[04:33] <Geth> ¦ MoarVM: same type then we use the traditional grapheme iterator based collapsing
+
+[04:33] <Geth> ¦ MoarVM: that we previously used to collapse strands.
+
+[04:33] <Geth> ¦ MoarVM:
+
+[04:33] <Geth> ¦ MoarVM: This is 4-4.5x faster as long as all the strands are of the same type.
+
+[04:33] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/8744857ed7
+
+[04:33] <samcv> \o/ pushed
+
+[05:44] *** lizmat joined
+[05:58] *** AlexDaniel joined
+[06:24] *** domidumont joined
+[06:26] *** domidumont joined
+[06:31] *** domidumont joined
+[07:21] *** geospeck joined
+[07:55] *** BinGOs joined
+[08:07] *** brrt joined
+[08:15] *** brrt joined
+[08:26] <brrt> oh, that's funny...
+
+[08:27] <brrt> i reduced the size of the expr nodes to 32 bits, and the time spent in building CORE.setting goes up
+
+[08:28] <lizmat> but perhaps it now builds under 1G ?
+
+[08:29] <brrt> hmm, it may have been not a real result
+
+[08:30] <brrt> i'm doing 10 consecutive runs and there's quite some variation
+
+[08:35] <brrt> i'm wondering if setting MVM_SPESH_BLOCKING to a true value will make them more consistent
+
+[08:35] <brrt> also, good morning
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: 51aa6e5d62 | (Bart Wiegmans)++ | 2 files
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: Add NOOP expr operator
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer:
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: During the tiling process we sometimes add tiles for the labels in
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: conditional expressions, that have no operator associated. However,
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: the operator in memory would then be 0, which is a valid operator type.
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer:
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: That didn't matter until I changed the order of LOAD and COPY, since COPY
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: <…commit message has 9 more lines…>
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: review: https://github.com/MoarVM/MoarVM/commit/51aa6e5d62
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: 366944125a | (Bart Wiegmans)++ | 11 files
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: Add CONST_PTR indirection
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer:
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: Previously, we'd put large constants directly in the expression nodes
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: array, which means that each node had to be as large as a
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: pointer (i.e. 64 bits wide). This is wasteful (we don't need that much
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: space for most nodes) but it also ensures that we can't compare
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: pointers accross runs, since address layout randomization will make
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: <…commit message has 8 more lines…>
+
+[08:36] <Geth> ¦ MoarVM/jit-expr-optimizer: review: https://github.com/MoarVM/MoarVM/commit/366944125a
+
+[08:47] *** zakharyas joined
+[08:54] *** domidumont joined
+[08:59] *** zakharyas1 joined
+[09:01] <lizmat> .tell samcv the collaps_strands change makes a lot of test files file, one example: https://gist.github.com/lizmat/c001084818a6fd2f714cb010c13d78b3
+
+[09:01] <yoleaux> lizmat: I'll pass your message to samcv.
+
+[09:05] <nine> lizmat: that's odd since samcv++ explicitly mentioned the change passing spectests
+
+[09:05] <lizmat> well, then maybe it's MacOS specific  :-(
+
+[09:06] <lizmat> it's definitely not an error that I've ever seen before
+
+[09:09] <nwc10> I'm seeing the same backtrace for that (CentOS (not my choice) and ASAN)
+
+[09:09] <nwc10> er, a line number differs - possibly I'm on a slightly different NQP version
+
+[09:09] <nwc10> so strange. why do different people get different versions of the truth?
+
+[09:18] *** robertle joined
+[09:30] <lizmat> hmmm...weird: I still get the "Note the same matching" error after reverting the NQP bump
+
+[09:30] <lizmat> *Not
+
+[09:35] <nine> lizmat: but did you actually downgrade MoarVM?
+
+[09:35] <lizmat> guess not  :-)
+
+[09:36] <nine> The new collapse_strands doesn't handle strand repetitions. lizmat, could this be the issue?
+
+[09:37] <lizmat> yeah looks like
+
+[09:56] <samcv> lizmat: hmm weird it was passing spectest for me
+
+[09:56] <yoleaux> 09:01Z <lizmat> samcv: the collaps_strands change makes a lot of test files file, one example: https://gist.github.com/lizmat/c001084818a6fd2f714cb010c13d78b3
+
+[09:56] <samcv> i will run it again
+
+[09:56] *** statisfiable6 joined
+[09:57] <samcv> hmm i'm getting the same error. weird. i'll figure it out then
+
+[09:57] <jnthn> morning o/
+
+[09:57] <yoleaux> 09:44Z <Ven``> jnthn: Is there a way to take a parameterized role as a role parameter?
+
+[09:57] <yoleaux> 09:51Z <Ven``> jnthn: I'm afraid I'm unclear, as usual. I mean taking a role you can parameterize. Like role B[::T[_, _]] { dd T[Int, Int]; }; B[Rational];
+
+[09:58] <samcv> lizmat: that is... very odd.
+
+[09:59] <samcv> hm ok i think i see
+
+[10:03] <Geth> ¦ MoarVM/jit-expr-optimizer: 11 commits pushed by (Bart Wiegmans)++
+
+[10:03] <Geth> ¦ MoarVM/jit-expr-optimizer: review: https://github.com/MoarVM/MoarVM/compare/366944125a...a37d05c6ba
+
+[10:03] <brrt> ^ is a rebase
+
+[10:18] <samcv> lizmat: ok this doesn't make sense
+
+[10:19] <samcv> if what my printf's are telling me is that it's seeing a two strand string. both strands start at 0 index end at 1 index. but the total graphemes total should be 5
+
+[10:19] <samcv> also the error you were getting was a conditional i added in there, and forgot to make the error more clear
+
+[10:24] <samcv> if i remove my checks all the tests in that file pass...
+
+[10:24] <samcv> so this seems to be a problem with the string that's being passed to the function
+
+[10:32] *** domidumont joined
+[10:36] <Geth> ¦ MoarVM: 97de3a2acb | (Samantha McVey)++ | src/strings/ops.c
+
+[10:36] <Geth> ¦ MoarVM: Revert "collapse_strands with memcpy if all strands are same type 4x faster"
+
+[10:36] <Geth> ¦ MoarVM:
+
+[10:36] <Geth> ¦ MoarVM: Reverting due to some possible corruption occuring inside or prior to
+
+[10:36] <Geth> ¦ MoarVM: this function being called in roast. Will revert until I fully
+
+[10:36] <Geth> ¦ MoarVM: investigate the cause.
+
+[10:36] <Geth> ¦ MoarVM: This reverts commit 8744857ed735833e1982384c2e01dea6450448ce.
+
+[10:36] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/97de3a2acb
+
+[10:36] <samcv> lizmat: going to revert for now, as i'm going to be going to bed and i'm not totally sure what is going on until i can do some detailed digging
+
+[10:46] *** AlexDaniel joined
+[11:02] *** zakharyas joined
+[11:03] <samcv> releasable6: status
+
+[11:03] <releasable6> samcv, Next release in 4 days and ≈7 hours. No blockers. 0 out of 186 commits logged
+
+[11:03] <releasable6> samcv, Details: https://gist.github.com/20826c1ae090381cf5926eda065e38db
+
+[11:04] <samcv> oh crap. ok looks like there's an issue in MVM_string_join. if i turn on NFG_CHECK i get failures running nqp tests
+
+[11:04] <samcv> will look tomorrow
+
+[11:04] <samcv> should be able to solve it in time :)
+
+[11:05] <samcv> should probably add that we should enable NFG_CHECK strict and run all tests before doing a moarvm release as well. to make sure it's remembered
+
+[11:05] <samcv> glad i spent a fair amount of time adding that debug functionality
+
+[11:05] <samcv> Differing grapheme at index 3
+
+[11:05] <samcv> orig: 13  (\r)  after re_nfg: -1  (\r\n)
+
+[11:06] <samcv> is what i'm getting when running nqp tests with NFG_CHECK and NFG_check strict
+
+[11:06] <samcv> NFG failure. Got different grapheme count of MVM_string_join. Got 8 but after re_nfg got 7
+
+[11:17] <dogbert17> o/
+
+[11:20] <jnthn> o/ dogbert17
+
+[11:20] <jnthn> Still not having much luck with https://github.com/MoarVM/MoarVM/issues/749 ... been hunting it all monring :(
+
+[11:23] <nwc10> lunch!
+
+[11:29] <dogbert2> oops, a nasty one then
+
+[11:30] <dogbert2> perhaps it will turn out to be blog material :)
+
+[11:31] *** releasable6 joined
+[11:33] <jnthn> Oh argh...I think I figured it out :/
+
+[11:34] <nwc10> why the ":/" ?
+
+[11:36] <jnthn> 'cus it's silly
+
+[11:37] <jnthn> Turns out uv_close needs calling on timers
+
+[11:39] <dogbert2> might there be more places in the code where timers aren't closed?
+
+[11:40] <dogbert2> there goes the blog post :)
+
+[11:43] <jnthn> I think there's only one place in the code that we do timers at all
+
+[11:43] * jnthn already has enough blog posts to write... :)
+
+[11:52] <dogbert17> with some luck, fixing this might resolve more problems
+
+[11:56] <jnthn> I've got a few fixes that I did along the way
+
+[11:56] <jnthn> It seems that test is reliably clean under valgrind now too
+
+[11:57] <jnthn> Will spectest now
+
+[12:02] *** dogbert11 joined
+[12:02] <jnthn> Yay, clean
+
+[12:02] <Geth> ¦ MoarVM: 3a656f9458 | (Jonathan Worthington)++ | src/io/timers.c
+
+[12:02] <Geth> ¦ MoarVM: Make sure to close timer handles
+
+[12:02] <Geth> ¦ MoarVM:
+
+[12:02] <Geth> ¦ MoarVM: Also, it's not safe to free their memory until after the close callback
+
+[12:02] <Geth> ¦ MoarVM: fires, so re-work things to do that.
+
+[12:02] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/3a656f9458
+
+[12:02] <Geth> ¦ MoarVM: ca12618171 | (Jonathan Worthington)++ | src/6model/reprs/ConcBlockingQueue.c
+
+[12:02] <Geth> ¦ MoarVM: Fix occasional old reads in ConcBlockingQueue
+
+[12:02] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ca12618171
+
+[12:02] <Geth> ¦ MoarVM: e694386643 | (Jonathan Worthington)++ | 2 files
+
+[12:02] <Geth> ¦ MoarVM: Harden event loop against fast cancellations
+
+[12:02] <Geth> ¦ MoarVM:
+
+[12:02] <Geth> ¦ MoarVM: It was possible that a cancellation might manage to run ahead of the
+
+[12:03] <Geth> ¦ MoarVM: setup work; make sure that we handle such cases correctly.
+
+[12:03] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/e694386643
+
+[12:04] <dogbert11> yay
+
+[12:05] <jnthn> Lunch, bbl
+
+[12:05] <dogbert11> perhaps you managed to fix https://github.com/rakudo/rakudo/issues/1202 as well
+
+[12:06] <jnthn> Maybe the SEGV side of it
+
+[12:06] <lizmat> that would be excellent  :-)
+
+[12:07] <lizmat> jnthn: ready for a bump ?
+
+[12:07] <jnthn> Hihgly unlikely the hang
+
+[12:07] <jnthn> Yeah, can do
+
+[12:07] <jnthn> really lunch :)
+
+[12:08] *** geospeck joined
+[12:12] <dogbert11> have a nice lunch
+
+[13:02] <lizmat> alas, this did not fix 1202 for me: MoarVM panic: Heap corruption detected: pointer 0x1045f73b8 to past fromspace
+
+[13:03] <lizmat> after about 1.5 minute
+
+[13:03] <jnthn> That woulda been lucky
+
+[13:07] <dogbert11> it always hangs for me, grr
+
+[13:31] *** brrt joined
+[13:58] <dogbert11> jnthn, did you get a good lunch?
+
+[14:00] <jnthn> Yeah, butternut squash soup :)
+
+[14:02] <dogbert11> Nice. Any good Indian restaurants in Prague?
+
+[14:04] <lizmat> jnthn: RT #132225 still reliable crashes for me
+
+[14:04] <synopsebot> RT#132225 [open]: https://rt.perl.org/Ticket/Display.html?id=132225 segmentation fault while concurrently updating SetHash
+
+[14:05] <lizmat> jnthn: lowering the number of threads, sometimes gives me: Cannot look up attributes in a VMNull type object
+
+[14:06] <lizmat> jnthn: which appears to happen in a Proxy.FETCH
+
+[14:06] <lizmat> jnthn: which would imply that "self" would be a VMNull
+
+[14:07] <jnthn> lizmat: I'm not surprised, I doubt that'll not SEGV until we re-work VMHash
+
+[14:08] <lizmat> jnthn: but all access are in a protect block ??
+
+[14:09] <lizmat> jnthn: another data point: if we put another key into the Set, it doesn't segfault
+
+[14:10] <lizmat> so only segfaults if we add / remove the first / last from the Set
+
+[14:13] <jnthn> Ah, then I've no idea what's happening, except maybe what was speculated about sink
+
+[14:15] <lizmat> it also seems to leak like hell
+
+[14:16] <lizmat> in 4 seconds from 69MB to 278MB
+
+[14:16] <timotimo> mhh, that feeling when changes you made to strings causes some regex match to fail
+
+[14:18] <timotimo> and you get "sorry, invalid precompilation id" when starting rakudo
+
+[14:23] <Geth> ¦ MoarVM: ae37b6b679 | (Jonathan Worthington)++ | 3 files
+
+[14:23] <Geth> ¦ MoarVM: Include reason when we cannot inline
+
+[14:23] <Geth> ¦ MoarVM:
+
+[14:23] <Geth> ¦ MoarVM: Just in the debug output now, however some profiling tool may find it
+
+[14:23] <Geth> ¦ MoarVM: useful to gather up these reasons in the future also.
+
+[14:23] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ae37b6b679
+
+[14:23] <timotimo> for some reason with my change a . will now match against <-[A..Za..z0..9._-]>
+
+[14:28] <dogbert11> jnthn: any immediate theories wrt https://gist.github.com/dogbert17/d43421ca74dce593ebd2ef4d54c1c468
+
+[14:28] *** brrt joined
+[14:29] <jnthn> Hm, looks like a bad assumption about a thread living on
+
+[14:29] <dogbert11> it's my latest retest of https://github.com/MoarVM/MoarVM/issues/728
+
+[14:31] <dogbert11> it does not cause asan to complain every run, more like one in two
+
+[14:33] * jnthn tries to remember why lastexpayload is marked :noinline
+
+[14:34] <timotimo> yeah, i removed that recently and spec tested, there was some failure but i didn't have time to investigate at all
+
+[14:34] <jnthn> It's what blocks inlining of things like postcircumfix:<[ ]>
+
+[14:36] <timotimo> anything with some kind of return handler, right?
+
+[14:36] <jnthn> Yeah
+
+[14:39] * jnthn spesh stresses with it on
+
+[14:39] <jnthn> timotimo: Can you remember how recently? :)
+
+[14:40] <timotimo> this or last month
+
+[14:40] <jnthn> Hm, OK
+
+[14:40] <jnthn> That is probably since I did all the exception handler cleaning up in spesh...
+
+[14:40] <timotimo> https://irclog.perlgeek.de/moarvm/2017-11-02#i_15389838
+
+[14:40] <jnthn> It makes it through NQP build/test
+
+[14:41] <jnthn> m: say 5.688 / 6.374
+
+[14:41] <camelia> rakudo-moar b36685981: OUTPUT: «0.892375␤»
+
+[14:41] <jnthn> m: say 8.801 / 9.768
+
+[14:41] <camelia> rakudo-moar b36685981: OUTPUT: «0.901003␤»
+
+[14:42] <jnthn> Worth 10% on some array access benchmarks
+
+[14:42] <timotimo> awesome
+
+[14:42] <dogbert11> jnthn++
+
+[14:42] <jnthn> Only if it won't break things
+
+[14:42] <jnthn> ah, a failure in t/02-rakudo/repl.t of all places...
+
+[14:43] <jnthn> t/05-messages/01-errors.t also
+
+[14:43] <timotimo> ah
+
+[14:43] <timotimo> because of stack traces becoming shorter, no doubt
+
+[14:43] <jnthn> Hm, the errors make no sense
+
+[14:44] <jnthn> "Cannot receive a message on a closed channel"
+
+[14:44] <jnthn> o.O
+
+[14:44] <timotimo> :o
+
+[14:45] <jnthn> Hopefully the stresstest gives a simpler case
+
+[14:46] <lizmat> jnthn: fwiw, I had t/02-rakudo/repl.t flap on me today
+
+[14:46] <lizmat> so that may be another issue
+
+[14:48] <jnthn> So far it looks like the spectest is only going to tell me "yeah, something about proc bust"
+
+[14:48] <jnthn> (With said closed channel error)
+
+[14:49] <jnthn> Of course, it's possible that the problem is that it permits inlining something that *otherwise* breaks
+
+[14:49] <timotimo> spesh bisect time?
+
+[14:49] <jnthn> Well, I know it's an inline causing it
+
+[14:52] <jnthn> ah, I think I've got a simpler case
+
+[15:02] *** zakharyas joined
+[15:37] <jnthn> m: multi foo(Int) { callsame }; multi foo(Any) { 1 }; for ^1000000 { foo(1) }
+
+[15:37] <camelia> rakudo-moar b36685981: ( no output )
+
+[15:37] <jnthn> Golfs to that
+
+[15:38] <jnthn> Turns out that we never eliminate the exception handler when there's a call
+
+[15:39] <jnthn> And the blocking of it being inlined in turn blocks inlining of things that might do callsame
+
+[15:39] <jnthn> (Also blocks a hell of a lot more, of course)
+
+[15:40] <jnthn> Which hides the fact that the dispatcher mechanism can't cope with inlining
+
+[15:41] <timotimo> so we mark something else :noinline, or can we comfortably fix the dispatcher mechanism to "get it"? would we have to keep the dispatcher around in a variable and reset it after an inlined call or something?
+
+[15:42] <timotimo> well, we do already store the dispatcher in $*DISPATCHER all the time
+
+[15:42] <timotimo> i don't claim to understand how the dispatcher mechanism works: )
+
+[15:43] <jnthn> It's...non-trivial...to fix :(
+
+[15:44] <jnthn> oh, but
+
+[15:44] <jnthn> Perl6::Optimizer already looks for explicit mentions of callsame and relies on that
+
+[15:46] <jnthn> So if we could just set a "don't inline this" flag at that level that makes it down to the VM, we're probably good
+
+[15:46] <jnthn> I think we'll probably have to do it that way
+
+[15:47] <timotimo> how about we invent a noinline op that we can codegen and all it does is prevent inlining, otherwise it's a nop?
+
+[15:47] <timotimo> that way we don't have to have a flag or something
+
+[15:51] <jnthn> I think it's cleaner on a block
+
+[15:53] <jnthn> There's already a set of flags on frames anyway
+
+[15:53] <jnthn> That we have infrastructure for passing down
+
+[15:53] <jnthn> So it's not even a big change to add it
+
+[15:54] *** zakharyas joined
+[15:56] <timotimo> ah, neat
+
+[16:05] *** AlexDaniel joined
+[16:06] *** brrt joined
+[16:25] <jnthn> Darnit. That flag does fix a bunch of the tests...but the thing busting proc turns out to be a different issue
+
+[16:27] <Geth> ¦ MoarVM: b9a01f750e | (Jonathan Worthington)++ | 5 files
+
+[16:27] <Geth> ¦ MoarVM: Add support for a block noinline flag
+
+[16:27] <Geth> ¦ MoarVM:
+
+[16:27] <Geth> ¦ MoarVM: Used to indicate that a block may never be inlined; will bet set by
+
+[16:27] <Geth> ¦ MoarVM: Rakudo upon spotting uses of things that need the dispatcher, which it
+
+[16:27] <Geth> ¦ MoarVM: already relies on spotting by name in the static optimizer anyway.
+
+[16:27] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/b9a01f750e
+
+[16:29] * [Coke] finds it very slightly weird that MoarVM has nqp code in it.
+
+[16:30] <timotimo> [Coke]: somehow nqp has to know about all the consts and such
+
+[16:31] <timotimo> and how to interop with the mast compiler
+
+[16:31] <timotimo> though that might change in the future to use bufs and such instead of objects
+
+[16:32] <jnthn> [Coke]: It has perl 6 scripts in tools/ too ;)
+
+[16:41] <jnthn> "huh, why is vim taking so long to load this spesh log"..."oh, it's 265 MB o.O"
+
+[16:43] *** domidumont joined
+[16:51] *** TimToady joined
+[16:55] *** geospeck left
+[16:56] <jnthn> So the problem is an exception handler "goes missing"
+
+[16:56] <jnthn> And an exception that should have been caught leaks out
+
+[16:56] <jnthn> The handler annotations look fine though
+
+[16:56] <jnthn> Turns out they are
+
+[16:56] <jnthn> And with MVM_JIT_EXPR_DISABLE=1 set then things arefine
+
+[16:56] <jnthn> *are fine
+
+[16:59] <timotimo> oh, interesting!
+
+[16:59] <lizmat> m: END die  # unrelated, I assume
+
+[16:59] <camelia> rakudo-moar b36685981: OUTPUT: «Unhandled exception: getexpayload needs a VMException, got P6opaque (X::AdHoc)␤   at <unknown>:1  (/home/camelia/rakudo-m-inst-1/share/perl6/runtime/CORE.setting.moarvm:)␤ from <unknown>:1  (/home/camelia/rakudo-m-inst-1/share/perl6/runtime/CORE.s…»
+
+[16:59] <jnthn> Very
+
+[16:59] <lizmat> ok
+
+[16:59] <lizmat> just checking :-)
+
+[16:59] <jnthn> That's not hot enough to JIT :)
+
+[17:00] <lizmat> yeah, and probably fixable by me  :-)
+
+[17:00] <jnthn> Interestingly, you can get this to appear in t/02-rakudo/repl.t without even turning on nodelay/blocking
+
+[17:02] <timotimo> this is with a rakudo patch for the optimizer and such, yes?
+
+[17:02] <jnthn> Yes
+
+[17:06] <Geth> ¦ MoarVM/inline-lastexpayload: b4021cea86 | (Jonathan Worthington)++ | 2 files
+
+[17:06] <Geth> ¦ MoarVM/inline-lastexpayload: Remove :noinline on lastexpayload
+
+[17:06] <Geth> ¦ MoarVM/inline-lastexpayload: review: https://github.com/MoarVM/MoarVM/commit/b4021cea86
+
+[17:15] <jnthn> .tell brrt the branch inline-lastexpayload fails t/02-rakudo/repl.t but works without the expr JIT. The problem is in the code at Proc.pm:73 in Rakudo; the try thunk is inlined into the enclosing block (not new, I think), but now the .receive method was inlined into the thunk with my branch. So it seems to have needed the nested inline to trigger it.
+
+[17:15] <yoleaux> jnthn: I'll pass your message to brrt.
+
+[17:33] *** zakharyas joined
+[17:55] <jnthn> There's one further issue besides that one, which I've not got to the bottom of yet, which results in Failure not being marked as handled even though .so is called
+
+[17:55] <jnthn> Which is very odd
+
+[17:59] <jnthn> Wow, it actually stops calling .Bool, somehow
+
+[18:02] <jnthn> Will have to continue some other time...will be a nice improvemnet to inline postcircumfix:<[ ]> and probably many other things, once we get the kinks worked out
+
+[18:05] * jnthn bbl
+
+[18:10] <Zoffix> This reminds me of https://rt.perl.org/Public/Bug/Display.html?id=132149#ticket-history
+
+[18:11] <Zoffix> Where Method.gist gets lost and Mu::gist is used instead, for some reason
+
+[18:13] *** AlexDaniel joined
+[18:27] *** zakharyas joined
+[18:39] *** zakharyas joined
+[19:41] <samcv> good * MoarVM :-)
+
+[19:41] * samcv cracks knuckles and starts trying to find the NFG_CHECK failure
+
+[19:44] <dogbert11> samcv, have you had your morning tea yet?
+
+[19:44] <samcv> drinking it this second :)
+
+[19:44] <dogbert11> :)
+
+[19:53] *** TimToady joined
+[19:54] *** robertle joined
+[19:56] <samcv> looks like the problem was in 2017.10 also
+
+[20:11] <dogbert11> still one the hunt then
+
+[20:11] <dogbert11> *on
+
+[20:35] <dogbert11> samcv: are you looking for why this happens:
+
+[20:35] <dogbert11> NFG failure. Got different grapheme count of MVM_string_join. Got 5 but after re_nfg got 3
+
+[20:35] <dogbert11> Differing grapheme at index 0
+
+[20:35] <dogbert11> orig: 68  (D)  after re_nfg: 7690  (Ḋ)
+
+[20:35] <samcv> yeah i have a fix now
+
+[20:35] <dogbert11> coool
+
+[20:36] <dogbert11> that tea sure helped :)
+
+[20:36] <Geth> ¦ MoarVM: e0ca68c9d7 | (Samantha McVey)++ | src/strings/ops.c
+
+[20:36] <Geth> ¦ MoarVM: Only run NFG_CHECK if concat is stable
+
+[20:36] <Geth> ¦ MoarVM:
+
+[20:36] <Geth> ¦ MoarVM: If concat is not stable, we we already *know* concat isn't stable, so
+
+[20:36] <Geth> ¦ MoarVM: don't run it and cause misleading results.
+
+[20:36] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/e0ca68c9d7
+
+[20:36] <samcv> dogbert11: fixed
+
+[20:37] <samcv> the fix was much easier than i thought at first :P but once i figured out everything was running fine and bisecting it and getting nowhere turns out the answer was just that we shouldn't run NFG_CHECK if concats_stable = 0. only if we are not going to run re_nfg on it
+
+[20:40] <dogbert11> nice fix
+
+[20:41] <dogbert11> t/spec/S32-str/utf8-c8.t still causes trouble though
+
+[20:42] <samcv> will check after i rebuild nqp and rakudo :)
+
+[20:42] <nwc10> fresh head for the win
+
+[20:42] <nwc10> or maybe it was the tea
+
+[20:42] * dogbert11 only rebuilt MoarVM ...
+
+[20:53] <timotimo> samcv: i started work on a new storage format for MVMString
+
+[20:53] <timotimo> but it breaks regex matching
+
+[20:53] <timotimo> wanna have a look at the code so far?
+
+[21:22] <Geth> ¦ MoarVM/in-situ-strings: 3ab9834d50 | (Timo Paulssen)++ | 6 files
+
+[21:22] <Geth> ¦ MoarVM/in-situ-strings: store short strings inside string's body
+
+[21:22] <Geth> ¦ MoarVM/in-situ-strings:
+
+[21:22] <Geth> ¦ MoarVM/in-situ-strings: uses the 8 bytes that the pointer to a buffer usually
+
+[21:22] <Geth> ¦ MoarVM/in-situ-strings: takes and puts up to 8 8-bit characters into it.
+
+[21:22] <Geth> ¦ MoarVM/in-situ-strings:
+
+[21:22] <Geth> ¦ MoarVM/in-situ-strings: Currently causes trouble with regex matches.
+
+[21:22] <Geth> ¦ MoarVM/in-situ-strings: review: https://github.com/MoarVM/MoarVM/commit/3ab9834d50
+
+[21:23] <timotimo> that's the one
+
+[21:23] <timotimo> the last time i tried to implement this was before grapheme iterators, i believe. so i would have had to change basically every piece of code that handles strings
+
+[21:30] <timotimo> if you take out the code that does it in latin1.c it'll get through a rakudo compilation
+
+[21:31] <timotimo> but a whole lot of strings get to be latin1 if they come out of the string heap
+
+[21:32] <timotimo> oh, well wasn't that easy
+
+[21:35] <timotimo> bleh. i don't like when it crashes in nfa's unmanaged_size function
+
+[21:36] <timotimo> dinner time i guess
+
+[21:36] *** zakharyas joined
+[21:36] *** releasable6 joined
+[22:02] *** unicodable6 joined
+[22:03] *** committable6 joined
+[22:03] *** bisectable6 joined
+[22:03] *** bloatable6 joined
+[22:03] *** statisfiable6 joined
+[23:28] <samcv> dogbert11: i'm checking some other NFG_CHECK failures
+
+[23:33] <samcv> i'm getting one for t/spec/integration/advent2010-day03.t it seems to be failing with a utf8-c8 string
+
+[23:34] <samcv> ah it's a path
+
+[23:46] <samcv> i've gotten it down to: `dir.map({ .relative });` this in the rakudo git folder will trigger it

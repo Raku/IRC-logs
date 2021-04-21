@@ -1,0 +1,128 @@
+[00:10] <MasterDuke> what's an easy way to test/stress on_read in asyncsocket.c?
+
+[00:10] <timotimo> hmm
+
+[00:11] <timotimo> well, you'd want to be sending a bunch of different-sized packets?
+
+[00:11] <timotimo> probably easy to just hackit up as a one-liner with synchronous sockets in perl6?
+
+[00:11] <MasterDuke> because it's on_alloc is the same as procops.c's. wondering how to test the same patch to it
+
+[00:12] <MasterDuke> but i'd like something somewhat realistic
+
+[00:12] <timotimo> right, there you can just build a process that prints different sized strings/bufs
+
+[00:15] <timotimo> gotta go o/
+
+[00:17] *** lizmat joined
+[00:20] <MasterDuke> later...
+
+[00:57] *** pharv_ joined
+[01:28] *** ilmari[m] joined
+[01:52] *** ilbot3 joined
+[02:50] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #632: Alloc read buffer based on amount last read
+
+[02:50] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/632
+
+[06:08] <Geth> ¦ MoarVM: markmont++ created pull request #633: Make sure libffi callbacks can be reused.
+
+[06:08] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/633
+
+[06:13] *** nwc10 joined
+[09:44] *** dogbert17 joined
+[11:11] *** evanm joined
+[11:23] *** AlexDani` joined
+[11:55] <nine> This is about the call to p5_method_call (the native sub): prepargs        callsite(0x604a1f0, 10 arg, 10 pos, nonflattening, noninterned)
+
+[11:56] <nine> timotimo: you said that the interning (what does that actually mean?) might be relevant for why the native sub is not JITed.
+
+[11:57] <nine> I don't even find anything about it in the spesh log other than the name in the argument to sp_findmeth
+
+[12:23] <timotimo> nine: a callsite is a little datastructure that describes what the arguments for a call look like; number of positional arguments, number and names of named arguments, primitive of arguments (obj/int/num/str), has flattening yes/no
+
+[12:24] <timotimo> nine: we only intern callsites if they are non-flattening and the number of arguments is below a certain number
+
+[12:24] <timotimo> and we only spesh call targets if they are being called from an interned callsite
+
+[12:27] *** nwc10 joined
+[12:41] <nine> Ok, p5_call_method has a boat load of arguments which probably explains, why it's not interned. p5_sv_refcnt_dec on the other hand has only 2, the callsite is interned, but still spesh does not even seem to look at that sub
+
+[12:45] <timotimo> valgrind is a tiny bit upset by find_invokee_static_frame using uninitialized values for control flow
+
+[12:45] <timotimo> coverity also complained about that function, i think it's able to reach its end without returning or something
+
+[12:47] <Geth> ¦ MoarVM: 3cf56817e7 | (Stefan Seifert)++ | 3 files
+
+[12:47] <Geth> ¦ MoarVM: JIT the create op
+
+[12:47] <Geth> ¦ MoarVM:
+
+[12:47] <Geth> ¦ MoarVM: Of course we'd much rather see sp_fastcretae ops, but sometimes we don't get
+
+[12:47] <Geth> ¦ MoarVM: them and bailing out on a generic create op may prevent us from JITing much
+
+[12:47] <Geth> ¦ MoarVM: more code (e.g. when Mu.CREATE is inlined).
+
+[12:47] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/3cf56817e7
+
+[14:20] <nine> This is for p5_sv_refcnt_dec: prepargs        callsite(0x7f592cda79e0, 2 arg, 2 pos, nonflattening, interned)
+
+[14:20] <nine> Yet spesh doesn't seem to care about p5_sv_refcnt_dec
+
+[14:40] <timotimo> right, i myself am often surprised by spesh not doing stuff i expect it to
+
+[15:06] *** zakharyas joined
+[16:53] *** pharv_ joined
+[17:16] *** zakharyas joined
+[18:39] *** dogbert17 joined
+[18:53] <timotimo> hm, so
+
+[18:53] <timotimo> i'm confused
+
+[18:53] <timotimo> i was expecting i could get "known type" facts about the arguments to "create" so i can turn it into direct calls into the repr in question
+
+[18:54] <timotimo> but not one instance has the "known type" flag set
+
+[19:00] <timotimo> oh perhaps it's just always inside an inline
+
+[19:00] <timotimo> that'd explain why it doesn't turn into fastcreate
+
+[19:00] <timotimo> because we just don't do facts in inlined blocks ;(
+
+[19:02] <timotimo> yeah, that must be it
+
+[19:03] <timotimo> maybe i'll be able to figure out the problem that prevents us ...
+
+[19:16] *** zakharyas joined
+[19:22] *** pharv_ joined
+[19:31] *** AlexDaniel joined
+[19:33] *** geekosaur joined
+[20:09] *** lizmat joined
+[20:14] <timotimo> the order of bbs after inline isn't exactly helpful; the dominance children/parent relationship doesn't seem to carry over from the inlinee
+
+[20:14] <timotimo> so going via the children isn't an option, and going in linear order or by following successors isn't necessarily sound
+
+[20:18] <timotimo> oh i went off-by-one in one of the BBs and so i thought the dominance graph was just looping first and last bb in the inline
+
+[21:48] <jnthn> We should probably just re-calc the dominance graph after the first pass and killing off BBs...
+
+[21:52] *** dogbert17 joined
+[22:02] <MasterDuke> jnthn: i did the same patch i did for proc and asyncsocket on asyncsocketudp, but it wasn't working right, long messages were getting cut off. i haven't had time to debug yet, but any quick ideas?
+
+[22:11] <jnthn> Uh, don't do it at all for UDP
+
+[22:12] <jnthn> There's no buffering on libuv's side, 'cus...well, it's UDP, so losing stuff is OK :)
+
+[22:12] <jnthn> We should just take the suggested size there
+
+[22:12] <jnthn> If they're getting cut off in other cases, well, that's LTA...
+
+[22:13] <jnthn> Oh, but you said it only happens for UDP, and I misread
+
+[22:13] <jnthn> So yeah, the answer is "don't do it there" :)
+
+[22:17] <MasterDuke> heh, easy enough
+
+[22:17] <MasterDuke> thanks
+
+[22:30] *** lizmat joined

@@ -1,0 +1,526 @@
+[00:09] *** anatofuz joined
+[00:30] <timotimo> i think i'll put information necessary to put information about deopts into the profiler into the spesh candidate object and look it up when a deopt happens
+
+[00:32] <timotimo> i'd like to put it into a field that already exists, so that it won't make every spesh candidate object bigger even when profiling isn't running
+
+[00:35] <timotimo> i guess the instrumentation barrier would mean that whenever a deopt is happening and profiling is "on", the currently active spesh candidate would have the data in question
+
+[00:45] *** anatofuz left
+[00:45] *** anatofuz joined
+[00:50] *** anatofuz left
+[01:14] *** anatofuz joined
+[01:32] *** anatofuz left
+[01:40] *** anatofuz joined
+[01:42] *** anatofuz left
+[01:44] *** anatofuz joined
+[01:46] *** anatofuz left
+[01:47] *** anatofuz joined
+[01:47] *** anatofuz left
+[01:49] *** anatofuz joined
+[01:53] *** anatofuz left
+[01:53] *** anatofuz joined
+[01:58] *** anatofuz left
+[01:59] *** anatofuz joined
+[02:09] *** anatofuz left
+[02:12] *** anatofuz joined
+[02:16] *** anatofuz left
+[02:20] *** anatofuz joined
+[02:22] *** anatofuz left
+[03:09] *** anatofuz joined
+[03:33] *** AlexDani` joined
+[03:37] *** AlexDaniel left
+[04:10] *** cinch__ joined
+[04:10] *** anatofuz left
+[04:13] *** cinch_ left
+[04:34] *** anatofuz joined
+[06:10] *** anatofuz left
+[06:12] *** sena_kun joined
+[06:28] *** anatofuz joined
+[07:02] *** sena_kun left
+[07:14] <nine> timotimo: something's odd with MVM_SPESH_LOG=spesh.log ./perl6-m --profile=profile.sql -e 'my $a; for ^100 { $a = rand ~~ /<$_>/; }'
+
+[07:16] <nine> According to the profile the stack traces become large because SETTING::src/core.c/Regex.pm6:28 appears to call some unknown frame which calls -e:1 which calls Regex.pm6:28 again and this repeats.
+
+[07:17] <nine> Looks to me like the profiler just misses the exit from Regex.pm6:28 (ACCEPTS). I'd suspect that some inlining is done and it misses the end of the inline. But according to the spesh.log ACCEPTS does not even become specialized.
+
+[07:18] <nine> It also doesn't get inlined into anything
+
+[07:52] *** domidumont joined
+[07:55] *** zakharyas joined
+[08:15] *** AlexDani` is now known as AlexDaniel
+
+[08:15] *** AlexDaniel left
+[08:15] *** AlexDaniel joined
+[08:41] *** Ven`` joined
+[08:43] *** Ven`` left
+[09:57] <Guest23744> nine: what do you think about https://gist.github.com/dogbert17/d6291bfbc9b69130a8cd5761f56ba704
+
+[10:04] <nine> Guest23744: I don't see how that value in the first stack trace could be uninitialized
+
+[10:08] <Guest23744> nine: it's very odd, I get the same error on my $work machine
+
+[10:09] <nine> You could try to find out if valgrind's right or wrong by adding some debug output and/or attacking it with a debugger
+
+[10:10] <Guest23744> I might have to do that
+
+[10:18] <nine> Guest23744: you could also first find out which of the 2 values valgrind thinks responsible. The int that's boxed is the result of (gc->abstime - absolute_start_time) / 1000. I'd add an if (gc->abstime < 10) fprintf(stderr, "abstime\n"); and if (absolute_start_time < 10) fprintf(stderr, "absolute_start_time\n"); and see which of the 2 valgrind complains about
+
+[10:18] *** domidumont left
+[10:32] *** sena_kun joined
+[11:34] <Guest23744> nine, perhaps our versions of instrument.c differ slightly but it turns out that the value valgrind complains about is 'gc->num_stolen_gen2roots'
+
+[11:34] *** zakharyas left
+[11:36] <Guest23744> a grep gives the following
+
+[11:36] <Guest23744> src/profiler/log.h:    MVMuint32 num_stolen_gen2roots;
+
+[11:36] <Guest23744> src/profiler/log.c:        ptd->gcs[ptd->num_gcs].num_stolen_gen2roots += amount;
+
+[11:37] <Guest23744> perhaps a MVMuint32 num_stolen_gen2roots = 0; might do the trick
+
+[11:37] * Guest23744 tries that
+
+[11:39] <Guest23744> hmm, can't do that in a .h file, will have to find a better place
+
+[11:41] *** domidumont joined
+[11:47] *** anatofuz left
+[11:48] *** anatofuz_ joined
+[11:49] <Guest23744> .seen timotimo
+
+[11:49] <tellable6> Guest23744, I saw timotimo 2019-10-03T00:35:02Z in #moarvm: <timotimo> i guess the instrumentation barrier would mean that whenever a deopt is happening and profiling is "on", the currently active spesh candidate would have the data in question
+
+[11:51] <nine> Guest23744: the MVMProfileGC struct is created in log.c:429
+
+[11:52] <nine> And you're right. It doesn't seem to get fully initialized
+
+[11:52] <Guest23744> nine: I initialized num_stolen_gen2roots in that method and the error went away
+
+[11:53] *** anatofuz_ left
+[11:53] <nine> \o/ I wouldn't be surprised if there were other fields that could use some initialization
+
+[11:55] <Guest23744> I'll see if I can find any, thx for your help
+
+[12:08] *** anatofuz joined
+[12:17] <nine> I guess the next release will be the most stable one of all times :)
+
+[12:18] <Guest23744> indeed :)
+
+[12:48] *** anatofuz left
+[12:50] *** anatofuz joined
+[13:36] *** domidumont left
+[13:36] *** zakharyas joined
+[13:41] *** domidumont joined
+[13:46] *** anatofuz left
+[13:54] *** lucasb joined
+[13:58] <timotimo> perhaps it's not just™ inlining, but every time there's a throwpayload?
+
+[14:01] <Guest23744> just got another SEGV, a combination of profiling an precomp
+
+[14:01] <Guest23744> *and
+
+[14:02] <Guest23744> here: https://github.com/MoarVM/MoarVM/blob/master/src/profiler/log.c#L465
+
+[14:02] *** zakharyas left
+[14:05] *** zakharyas joined
+[14:10] *** anatofuz joined
+[14:13] <timotimo> huh? how would that segfault?
+
+[14:13] <timotimo> ptd-> has been accessed in earlier lines, and ptd->gcs[ptd->num_gcs] similarly
+
+[14:14] *** anatofuz left
+[14:15] <Guest23744> timotimo: yeah, it's odd. Perhaps valgrind is playing some tricks on us
+
+[14:17] <timotimo> i mean, gcc is allowed to reorder code if it thinks that makes it faster
+
+[14:17] <timotimo> so maybe that line actually comes first
+
+[14:28] <Guest23744> could it be that something is not initialized?
+
+[14:29] <Guest23744> timotimo: https://gist.github.com/dogbert17/c79bde902060fe74ccf83d766c50a1cd
+
+[14:31] <timotimo> get_thread_data will calloc if the ptd doesn't exist yet, which means num_gc starts at 0
+
+[14:33] <timotimo> is there a way to log_gc_end without corresponding log_gc_start?
+
+[14:36] <timotimo> what other way would there be for that pointer to be null?
+
+[14:47] *** AlexDaniel left
+[14:48] *** AlexDaniel joined
+[14:52] *** AlexDaniel left
+[14:53] *** zakharyas left
+[15:08] *** AlexDaniel joined
+[15:08] *** AlexDaniel left
+[15:08] *** AlexDaniel joined
+[15:25] *** Guest23744 left
+[15:36] *** domidumont left
+[15:39] *** AlexDaniel left
+[15:46] *** patrickb joined
+[16:17] *** patrickb left
+[16:21] <Geth_> ¦ MoarVM: dogbert17++ created pull request #1186: Fix uninitialized field in MVM_profiler_log_gc_start()
+
+[16:21] <Geth_> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1186
+
+[16:25] <Geth_> ¦ MoarVM: 6ecbf6e08a | (Jan-Olof Hendig)++ | src/profiler/log.c
+
+[16:25] <Geth_> ¦ MoarVM: Fix uninitialized field
+
+[16:25] <Geth_> ¦ MoarVM:
+
+[16:25] <Geth_> ¦ MoarVM: MVM_profiler_log_gc_start() must initialize gc->num_stolen_gen2roots
+
+[16:25] <Geth_> ¦ MoarVM: Doing so avoids complaints from valgrind.
+
+[16:25] <Geth_> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/6ecbf6e08a
+
+[16:25] <Geth_> ¦ MoarVM: b72a790b1b | niner++ (committed using GitHub Web editor) | src/profiler/log.c
+
+[16:25] <Geth_> ¦ MoarVM: Merge pull request #1186 from dogbert17/fix-uninit-field
+
+[16:25] <Geth_> ¦ MoarVM:
+
+[16:25] <Geth_> ¦ MoarVM: Fix uninitialized field in MVM_profiler_log_gc_start()
+
+[16:25] <Geth_> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/b72a790b1b
+
+[16:26] <timotimo> maybe instead of nulling the fields individually, we should use MVM_calloc and instead of realloc use recalloc
+
+[16:26] <timotimo> oh, there is no malloc call, we just use realloc starting with a null pointer
+
+[16:46] *** zakharyas joined
+[17:04] *** mtj_ joined
+[17:04] *** MasterDuke joined
+[17:05] *** mtj_ left
+[17:07] *** mtj_ joined
+[17:25] *** domidumont joined
+[17:36] *** bartolin left
+[18:05] *** bartolin joined
+[18:33] <MasterDuke> timotimo: have you ever seen a segv in moarperf before? i saw one last night, but it was way after the fact and i don't have any data about it
+
+[18:34] <timotimo> well, it's a perl6 app, i'm not doing anything particularly exciting, unless you're using the memory profiler, which does loads of work itself
+
+[18:34] <timotimo> but no, i don't think i've seen it segfault except when i reinstall rakudo or moarvm in the background while it runs
+
+[18:36] *** domidumont left
+[18:36] <MasterDuke> oh, now that you mention it that could have been what happened. i think i did recompile moarvm once or twice
+
+[18:36] <timotimo> right, that's dangerous
+
+[18:36] <timotimo> even though i tried to make it not dangerous in the makefile by first moving old files out of the way before rewriting
+
+[18:36] <timotimo> that didn't seem to help enough :( :(
+
+[18:42] *** zakharyas left
+[18:44] *** AlexDaniel joined
+[18:44] *** AlexDaniel left
+[18:44] *** AlexDaniel joined
+[18:44] <dogbert17> what does 'Profiler lost sequence' mean? I get that when running './perl6-m --profile -Ilib t/spec/S03-operators/repeat.t'
+
+[18:44] <timotimo> when prof_leave is called more often than prof_enter was called, for example
+
+[18:45] <timotimo> "profiler lost sequence" usually means "profiler got very confused and has to abort"
+
+[18:47] <dogbert17> that sounds bad
+
+[18:48] <timotimo> it wouldn't have to crash the program, but if you're profiling your program, you probably want it to abort early rather than running for days and then resulting in a partial profile
+
+[18:50] <MasterDuke> oh, that one repros easily
+
+[18:50] <dogbert17> MasterDuke: cool
+
+[18:50] <MasterDuke> i'm on stock moarvm too, no nursery or GC_DEBUG changes
+
+[18:51] <dogbert17> even better :)
+
+[18:52] <MasterDuke> https://gist.github.com/MasterDuke17/044b40e1229b2f774836da30a02fbe1b
+
+[18:55] <MasterDuke> still same error with jit and/or spesh disabled
+
+[18:56] <MasterDuke> but works fine with rakudo 2019.03.1
+
+[18:58] <dogbert17> so it could possibly be bisected
+
+[19:00] <dogbert17> I always forget how to run the bots with options I'm afraid
+
+[19:00] <MasterDuke> hm, doesn't seem to be caused by any of the recent profiler related commits
+
+[19:01] <timotimo> you've got to invoke "perl6" with qx or similar
+
+[19:05] <dogbert17> it's not present in 2019.07.1 either
+
+[19:05] <timotimo> so it's very new?
+
+[19:05] <dogbert17> it definitely looks like it
+
+[19:07] <MasterDuke> bisectable6: old=2019.07.1 run <<$*EXECUTABLE --profile -Ilib t/spec/S03-operators/repeat.t>>
+
+[19:07] <bisectable6> MasterDuke, Bisecting by output (old=2019.07.1 new=168c9c2) because on both starting points the exit code is 1
+
+[19:07] <bisectable6> MasterDuke, bisect log: https://gist.github.com/8bdb8808337a8093587a657845ef05f7
+
+[19:07] <bisectable6> MasterDuke, There are 4 candidates for the first “new” revision. See the log for more details
+
+[19:08] <dogbert17> the log is filled with a lot of 'Could not open t/spec/S03-operators/repeat.t. Failed to stat file: no such file or directory'
+
+[19:08] <MasterDuke> oh, roast wouldn't be checked out, i'd have to put that test file in a gist i guess
+
+[19:08] <MasterDuke> AlexDaniel: ping
+
+[19:08] <AlexDaniel> pong
+
+[19:09] <dogbert17> AlexDaniel: see above, expert bot help needed
+
+[19:09] <AlexDaniel> e: shell <cd sandbox/roast; git pull>
+
+[19:09] <evalable6> AlexDaniel, rakudo-moar 168c9c2fb: OUTPUT: «From https://github.com/perl6/roast␤   333581c9a..f48f1ba57  master                 -> ori…»
+
+[19:09] <evalable6> AlexDaniel, Full output: https://gist.github.com/cac770be0d5c1c7b5eb6cb016c5a05d4
+
+[19:09] <AlexDaniel> e: run <<$*EXECUTABLE --profile -Ilib sandbox/roast/S03-operators/repeat.t>>
+
+[19:09] <evalable6> AlexDaniel, rakudo-moar 168c9c2fb: OUTPUT: «(exit code 1) 1..62␤ok 1 - string repeat operator works on single character␤ok 2 - string …»
+
+[19:09] <evalable6> AlexDaniel, Full output: https://gist.github.com/85ccd0c7ec7e546ee368b54a5e950774
+
+[19:10] <AlexDaniel> 6c: run <<$*EXECUTABLE --profile sandbox/roast/S03-operators/repeat.t>>
+
+[19:10] <AlexDaniel> I absolutely hate << >> here
+
+[19:10] <AlexDaniel> but fine
+
+[19:10] <AlexDaniel> (will break if path to your executable has spaces)
+
+[19:10] <committable6> AlexDaniel, No! It wasn't me! It was the one-armed man! Backtrace: https://gist.github.com/67bf59c40b83539fa75c86da69da54f5
+
+[19:10] <AlexDaniel> what
+
+[19:11] <AlexDaniel> ok the links in the gist are not really working too
+
+[19:11] <AlexDaniel>         Type check failed in push to Buf; expected uint8 but got Str ("«SIGKILL after anoth...)
+
+[19:11] <AlexDaniel> >:S
+
+[19:12] <MasterDuke> i don't think you need to run on all releases
+
+[19:12] <AlexDaniel> c: 2019.05 run <<$*EXECUTABLE --profile sandbox/roast/S03-operators/repeat.t>>
+
+[19:12] <committable6> AlexDaniel, ¦2019.05: «Cannot find this revision (did you mean “2019.07”?)»
+
+[19:12] <AlexDaniel> I have to fix the bug anyway
+
+[19:12] <AlexDaniel> c: 2019.01 run <<$*EXECUTABLE --profile sandbox/roast/S03-operators/repeat.t>>
+
+[19:12] <committable6> AlexDaniel, ¦2019.01: «Cannot find this revision (did you mean “2019.07”?)»
+
+[19:12] <AlexDaniel> c: 2019.02 run <<$*EXECUTABLE --profile sandbox/roast/S03-operators/repeat.t>>
+
+[19:12] <committable6> AlexDaniel, ¦2019.02: «Cannot find this revision (did you mean “2019.07”?)»
+
+[19:12] <AlexDaniel> c: 2019.03 run <<$*EXECUTABLE --profile sandbox/roast/S03-operators/repeat.t>>
+
+[19:13] <committable6> AlexDaniel, https://gist.github.com/b91333bc9b28d1366c1563055c28d4c6
+
+[19:13] <AlexDaniel> so that is alright?
+
+[19:13] <MasterDuke> yeah
+
+[19:13] <AlexDaniel> bisect: old=2019.03 run <<$*EXECUTABLE --profile sandbox/roast/S03-operators/repeat.t>>
+
+[19:13] <AlexDaniel> let's see
+
+[19:13] <bisectable6> AlexDaniel, Bisecting by exit code (old=2019.03 new=168c9c2). Old exit code: 0
+
+[19:14] <bisectable6> AlexDaniel, bisect log: https://gist.github.com/a9791c1c90f43f44ad4fc082b316dbe9
+
+[19:14] <bisectable6> AlexDaniel, There are 4 candidates for the first “new” revision. See the log for more details
+
+[19:14] <AlexDaniel> that doesn't sound right?
+
+[19:15] <MasterDuke> try old=2019.07.1
+
+[19:15] <AlexDaniel> b: old=2019.07.1 run <<$*EXECUTABLE --profile sandbox/roast/S03-operators/repeat.t>>
+
+[19:15] <MasterDuke> dogbert17 said it worked there
+
+[19:15] <bisectable6> AlexDaniel, Bisecting by exit code (old=2019.07.1 new=168c9c2). Old exit code: 0
+
+[19:16] <bisectable6> AlexDaniel, bisect log: https://gist.github.com/508f9a4b712f54b014ea6e73a5de80e7
+
+[19:16] <bisectable6> AlexDaniel, There are 4 candidates for the first “new” revision. See the log for more details
+
+[19:16] <dogbert17> I did, I hope I didn't make a mistake
+
+[19:17] <MasterDuke> uh oh...nobody look at who authored those commits...
+
+[19:17] <AlexDaniel> the damn thing trims the output
+
+[19:17] <AlexDaniel> but
+
+[19:18] <AlexDaniel> c: 290cd7924^,1e4d3ac468 run <<$*EXECUTABLE --profile sandbox/roast/S03-operators/repeat.t>>
+
+[19:18] <committable6> AlexDaniel, https://gist.github.com/3eda948debf033b2c48b840f31c0f612
+
+[19:19] <AlexDaniel> I don't get it
+
+[19:19] <AlexDaniel> how did you get the right answer with a broken query?
+
+[19:21] <AlexDaniel> but yeah, it's one of these four commits
+
+[19:21] <dogbert17> never heard of that guy :)
+
+[19:21] <AlexDaniel> I mean, it's unclear how these commits are causing the panic
+
+[19:22] <AlexDaniel> most likely some other issue at play here
+
+[19:26] <MasterDuke> hm. can someone else confirm that it works fine with --optimize=off to rakudo?
+
+[19:28] <dogbert17> confirmed
+
+[19:31] <MasterDuke> think it's this https://github.com/rakudo/rakudo/blob/master/src/Perl6/Optimizer.nqp#L1954-L2012
+
+[19:32] *** brrt joined
+[19:33] <brrt> \o
+
+[19:34] <MasterDuke> but why does it only fail if profiling...?
+
+[19:34] <dogbert17> hello brrt
+
+[19:35] <brrt> ohai dogbert17
+
+[19:40] <dogbert17> brrt: any interesting jit work going on?
+
+[19:58] <brrt> not atm
+
+[19:58] <brrt> I was doing JIT devirtualization but got sidetracked
+
+[20:00] <MasterDuke> https://gist.github.com/MasterDuke17/c643f663247457458ffda483f498ebcd this passes a spectest and makes profiling t/spec/S03-operators/repeat.t work without needing --optimize=off
+
+[20:01] <MasterDuke> and is probably a good change. but is there a profiling bug that this would mask?
+
+[20:16] <nine> After just 5 days rakudo's make test completed on the fix_spesh_plugin_guard_set_threading_issue branch with full GC torture turned on. I only got failures in t/05-messages/10-warnings.t, t/05-messages/02-errors.t, t/02-rakudo/repl.t and t/06-telemetry/01-basic.t. None of them linked conclusively to GC issues so far :)
+
+[20:16] *** bartolin left
+[20:16] <nine> t/02-rakudo/15-gh_1202.t failed, too but I know that it's just the time out. The author didn't think it would take a couple hours to run ;)
+
+[20:18] <MasterDuke> nice. btw, were you using rr on a ryzen? i thought you had one, but rr wouldn't work on them
+
+[20:19] <nine> I also have an Intel based laptop where I run rr on
+
+[20:19] <MasterDuke> ah
+
+[20:28] <AlexDaniel> nine: maybe start a ticket with a list of those? I'm struggling keeping track of test files that fail sometimes
+
+[20:28] <AlexDaniel> I thought I made a ticket at some point… did I?
+
+[20:36] <timotimo> rrrun
+
+[20:37] *** Ven`` joined
+[20:37] *** brrt left
+[20:38] <MasterDuke> timotimo: see my profiling-related question from a little while ago?
+
+[20:44] *** sena_kun left
+[20:45] *** brrt joined
+[20:52] <timotimo> the moarperf big frowny face?
+
+[20:52] <MasterDuke> no, the one about that gist of a patch i linked
+
+[20:53] <timotimo> not letting values underflow?
+
+[20:53] <MasterDuke> fwiw, i'm not sure that exact patch is actually needed. but the question about does it hide a moarvm profiling bug still stands
+
+[20:54] <timotimo> oh, i somehow missed that questio
+
+[20:54] <MasterDuke> yeah, i think
+
+[20:54] <timotimo> it's possible that it does
+
+[20:59] <MasterDuke> ah, here's the golf. `use Test; throws-like q|my $a = "a" x -NaN|, X::Numeric::CannotConvert`
+
+[20:59] <MasterDuke> or just NaN
+
+[20:59] <timotimo> oh? could it be about "fail"?
+
+[21:00] <MasterDuke> and it does run just fine if you --optimize=off
+
+[21:00] <timotimo> can you get rid of Test by using EVAL?
+
+[21:01] <MasterDuke> yep
+
+[21:01] <timotimo> and still reproduce it, yes?
+
+[21:02] <MasterDuke> yeah. dies regularly, succeeds (creates a profile) with --optimize=off
+
+[21:04] <timotimo> could it be that calling something that does "fail" from inside nqp code makes it asplode?
+
+[21:07] <MasterDuke> dunno, maybe? the rakudo backtrace does point to https://github.com/rakudo/rakudo/blob/master/src/Perl6/Optimizer.nqp#L1959
+
+[21:11] <timotimo> we can try profiling nqp with basically just the code "my $survived := 0; try { my $foo := 50 * "-NaN"; $survived := 1 }'
+
+[21:11] <MasterDuke> that does write a profile
+
+[21:12] *** bartolin joined
+[21:12] <timotimo> mhm
+
+[21:13] <MasterDuke> huh. $foo is 0 and $survived is 1
+
+[21:14] <timotimo> hm, what exactly is $args[1] in this case?
+
+[21:14] <timotimo> it's the compile_time_value of that op
+
+[21:15] *** anatofuz joined
+[21:15] <timotimo> oh
+
+[21:15] <timotimo> could it be that there should be !$survived?
+
+[21:16] <timotimo> and | instead of &&
+
+[21:16] *** Ven`` left
+[21:17] <timotimo> |||*
+
+[21:17] <timotimo> damn it
+
+[21:17] <MasterDuke> i think the idea is only don't do that particular optimization if it really is a value that's too big. otherwise let it go through and hit whatever the normal error paths are
+
+[21:18] <timotimo> OK
+
+[21:18] <timotimo> hm, i wonder if that CONTROL block there is not good enough perhaps
+
+[21:19] <timotimo> further down
+
+[21:22] <MasterDuke> you think the profiler is getting lost/confused following a chain of exceptions and catching them in potentially the wrong place?
+
+[21:23] <timotimo> shouldn't be; unwinding only happens after all handlers have gone through i think
+
+[21:27] <timotimo> but it's an interesting hypothesis that should be investigated
+
+[21:28] *** MasterDuke left
+[21:32] *** anatofuz left
+[21:32] *** MasterDuke joined
+[21:37] *** brrt left
+[21:40] *** anatofuz joined
+[21:41] <MasterDuke> timotimo: https://github.com/MoarVM/MoarVM/issues/1187
+
+[21:41] <timotimo> thank you
+
+[21:45] *** anatofuz left
+[22:16] *** anatofuz joined
+[22:26] <Kaiepi> is there anything that i need to do before pr 1166 can be merged?
+
+[22:35] *** anatofuz left
+[22:36] *** anatofuz joined
+[23:24] *** dogbert17 left
+[23:28] <timotimo> actually maybe i'll put the information necessary for deopt information gathering into the first spesh slot, maybe inside a 64 bit VMArray or something
+
+[23:29] <timotimo> forcing the allocation to be in gen2 would make it safe to do even inside spesh
+
+[23:32] <timotimo> oh, instrumentation already happens on non-speshed things, and without a spesh candidate there are no spesh slots
+
+[23:33] <timotimo> and just giving everything a spesh candidate seems heavy, and probably adds lots of special casing in different places all over the codebase
+
+[23:34] *** anatofuz left
+[23:34] *** lucasb left
+[23:35] *** anatofuz joined
+[23:39] *** anatofuz left
+[23:44] <timotimo> am i really not getting around duplicating all guard ops to have a prof-specific version m(
+
+[23:56] <timotimo> but i dun wanna
+

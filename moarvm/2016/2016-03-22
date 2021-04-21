@@ -1,0 +1,279 @@
+[00:30] *** Ven joined
+[02:11] *** lizmat_ joined
+[02:25] *** mojca joined
+[04:53] *** vendethiel joined
+[06:36] *** domidumont joined
+[06:38] *** domidumont joined
+[06:49] *** mojca joined
+[07:06] *** domidumont joined
+[07:11] *** FROGGS joined
+[07:12] *** domidumont joined
+[08:05] *** zakharyas joined
+[08:17] *** Ven joined
+[08:44] *** mojca joined
+[09:00] *** zakharyas1 joined
+[09:19] *** vendethiel joined
+[11:21] *** vendethiel joined
+[11:36] *** brrt joined
+[11:43] <brrt> good * #moarvm
+
+[11:43] <jnthn> o/ brrt
+
+[11:43] <brrt> \o jnthn
+
+[11:43] <brrt> nice writeup on the heap profiler :-)
+
+[11:46] <brrt> ooc, what do you think would be a decent benchmark to test the effect of -fno-omit-frame-pointer
+
+[11:47] <brrt> basically, if -fno-omit-frame-pointer is cheap, then we can start looking at entirely new strategies in both the JIT and the GC
+
+[11:48] <brrt> GC can use a conservative stack-walking collector, which means no more temp roots
+
+[11:48] <timotimo> does anybody have a clue if it might be worth it checking the current stack of frames to see if an upper frame already has a reference on a frame we'd invoke? so that we can save a inc/dec cycle, which would cause a memory fence
+
+[11:48] <brrt> probably not
+
+[11:49] <brrt> but, that is just a feeling
+
+[11:49] <brrt> :-)
+
+[11:49] <brrt> basically, you're going to do an O(N) algorithm to save on a O(1) operation, and that is disregarding the cost of cache misses
+
+[11:50] <brrt> and, i recall reading that in case of no actual contention, atomic updates ought to be cheap
+
+[11:50] <brrt> but, i don't know where
+
+[11:51] <timotimo> if you have a simple "run this code in multiple threads" parallelization, you'll end up invoking the same frames all the time on all your threads
+
+[11:52] <timotimo> so the contention is actually real, at least if your individual functions end up being small
+
+[11:52] <brrt> hmm... really? staticframes, but not frames, i'd think?
+
+[11:52] <timotimo> every time we invoke a staticframe, we inc its ref, don't we?
+
+[11:52] <brrt> .. i did not know that
+
+[11:53] <timotimo> that's why i always see incref and decref and such in the perf output
+
+[11:53] <timotimo> and why i implemented at least two of those incs and decs without atomic ops when moar says there are no user threads
+
+[11:53] <jnthn> brrt: Uh, we can't do conservative
+
+[11:54] <jnthn> brrt: 'cus we move
+
+[11:54] <brrt> oh, right
+
+[11:54] <brrt> good point
+
+[11:54] <jnthn> timotimo: refs are on frames, not static frames
+
+[11:54] <jnthn> ref counts, that is
+
+[11:55] <timotimo> oh, oops
+
+[11:55] <jnthn> static frames are just normal collectable objects
+
+[11:55] <timotimo> does that invalidate the idea i had?
+
+[11:55] <jnthn> We can do better on frames, but...it'll need more than just some tweakery :)
+
+[11:55] <brrt> i'm very curious about the list of reasons for refcounted frames actually :-)
+
+[11:56] <brrt> well, it should invalidate the idea of contention on frames
+
+[11:56] <jnthn> brrt: Well, thanks to closures you don't really have a simple stack any more
+
+[11:56] <jnthn> But more a frame tree
+
+[11:56] <jnthn> So you have to manage that memory somehow
+
+[11:56] <brrt> why we can't have nice things
+
+[11:57] <jnthn> And if you do it by having the GC manage them then a bunch of code that never allocates (e.g. is doing lots of work with native types), but does invoke, would cause GC anyway.
+
+[11:57] <brrt> hmm
+
+[11:57] <jnthn> What I've been pondering (but I need to do a lot more thinking/design work on it) is to have a simple stack anyway, until a point we realize "oops, we can't"
+
+[11:57] <brrt> what if we could prove that a certain set of frames behaved stackish
+
+[11:58] <jnthn> And then we will actually promote them to full GC-able objects.
+
+[11:58] <brrt> hmmm
+
+[11:58] <brrt> that seems doable
+
+[11:58] <brrt> optimistically speaking
+
+[11:58] <jnthn> Which in turn would get rid of the GC performance issues around closures (which arises from the reference counting scheme not playing nice with generational GC)
+
+[11:58] <brrt> or better said
+
+[11:59] <brrt> when will it not be feasible
+
+[11:59] <jnthn> Well, the hard part is working out a design that isn't complex
+
+[11:59] <jnthn> And so we won't end up with it screwing up
+
+[11:59] <jnthn> :)
+
+[11:59] <jnthn> It's basically a kind of "escape" problem
+
+[11:59] <brrt> i can think of two non-stackish things: closures and continuations
+
+[11:59] <jnthn> Right
+
+[12:00] <jnthn> And closures are endemic
+
+[12:00] <timotimo> yeah, they're all around
+
+[12:00] <brrt> yes, but, both are explicit in the bytecode
+
+[12:00] <jnthn> True
+
+[12:00] <brrt> so from our level, we know when they happen
+
+[12:01] <brrt> what would be  interesting is if we could prove that a given closure never referenced upward beyond a certain frame
+
+[12:01] <jnthn> Anyway, I've been pondering things in that area, 'cus I really want to get the cost of invocation down.
+
+[12:01] <brrt> in general that means no dynamic lexicals
+
+[12:02] <brrt> e.g. A -> B -> C -> D, if we'd take a closure on D, that closure would not 'reach' beyond C, then we could heap-promote the block from C -> D, but leave A->B as a stack
+
+[12:02] <jnthn> I suspect we'll need to uphold an invariant along the lines of stack can reference GC-ables, gut GC-ables can't reference stack
+
+[12:02] <jnthn> *but
+
+[12:02] <brrt> oh, right
+
+[12:02] <jnthn> That *may* be sufficient in fact.
+
+[12:02] <brrt> let me think about that
+
+[12:03] <jnthn> However, a frame becoming GCable rather than stack then implies contaigion
+
+[12:03] <brrt> GC-ables would include closures in this scheme, right?
+
+[12:03] <jnthn> Absolutely.
+
+[12:03] <jnthn> What *is* interesting though, is to realize that escape analysis and its applications basically turn GC-able to stack
+
+[12:04] <brrt> uhuh
+
+[12:04] <timotimo> right; but we're kind-of far off from full escape analysis, aren't we?
+
+[12:04] <brrt> i suppose stack objects would be marked with an appropriate flag?
+
+[12:04] <jnthn> So if we were to leave it to plain old escape analysis to prove closures don't escape, we might be able to just implement the really simple invariant and not be any more clever than that.
+
+[12:04] <jnthn> brrt: Something like, I guess. :)
+
+[12:05] <brrt> i've grown fond of not being clever
+
+[12:05] <jnthn> Yes, anyone can come up with a clever design...
+
+[12:05] <jnthn> But they tend to be fragile
+
+[12:06] <jnthn> timotimo: Well, yes and no. It's not risen to the top of the priority list yet.
+
+[12:06] <jnthn> timotimo: But MoarVM was generally deprioritized by me a bit last year, to focus on Perl 6 language issues.
+
+[12:06] <timotimo> has the approach you sketched out with masak bitrotted?
+
+[12:06] <timotimo> aye
+
+[12:06] <jnthn> But by now we've shipped 6.c, and I don't have to worry about Perl 6 from a lang design point of view for now.
+
+[12:06] <brrt> we're basically in need of a giant surplus of energy on MoarVM
+
+[12:07] <jnthn> So I can go back to focusing on compiler/VM things :)
+
+[12:08] <jnthn> Anyway, lunch time :) bbs :)
+
+[12:08] <brrt> lunch well :-)
+
+[12:20] *** vendethiel joined
+[12:50] *** vendethiel joined
+[13:18] *** dlem joined
+[13:20] <dlem> .tell jnthn Regarding your discussion with brrt above, I coincidentally came across an article today which may or may not be of interest to you: http://blog.rocana.com/golang-escape-analysis
+
+[13:21] * dlem apologizes for lurking by way of http://irclog.perlgeek.de/moarvm :-)
+
+[13:23] <brrt> no apology necessary
+
+[13:23] <dlem> .tell jnthn Oh, and the article has a link to an Escape Analysis paper for Java. You may already have read it :-)
+
+[13:23] <dlem> brrt: Phew :-)
+
+[13:25] <jnthn> dlem: Thanks for the link. I was lucky enough to run into a couple of Go compiler folks last summer and they they mentioned escape analysis, and that it'd cut a good bit of GC work out. :)
+
+[13:25] <jnthn> So will be interseting to read
+
+[13:27] <dlem> jnthn: OK! Outstanding work on MoarVM / Rakudo - a real thriller to watch the development :-)
+
+[13:29] * dlem goes back to $work
+
+[13:38] *** vendethiel joined
+[14:03] *** Ven joined
+[15:50] *** vendethiel joined
+[16:34] <dalek> MoarVM/heap-profiler: f12e77b | jnthn++ | src/gc/roots.c:
+
+[16:34] <dalek> MoarVM/heap-profiler: Split out register and lexical marking.
+
+[16:34] <dalek> MoarVM/heap-profiler:
+
+[16:34] <dalek> MoarVM/heap-profiler: We'll re-use the registers part from the heap snapshot analyzer, but
+
+[16:34] <dalek> MoarVM/heap-profiler: not the lexicals bit since those have names and we'd like to include
+
+[16:34] <dalek> MoarVM/heap-profiler: those.
+
+[16:34] <dalek> MoarVM/heap-profiler: review: https://github.com/MoarVM/MoarVM/commit/f12e77b296
+
+[16:34] <dalek> MoarVM/heap-profiler: 48ca567 | jnthn++ | src/ (4 files):
+
+[16:34] <dalek> MoarVM/heap-profiler: Include all frame references into heap snapshot.
+
+[16:34] <dalek> MoarVM/heap-profiler: review: https://github.com/MoarVM/MoarVM/commit/48ca56736e
+
+[16:49] <dalek> MoarVM/heap-profiler: 41403d2 | jnthn++ | src/profiler/heapsnapshot.h:
+
+[16:49] <dalek> MoarVM/heap-profiler: Be consistent with sized types.
+
+[16:49] <dalek> MoarVM/heap-profiler: review: https://github.com/MoarVM/MoarVM/commit/41403d2ee6
+
+[16:49] <dalek> MoarVM/heap-profiler: af6791b | jnthn++ | src/profiler/heapsnapshot.c:
+
+[16:49] <dalek> MoarVM/heap-profiler: Include static frames data in output.
+
+[16:49] <dalek> MoarVM/heap-profiler: review: https://github.com/MoarVM/MoarVM/commit/af6791bfd3
+
+[17:11] <dalek> MoarVM/heap-profiler: 8cb0fba | jnthn++ | src/profiler/heapsnapshot.c:
+
+[17:11] <dalek> MoarVM/heap-profiler: Fix size thinko, correcting junk output.
+
+[17:11] <dalek> MoarVM/heap-profiler: review: https://github.com/MoarVM/MoarVM/commit/8cb0fba23d
+
+[17:12] <jnthn> OK, now the heap snapshot for Rakudo looks sorta sensible
+
+[17:13] <jnthn> And 21MB. Just at startup
+
+[17:48] *** geekosaur joined
+[17:53] <dalek> Heuristic branch merge: pushed 46 commits to MoarVM by jnthn
+
+[17:53] <jnthn> Merged the heap profiler :)
+
+[17:54] <nwc10> oh, I just did that locally and ASAN still tolerates you
+
+[17:54] <jnthn> :)
+
+[18:26] *** mojca joined
+[18:28] *** domidumont joined
+[19:03] *** vendethiel joined
+[19:17] *** mojca joined
+[19:22] *** FROGGS joined
+[19:47] *** vendethiel joined
+[20:12] *** synopsebot6 joined
+[22:56] *** mojca joined
+[23:32] *** vendethiel joined

@@ -1,0 +1,766 @@
+[00:45] *** jnap joined
+[01:09] *** raiph joined
+[01:54] *** jnap joined
+[02:04] *** colomon joined
+[02:23] *** jnap joined
+[02:47] *** jnap joined
+[02:51] *** benabik joined
+[03:03] *** jnap joined
+[05:30] *** jnap joined
+[05:47] *** jnap joined
+[06:39] <cxreg> is moar's GC a m&s model?
+
+[06:40] <cxreg> i had a long-standing question with parrot's GC that despite all the times it was rewritten, was never addressed.  which is, making m&s gc cow-friendly
+
+[06:42] <cxreg> ruby added a bitmap look-aside for gc in 2.0, very similar to what i'd hoped to see in parrot
+
+[06:42] <cxreg> http://patshaughnessy.net/2012/3/23/why-you-should-be-excited-about-garbage-collection-in-ruby-2-0
+
+[06:48] *** jnap joined
+[07:04] <TimToady> http://jnthn.net/papers/2013-bs-secret-life-of-gc.pdf
+
+[07:49] *** jnap joined
+[08:49] *** jnap joined
+[09:26] <FROGGS> about the uniode issues...
+
+[09:26] <FROGGS> the problem is that we currently can't handle unions, like L, which matches when one of Lu|Ll|Lt|Lm|Lo is true
+
+[09:26] <FROGGS> so I was thinking of making a bitmask out of Lu|Ll|Lt|Lm|Lo, but unfortunatly these are enums (1..5) whih makes that impossible
+
+[09:26] <FROGGS> and we have only three bytes available for storing that information
+
+[09:26] <FROGGS> my goal for today is to pack these unions (L = Ll|Lt|Lu, LC = Ll|Lm|Lo|Lt|Lu) as a list of ranges in these three bytes
+
+[09:29] <diakopter> FROGGS: u still there?
+
+[09:29] <FROGGS> diakopter: yes
+
+[09:31] <diakopter> why do you say we have only 3 bytes for that
+
+[09:32] <FROGGS> because it is a MVMint32, and the first byte is for the property code
+
+[09:32] <diakopter> eh
+
+[09:33] * diakopter is confused
+
+[09:34] <diakopter> where do you see these 3/4 bytes
+
+[09:34] <FROGGS> here, for example: entry->codepoint = unicode_property_value_keypairs[index].value & 0xFFFFFF;
+
+[09:34] <FROGGS> MVMint32 property_code = unicode_property_value_keypairs[index].value >> 24;
+
+[09:35] <diakopter> that's generated; it computes how many bits each property needs; most are binary so they need just one
+
+[09:35] <FROGGS> Ll is something like 14 << 24 + 1
+
+[09:36] <FROGGS> and Zs is something like 14 << 24 + 36
+
+[09:36] <FROGGS> 14 == general category
+
+[09:36] <diakopter> my understanding of the ucd2c.pl is so far removed from the generated code that doesn't help me; I can only speak in generalities, I guess
+
+[09:37] <FROGGS> diakopter: it is not about how many bits something needs, it is the property code and property value code
+
+[09:37] <diakopter> what is the problem we're trying to solve? just that the "L" property doesn't work?
+
+[09:37] <FROGGS> diakopter: that is in unicode_ops.c
+
+[09:37] <diakopter> (or other aliases?)
+
+[09:37] <FROGGS> correct, any union like L does not work
+
+[09:38] <diakopter> it's just that in the unicode text file tables, it doesn't care whether it's a union; the value is "normalized" into the text file anyway
+
+[09:38] <FROGGS> hmmm, maybe I could make L its own property code, and emit a lookup to Lu | Ll | ...
+
+[09:38] <diakopter> so it should just be a regular old boolean property
+
+[09:39] <FROGGS> gc ; L                                ; Letter                           # Ll | Lm | Lo | Lt | Lu
+
+[09:39] <FROGGS> gc ; LC                               ; Cased_Letter                     # Ll | Lt | Lu
+
+[09:39] <FROGGS> gc ; Ll                               ; Lowercase_Letter
+
+[09:39] <FROGGS> gc ; Lm                               ; Modifier_Letter
+
+[09:39] <diakopter> right; it's precomputed for you in the .txt
+
+[09:39] <diakopter> at least, it used to be
+
+[09:39] <FROGGS> if you ask a codepoint like "a" for its property value code for general category, you get a 1, which is Ll
+
+[09:40] <FROGGS> so you can't check for L in the same category
+
+[09:40] <diakopter> hang on
+
+[09:40] <diakopter> 0061;LATIN SMALL LETTER A;Ll;0;L;;;;;N;;;0041;;0041
+
+[09:41] <FROGGS> hmmm
+
+[09:41] <FROGGS> but but
+
+[09:41] <diakopter> inthe
+
+[09:41] <FROGGS> hmmm
+
+[09:41] <FROGGS> yeah
+
+[09:41] <diakopter> hang on; looking at the ucd2c.pl for a min
+
+[09:43] <diakopter> oh, did you revert your aliases thing yet
+
+[09:43] <FROGGS> no
+
+[09:43] <FROGGS> I may know why it does not work
+
+[09:44] <diakopter> can you revert it
+
+[09:44] <FROGGS> if we are using UNIDATA/extracted/DerivedGeneralCategory.txt, there are mappings for Ll,Lu,etc to codepoint, but not for L
+
+[09:44] <diakopter> oh
+
+[09:45] <FROGGS> no, does not seem to be used...
+
+[09:45] <diakopter> hm, how new is that file
+
+[09:45] <diakopter> (was it in 6.0 or 6.1?)
+
+[09:45] <FROGGS> no idea
+
+[09:45] <diakopter> if so, oops :)
+
+[09:46] <diakopter> hm yeah, seems it was there
+
+[09:46] <diakopter> so that's not the problem
+
+[09:46] <diakopter> (they didn't move the data to there)
+
+[09:47] <diakopter> I'm still looking at th e.pl
+
+[09:48] <FROGGS> but sadly I must go now, otherwise we won't have lunch :o(
+
+[09:48] <FROGGS> I am going to check then why we don't create an enum for L if that is the case
+
+[09:48] <diakopter> i'll keep looking at it
+
+[09:48] <FROGGS> thank you
+
+[09:48] <FROGGS> :o)
+
+[09:49] *** FROGGS[mobile] joined
+[09:50] <diakopter> FROGGS[mobile]: which commits were you going to revert
+
+[09:50] *** jnap joined
+[09:51] <FROGGS> parts of https://github.com/MoarVM/MoarVM/commit/00981442757ae5f5a22bd76ad2cb89c16c2d4a9f#diff-2
+
+[09:51] <FROGGS> I'd remove at least line 775 to 783 there
+
+[09:51] <diakopter> what were the other lines doing
+
+[09:56] <FROGGS> was about adding ASCII_Hex_Digit, ASCIIHexDigit and asciihexdigit
+
+[10:03] *** [Coke] joined
+[10:03] *** masak joined
+[10:23] <dalek> MoarVM: 815c123 | jnthn++ | src/core/args.c:
+
+[10:23] <dalek> MoarVM: Align arity-related error generation with Rakudo.
+
+[10:23] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/815c123cfb
+
+[10:25] *** FROGGS[mobile] joined
+[10:28] <moritz> on Thursday we will have the first monthly rakudo release that supports MoarVM
+
+[10:28] <moritz> for that purpose, we should also cut a MoarVM release
+
+[10:28] <jnthn> moritz: Yes, we should.
+
+[10:29] <moritz> so, how? :-)
+
+[10:29] <jnthn> 1) Make a tarball. 2) Put it somewhere. :)
+
+[10:29] <moritz> maybe steal the release process from NQP, which also has submodules?
+
+[10:29] <jnthn> That's a good idea
+
+[10:29] <moritz> jnthn: tag the version in the MoarVM repo
+
+[10:29] <moritz> write it into a file
+
+[10:30] <moritz> ideally have MoarVM read that file, and know its own version
+
+[10:31] <jnthn> C:\consulting\MoarVM>moar --version
+
+[10:31] <jnthn> This is MoarVM version 2013.10-375-g3a57b01
+
+[10:31] <jnthn> It does at least have some idea...
+
+[10:31] <moritz> ok, so that needs to consider a VERSION file if not under git, or something
+
+[10:31] <jnthn> But i guess that comes from git
+
+[10:32] <jnthn> So yeah...need to change that.
+
+[10:32] <moritz> I'll try to look into it this weekend, but we have visitors, so tuits might be low-ish
+
+[10:32] <jnthn> Sure. If you don't get to it, I will :)
+
+[10:33] <moritz> ooh, Configure.pl already reads from a VERSION file if it exists
+
+[10:33] <jnthn> oh, cool
+
+[10:33] <moritz> FROGGS++
+
+[10:33] <moritz> FROGGS[mobile]++
+
+[10:34] <dalek> MoarVM: 75e60a1 | jnthn++ | src/core/args.c:
+
+[10:34] <dalek> MoarVM: Align missing named param error with Rakudo's.
+
+[10:34] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/75e60a1ed0
+
+[10:51] *** jnap joined
+[10:56] *** odc joined
+[10:57] <FROGGS> diakopter: could you make some sense out of it? otherwise I would continue now
+
+[10:59] <dalek> MoarVM: ccce6a6 | moritz++ | / (2 files):
+
+[10:59] <dalek> MoarVM: [Build] "release" Makefile target
+
+[10:59] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ccce6a6fc3
+
+[11:00] <moritz> this is a "simplest thing that could possibly work". I'm pretty sure pmichaud++ had some issues with git-archive, but I don't know what they were, so I'm going to use it until I run into the same issue
+
+[11:01] * jnthn was gonna go with git archive also
+
+[11:26] <FROGGS> ahh, we are indeed reading from DerivedGeneralCategory where L is not listed!
+
+[11:26] <FROGGS> I can fix that
+
+[11:38] <timotimo> i had a probably silly idea when trying to sleep:
+
+[11:38] <timotimo> since we handle strings as collections of begin+length blobs anyway, would it make sense to have an optimization that looks for common substrings and compresses every string?
+
+[11:39] <timotimo> it seemed very costly to me when i thought about it, but there may be crazy-cool algorithms involving prefix-tables or something like that
+
+[11:51] * jnthn is working on the binder elimination opt today
+
+[11:52] *** jnap joined
+[11:52] <FROGGS> jnthn: will this get rid of the "slow path" ?
+
+[11:53] <jnthn> Yeah
+
+[11:53] <FROGGS> ohh, that sounds interesting then :D
+
+[11:55] <timotimo> \o/
+
+[12:02] <jnthn> I'm probably gonna (though maybe not in time for release) get this stuff in place on JVM too.
+
+[12:12] <FROGGS> ohh, I didn't even know that this applies to jvm also
+
+[12:12] <jnthn> Well, we notice it a bit less there 'cus the JVM is good at making hot slow paths less slow :)
+
+[12:20] <timotimo> but this would also hit non-hot slow paths, yes?
+
+[12:22] <jnthn> Yeah
+
+[12:22] <timotimo> i like that
+
+[12:22] <jnthn> And should mean the JVM can do a way better job on hot paths overall
+
+[12:23] <timotimo> i can imagine
+
+[12:23] <jnthn> Time for a little shopping/lunch, methinks...
+
+[12:52] *** jnap joined
+[13:53] *** jnap joined
+[13:58] <FROGGS> 0061;LATIN SMALL LETTER A;Ll;0;L;;;;;N;;;0041;;0041
+
+[13:59] <FROGGS> I wonder how both Ll and L property is stored for "a" in the six bits that general category has...
+
+[14:19] <FROGGS> when I do  "die Dumper($point) if $point->{code} == 65;" in the while loop of sub emit_bitfield, I can see that every codepoint can only has one property value within a category
+
+[14:19] <FROGGS> so "a" can't be Ll and L at the same time atm
+
+[14:44] *** benabik joined
+[14:44] <benabik> L = Ll + Lu + L?
+
+[14:45] <FROGGS> ?
+
+[14:46] <benabik> L is Letter, Ll is lowercase, Lu is uppercase (IIRC).  So perhaps it's implicitly in L because it's in Ll?
+
+[14:46] <FROGGS> well, that is not wrong, the problem is that the implementation makes it impossible to check for L atm
+
+[14:54] *** jnap joined
+[14:57] <moritz> there are also non-cased letters
+
+[14:57] <moritz> L = Lu + Ll + Lt + Lm + Lo
+
+[14:58] <moritz> (t = titlecase, m = modifier, o = other)
+
+[14:59] <benabik> L = ^L.$ ?
+
+[15:00] <FROGGS> that is not how it works :o)
+
+[15:08] <FROGGS> diakopter: that "L" in "0061;LATIN SMALL LETTER A;Ll;0;L;;;;;N;;;0041;;0041" is not gc:Letter but bc:Left_To_Right
+
+[15:24] <FROGGS> diakopter: so I think we need to make L, LC, etc first class properties with one bit width
+
+[15:51] *** ingy joined
+[15:52] *** dagurval joined
+[15:55] *** jnap joined
+[15:58] *** ingy joined
+[15:58] *** dagurval joined
+[16:03] <diakopter> FROGGS: ah yes, ok
+
+[16:04] <diakopter> FROGGS: if you're not doing it, I can do it now
+
+[16:12] <diakopter> FROGGS: you working on it?
+
+[16:19] <FROGGS> diakopter: not atm
+
+[16:19] <FROGGS> diakopter: I would be happy if you gave it a whirl
+
+[16:19] <diakopter> ok I will
+
+[16:20] <diakopter> now
+
+[16:22] <diakopter> FROGGS: where are the other union-ish categories defined
+
+[16:22] <diakopter> er, properties
+
+[16:23] <FROGGS> UNIDATA/PropertyValueAliases.txt:566:gc ; L                                ; Letter                           # Ll | Lm | Lo | Lt | Lu
+
+[16:24] <FROGGS> you need to look for | in the last part
+
+[16:24] <diakopter> did you see I already had the section to parse that file
+
+[16:26] <FROGGS> I added:
+
+[16:26] <FROGGS> my @unionof = split /\s*\|\s*/, $parts[-1];
+
+[16:26] <FROGGS> if ($#unionof) {
+
+[16:26] <FROGGS> to:
+
+[16:26] <FROGGS> https://github.com/MoarVM/MoarVM/blob/master/tools/ucd2c.pl#L872
+
+[16:26] <FROGGS> ahh, and the first within that "if ($#unionof) {" is "pop @parts;"
+
+[16:27] <diakopter> ok, but what is the current line 808 doing
+
+[16:27] <FROGGS> it resolves extra aliases
+
+[16:27] <FROGGS> you can get rid of it for now
+
+[16:28] <FROGGS> because it probably mixes names of aliases and unions
+
+[16:29] <diakopter> ok
+
+[16:55] *** jnap joined
+[17:56] *** jnap joined
+[18:28] <jnthn> m: say 850 / 1662
+
+[18:28] <camelia> rakudo-moar 6aa2f1: OUTPUT«0.511432␤»
+
+[18:28] <jnthn> Got a few regressions to hunt after dinner, but so far got spectest time on Moar down to half of what it was.
+
+[18:29] <jnthn> Well, just over half
+
+[18:44] <diakopter> wat
+
+[18:44] <diakopter> that sounds like it means setting parse time is far more than 50% reduced in time
+
+[18:49] <FROGGS> wow!
+
+[18:51] <dalek> MoarVM: 8782fd3 | diakopter++ | / (3 files):
+
+[18:51] <dalek> MoarVM: back out these changes temporarily or not
+
+[18:51] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/8782fd34e0
+
+[18:51] <diakopter> FROGGS: did I remove the right things?
+
+[18:51] <diakopter> I'm not certain
+
+[18:52] <jnthn> diakopter: No, setting parse time is the about the same. :)
+
+[18:52] <diakopter> o_O
+
+[18:52] <jnthn> diakopter: It's the code it generates that's better.
+
+[18:52] <diakopter> o
+
+[18:56] <diakopter> FROGGS: I'm not sure
+
+[18:57] *** jnap joined
+[18:57] *** lue joined
+[19:00] <diakopter> FROGGS: am I right that a char can have multiple general categories?
+
+[19:11] <FROGGS> diakopter: yes, looks like you removed the right things
+
+[19:11] <FROGGS> diakopter: yes
+
+[19:12] <FROGGS> a char can be at least in two categories of the general category
+
+[19:12] <FROGGS> same goes for all unions
+
+[19:12] <FROGGS> I mean, this applies only for unions
+
+[19:13] <diakopter> ok
+
+[19:13] <FROGGS> a codepoint can be in up two to categories of a "property"
+
+[19:25] <FROGGS> jnthn: btw, I am running into this:
+
+[19:25] <FROGGS> Object conflict detected during deserialization.
+
+[19:25] <FROGGS> (Probable attempt to load two modules that cannot be loaded together).
+
+[19:25] <FROGGS> I just commented it so I can compile v5... and it seems to work :o)
+
+[19:33] <FROGGS> perl6-m t/spec/base/num.v5
+
+[19:33] <FROGGS> Cannot find method 'encoding': no method cache and no .^find_method
+
+[19:33] <FROGGS> looks like I need to tweak v5's module loader...
+
+[19:34] <FROGGS> damn, I did not want to use fudge for v5's source
+
+[19:37] <jnthn> FROGGS: Oh, there's some NYI there I think...
+
+[19:40] <[Coke]> moar is up to 28068 passes.
+
+[19:41] <FROGGS> jnthn: ahh, about repossession or some such?
+
+[19:41] <jnthn> yeah
+
+[19:42] <FROGGS> [Coke]: and it will get a lot more passing tests or it will fail quite a lot for the next run... be prepared :o)
+
+[19:44] <[Coke]> oh, di dyou fix the unicode!? woot.
+
+[19:45] <FROGGS> not me, no
+
+[19:46] <FROGGS> diakopter++ is working on it
+
+[19:58] *** jnap joined
+[20:05] <FROGGS> damn, I think I sent a patch for Perl5 wrong-ish :o(
+
+[20:07] <jnthn> FROGGS: You wrote it in Perl 6 instead? :)
+
+[20:08] <FROGGS> hehe, no
+
+[20:08] <FROGGS> but I think that I have attached either another unrelated patch, or only the unrelated patch :/
+
+[20:10] <jnthn> Email, how does it work...
+
+[20:10] <diakopter> FROGGS: hard problem is hard
+
+[20:10] <diakopter> er, easy problem is hard
+
+[20:10] <FROGGS> diakopter: yeah
+
+[20:12] <diakopter> well, I got this far:
+
+[20:12] <diakopter> processing PropertyValueAliases.txt...found union: C is 'Cc | Cf | Cn | Co | Cs'
+
+[20:12] <diakopter> found union: L is 'Ll | Lm | Lo | Lt | Lu'
+
+[20:12] <diakopter> found union: LC is 'Ll | Lt | Lu'
+
+[20:12] <diakopter> found union: M is 'Mc | Me | Mn'
+
+[20:12] <diakopter> found union: P is 'Pc | Pd | Pe | Pf | Pi | Po | Ps'
+
+[20:12] <diakopter> found union: S is 'Sc | Sk | Sm | So'
+
+[20:12] <diakopter> found union: Z is 'Zl | Zp | Zs'
+
+[20:12] <diakopter> but the problem is it needs to do this much earlier
+
+[20:14] <diakopter> anyway, moving it
+
+[20:15] <dalek> MoarVM: c74390c | jnthn++ | / (10 files):
+
+[20:15] <dalek> MoarVM: Add assertparamcheck, to help with arg type checks
+
+[20:15] <dalek> MoarVM:
+
+[20:15] <dalek> MoarVM: This will be used to add a new feature to the Moar code-gen in NQP,
+
+[20:15] <dalek> MoarVM: which in turn will be used for binder fast-pathing in Rakudo.
+
+[20:15] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/c74390c215
+
+[20:15] <dalek> MoarVM: 2bfad44 | jnthn++ | src/core/args.c:
+
+[20:15] <dalek> MoarVM: Decont while auto-unboxing.
+
+[20:15] <dalek> MoarVM:
+
+[20:15] <dalek> MoarVM: Works for the common case.
+
+[20:15] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/2bfad443c4
+
+[20:16] <FROGGS> diakopter: well, you could scan for that piece earlier...
+
+[20:16] <diakopter> yeah
+
+[20:16] <FROGGS> like before calling UniCode(
+
+[20:16] <diakopter> adding into UnicodeData()
+
+[20:24] <timotimo> jnthn: this is your speedup without regressions? :)
+
+[20:24] <jnthn> timotimo: Well, I might have lost 4-5 tests.
+
+[20:24] <jnthn> tests, not test files
+
+[20:25] <jnthn> But think we can live with that.
+
+[20:25] <jnthn> Rakudo patch coming it a bit.
+
+[20:26] <timotimo> that sounds pretty darn good!
+
+[20:27] <jnthn> Doing some further analysis/tweaks
+
+[20:58] <diakopter> FROGGS: I'm still not sure whether to add these as top-level categories or not
+
+[20:58] *** jnap joined
+[21:00] <FROGGS> is there another way?
+
+[21:00] <FROGGS> I think that is the cheapest we can do
+
+[21:00] <FROGGS> when we want to avoid to add another hash
+
+[21:01] <diakopter> FROGGS: oops I meant top-level properties
+
+[21:01] <jnthn> diakopter: What's the argument against doing so?
+
+[21:02] <diakopter> hm
+
+[21:02] <diakopter> I guess there isn't one
+
+[21:02] <diakopter> except unicode treats them as property values
+
+[21:02] <diakopter> instead of properties
+
+[21:03] <diakopter> meh
+
+[21:03] <diakopter> they're looked up the same way anyway
+
+[21:03] <diakopter> it's not like someone does <gc=Letter>
+
+[21:07] <FROGGS> or <:gc<Letter>>
+
+[21:08] <FROGGS> I'd do it in another way too if I knew one
+
+[21:20] *** masak joined
+[21:20] *** eternaleye joined
+[21:20] *** harrow joined
+[21:36] <diakopter> FROGGS: wait, how are the general category things currently looked up
+
+[21:40] <FROGGS> diakopter: it is looking for, say, "Letter" in unicode_property_keypairs
+
+[21:40] <FROGGS> MoarVM/src/strings/unicode.c:32957:    {"compex",44},{"Digit",22},{"digit",22},{"CWU",38},{"cwu",38},{"Soft_Dotted",75},{"SoftDotted",75},{"softdotted",75},
+
+[21:40] <diakopter> no I mean the actual general categories, like Letter_Cased
+
+[21:40] <FROGGS> so Digit is property code 22
+
+[21:41] <FROGGS> Letter_Cased should be in there too, but might not be atm
+
+[21:42] <FROGGS> it should point to MVM_UNICODE_PROPERTY_GENERAL_CATEGORY, which is 14 for right now
+
+[21:42] <dalek> MoarVM: ac8af16 | tadzik++ | src/core/args.c:
+
+[21:42] <dalek> MoarVM: Remove leftover debugging code
+
+[21:42] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ac8af16b05
+
+[21:42] <diakopter> so someone would need to do <:gc<Letter_Cased>> ?
+
+[21:42] <tadzik> sweet karma
+
+[21:42] <FROGGS> diakopter: no
+
+[21:42] <diakopter> tadzik--
+
+[21:42] <FROGGS> Letter_Cased would point to 14, which is gc
+
+[21:42] <jnthn> tadzik++ # removing jnthn's debugging code :P
+
+[21:43] <FROGGS> and then it goes on and searches for the property value code using that property code 14
+
+[21:44] <FROGGS> so Letter_Cased is an alias for gc when it comes to property codes
+
+[21:44] <FROGGS> and this is a problem for L, because there are several L-s, and we prefer the one from gc
+
+[21:47] <FROGGS> diakopter: that is why I did this: https://gist.github.com/FROGGS/7575e1d5b15abc22ba89 (note that the patch is invalid, because modified manually)
+
+[21:47] <diakopter> bleh
+
+[21:48] <diakopter> I'm not sure what I meant the %done thing to do :)
+
+[21:48] <FROGGS> install aliases only once I suppose
+
+[21:49] <FROGGS> because you only get the first anyway
+
+[21:49] <diakopter> yeah but it never checked it
+
+[21:49] <FROGGS> yeah, I've seen that :o)
+
+[21:49] <FROGGS> but still, diakopter++ for this unimagic
+
+[21:49] <diakopter> we'll see
+
+[21:50] <jnthn> Mmm...smoked porter
+
+[21:53] <FROGGS> and I will have a full scottish breakfast in about ten hours! yay!
+
+[21:53] <FROGGS> that does not help about the missing beer, but well, what an I do?
+
+[21:53] <FROGGS> can*
+
+[21:59] *** jnap joined
+[22:04] <diakopter> src/vm/moar/ops/container.c(154) : warning C4133: 'function' : incompatible types - from 'Rakudo_Scalar *' to 'MVMObject *'
+
+[22:06] <jnthn> FROGGS: Take more care to keep your beer fridge stocked, what's what :P
+
+[22:06] <jnthn> *that's
+
+[22:07] <jnthn> diakopter: Thanks, got it
+
+[22:08] <FROGGS> not another project... SDL, v5, kids, S11 and now beer? ó.ò
+
+[22:08] <diakopter> harness reports: Missing test file: t\spec\S04-operators\brainos.t
+
+[22:08] <jnthn> Yeah, that's not moar specific
+
+[22:09] <jnthn> haha...I have TEST_JOBS=6 and now Rakudo "make test" takes 3s...
+
+[22:09] <diakopter> someone remind me how to nmake spectest in parallel
+
+[22:09] <jnthn> set TEST_JOBS=n
+
+[22:09] <jnthn> (choose n)
+
+[22:09] <diakopter> thanks
+
+[22:09] <jnthn> uh, and less obviously: I tend to find virtual cores - 2 works out well.
+
+[22:10] <FROGGS> diakopter: I tested these four files regularly btw: https://gist.github.com/FROGGS/aaafdacb95ece1aba4d8
+
+[22:10] <diakopter> jnthn: can you nopaste your current spectest output so I can compare to mine
+
+[22:10] <FROGGS> diakopter: you have to beat the second block there :o)
+
+[22:11] <diakopter> ok
+
+[22:11] <jnthn> diakopter: Just for S05?
+
+[22:11] <FROGGS> jnthn: are you sure you are really invoking prove? O.o
+
+[22:11] <FROGGS> 3s is like quick
+
+[22:11] <jnthn> FROGGS: Yes, I see all the tests go by
+
+[22:11] <diakopter> jnthn: well, all, if you could
+
+[22:12] <jnthn> Comes out as 4s sometimes...
+
+[22:12] <FROGGS> ohh yes, it feels very fast...
+
+[22:13] <jnthn> Doing another spectest run with latest changes here
+
+[22:13] <jnthn> diakopter: Will paste you it in a mo
+
+[22:22] <diakopter> FROGGS: well, somehow I broke the block lookups
+
+[22:23] <FROGGS> hmmm, should not be too hard to fix, this was in a separate commit
+
+[22:28] <jnthn> diakopter: https://gist.github.com/jnthn/95d3d4c69d585bbcece5
+
+[22:30] <diakopter> thanks
+
+[22:44] <timotimo> 3s? that's absurdly quick
+
+[22:50] <FROGGS> m-spectest takes 8:44.44 using TEST_JOBS=4
+
+[22:50] <FROGGS> dunno how much it was before though
+
+[22:50] <jnthn> Probably quite a lot more :)
+
+[22:50] <timotimo> how long does parrot take for that on your machine?
+
+[22:50] <FROGGS> yeah... 8:44 minutes is very nice
+
+[22:50] <FROGGS> timotimo: need to rebuild it to test
+
+[22:50] <jnthn> Well, it's ok... :)
+
+[22:50] <FROGGS> will post later
+
+[22:51] <timotimo> thanks :)
+
+[22:51] <timotimo> i'm rebuilding everything right now, too
+
+[23:00] *** jnap joined
+[23:15] <jnthn> Rakudo on Moar seems to have the best startup time of the Rakudos, by this point.
+
+[23:16] <jnthn> m: say "I starts in {100*0.31/0.46)% of the time Rakudo on Parrot does"
+
+[23:16] <camelia> rakudo-moar 61860f: OUTPUT«[31m===[0mSORRY![31m===[0m Error while compiling /tmp/ihZuhgiFgu␤Unable to parse expression in block; couldn't find final '}' ␤at /tmp/ihZuhgiFgu:1␤------> [32msay "I starts in {100*0.31/0.46[33m⏏[31m)% of the time Rakudo on Parrot does"[0m…»
+
+[23:16] <jnthn> m: say "I starts in {100*0.31/0.46}% of the time Rakudo on Parrot does"
+
+[23:16] <camelia> rakudo-moar 61860f: OUTPUT«I starts in 67.391304% of the time Rakudo on Parrot does␤»
+
+[23:17] <FROGGS> a segfault I have to golf: https://gist.github.com/FROGGS/647a0fa6bcb06d42717e
+
+[23:18] <FROGGS> interp.c:2060 is existskey
+
+[23:18] <jnthn> obj = 0x0
+
+[23:18] <jnthn> You're trying to do a lookup in a null hash.
+
+[23:20] <FROGGS> hmmm, might be related to this "Probable attempt to load two modules that cannot be loaded together"
+
+[23:31] <FROGGS> yeah, require-ing my test.pl from a v5 block with loads a v6 script which has a v5 block in it crashes
+
+[23:32] <FROGGS> and these v5 blocks get a Perl5::Terms module implicitly loaded
+
+[23:53] <dalek> MoarVM: 26a57a8 | diakopter++ | / (3 files):
+
+[23:53] <dalek> MoarVM: try to add aliases and gc value aliases # who knows whether it will work
+
+[23:53] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/26a57a855a
+
+[23:53] <dalek> MoarVM: b8f2a2d | diakopter++ | tools/ucd2c.pl:
+
+[23:53] <dalek> MoarVM: try again
+
+[23:53] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/b8f2a2d4c0
+
+[23:53] <dalek> MoarVM: 1a93bf0 | diakopter++ | / (3 files):
+
+[23:53] <dalek> MoarVM: pass a couple more tests... need more though.
+
+[23:53] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/1a93bf0231
+
+[23:54] <jnthn> Hmm, seems that the MAST to bytecode thingy doesn't properly detect duplicate callsites
+
+[23:55] <jnthn> mebbe just NYI
+
+[23:57] <jnthn> Probably wroth doing since CORE.setting gets 7045 callsites :)
+
+[23:58] <FROGGS> uhh, something to pull
+
+[23:58] <diakopter> jnthn: yeah it broke at some point
+
+[23:58] <jnthn> diakopter: Well, I'm thinking of working named arg's names into callsites too
+
+[23:59] <diakopter> :)
+
+[23:59] <jnthn> diakopter: And maybe a "no need to re-type-check" flag
+
+[23:59] <jnthn> I realized that the first, but maybe also the second, will help when it comes to do doing the specializer

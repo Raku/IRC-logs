@@ -1,0 +1,231 @@
+[01:43] *** lizmat joined
+[01:55] *** Kaeipi left
+[01:57] *** Kaeipi joined
+[01:57] *** Kaeipi left
+[02:01] *** Kaeipi joined
+[02:09] *** Kaeipi left
+[02:10] *** Kaeipi joined
+[02:11] *** Kaeipi left
+[02:47] *** lucasb left
+[04:41] *** evalable6 left
+[04:41] *** linkable6 left
+[04:41] *** linkable6 joined
+[04:41] *** evalable6 joined
+[07:33] <nwc10> good *, #moarvm 
+
+[07:42] <nine> And a good morning to you!
+
+[08:05] *** domidumont joined
+[08:29] *** sena_kun joined
+[08:38] *** MasterDuke joined
+[08:54] *** zakharyas joined
+[09:24] *** sena_kun left
+[09:26] *** sena_kun joined
+[10:39] <jnthn> m: Setty.^lookup("elems").returns.say
+
+[10:39] <camelia> rakudo-moar e7a46bc09: OUTPUT: «(Mu)␤»
+
+[10:39] <jnthn> grmbl, that used to be Int
+
+[10:41] *** MasterDuke left
+[11:18] <dogbert17> jnthn: https://github.com/rakudo/rakudo/commit/1c43c46efb1a07f27bd2b9827a93cdf01e328550
+
+[11:19] <dogbert17> quite recent change
+
+[11:31] *** Altai-man joined
+[11:33] *** sena_kun left
+[11:58] *** klapperl joined
+[12:06] *** MasterDuke joined
+[12:11] *** zakharyas left
+[12:51] <MasterDuke> the problem in MVM_spesh_candidate_discard_one appears to be my fixed_size_frees https://gist.github.com/MasterDuke17/fd2360d357bfc85e7dfba607aad7722f#file-deopt-patch-L139-L142
+
+[12:52] <nine> MasterDuke: that's an interesting find. I.e. somewhere those spesh_candidates or even the cands_and_arg_guards is still referenced?
+
+[12:53] <MasterDuke> well, i did some very mild reworking of MVM_spesh_candidate_discard_one and the symptom is now a segv in https://github.com/MoarVM/MoarVM/blob/master/src/spesh/arg_guard.c#L515 where test is 0x0
+
+[12:54] <MasterDuke> attempting to back out the reworking and try again with the frees disabled to comfirm
+
+[12:56] <MasterDuke> hm. i fixed_size_free_at_safepoint(foo->bar) and then fixed_size_free_at_safepoint(foo), are those guaranteed to happen in the right order?
+
+[12:58] <nine> Should'nt matter.
+
+[12:59] <nine> fixed_size_free_at_safepoint takes the pointer and puts it into the list of things to free. Doesn't matter if one of those is a memory area that also contains one of these pointers
+
+[12:59] <nine> safepoint also means that this will happen at a time when normal operations are suspended, i.e. no concurrent access
+
+[13:00] <nine> What it cannot do is prevent anyone from still having a pointer to the object that will be free'd. And it looks like this is the case here
+
+[13:02] <MasterDuke> yeah, wonder if valgrind can help out here
+
+[13:02] <nine> Possibly. I think the fixed size allocator (at least in debug mode) gives valgrind info
+
+[13:04] <MasterDuke> yep, i've turned its debug on and compiled with --valgrind. i also compiled with GC_DEBUG=3 and --optimize=0, so this is going to take a while...
+
+[13:06] <Altai-man> Hi folks! I will be traveling this week (in fact moving to another apartment). While the release is on track as usual, I would really appreciate if someone could prepare a MoarVM changelog this time, this increases the chances of the release being in time to bring all the cool goodies you have worked on. :)
+
+[13:12] <[Coke]> Altai-man++
+
+[13:17] <Altai-man> If there are any questions, don't hesitate to ping me. For the format refer to previous releases (cut commit SHAs, the category is usually where changed files reside, some rewording), for the commits to check start from the previous version bump commit and go reverse in history. The end is the revision specified in NQP. Don't forget to check merge commits: if the commits in the PR merged are old enough to be older than the previous release bump, they 
+
+[13:17] <Altai-man> will not be visible in the history this way, so instead of just skipping the merge ones check if everything merged is really included.
+
+[13:24] *** zakharyas joined
+[13:30] <jnthn> MasterDuke: Did you try MVM_FSA_DEBUG=1 already?
+
+[13:31] <jnthn> (I don't immediately see you passing the wrong size anywhere for freeing, but it's worth checking)
+
+[13:31] <jnthn> But also: what calls MVM_spesh_candidate_discard_one?
+
+[13:31] <jnthn> ohhh
+
+[13:31] <jnthn> It's being called from deopt.c
+
+[13:31] <jnthn> That's not safe
+
+[13:32] <jnthn> Because the safety of updates to the spesh candidates / arg guards is that the only writer is the spesh worker thread
+
+[13:33] <jnthn> And everything else just reads and the things it reads are immutable
+
+[13:33] <jnthn> (And not freed until a safepoint)
+
+[13:33] <jnthn> I think what's needed is write deopts into the spesh log for the current thread
+
+[13:33] <jnthn> And then when that log is sent, the spesh worker thread processes it and decides what to do
+
+[13:34] <jnthn> And can call discard_one
+
+[13:36] <jnthn> See src/spesh/log.[hc] for where to add a logging function
+
+[14:07] <MasterDuke> ah! very good to know!
+
+[14:08] <MasterDuke> i'd looked at spesh/log.c initially, but then deopt.c seemed a much more straightforward place
+
+[14:21] *** vrurg_ is now known as vrurg
+
+[14:28] <MasterDuke> jnthn: i assume i'll need to create a new MVMSpeshLogEntryKind?
+
+[14:28] <jnthn> Yes
+
+[14:29] <jnthn> Most likely sending along the static frame and spesh candidate that caused the deopt
+
+[14:29] *** Kaeipi joined
+[14:29] <MasterDuke> k, thanks
+
+[14:30] <jnthn> Oh, since the candidate is an object you can pass that along with the static frame
+
+[14:31] <jnthn> And make sure it's marked (in the MVMSpeshLog REPR's gc_mark)
+
+[14:31] <jnthn> s/it's/they're/
+
+[14:31] <jnthn> Then if it's already discarded somehow you can easily disregard it
+
+[14:31] <jnthn> If we throw indexes around then they can change under us if something else is deopt'd
+
+[14:34] <MasterDuke> think i'll still want the `spesh_cand->body.deopt_count` i added? instead of calling MVM_spesh_candidate_discard_one from the new `if` in deopt.c will i call the spesh_log_* function? or do i unconditionally call spesh_log_* and it handles whether to do the remove?
+
+[14:37] <jnthn> I think you'll unconditionally want to call spesh_log to log the deopt
+
+[14:37] <jnthn> And then we put the aggregation/smarts into the spesh worker thread
+
+[14:37] <jnthn> I don't know about the deopt_count.
+
+[14:38] *** lucasb joined
+[14:38] <jnthn> I mean, the current scheme (if there's 100 deopts, discard it) is a bit over-simple. There are programs that will in do deopts in steady state, but they handle a 1 time in 1000 edge case
+
+[14:38] <MasterDuke> i think it has to stay in the candidate, otherwise i'll need to keep a candidate->count structure somewhere else
+
+[14:39] <MasterDuke> well, that hardcoded 100 was just so it would trigger in "regular" code a non-zero number of times so i could see it working
+
+[14:41] <jnthn> Yeah
+
+[14:41] <jnthn> I can think of a few schemes
+
+[14:42] <jnthn> But I agree with getting it working with just a simple number, then we can try and figure out something better
+
+[14:42] <MasterDuke> yeah. e.g., # deopts / time since program start
+
+[14:43] <jnthn> Or maybe since birth of the spesh candidate, but yeah
+
+[14:43] <MasterDuke> # deopts > x && avg time since last deopt < y
+
+[14:44] <MasterDuke> knobs to tweak
+
+[14:44] <jnthn> Yeah, that'll already be a huge improvement
+
+[14:44] <jnthn> And perhaps good enough
+
+[15:01] *** MasterDuke left
+[15:13] *** MasterDuke joined
+[15:15] <MasterDuke> jnthn: not sure where MVM_spesh_candidate_discard_one should be called from. src/spesh/plan.c? src/spesh/stats.c?
+
+[15:20] <jnthn> Maybe the cleanest way is that stats increments the counter on the candidate, and puts it into the list of things that changed. Then up in worker.c we have a function that goes and looks for anything to remove
+
+[15:22] <jnthn> Alternatively, stats.c gathers the info and plan.c does the deciding
+
+[15:26] *** Altai-man left
+[15:36] <MasterDuke> regardless if plan.c is involved, the actual call to MVM_spesh_candidate_discard_one (has to) happen in worker.c?
+
+[15:38] <jnthn> I could live with it in plan.c, it just feels a bit unclean
+
+[15:38] <jnthn> stats.c aggregates stuff, plan.c decides what to do, then the worker goes through the plan and does each of the things
+
+[15:38] <jnthn> If we can keep that division it's neater
+
+[15:38] <MasterDuke> sure
+
+[15:38] <jnthn> It's not really a correctness issue, just a code design one
+
+[15:51] <MasterDuke> looks like i need to add something to MVMSpeshSimStack too?
+
+[16:21] <jnthn> Hm, it's not obvious to me that you would, assuming that you increment the deopt count inside of the MVMSpeshCandidate?
+
+[16:26] <MasterDuke> yeah. what i have so far is deopt.c calling MVM_spesh_log_deopt(tc, f->static_info, f->spesh_cand). then log.c creates an entry with the static frame and spesh candidate. then stats.c in `case MVM_SPESH_LOG_DEOPT` just increments `e->deopt.spesh_cand->body.deopt_count`
+
+[16:36] <MasterDuke> plan.c is where i'm getting lost now. i think i'll need a new MVMSpeshPlannedKind?
+
+[16:41] <jnthn> Probably, yes. Did you also make sure that the static frame goes on the worklist?
+
+[16:41] <jnthn> (back in stats)
+
+[16:42] <MasterDuke> no. i added `case MVM_SPESH_LOG_DEOPT:` to gc_mark in src/6model/reprs/MVMSpeshLog.c
+
+[16:43] <jnthn> That seems fine
+
+[16:43] <MasterDuke> MVM_gc_worklist_add(tc, worklist, &(log->entries[i].deopt.sf)); MVM_gc_worklist_add(tc, worklist, &(log->entries[i].deopt.spesh_cand));
+
+[16:43] <jnthn> The other bit I mentioned is about sf_updated
+
+[16:46] <jnthn> You'll need to make sure that the static frame ends up in that list. Look around `if (ss->last_update != tc->instance->spesh_stats_version) {`
+
+[16:47] <jnthn> Otherwise it won't be in the updated_static_frames that worker.c passes to plan.c
+
+[16:48] <MasterDuke> ah, thanks
+
+[16:48] <jnthn> Granted MVMSpeshPlanned is a bit of an awkward shape for this at present; maybe a union is warranted for everything except kind and sf
+
+[16:53] <MasterDuke> yeah, looks like it's not going to slot in there quite as nicely as all the other places
+
+[17:08] <MasterDuke> stick cs_stats, type_tuple, type_stats, num_type_stats as one element of the union, and a MVMSpeshCandidate *spesh_cand as the other element?
+
+[18:55] *** zakharyas left
+[19:03] *** Kaeipi left
+[19:05] *** Kaeipi joined
+[19:29] *** MasterDuke left
+[19:48] *** Kaeipi left
+[19:50] *** Kaeipi joined
+[19:50] *** Kaeipi left
+[19:51] *** Kaeipi joined
+[19:57] *** Kaeipi left
+[19:59] *** Kaiepi joined
+[20:16] *** domidumont left
+[20:27] *** Kaiepi left
+[20:31] *** Kaiepi joined
+[20:31] *** Kaiepi left
+[21:06] *** zakharyas joined
+[22:01] *** zakharyas left
+[22:58] *** lucasb left
+[23:27] <jnthn> .tell MasterDuke Sorry, was afk/distracted for quite a while. Yes, sounds reasonable.
+
+[23:27] <tellable6> jnthn, I'll pass your message to MasterDuke
+
+[23:55] *** moon-child left

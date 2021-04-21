@@ -1,0 +1,264 @@
+[01:15] *** pyrimidine joined
+[01:29] *** lizmat joined
+[01:30] *** lizmat_ joined
+[01:32] *** zakharyas joined
+[02:22] *** pyrimidine joined
+[02:48] *** ilbot3 joined
+[06:25] *** domidumont joined
+[06:29] *** pyrimidine joined
+[06:35] *** vendethiel joined
+[06:56] *** domidumont joined
+[07:01] *** domidumont joined
+[08:13] *** vendethiel joined
+[08:13] *** domidumont joined
+[09:04] *** pyrimidine joined
+[09:06] *** brrt joined
+[09:06] <brrt> ohai #moarvm
+
+[09:06] * brrt has got some writing to do
+
+[09:12] <jnthn> o/ brrt
+
+[09:13] *** lizmat joined
+[09:23] *** camelia joined
+[09:36] <brrt> \o jnthn
+
+[09:36] <brrt> i enjoyed your post
+
+[09:37] <jnthn> :)
+
+[10:16] <brrt> ... unfortunately i've had very low energy levels in the past few weeks
+
+[10:16] <brrt> so just getting a blog post out has been really troubling
+
+[10:16] <brrt> or, 'challenging'
+
+[10:18] *** samcv joined
+[10:19] * jnthn knows the feeling
+
+[10:19] <jnthn> I went some months without blogging for that kinda reason
+
+[10:19] <jnthn> Then managed 2 in the space of the last week :)
+
+[10:19] <brrt> well, unlike me, you did manage to write some code at least :-)
+
+[11:03] <timotimo> seems like google developed their own fuzzing software
+
+[11:04] <timotimo> oh, it's a service, not a software
+
+[11:32] *** lizmat joined
+[12:23] *** pyrimidine joined
+[13:18] <nine> jnthn: commit 5c659178a07d86fe73b7c506c4ea7b10ad38b0e8 breaks Inline::Perl6
+
+[13:18] <nine> :/
+
+[13:18] <timotimo> i wonder if we want synopsebot to figure out what repo a commit id belongs to and link it directly when someone mentions it?
+
+[13:18] <nine> It hangs during initialize in sched_yield called by MVM_gc_mark_thread_unblocked
+
+[13:18] <nine> in src/gc/orchestrate.c:270
+
+[13:29] <jnthn> nine: Can I see the whole call stack?
+
+[13:29] <jnthn> (C level one)
+
+[13:31] <nine> need to change trains
+
+[13:31] <nine> will post
+
+[13:32] <jnthn> k, thanks
+
+[13:33] <jnthn> Hopefully we'll be able to distill a relatively small test case form it...
+
+[13:33] <jnthn> *from
+
+[13:34] <nine> Actually I didn't have to change trains. Instead the train changed.
+
+[13:35] <nine> jnthn: https://gist.github.com/niner/6b0f77d661600c4c23db8b462add2f57
+
+[13:43] <nine> Maybe helpful link: https://metacpan.org/source/NINE/Inline-Perl6-0.08/Perl6.xs#L112
+
+[13:45] <jnthn> What a kind train.
+
+[13:45] <jnthn> Hmmm
+
+[13:46] * jnthn notices that a call into C land is not on the stack below this
+
+[13:47] <jnthn> (As in, Moar doesn't own the main loop)
+
+[13:47] <nine> Inline::Perl6 works by initializing Moar with code copied from Moar's main.c, running Perl 6 code that just calls Inline::Perl5's initialization. This will pass a callback routine to a Inline::Perl6's init_inline_perl6_new_callback function which stores the pointer to the callback in a global variable.
+
+[13:47] <jnthn> I suspect we don't have a test like that, and maybe can't have a test like that, inside of t/04-nativecall
+
+[13:47] <nine> That's p5_callback which is used to get back into Perl 6
+
+[13:47] <jnthn> Yeah, what you're doing is reasonable enough.
+
+[13:48] <jnthn> I think I understand how it's busted
+
+[13:48] <nine> :)
+
+[13:48] <jnthn> Lemme finish up a refactor on some $dayjob code and I can take a look
+
+[13:49] <nine> Many thanks :)
+
+[13:51] * nine will be losing connectivity at around 17:00 on his way to LPW
+
+[14:02] *** pyrimidine joined
+[14:04] <jnthn> 'tis done, now I can look
+
+[14:12] <dalek> MoarVM/nine-try-this-fix: 859bcf4 | jnthn++ | src/core/nativecall_dyncall.c:
+
+[14:12] <dalek> MoarVM/nine-try-this-fix: Attempted Inline::Perl6 fix.
+
+[14:12] <dalek> MoarVM/nine-try-this-fix: review: https://github.com/MoarVM/MoarVM/commit/859bcf4756
+
+[14:12] <jnthn> nine: I'm trying out a fix along these lines...could you give it a try?
+
+[14:16] *** pyrimidine joined
+[14:22] <jnthn> Yeah, I've scribbled myself a couple of transition diagrams for GC status and I'm pretty sure that is fine
+
+[14:48] <dalek> MoarVM: be5ed38 | jnthn++ | src/ (4 files):
+
+[14:48] <dalek> MoarVM: Fix native callback/GC interaction when embedded.
+
+[14:48] <dalek> MoarVM:
+
+[14:48] <dalek> MoarVM: A while ago, we started to block a thread for GC purposes when doing
+
+[14:48] <dalek> MoarVM: a call into native code, so that long-running calls won't prevent
+
+[14:48] <dalek> MoarVM: progress of other thread in the VM by preventing their GC. In the
+
+[14:48] <dalek> MoarVM: case of callbacks, we then unblocked the thread.
+
+[14:48] <dalek> MoarVM:
+
+[14:48] <dalek> MoarVM: Inline::Perl6 embeds MoarVM. It can therefore create a situation where
+
+[14:48] <dalek> MoarVM: a MoarVM native callback is invoked when a call into native code was
+
+[14:48] <dalek> MoarVM: not on the stack. This deals with the issue - at least somewhat - by
+
+[14:48] <dalek> MoarVM: not trying to unblock a thread that is not blocked, which would lead
+
+[14:49] <timotimo> to a hang.
+
+[14:49] <timotimo> This hopefully gets things back to working as well as they did prior
+
+[14:49] <timotimo> to the nativecall GC blocking fixes. However, it's worth noting that
+
+[14:49] <timotimo> a situation where code running under Inline::Perl6 starts threads,
+
+[14:49] <timotimo> and then the Perl 5 code using it keeps the main thread tied up for
+
+[14:49] <timotimo> a while, would result in the Perl 6 threads also getting blocked.
+
+[14:49] <timotimo> Thus, Inline::Perl6 may want to explore marking the thread running
+
+[14:49] *** pyrimidine joined
+[14:49] <timotimo> the Perl 5 interpreter that embeds MoarVM as GC-blocked to prevent
+
+[14:49] <timotimo> such a situation.
+
+[14:51] <dalek> MoarVM: 5a75216 | jnthn++ | src/gc/orchestrate.h:
+
+[14:51] <dalek> MoarVM: Add GC block management functions to public API.
+
+[14:51] <dalek> MoarVM:
+
+[14:51] <dalek> MoarVM: So that Inline::Perl6 can explore using them, as described in the
+
+[14:51] <dalek> MoarVM: previous commit.
+
+[14:51] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/5a75216ce7
+
+[14:52] <jnthn> nine: Did a cleanup of the fix I sent you to try and it's in master now. I'm fairly sure this will cover it; see the commit message for a hint on a further (not new) problem that may exist in Inline::Perl6 though :)
+
+[14:59] <nine> jnthn: confirmed :) Thanks for the quick fix
+
+[15:00] <jnthn> \o/
+
+[15:03] <nine> Sounds like I should just MVM_gc_mark_thread_blocked right after the toplevel_initial_invoke?
+
+[15:04] <jnthn> nine: How do you "initially" run code?
+
+[15:04] <jnthn> To give you the callbacks?
+
+[15:05] <jnthn> I guess you run some setup code of some kind?
+
+[15:05] <jnthn> You'd need to block it *after* that can run, anyways.
+
+[15:05] <jnthn> (Which may be the place you're talking about)
+
+[15:06] <jnthn> The key thing is that, aside from callbacks, you don't get MoarVM to run code in any other way while it's marked as blocked
+
+[15:09] <nine> jnthn: I set up moar with lib/Inline/Perl6/Helper.pm as first Perl 6 argument. The module is just: use Inline::Perl5; Inline::Perl5::init_inline_perl6_callback(@*ARGS[0]);
+
+[15:10] <jnthn> nine: Yeah, so it'd be after that has run
+
+[15:11] <jnthn> Since presumably after that point everything else you do that calls back into MoarVM is via the callbacks
+
+[15:16] <nine> I can now confirm that this also works without your workaround. Now I just wonder, if there's any way to check if MVM_gc_mark_thread_blocked is available?
+
+[15:17] <jnthn> Yeah, though I think my workaround probably wants to stay for other embedders in the future. :)
+
+[15:17] <jnthn> Hmm...you could check MoarVM version at configure time and set a define?
+
+[15:22] <timotimo> i wonder how the ndarrayview could be implemented so it can also handle CArray ...
+
+[15:33] <nine> jnthn: excellent idea :)
+
+[15:34] <nine> jnthn: do I understand this correctly? Thanks to the MVM_gc_mark_thread_blocked call, we allow for another MoarVM thread to steal our GC work, while we're happily running Perl 5 code?
+
+[15:34] <timotimo> that's how i understand it
+
+[15:37] *** pyrimidine joined
+[15:38] <jnthn> nine: Yes
+
+[15:39] <jnthn> nine: So you could use Inline::Perl6 to do start { ...blah some Perl 6 thing... }
+
+[15:39] <jnthn> And get the Promise back
+
+[15:39] <jnthn> And later in Perl 5 code .result it to get the result
+
+[15:39] <jnthn> But it could compute happily in the background without the Perl 5 thread working away at stuff blocking the Perl 6 threads when they need GC
+
+[15:39] <jnthn> That may just be useful for something ;)
+
+[15:40] <nine> It's very cool in any case ;)
+
+[15:40] <jnthn> Aye :)
+
+[15:44] <nine> Inline::Perl6 v0.08 is on its way to CPAN :)
+
+[15:46] <[Coke]> nine++ jnthn++
+
+[16:11] *** pyrimidine joined
+[16:50] <timotimo> i wonder if i'm missing something crucial in my jit implementation of the throwpayload ops
+
+[16:53] <timotimo> maybe the throwpayload* ops want to be marked :throwish in the oplist
+
+[16:53] <timotimo> well, that brings the build further
+
+[17:10] <dalek> MoarVM: 3c82b48 | timotimo++ | src/core/op (2 files):
+
+[17:10] <dalek> MoarVM: mark throwpayload* as :throwish in oplist
+
+[17:10] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/3c82b48b3b
+
+[17:10] <dalek> MoarVM: fea28ed | timotimo++ | src/jit/graph.c:
+
+[17:10] <dalek> MoarVM: implement throwpayload* in the JIT
+
+[17:10] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/fea28ed247
+
+[17:13] *** domidumont joined
+[17:25] *** pyrimidine joined
+[17:39] *** pyrimidine joined
+[18:11] *** pyrimidine joined
+[18:26] *** FROGGS joined
+[20:42] *** pyrimidine joined
+[22:43] *** pyrimidine joined
+[22:57] *** pyrimidine joined
+[22:59] *** pyrimidine joined

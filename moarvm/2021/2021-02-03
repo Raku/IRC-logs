@@ -1,0 +1,367 @@
+[00:11] *** MasterDuke left
+[00:55] *** rypervenche left
+[02:19] *** rypervenche joined
+[05:26] *** leedo left
+[07:48] *** patrickb joined
+[08:13] *** domidumont joined
+[08:15] *** squashable6 left
+[08:17] *** squashable6 joined
+[09:10] *** domidumont left
+[09:33] *** zakharyas joined
+[09:54] <nine> Ah repossession! Ye olde nemesis. Looks like the module loading segfaults in our Inline::Perl5+Cro application are due to NativeCall sites getting repossessed after being in use already. This leads to jitcode getting freed and recreated which somehow leads to jumps into memory areas filled with zeroes
+
+[10:23] <nine> Ok, now I understand what's going on. We deserialize a native call site. Then we call the function which triggers the actual setup, i.e. resolving the library name, loading the library, generating caller code. We run the function often enough that spesh decides its worth its time.
+
+[10:24] <nine> While spesh is working however, we load the module again (perhaps as a dependency of some other module), thus we deserialize again and as part of the repossession process clear the native call site's body. I.e. body->entry_point is NULL.
+
+[10:24] <nine> Only after we did so is spesh far enough to run JIT compilation, which generates code for jumping to entry_point. Which at this point is NULL.
+
+[10:26] <jnthn> Ugh. That's not nice.
+
+[10:28] <jnthn> Wait, why do we load the module *again*?
+
+[10:28] <jnthn> That's not supposed to happen
+
+[10:29] <nine> It's a dependency of multiple modules we use
+
+[10:30] <jnthn> Yes, but given a module A, and both B and C `use A`, and then we have `use B; use C;`, we shoudl still only load A once
+
+[10:30] <nine> I was a bit sloppy. It's not the module that's loaded again, but we do repossess
+
+[10:30] <jnthn> Ah, we repossess it in two different modules?
+
+[10:30] <nine> yes
+
+[10:31] <jnthn> Hm, I thought we tended to report conflicts in that situation except for stashes, which we have logic to unify
+
+[10:31] <jnthn> Did that get extended to cover more cases?
+
+[10:35] <nine> no, that's still the case
+
+[10:40] <jnthn> Hm, so we segfault before we get around to reporting the conflict?
+
+[10:41] <lizmat> in related news, someone came up with an easy way to segfault rakudo:
+
+[10:41] <lizmat> for (1, 2, 3, 4, 5) -> $n { (say $n for ^5000) xx 2 }
+
+[10:41] <evalable6> lizmat, rakudo-moar 446caae36: OUTPUT: «(signal SIGSEGV) 1␤»
+
+[10:41] <nine> I don't think there are conflicts.
+
+[10:41] <nine> I can work around the segfault by aborting JIT compilation and everything turns out fine
+
+[10:41] <lizmat> well, related in that it also segfaults  :-)
+
+[10:43] <jnthn> Ah, so perhaps only one module does a repossession, and the thing we trip over is the JIT of the original non-repossessed one, perhaps?
+
+[10:43] <nine> probably
+
+[10:45] <nine> So, what to do about this?
+
+[10:48] <jnthn> Is there any need for the repossession to happen?
+
+[10:48] <jnthn> As in, does the downstream module add anything important, or is it just because we happen to trigger setup work on the nativecall?
+
+[10:48] <nine> it's just the setup
+
+[10:49] <jnthn> OK, then mark the object never repossessed or do the thing to disable repossession while we run the setup, maybe?
+
+[10:49] <nine> The NativeCall site's body will end up exactly the same (except for the needless recompilation of the JIT code)
+
+[11:04] *** MasterDuke joined
+[11:27] *** MasterDuke left
+[12:09] *** MasterDuke joined
+[12:13] <timotimo> lizmat: could it be memory exhaustion?
+
+[12:16] <MasterDuke> timotimo: don't think so, the segv happens almost instantly for me
+
+[12:16] <timotimo> fascinating. can you post a gist with backtraces? i'm a bit distracted by workwork, though
+
+[12:17] <MasterDuke> 101804maxresident
+
+[12:17] <MasterDuke> https://github.com/rakudo/rakudo/issues/4192#issuecomment-772437701
+
+[12:18] <timotimo> can you try tossing the "say" and friends for something that doesn't do any outputting?
+
+[12:20] <nine> getlex segfaults because a frame's outer is NULL
+
+[12:20] <MasterDuke> same segv if if change `say $n` to `$n + 1`
+
+[12:20] <timotimo> why would it do such a thing
+
+[12:24] <El_Che> any feedback on this UI for dev testing rakudo/moarvm/nqp on the same distors rakudo-pkg is built? https://strasbourg.apt-get.be/f/ec095c272ed248dd811d/
+
+[12:24] <El_Che> the defaults are set to latest release
+
+[12:25] <El_Che> version can be a connit if preceded by @
+
+[12:25] *** zakharyas left
+[12:25] <El_Che> moarvm has is --debug --optiniz=0 as default
+
+[12:26] <MasterDuke> non-substantial comment, but weird spacing between words
+
+[12:27] <El_Che> yeah, weird
+
+[12:27] <MasterDuke> for dev testing, defaulting to HEAD is probably more useful
+
+[12:28] <El_Che> it's to slow to be the CI, but sure
+
+[12:28] <El_Che> I guess it takes around 10-15m to do 25 distros/versions
+
+[12:32] <MasterDuke> bisectable6: my $n := 1; ($n + 1 for ^17000) xx 20
+
+[12:32] <bisectable6> MasterDuke, Will bisect the whole range automagically because no endpoints were provided, hang tight
+
+[12:32] <bisectable6> MasterDuke, More than 4 changes to bisect, please try a narrower range like old=2020.02.1 new=HEAD
+
+[12:32] <bisectable6> MasterDuke, Output on all releases: https://gist.github.com/b6e3e0ddec327643d917c7ab435067dd
+
+[12:35] <MasterDuke> bisectable6: my $n = 1; say (($n + 1 for ^17000) xx 20).elems
+
+[12:35] <bisectable6> MasterDuke, Will bisect the whole range automagically because no endpoints were provided, hang tight
+
+[12:36] <bisectable6> MasterDuke, Output on all releases: https://gist.github.com/9eeca70a4cdc67d0cc087fdf1e356ba5
+
+[12:36] <bisectable6> MasterDuke, Bisecting by exit signal (old=2017.07 new=2017.08). Old exit signal: 0 (None)
+
+[12:36] <bisectable6> MasterDuke, bisect log: https://gist.github.com/7b827f46940106acde407cd7645b730b
+
+[12:36] <bisectable6> MasterDuke, (2017-08-11) https://github.com/rakudo/rakudo/commit/76af17a8b1dc79f8923109bbd284afed2e2fe011
+
+[12:36] <bisectable6> MasterDuke, Output on all releases and bisected commits: https://gist.github.com/e9079d808afb717a1242e5168f84688f
+
+[12:38] <MasterDuke> some of the moarvm commit messages in that bump look relevant
+
+[13:00] <jnthn> Wasn't there another bug report about that bit of code to the effect that it gets code-gen'd incorrectly?
+
+[13:01] <jnthn> (e.g. it gets lexical lookups wrong, probably due to spitting out mis-nested code)
+
+[13:01] <jnthn> I suspect the two are rather related
+
+[13:06] *** leedo joined
+[13:07] <MasterDuke> i don't recall anything about that code getting genned incorrectly. oh, you mean https://github.com/rakudo/rakudo/issues/4193 ?
+
+[13:09] <jnthn> Yes
+
+[13:09] <jnthn> That'll be caused my mis-nesting of lexical scopes in the generated code
+
+[13:10] *** domidumont joined
+[13:11] <jnthn> And that in turn likely leads to confusion later on during optimization that leads to the SEGV
+
+[13:11] <jnthn> Ideally MoarVM can spot that and refuse the inline/optimization
+
+[13:11] *** ggoebel_ left
+[13:12] <MasterDuke> error/panic or just quietly not do the opt?
+
+[13:12] <jnthn> Preferably the latter
+
+[13:13] <jnthn> In the best case it can be detected at the "can we inline this" point
+
+[13:15] <MasterDuke> oh, no segv with raku flag `--optimize=off` (but does with `--optimize=0`)
+
+[13:15] <jnthn> As for the code-gen issue, it depends if anybody is motivated to fix it in the current compiler frontend, or we just wait for the RakuAST-based one
+
+[13:16] <jnthn> Which takes a completely different approach to the whole issue
+
+[13:16] <jnthn> And so in principle will avoid the fragilities that have given us these kinds of bugs
+
+[13:27] <nine> How far is that away?
+
+[13:28] <nwc10> I wasn't going to ask, but I assumed "after new-disp"
+
+[13:29] <jnthn> After new-disp for sure, in part because if new-disp doesn't come first, I have to do throw-away work in rakuast
+
+[13:31] <nwc10> before SLS launches? :-)
+
+[13:32] <jnthn> As for how far away: a bit hard to predict. It's the first time we're trying to do a compiler frontend replacement in over 10 years, and the situation is entirely different between then and now.
+
+[13:33] <MasterDuke> interesting, --optimize=off stops the segv, but not the miss-printing
+
+[13:34] <jnthn> I'd be disappointed if we weren't running it as the production frontend come the end of 2021. If we are in less than 6 months from now, I'd consider that good.
+
+[13:34] <jnthn> We have pretty high standards on non-regression
+
+[13:35] <nine> So, not that far off at all :)
+
+[13:36] <jnthn> A lot will depend on how much enthusiasm there is for it beyond mine. :) I mean, when we did the GLR, it got to a point where quite a few folks were going through failing spectests and figuring them out.
+
+[13:36] <nwc10> I remember 8 people around a flipchart for the GLR
+
+[13:37] <jnthn> There's also a huge unknown around how far we want to go with revisiting precompilation to try and resolve some of the deeper issues there.
+
+[13:37] <nwc10> (this was not the "fixing spectests" stage)
+
+[13:37] <nine> Oh the enthusiasm is there, at least with me. It's just that there seems to be an endless supply of bugs that find me...
+
+[13:40] <jnthn> nine: I figure you know the current state of precomp best, and have a good handle on a bunch of the issues that are solved in an unideal way or aren't easily solved at all... I'd like to try and draw on that at some point, to see what can be done.
+
+[13:40] <nine> sure :)
+
+[13:41] *** ggoebel_ joined
+[13:41] <nine> That will recover some of the time cost sunk into in-process-precompilation
+
+[13:42] <MasterDuke> enthusiasm - yes, ability to just jump in and help - suspect. i also keep getting into projects that take a long time and still aren't finished (e.g., gmp, removing spesh candidates, fsa for vmarray)
+
+[13:44] <jnthn> nine: Did you end up deeming it impossible at all, or out of reach with the current compiler architecture?
+
+[13:46] *** zakharyas joined
+[13:59] <nine> jnthn: I still think it's possible but I was fighting the architecture every step of the way. Biggest issue is the stash hierarchy which as it is totally relies on repossession.
+
+[14:03] <jnthn> Sigh, yes, the moment one steps away from lexical scoping and has to deal with global stuff, life gets awkward.
+
+[14:05] <nine> In the end I got stuck in a "fix it in one place, break another" loop. I gave up because it wasn't clear that I would ever get it to work fully and a lot of things fell by the wayside during the time I spent on it.
+
+[14:05] <nine> Not to mention that I was simply exhausted...
+
+[14:09] <dogbert2> the commit which introduced the SEGV is https://github.com/MoarVM/MoarVM/commit/c663342b485b244bc1092140245369afdc8b2b06
+
+[14:10] <nine> Ha! That's the one I guessed :)
+
+[14:12] <MasterDuke> and https://github.com/MoarVM/MoarVM/commit/c663342b485b244bc1092140245369afdc8b2b06#diff-34715b5e8db6cf81887ae7c98a123cb13605aa28605441428c095dcf91db707eR5591 is where the segv happens
+
+[14:22] <dogbert2> valgrind is a bit sceptical: https://gist.github.com/dogbert17/afa27175325603de12ff929b8278a364
+
+[14:27] <dogbert2> the printout is from commit c663342b485b244bc1092140245369afdc8b2b06 so the line numbers do not match with how the code looks today
+
+[14:27] *** linkable6 left
+[14:29] *** linkable6 joined
+[14:45] *** MasterDuke left
+[14:48] *** MasterDuke joined
+[15:12] *** ggoebel_ left
+[15:26] *** patrickb left
+[15:47] *** patrickb joined
+[15:47] <[Coke]> dogbert2: how old is that based on "Rakudo Perl 6" in the tool output? (looks like current version just says Rakudo)
+
+[15:48] <[Coke]> (tried to find that commit ID in rakudo, don't see it)
+
+[16:00] <jnthn> [Coke]: It's from a bissected commit from 2017, so quite old :)
+
+[16:14] <[Coke]> O_o;
+
+[16:37] <nine> Darn....marking NativeCall repr based types as MVM_NEVER_REPOSSESS_TYPE doesn't help, because the objects are flattened into the P6opaques holding the Routine
+
+[16:59] <nine> And no amount of nqp::neverrepossess or nqp::scwbdisable seems to change anything
+
+[17:17] <nine> Ah, of course. The solution is just to run it in rr, then it works just fine
+
+[17:21] <patrickb> lol
+
+[17:21] <nine> rr record -c 10 helps, but of course is slooooow
+
+[17:22] <lizmat> .oO( running co-rr-ectly )
+
+[17:30] <jnthn> nine: MVM_SPESH_BLOCKING=1 may encourage it to happen under rr
+
+[17:48] <nine> Well if anything, the months working on in-process-precompilation got me to write MVM_dump_string(tc, string) which makes looking at MVMStrings in gdb so much nicer :)
+
+[17:49] *** domidumont left
+[17:51] *** MasterDuke left
+[18:02] <nine> Aaaah....the repossession happens in dependencies+deserialize
+
+[18:08] <nine> Finally progress!
+
+[18:09] <nine> Adding scwbdisable to the fixup code prevented the repossession
+
+[18:36] <El_Che> .tell MasterDuke This more like it for knobs and switches? https://strasbourg.apt-get.be/f/c033a63ad86f4f38a82d/
+
+[18:36] <tellable6> El_Che, I'll pass your message to MasterDuke
+
+[18:40] <El_Che> .tell MasterDuke What's filled in are defaults
+
+[18:40] <tellable6> El_Che, I'll pass your message to MasterDuke
+
+[18:47] <nine> Of course scwbdisable breaks Cro...
+
+[18:58] <nine> nqp::neverrepossess with nqp::scwbdisable in the deserialize code fares better :)
+
+[18:59] *** zakharyas left
+[19:54] *** ggoebel_ joined
+[19:59] *** MasterDuke joined
+[20:00] *** patrickb left
+[20:23] *** MasterDuke left
+[20:30] *** MasterDuke joined
+[20:46] <MasterDuke> just created https://github.com/MoarVM/MoarVM/pull/1428
+
+[20:46] <tellable6> 2021-02-03T18:36:19Z #moarvm <El_Che> MasterDuke This more like it for knobs and switches? https://strasbourg.apt-get.be/f/c033a63ad86f4f38a82d/
+
+[20:46] <tellable6> 2021-02-03T18:40:23Z #moarvm <El_Che> MasterDuke What's filled in are defaults
+
+[20:50] <MasterDuke> El_Che: nice, but i'm not sure what the '(HEAD, $tag, $commit)' means. also, you have that text after the 'Rakudo version' field, but after the '* configure command' for MoarVM and NQP
+
+[20:51] <El_Che> MasterDuke: it means you can put there HEAD, a commit hash or a tag
+
+[20:51] <El_Che> yeah, bad label
+
+[20:52] <MasterDuke> oh, so it should go on the version fields of moarvm and nqp?
+
+[20:52] <El_Che> yes
+
+[20:52] <MasterDuke> that does make more sense, i was thrown off by seeing on the configure field for the first two
+
+[20:54] <El_Che> bad case of copy paste :)
+
+[20:54] <El_Che> This is the result of a run: https://github.com/nxadm/rakudo-pkg/actions/runs/534935305
+
+[20:55] <El_Che> waiting for a segfault to archive the core file :)
+
+[20:55] <El_Che> ah, it looks like you can not see the logs if not owner
+
+[21:04] <MasterDuke> huh, i just see green
+
+[21:05] <El_Che> yeah, I can look into the tasks
+
+[21:05] <El_Che> wll, the idea is that a dev forks it and run the actions in his fork
+
+[21:05] <El_Che> so it's a non-issue
+
+[21:05] <El_Che> he can copy a link to the raw output
+
+[21:07] <El_Che> So, is there any thing else that someone would like to test while building rakudo?
+
+[21:08] <El_Che> with the file edit and the vars most situations seem covered
+
+[21:12] *** squashable6 left
+[21:13] *** squashable6 joined
+[21:44] *** ggoebel_ left
+[21:44] *** ggoebel_ joined
+[22:20] *** MasterDuke left
+[22:21] *** MasterDuke joined
+[22:38] <El_Che> ok, I think I know what causes #1424 and #1425
+
+[22:40] <MasterDuke> oh?
+
+[22:40] <El_Che> the kernel seccomp
+
+[22:41] <El_Che> why only one alpine:edge and fedora:rawhide I don't know (yet) , but running the containers with "--security-opt seccomp=unconfined" is a happy moarvm
+
+[22:42] <El_Che> now the containers passed the moarvm builds and are testing rakudo
+
+[22:43] <El_Che> so it would be great if someone who knows what weird systemcall the build process calls to have a look at this: https://docs.docker.com/engine/security/seccomp/
+
+[22:44] <El_Che> The weird bug of the day is brought to you by El_Che :)
+
+[22:47] <MasterDuke> i think there have been some changes in secomp recently, at least, i think i read something on lwn.net in the past month or so
+
+[22:48] <El_Che> I would have expected that the VM would be impacted instead of the individuals VMs
+
+[22:48] <El_Che> I read individuals containers I mean
+
+[22:48] <El_Che> I read something about musl changes
+
+[22:48] <El_Che> no idea about rawhide
+
+[22:49] <MasterDuke> https://lwn.net/Articles/834785/ but it's an optimization, probably unrelated
+
+[22:50] *** ggoebel_ left
+[22:51] <El_Che> I am waiting my builds to finish to add the info to the tickets
+
+[22:51] <El_Che> should I close them or change the title?
+
+[22:58] <MasterDuke> i logged just `make -j12` and it has 370 calls to clone, only match with the list from that page
+
+[22:59] <El_Che> ok, the dists build fine now
+
+[22:59] <El_Che> just finished
+
+[23:30] <El_Che> MasterDuke: if you have info add it to https://github.com/MoarVM/MoarVM/issues/1424
+

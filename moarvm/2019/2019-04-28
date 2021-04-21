@@ -1,0 +1,241 @@
+[01:00] *** lizmat joined
+[01:02] *** lizmat left
+[05:08] *** scovit left
+[06:43] *** domidumont joined
+[07:26] *** scovit joined
+[08:28] *** lizmat joined
+[08:55] *** lizmat left
+[08:55] *** lizmat_ joined
+[09:40] *** domidumont left
+[10:05] *** lizmat_ is now known as lizmat
+
+[10:41] *** domidumont joined
+[11:30] <MasterDuke> timotimo: what i just tried and some output https://gist.github.com/MasterDuke17/4bd90508faba10c22151ddb2e6172262
+
+[11:56] <dogbert17> MasterDuke: I just made an update to https://github.com/MoarVM/MoarVM/issues/1093
+
+[11:57] <MasterDuke> huh
+
+[11:58] <MasterDuke> dogbert17: same with jit disabled?
+
+[11:58] <dogbert17> let me check
+
+[12:01] <dogbert17> valgrind still complains but the output is a bit different
+
+[12:02] <MasterDuke> and if spesh is disabled?
+
+[12:02] <dogbert17> then it looks exactly like the gist
+
+[12:03] <MasterDuke> interesting
+
+[12:03] <dogbert17> it has something to do with this line: whenever signal(SIGTERM).merge: signal(SIGINT) {
+
+[12:04] <MasterDuke> good catch, i hadn't realized there was any problem with that part
+
+[12:07] <dogbert17> perhaps a few errors like that will lead to the SEGV you reported
+
+[12:11] <dogbert17> I get the impression that the signal handling block is never executed
+
+[12:13] <MasterDuke> i think i have seen those "signal received" prints, but am not 100% sure
+
+[12:14] <dogbert17> "signal received" is mysteriously absent in the gist I posted
+
+[12:15] <MasterDuke> maybe it occasionally works
+
+[12:17] <dogbert17> yes, guess I have to run it several times. I am a bit confused even though I have watched jnthn's talk from the GPW
+
+[12:18] <dogbert17> I mean, when we come to the 'whenever Promise.in(20) {' line and kill the process, which whenever will be run next? It's not obvious to me.
+
+[12:21] <dogbert17> looking at the gist it seem to be the block surrounded by 'whenever $proc.start'
+
+[12:22] <MasterDuke> i don't perfectly understand it either, i just cribbed the code from the example in the docs
+
+[12:23] <dogbert17> perhaps we need jnthn's wisdom
+
+[15:33] *** zakharyas joined
+[15:47] *** sena_kun joined
+[15:47] *** patrickb joined
+[16:24] <timotimo> MasterDuke: oh, interesting, it's probably necessary to also tell valgrind how our nursery allocations work
+
+[16:24] <timotimo> i.e. how individual objects get to exist, rather than just the whole nursery space
+
+[16:25] <timotimo> because "Address 0x597e378 is 1,307,448 bytes inside a block of size 4,194,304 alloc'd" is barely helpful
+
+[16:31] *** patrickb left
+[16:49] *** lizmat left
+[17:25] *** zakharyas left
+[17:50] *** sena_kun left
+[17:53] *** Voldenet left
+[17:58] <MasterDuke> timotimo: yeah, but is the other one useful? and, how do we tell valgrind about the nursery allocations?
+
+[17:59] *** Voldenet joined
+[17:59] *** Voldenet left
+[17:59] *** Voldenet joined
+[18:01] <timotimo> i think the second one is just the register that has the pointer in it because it's on the call stack
+
+[18:02] <MasterDuke> ah. so we need to teach valgrind about the nursery to get anything useful?
+
+[18:05] <MasterDuke> how does one do that?
+
+[18:07] <timotimo> one example would be VALGRIND_CREATE_BLOCK (and also VALGRIND_DISCARD when we have cleared the nursery)
+
+[18:08] <timotimo> otherwise, deal with it via VALGRIND_*_MEMPOOL client requests
+
+[18:11] <timotimo> http://valgrind.org/docs/manual/mc-manual.html#mc-manual.clientreqs - it's slightly explained here
+
+[18:14] <MasterDuke> hmm, looks not entirely trivial, i will probably have to punt
+
+[18:15] <timotimo> i think CREATE_BLOCK is a lot simpler and might be the right one for our purpose
+
+[18:15] <timotimo> if we want to be extra much, we can even annotate individual parts inside of structs
+
+[18:16] <timotimo> it'll make allocating stuff a bit slower, of course, which isn't fun
+
+[18:19] <timotimo> also, it'll surely be "fun" to try to get the client request stuff into the jit
+
+[18:21] <MasterDuke> i presume it's not as simple as sticking a CREATE_BLOCK in MVM_malloc?
+
+[18:21] <timotimo> MVM_malloc is already understood by valgrind
+
+[18:21] <timotimo> the thing is that the nursery allocation works by grabbing one gigantic chunk of memory, and just giving pieces of memory whenever someone asks
+
+[18:23] <timotimo> or do you mean the jit part?
+
+[18:23] <MasterDuke> nursery part, i'm fine with ignoring the jit for now
+
+[18:23] <timotimo> ah
+
+[18:24] <timotimo> nursery allocation is equivalent to "result = nursery_alloc; nursery_alloc += size; return result"
+
+[18:24] <timotimo> though the STable pointer and the owning thread ID has to be set
+
+[18:24] <timotimo> and many reprs do some initial setup
+
+[18:27] <MasterDuke> looks like tc->nursery_alloc is mentioned in a couple places. all of them will need a CREATE_BLOCK?
+
+[18:28] <timotimo> the ones that flip old and new nursery around in the GC will want to remove the previously created blocks in there, hopefully we can do it with just one big call
+
+[18:41] <MasterDuke> so a CREATE_BLOCK somewhere in here https://github.com/MoarVM/MoarVM/blob/master/src/gc/collect.c#L316-L329 ?
+
+[18:41] <timotimo> that's one place, yeah
+
+[18:43] <MasterDuke> and here https://github.com/MoarVM/MoarVM/blob/master/src/gc/gen2.c#L60 ?
+
+[18:52] <timotimo> yeah
+
+[18:52] <timotimo> did you already put it in MVM_gc_nursery_allocate or whatever it's called?
+
+[18:54] <MasterDuke> MVM_gc_allocate_nursery?
+
+[18:54] <timotimo> ah, yes
+
+[18:54] <timotimo> that must be the one
+
+[18:55] <MasterDuke> i haven't actually added anything anywhere yet. still trying to figure out exactly what goes where
+
+[18:57] <timotimo> ah
+
+[18:57] <timotimo> right
+
+[18:57] <timotimo> we'll also want to come up with something cool to put as the blocks names
+
+[19:03] <MasterDuke> timotimo: https://gist.github.com/MasterDuke17/768644375e173390a6f2ca3ad1be78c4
+
+[19:06] <MasterDuke> "Address 0x597ced8 is 40 bytes inside a MVM_gc_allocate_nursery of size 56 client-defined" looks like something worked(ish)
+
+[19:06] <timotimo> that looks like a good first step, yeah
+
+[19:07] <timotimo> if we put #ifdef for valgrind support around the allocate nursery thing, we can afford to put a bit more work into the names that show up
+
+[19:07] <timotimo> (then we can allow ourselves to sprintf some details)
+
+[19:08] <MasterDuke> what would make sense to put in the names?
+
+[19:08] <timotimo> oh, dang, MVM_gc_allocate_nursery only has the size
+
+[19:08] <timotimo> so maybe MVM_gc_allocate_object has to do that
+
+[19:08] <timotimo> since it should have the STable, which has, for example, the debug name
+
+[19:10] <MasterDuke> instead of in *_nursery? or in addition to?
+
+[19:11] <timotimo> i'd say instead of
+
+[19:13] <timotimo> i have no idea if valgrind copies away the character string you give it, i.e. if we can/should put it on the stack or free it after building it
+
+[19:13] <timotimo> i think it should be fine to construct it on the stack
+
+[19:13] <MasterDuke> i just gave it st->debug_name
+
+[19:13] <timotimo> just like we did with the monitor command for "who points at"
+
+[19:13] <timotimo> oh
+
+[19:13] <timotimo> that could even be enough, yeah
+
+[19:15] <MasterDuke> man, i should check if i'm currently running with --optimize=0 or if adding that CREATE_BLOCK is what's making this run even slower than usual
+
+[19:19] <timotimo> well, valgrind makes it super super slow already
+
+[19:20] <MasterDuke> yeah, but it's even slower than it usually is under valgrind
+
+[19:20] <MasterDuke> it's been sitting for a couple min now and hasn't even ok'ed the first test
+
+[19:20] <timotimo> damn
+
+[19:21] <timotimo> the only create block part you've currently got was the one for gc_nursery_alloc?
+
+[19:21] <timotimo> gc_allocate_nursery*
+
+[19:21] <MasterDuke> now only in MVM_gc_allocate_object
+
+[19:21] <timotimo> right
+
+[19:21] <timotimo> well, i imagine that'd be called a whole, whole lot
+
+[19:23] <MasterDuke> ok, test 4!
+
+[19:26] <MasterDuke> "Address 0x59810f8 is 8 bytes inside a BOOTCode of size 72 client-defined"
+
+[19:28] <MasterDuke> gist updated
+
+[19:39] <timotimo> isn't that hella sweet?
+
+[19:39] <MasterDuke> useful?
+
+[19:39] <timotimo> no idea
+
+[19:39] <timotimo> do you think we should split it into header and body of the object in question?
+
+[19:40] <timotimo> we definitely get a "proper" traceback now
+
+[19:40] <timotimo> however
+
+[19:40] <timotimo> when an object gets moved, for example from nursery to nursery or from nursery to gen2, i think it will lose the backtrace :o
+
+[19:41] <timotimo> now that i read a bit more, i see that you get an integer back from VALGRIND_CREATE_BLOCK that it expects you to call VALGRIND_DISCARD with at some point
+
+[19:41] <timotimo> so maybe we're leaking loads of these blocks all over the place
+
+[19:41] <timotimo> perhaps this makes things slower?
+
+[19:45] <timotimo> maybe i'll go ask in #valgrind-dev
+
+[19:45] <MasterDuke> would it go in MVM_6model_stable_gc_free?
+
+[19:45] <MasterDuke> i'm gonna be afk for a while, but i'll backlog later
+
+[19:46] <timotimo> that'll only be called in the case of an stable getting freed, because that is handled a bit more specially
+
+[20:18] <MasterDuke> doh, i knew that, dumb question
+
+[20:20] <MasterDuke> one of the MVM_gc_collect_free_* ?
+
+[20:21] <MasterDuke> or the gc_free for MVMCode?
+
+[20:22] <timotimo> "uncopied" something something
+
+[20:28] <timotimo> i'm pretty tired :\
+
+[20:46] *** domidumont left
+[22:54] *** lucasb joined

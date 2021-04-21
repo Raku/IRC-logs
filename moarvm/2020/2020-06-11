@@ -1,0 +1,198 @@
+[00:02] *** patrickz left
+[00:09] *** patrickb left
+[00:25] *** leont left
+[01:51] *** squashable6 left
+[01:51] *** squashable6 joined
+[07:21] *** sena_kun joined
+[07:36] *** zakharyas joined
+[07:36] *** MasterDuke joined
+[07:51] *** leont joined
+[09:00] *** patrickb joined
+[09:22] *** Altai-man_ joined
+[09:25] *** sena_kun left
+[10:29] *** squashable6 left
+[10:32] *** squashable6 joined
+[10:58] *** MasterDuke left
+[11:12] *** patrickb left
+[11:23] *** sena_kun joined
+[11:25] *** Altai-man_ left
+[11:30] *** zakharyas left
+[12:51] *** zakharyas joined
+[12:53] *** Altai-man_ joined
+[12:55] *** sena_kun left
+[12:57] *** MasterDuke joined
+[13:17] <MasterDuke> timotimo: https://blosc.org/pages/blosc-in-depth/ seems like something you'd find interesting
+
+[13:20] <MasterDuke> could we use it to store profile data compressed
+
+[13:20] <MasterDuke> ?
+
+[13:33] * jnthn is on quite the bug hunt...
+
+[13:33] <jnthn> https://github.com/jnthn/spreadsheet-xlsx/issues/2 segfaults because we try to make a native call but the function pointer is null
+
+[13:34] <jnthn> But it only does it when specialized
+
+[13:34] <jnthn> Disabling all <jit inline osr> doesn't fix it
+
+[13:34] <lizmat> yuk
+
+[13:34] <lizmat> good that it's reproducible  :-)
+
+[13:35] <jnthn> It's not stable as you start spesh limiting it to try and bissect what busts it, even with hash randomization turned off
+
+[13:36] <timotimo> this is where i'd rr and watch-point the function pointer address
+
+[13:36] <timotimo> may have to switch the address around once or twice as it may move / be moved
+
+[13:36] <jnthn> Until I put in a NULL check in our native call logic it managed to be in such a broken state that it was almost impossible to examine the program much under gdb, 'cus evaluations caused an error that was too unrecoverable and GDB is just like "oh, the process went away", which is odd :)
+
+[13:37] <jnthn> I mighta seen that happen before, but not often.
+
+[13:39] <timotimo> if it was in combination with jit, i could imagine the "surprising stack layout" to combine with an invalid function pointer bein ginvoked to turn into a big ol' mess
+
+[13:42] <jnthn> No, I had JIT disabled
+
+[13:44] <timotimo> that makes it quite a bit more interesting :)
+
+[13:51] <MasterDuke> releasable6: status
+
+[13:51] <releasable6> MasterDuke, Next release in ≈9 days and ≈5 hours. There are no known blockers. 143 out of 274 commits logged (⚠ 4 warnings)
+
+[13:51] <releasable6> MasterDuke, Details: https://gist.github.com/6c12cebc517cee3085c98d272f921017
+
+[13:52] <MasterDuke> anyone object if i merge https://github.com/MoarVM/MoarVM/pull/1291 so it gets some time for testing before the release?
+
+[13:55] <[Coke]> it says it's a gcc plugin but is modifying source also? (just checking)
+
+[13:56] <MasterDuke> yep. fixing the things the plugin found
+
+[14:03] <dogbert11> What should we do with https://github.com/MoarVM/MoarVM/pull/1302
+
+[14:04] <MasterDuke> merge it too
+
+[14:04] <MasterDuke> hopefully Altai-man_ can do a Blin run this weekend
+
+[14:06] <Altai-man_> Sure thing.
+
+[14:17] <timotimo> i have no clue if blosc can do very much for the heap snapshot profiler; that page seems to focus on speed, and better compression rates would be reached by a good selection of filters for different parts of the data i guess?
+
+[14:24] <MasterDuke> i guess i'm thinking reducing memory use. if it's fast enough, compress/decompress collected data on the fly
+
+[14:35] <jnthn> OK, so...the require at https://github.com/libxml-raku/LibXML-raku/blob/master/lib/LibXML/Node.rakumod#L692 reposseses the native call, thus wiping out its body
+
+[14:38] <jnthn> But bizzarely, that only happens when spesh is enabled...
+
+[14:39] <nine> jnthn: that.....I was gonna suggest repossession as that's bitten me in that way too many times. I even had typed in the message and then deleted it again because how could that be a reason when it's about spesh?
+
+[14:40] <jnthn> Or more to the point, MVM_nativecall_restore_library only gets called when the specializer is on, which implies the library only got wiped out in that case
+
+[14:40] <jnthn> Well, spesh doesn't really enforce repossession barriers...
+
+[14:41] <jnthn> Or rather, the specialized code doesn't
+
+[14:42] <jnthn> But not sure why that'd be the issue
+
+[14:55] *** sena_kun joined
+[14:56] *** Altai-man_ left
+[15:04] <jnthn> nine: How exactly do the frames with nativecallinvoke come to exist? Is there any reason that doing a fastinvoke of one could go very wrong?
+
+[15:05] <jnthn> 'cus it seems to be the optimization of the invoke to that which is breaking
+
+[15:10] <nine> They're not that special https://github.com/rakudo/rakudo/blob/master/lib/NativeCall.rakumod#L441
+
+[15:10] <nine> nativecallinvoke means that it's not even a JIT compiled native call
+
+[15:10] <nine> Oh, of course, since you disabled the jit
+
+[15:11] <jnthn> Yeah, just looking at that now. Hmmm.
+
+[15:20] <nine> No, can't find anything. This is really the most mundane part of it all
+
+[15:31] <jnthn> If I disable rewriting to fastinvoke the bug goes away
+
+[15:32] <jnthn> oops
+
+[15:32] <jnthn> If I disable optimizing invoke_o at all the bug goes away
+
+[15:32] <jnthn> If I only disable rewriting to fastinvoke then it stays
+
+[15:32] <jnthn> This is really odd
+
+[15:41] <jnthn> gah, I found it
+
+[15:41] <jnthn> spesh didn't check if there was an invocation handler...which there is
+
+[15:42] <jnthn> grmbl, a whole afternoon for a tiny patch to fix something that I'm ripping out as a result of dispatch
+
+[15:42] <jnthn> At least it'll get into the next release...
+
+[15:44] <jnthn> How on earth didn't we hit this before, though...
+
+[16:02] <Geth> ¦ MoarVM: 63051257b5 | (Jonathan Worthington)++ | src/spesh/optimize.c
+
+[16:02] <Geth> ¦ MoarVM: Don't specialize invokes with invocation handlers
+
+[16:02] <Geth> ¦ MoarVM: 
+
+[16:02] <Geth> ¦ MoarVM: These don't actually wish to be directly invoked, but rather to have
+
+[16:02] <Geth> ¦ MoarVM: their invocation handler invoked. This applies to anything with a
+
+[16:02] <Geth> ¦ MoarVM: CALL-ME. Fixes https://github.com/jnthn/spreadsheet-xlsx/issues/2
+
+[16:02] <Geth> ¦ MoarVM: (although the code fixed here will end up going away as part of the
+
+[16:02] <Geth> ¦ MoarVM: dispatch work).
+
+[16:02] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/63051257b5
+
+[16:17] <[Coke]> jnthn++
+
+[16:17] <[Coke]> nine++
+
+[16:36] *** leont left
+[16:45] *** leont joined
+[16:46] *** dogbert11 left
+[16:54] *** Altai-man_ joined
+[16:56] *** sena_kun left
+[16:57] <timotimo> d'oh
+
+[17:49] *** zakharyas left
+[18:55] *** sena_kun joined
+[18:57] *** Altai-man_ left
+[19:07] *** zakharyas joined
+[20:51] *** zakharyas left
+[20:52] <timotimo> jnthn: how can we deal with bringing my changes to the moar heapanalyzer back to your upstream repo?
+
+[20:54] *** Altai-man_ joined
+[20:56] *** sena_kun left
+[20:59] <timotimo> it's not ... pretty :X
+
+[21:12] <jnthn> What in particular ins't pretty?
+
+[21:12] <jnthn> *isn't
+
+[21:12] <timotimo> only the code inside it. i should probably get rid of all usage of nqp:: ops
+
+[21:12] <timotimo> which i put in mostly for performance reasons
+
+[21:13] <timotimo> i'm also thinking moar could perhaps get a commandline flag that at the very least reads out the "highscores" and summary data for snaps inside a mvmheap file
+
+[21:13] <timotimo> (since moar already has zstd support for writing the heap snapshots anyway)
+
+[21:16] <timotimo> oh, hmm, if moar gets something that does low-level heap snapshot file access, perhaps there's no more need for a zstd library binding (though then rakudo-js and rakudo-jvm wouldn't be able to stand-alone read a file like that)
+
+[21:20] <timotimo> aha it's not even that many nqp ops
+
+[21:22] <timotimo> https://github.com/timo/p6-app-moarvm-heapanalyzer/blob/nqp-ops-make-stuff-faster/lib/App/MoarVM/HeapAnalyzer/Parser.pm6#L221 these three blocks use nqp to shovel integers of different sizes from a big buffer into a native int array of the given entrysize
+
+[21:23] <timotimo> https://github.com/timo/p6-app-moarvm-heapanalyzer/blob/nqp-ops-make-stuff-faster/lib/App/MoarVM/HeapAnalyzer/Parser.pm6#L352 - and here it's grabbing its value from an array with atpos_i
+
+[21:50] <jnthn> I'd prefer it be free of nqp:: ops, in so far as I like to set a good example
+
+[21:57] <timotimo> yeah
+
+[22:02] *** dogbert11 joined
+[22:55] *** sena_kun joined
+[22:56] *** Altai-man_ left

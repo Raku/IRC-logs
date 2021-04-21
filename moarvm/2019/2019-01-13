@@ -1,0 +1,534 @@
+[00:22] *** MasterDuke joined
+[00:22] *** p6bannerbot sets mode: +v MasterDuke
+
+[00:22] *** MasterDuke left
+[00:22] *** MasterDuke joined
+[00:22] *** herbert.freenode.net sets mode: +v MasterDuke
+
+[00:22] *** p6bannerbot sets mode: +v MasterDuke
+
+[00:22] <MasterDuke> timotimo++ the block was getting re-numbered
+
+[00:22] <MasterDuke> i found out some stuff
+
+[00:24] <MasterDuke> the block is entering optimize_plugin, but leaves via https://github.com/MoarVM/MoarVM/blob/master/src/spesh/optimize.c#L2126
+
+[00:26] <MasterDuke> so the speshresolve (which is there in the before when i look at the right BB) never gets turned into sp_speshresolve, and that then causes the jit BAIL later
+
+[00:28] <MasterDuke> i tried adding some very specific conditionals to get it past that return (e.g., if BB name is 'index' and the opcode is MVM_op_speshresolve), and then index does show up as jitted in a profile
+
+[00:29] <MasterDuke> however, it's significantly slower, because that causes ~800k deopts (instead of the 4 before my changes)
+
+[00:30] <timotimo> oh wow?
+
+[00:31] <timotimo> can you see what exactly it deopts on?
+
+[00:31] <MasterDuke> fwiw, when it gets to that return, count is 60, and agg_guard_index_count is 280
+
+[00:31] <MasterDuke> timotimo: i haven't checked that yet, how do i tell?
+
+[00:32] <timotimo> start with breakpoints in every deopt function, but i don't know how to figure out where exactly in the jitted code that would put you
+
+[00:32] <timotimo> and how you'd figure out
+
+[00:32] <timotimo> does turning jit off make it still do that?
+
+[00:33] <MasterDuke> still deopt after my change?
+
+[00:33] <timotimo> i mean can you turn the jit off so you can better see what those 800k deopts are
+
+[00:34] <timotimo> or does that make the deopt sitaution change?
+
+[00:35] <MasterDuke> i get about 600k deopts with the jit disabled
+
+[00:35] <MasterDuke> now i'll look into the deopt functions
+
+[00:36] <MasterDuke> oh, there's a MVM_LOG_DEOPTS, that might prove useful
+
+[00:39] <MasterDuke> hm, not sure how to interpret thes 3.3million line log file
+
+[00:39] <timotimo> isn't it the same output over and over?
+
+[00:39] <MasterDuke> yeah
+
+[00:39] <MasterDuke> 46 Deopt one requested by JIT in frame 'index' (cuid '4053') (302 -> 510)
+
+[00:40] <MasterDuke> 1127687     Recreated frame 'index' (cuid '4053')
+
+[00:40] <MasterDuke> 1127733 Completed deopt_one in 'index' (cuid '4053') with potential uninlining
+
+[00:40] <timotimo> the number in the last parenthesis is program counter before and after deopt
+
+[00:40] <timotimo> should be able to correlate that with the "pc" numbers in the spesh log
+
+[00:40] <timotimo> and i think in the deopt annotations, too
+
+[00:45] <MasterDuke> hm, both pc 302 and pc 510 are in is_narrower, not index
+
+[00:46] <timotimo> that's also why it's uninlining, right?
+
+[00:46] <MasterDuke> i guess, here's a relevant line from the spesh log: [Annotation: INS Deopt Inline (idx 9 -> pc 510; line 272)]
+
+[00:47] <MasterDuke> oh, and that is in BB 13 of index
+
+[00:55] <MasterDuke> anything i can do with this info?
+
+[00:55] <timotimo> the instruction after that is probably the one that caused the deopt
+
+[00:59] <MasterDuke> prepargs        callsite(0x7f83d272c4a0, 1 arg, 1 pos, nonflattening, interned)
+
+[00:59] <MasterDuke> arg_o           liti16(0),  r9(12)
+
+[00:59] <MasterDuke> [Annotation: INS Deopt One (idx 10 -> pc 528; line 272)]
+
+[00:59] <MasterDuke> [Annotation: Logged (bytecode offset 520)]
+
+[00:59] <MasterDuke> speshresolve    r14(10), lits(decontrv)
+
+[00:59] <MasterDuke> that's the end of the BB
+
+[01:07] <timotimo> i don't know under what circumstance speshresolve would deopt, tbh. though it could be that an op after that does teh actual deopt
+
+[01:07] <timotimo> what's the position in the interpreter frame?
+
+[01:09] <MasterDuke> uh, how do i find that?
+
+[01:11] <timotimo> "up" until you're in the interpreter
+
+[01:12] <timotimo> then "list" for context, or just "frame" for the line number
+
+[01:12] *** TimToady joined
+[01:13] *** p6bannerbot sets mode: +v TimToady
+
+[01:17] *** Ven`` left
+[01:19] *** lizmat left
+[01:20] <MasterDuke> src/core/interp.c:5577, i just put a breakpoint at uninline in src/spesh/deopt.c and this is the first one it it
+
+[01:21] <timotimo> hm, "call MVM_dump_bytecode(tc)" may not help
+
+[01:21] <timotimo> but perhaps it does
+
+[01:24] <MasterDuke> https://gist.github.com/MasterDuke17/0c79660a0688abf9fca6e1185a5d47f5
+
+[01:25] <timotimo> it sometimes doesn't understand where the instruction pointer actually is
+
+[01:26] <timotimo> yeah, there is no --> in there at all
+
+[01:26] <MasterDuke> src/core/interp.c:5553 according to the backtrace
+
+[01:27] <MasterDuke> which is in             OP(sp_guard): {
+
+[01:40] <timotimo> my head aches :\
+
+[01:44] <MasterDuke> debugging weird deopt stuff is probably not prescribed by 9 out of 10 doctors
+
+[02:24] *** Kaypie is now known as Kaiepi
+
+[04:02] *** MasterDuke left
+[04:28] *** Kaiepi left
+[04:28] *** Kaiepi joined
+[04:29] *** p6bannerbot sets mode: +v Kaiepi
+
+[08:18] *** lizmat joined
+[08:18] *** p6bannerbot sets mode: +v lizmat
+
+[08:35] *** domidumont joined
+[08:36] *** p6bannerbot sets mode: +v domidumont
+
+[08:47] *** robertle left
+[09:19] *** robertle joined
+[09:20] *** p6bannerbot sets mode: +v robertle
+
+[10:14] <nine> Ok, as I understand it, when we deserialize a comp unit we take all repossessions we find there and move those objects to the new owning SC. We later got through this list and add dependencies to all those SCs. This part makes sense to me.
+
+[10:15] <nine> What doesn't make sense is why apprarently one and only one NQPRoutine from Perl6::Grammar gets repossessed into CompUnit::Repository::Staging in the first place.
+
+[10:15] <nine> Even weirder, that NQPRoutine is worryobs which is not even used anywhere. When I remove it from the grammar, worry ends up getting repossessed instead.
+
+[10:38] <timotimo> nine: something closure related maybe for some reason?
+
+[10:49] <lizmat> feels like an off-by-one error to me
+
+[10:54] <nine> Apparently it's a write barrier hit by the bindkey in this line in quote_lang: my $quote_lang := nqp::existskey(%quote_lang_cache, $key) && $key ne 'NOCACHE' ?? %quote_lang_cache{$key} !! (%quote_lang_cache{$key} := con_lang());
+
+[10:55] <nine> Fun fact: directly above this method in the source code there's a: nqp::neverrepossess(%quote_lang_cache);
+
+[11:00] <nine> So if the stated intent of the code is that this hash is never repossessed and yet we repossess it, I'd say there's a bug somewhere
+
+[11:08] <nine> Oh and the argument lists in gdb's backtraces shows you the current value of those arguments. Not the values the function was called with.
+
+[11:08] <timotimo> oh, that's good to know
+
+[11:19] <nine> Removing the %quote_lang_cache does indeed fix the whole issue!
+
+[11:20] <timotimo> wowza
+
+[11:24] <nine> So I now have 3 workarounds. But at least this last one points at the actual problem
+
+[11:38] <nine> I think the call to nqp::neverrepossess is just not enough. The cache will be serialized anyway and the flags are probably not part of the serialized data. So we deserialize it during precompilation of a module and happily go on repossess it during the parse.
+
+[11:39] <timotimo> oh, that could totally be the problem here
+
+[11:41] <nine> Maybe this was even the root cause for why I never got in-process-precompilation to work. I gave up when I came across repossession related dependencies that I couldn't explain.
+
+[11:47] *** kiwi_87 joined
+[11:47] *** p6bannerbot sets mode: +v kiwi_87
+
+[11:47] *** kiwi_87 left
+[11:50] <timotimo> whoa
+
+[11:50] <timotimo> spooky
+
+[11:51] <nine> I'd love to just remove %quote_lang_cache or move it to an attribute of role STD, but that'd cost > 10 seconds in settings compilation time :/
+
+[11:52] <timotimo> then we fix "never repossess"
+
+[11:52] <timotimo> or maybe it'd be enough to call that again in the mainline of the containing module
+
+[12:52] *** lucasb joined
+[12:52] *** p6bannerbot sets mode: +v lucasb
+
+[13:31] *** patrickb joined
+[13:32] *** p6bannerbot sets mode: +v patrickb
+
+[14:23] *** MasterDuke joined
+[14:23] *** p6bannerbot sets mode: +v MasterDuke
+
+[14:23] *** MasterDuke left
+[14:23] *** MasterDuke joined
+[14:23] *** herbert.freenode.net sets mode: +v MasterDuke
+
+[14:23] *** p6bannerbot sets mode: +v MasterDuke
+
+[14:24] <MasterDuke> jnthn: did you happen to see any of my conversation with timotimo++ last night? any recommendations for further debugging?
+
+[14:31] <MasterDuke> timotimo: likewise, i'll have a little time today if you have anything else for me to try
+
+[14:33] *** dogbert17 joined
+[14:34] *** p6bannerbot sets mode: +v dogbert17
+
+[14:38] <MasterDuke> huh, i just got `free(): corrupted unsorted chunks` when re-running the last part of the install but with a spesh log: `MVM_SPESH_LOG=s.log ./perl6-m tools/build/install-core-dist.p6 /home/dan/Source/perl6/install/share/perl6`
+
+[15:24] *** bisectable6 left
+[15:29] *** shareable6 left
+[15:29] *** greppable6 left
+[15:29] *** benchable6 left
+[15:29] *** undersightable6 left
+[15:29] *** releasable6 left
+[15:29] *** notable6 left
+[15:29] *** squashable6 left
+[15:29] *** undersightable6 joined
+[15:30] *** greppable6 joined
+[15:30] *** p6bannerbot sets mode: +v undersightable6
+
+[15:30] *** squashable6 joined
+[15:30] *** notable6 joined
+[15:31] *** p6bannerbot sets mode: +v greppable6
+
+[15:31] *** p6bannerbot sets mode: +v squashable6
+
+[15:31] *** releasable6 joined
+[15:31] *** bisectable6 joined
+[15:31] *** p6bannerbot sets mode: +v notable6
+
+[15:32] *** benchable6 joined
+[15:32] *** p6bannerbot sets mode: +v releasable6
+
+[15:32] *** p6bannerbot sets mode: +v bisectable6
+
+[15:32] *** p6bannerbot sets mode: +v benchable6
+
+[15:33] *** shareable6 joined
+[15:33] *** p6bannerbot sets mode: +v shareable6
+
+[16:00] *** brrt joined
+[16:01] *** p6bannerbot sets mode: +v brrt
+
+[16:09] *** zakharyas joined
+[16:10] *** p6bannerbot sets mode: +v zakharyas
+
+[16:10] <brrt> \o
+
+[16:11] <brrt> I'm thinking of moving the 3-operand to two-operand form conversion into the register allocator
+
+[16:11] <brrt> probably protected by conditional compilation, because not every dialect uses it
+
+[16:19] <MasterDuke> brrt: off-topic, but is there some reason https://github.com/MoarVM/MoarVM/tree/jit-moar-ops wasn't merged?
+
+[16:19] <MasterDuke> also, is this comment still correct? https://github.com/MoarVM/MoarVM/blob/master/src/jit/core_templates.expr#L236-L240
+
+[16:20] <brrt> MasterDuke: ehm
+
+[16:20] <brrt> yes
+
+[16:20] <brrt> that's still correct
+
+[16:20] <brrt> I'm working on that
+
+[16:21] <brrt> But, it would've broken the nativecall-jit thing that nine++ has developed
+
+[16:21] <brrt> which would've meant a slowdown
+
+[16:22] <brrt> I didn't want to push that, but fixing it completely needed floating point support
+
+[16:22] <brrt> and here I am :-)
+
+[16:22] <MasterDuke> ah, cool
+
+[16:23] <brrt> hmm
+
+[16:23] <brrt> I"m not sure about jit-moar-ops
+
+[16:39] <brrt> hmm
+
+[16:39] <brrt> no, I just have no idea
+
+[16:42] <Geth> ¦ MoarVM/jit-expr-optimizer: 4 commits pushed by (Bart Wiegmans)++
+
+[16:42] <Geth> ¦ MoarVM/jit-expr-optimizer: 1740094621 | [JIT] Simple tree-rewriting optimizer
+
+[16:42] <Geth> ¦ MoarVM/jit-expr-optimizer: b6181b932e | [JIT] Optimize multiple loads to a COPY
+
+[16:42] <Geth> ¦ MoarVM/jit-expr-optimizer: a59b6f9574 | Optimize ADD of CONST to ADDR
+
+[16:42] <Geth> ¦ MoarVM/jit-expr-optimizer: 9f869a1f7a | Eliminate COPY of CONST
+
+[16:42] <Geth> ¦ MoarVM/jit-expr-optimizer: review: https://github.com/MoarVM/MoarVM/compare/2dc8f8ec4353...9f869a1f7a9d
+
+[16:42] <brrt> at the risk of starting yet *another* branch....
+
+[16:44] <MasterDuke> is it easy to know when an SC's root_objects won't have anything more added to it?
+
+[16:45] <brrt> not that I know of
+
+[16:50] <Geth> ¦ MoarVM/expr-jit-invoke: 132e980222 | (Bart Wiegmans)++ | 4 files
+
+[16:50] <Geth> ¦ MoarVM/expr-jit-invoke: [JIT] Implement invoke sequence in expr JIT
+
+[16:50] <Geth> ¦ MoarVM/expr-jit-invoke: review: https://github.com/MoarVM/MoarVM/commit/132e980222
+
+[16:50] <Geth> ¦ MoarVM/expr-jit-invoke: 4dd9cd3e24 | (Bart Wiegmans)++ | src/jit/graph.c
+
+[16:50] <Geth> ¦ MoarVM/expr-jit-invoke: [JIT] Eliminate special consume_invoke opcode
+
+[16:50] <Geth> ¦ MoarVM/expr-jit-invoke:
+
+[16:50] <Geth> ¦ MoarVM/expr-jit-invoke: Except for nativecall_invoke, we no longer need this part of the
+
+[16:50] <Geth> ¦ MoarVM/expr-jit-invoke: legacy JIT.
+
+[16:50] <Geth> ¦ MoarVM/expr-jit-invoke: review: https://github.com/MoarVM/MoarVM/commit/4dd9cd3e24
+
+[16:50] <Geth> ¦ MoarVM/expr-jit-invoke: 695d5e04d5 | (Bart Wiegmans)++ | 7 files
+
+[16:50] <Geth> ¦ MoarVM/expr-jit-invoke: [JIT] WIP on nativeinvoke in the expression JIT
+
+[16:50] <Geth> ¦ MoarVM/expr-jit-invoke: review: https://github.com/MoarVM/MoarVM/commit/695d5e04d5
+
+[16:58] <Geth> ¦ MoarVM/jit-expr-float: 9 commits pushed by (Bart Wiegmans)++
+
+[16:58] <Geth> ¦ MoarVM/jit-expr-float: 05daa3ce0c | [DynASM] Take in REX encoding fix
+
+[16:58] <Geth> ¦ MoarVM/jit-expr-float: 614ddfdfc0 | [JIT] Use bitmap for free register set
+
+[16:58] <Geth> ¦ MoarVM/jit-expr-float: b7984a496c | [JIT] Autogenerate tile predeclarations
+
+[16:58] <Geth> ¦ MoarVM/jit-expr-float: 197543077e | [JIT] Move JIT-compile support libs to tools/lib
+
+[16:58] <Geth> ¦ MoarVM/jit-expr-float: a20b86a677 | [JIT] Parse oplist operands
+
+[16:58] <Geth> ¦ MoarVM/jit-expr-float: 902fe6d4fa | [JIT] Basic expression support for floating point operators
+
+[16:58] <Geth> ¦ MoarVM/jit-expr-float: 0b9ae2a633 | [JIT] Split type check from expr type resolution
+
+[16:58] <Geth> ¦ MoarVM/jit-expr-float: 1899e71c12 | [JIT] More rigorous type checking
+
+[16:58] <Geth> ¦ MoarVM/jit-expr-float: 98bd613c39 | [JIT] Make STORE polymorphic on input
+
+[16:58] <Geth> ¦ MoarVM/jit-expr-float: review: https://github.com/MoarVM/MoarVM/compare/f95b73894549...98bd613c3942
+
+[16:59] <MasterDuke> brrt: another random question, could settypecache and setmethcache be jitted?
+
+[16:59] <brrt> I don't know what these do
+
+[17:00] <brrt> I don't see why not
+
+[17:00] <brrt> It'd be kind of a pain in the expression JIT now because it can't express loops
+
+[17:01] <MasterDuke> yeah, looks like their implementation would have to (at least partially) be moved out into a function
+
+[17:03] *** zakharyas left
+[17:11] *** brrt left
+[17:37] *** zakharyas joined
+[17:38] *** p6bannerbot sets mode: +v zakharyas
+
+[17:38] <robertle> can anyone explain to me how moarvm decides when to do GC? does it depend on some sort of "memory pressure"? is moarvm aware of some sort of max heap size? like the -Xmx settings on jvm?
+
+[18:02] *** lucasb left
+[18:10] <nine> robertle: MoarVM starts a collection run when a thread's nursery runs out of space. The nursery's size is defined by MVM_NURSERY_SIZE in src/gc/collect.h and is currently set at 4 MiB.
+
+[18:12] <nine> robertle: the start of full collections is documented as "This is determined by looking at the amount of memory that has been promoted to generation 2 relative to the overall heap size, and possibly other factors (this has been tuned over time and will doubtless be tuned more; see the code)."
+
+[18:12] <nine> in docs/gc.markdown
+
+[18:29] <timotimo> nurseries also start smaller for threads other than the main thread
+
+[18:34] <nine> So I have worked on this repossession thing all weekend and this is what I have actually done about it in the end: https://build.opensuse.org/package/view_file/home:niner9:branches:devel:languages:perl6/perl6-Inline-Perl5/repossession-workaround.diff?expand=1
+
+[18:38] <timotimo> you just put them together in the same file?
+
+[18:39] <nine> yep :) That's a workaround that I could have done on Friday already.... Anyway I still want to fix this for real but I need a solution tomorrow and I'm running out of time.
+
+[18:39] <timotimo> understandable
+
+[18:40] <nine> Our new year's resolution at $work is to switch to Perl 6 for all new functionality instead of just using it at the fringes. Last Friday I gave a little presentation on how to do this with our Catalyst applications and that's where I discovered that the Inline::Perl5 package that's installed on our servers was horribly broken.
+
+[18:41] <timotimo> damn!!
+
+[18:41] <timotimo> horribly broken but not caught by tests
+
+[18:41] <timotimo> or something?
+
+[18:41] <nine> No, because it only appeared when the module is installed through CompUnit::Repository::Staging which is only used when creating rpm packages. Zef doesn't use it yet.
+
+[18:42] <timotimo> ah, ok
+
+[19:06] *** zakharyas left
+[19:12] *** brrt joined
+[19:13] *** p6bannerbot sets mode: +v brrt
+
+[19:17] <robertle> nine: will read up on that, but to me this sounds like there is no way to tell moar how much heap to use? "realtive to the
+
+[19:17] <robertle>  overall heap size" is a bit ambiguous in that
+
+[19:17] <timotimo> it'll just grow as it needs to
+
+[19:18] <timotimo> there's no "start at this" or "stop at this" parameter
+
+[19:20] <robertle> ok, thanks
+
+[19:21] <timotimo> do you want to implement it so that starting perl6 only takes 5 megabytes of ram? :) :)
+
+[19:25] *** zakharyas joined
+[19:26] *** p6bannerbot sets mode: +v zakharyas
+
+[19:33] <brrt> we'll need a bit more than a max-heap-size parameter
+
+[19:33] <brrt> imho, heap size parameter tweaking is the worst bit of the java platform
+
+[19:33] <brrt> btw, we don't support finalization, do we?
+
+[19:35] *** MasterDuke left
+[19:58] <nine> brrt: finalization?
+
+[20:03] <lizmat> .oO( this is the end, my friend )
+
+[20:07] <brrt> yes, as in, running a piece of code if an object is deleted
+
+[20:08] <nine> We do: submethod DESTROY
+
+[20:08] <brrt> :-(
+
+[20:08] <brrt> oh well
+
+[20:09] <nine> Sucks to support it, sucks to not have it...
+
+[20:15] *** zakharyas left
+[20:25] *** domidumont left
+[20:32] <brrt> yeah
+
+[20:40] <robertle> I agree that the constant fiddling with heap settings is super annoying in java, but at the same time I find it hard to see how a runtime can make quality decisions on GC without knowing the cost of increasing the heap. if I have plenty of memory, I might want to GC less frequently
+
+[20:40] <robertle> but I am not complaining by any means, I am trying to understand and steal some ideas for my own totally sub-standard GC :)
+
+[20:42] <robertle> one thing I noted was that I can increase my heap easily if required, but it is really hard to give anything back to the OS. so what work I have done in the past can easily affect my GC decisions now, which seems weird too
+
+[20:44] <brrt> so the thing is
+
+[20:44] <brrt> you can't
+
+[20:44] <brrt> this is the signature weakness of the whole model
+
+[20:45] <brrt> and it is *the* reason why java is, above all, an *application* language
+
+[20:46] <robertle> what do you mean with "you cann't"? give back ram?
+
+[20:46] <brrt> You can't determine what is the 'correct' amount of memory use, from the limited PoV of the VM
+
+[20:46] <brrt> given that the VM is a user process among equals
+
+[20:46] <robertle> ah, I get it
+
+[20:46] <robertle> yeah
+
+[20:46] <robertle> hence the annoying tuning
+
+[20:47] <brrt> The thing that you can do is assume you own the whole machine
+
+[20:48] <robertle> which is really terrible
+
+[20:48] <brrt> indeed
+
+[20:48] <brrt> so there's this meme, for lack of a better word, this concept among IT folks that java is an excellent systems langauge
+
+[20:48] <brrt> And it's not
+
+[20:49] <brrt> It has this dumb lazy loading stuff that is totally unsuitable for the job
+
+[20:49] <brrt> it has a smalltalk-ish 'we own your box' idea, that is totally unsuitable as well
+
+[20:50] <robertle> I guess most java people have gotten used to allocating memory to their processes
+
+[20:50] <brrt> The alternative is actually letting the JVM own your box, but if you do that, now suddenly java's GC has to fight its thread model to GC however many GB your heap is
+
+[20:51] <brrt> and oracle can pay PhD's to design any number of GC algorithms with ever more evil names
+
+[20:51] <robertle> right, that's the other part: if you collect less frequently you get more total throughput, but the individual GC pauses go up
+
+[20:51] <brrt> oh, yes
+
+[20:51] <brrt> and what about cache locality during tracing
+
+[20:51] <brrt> (i.e. there is none)
+
+[20:53] <robertle> right, but we do agree that collecting too often isn't good either of course. so what I am struggling is how to determine the right frequency. currently I collect every N objects, which is of course dumb
+
+[20:53] <robertle> you are saying moar does collect every time it has allocated a certain fraction of the total heap
+
+[20:53] <robertle> certainly better
+
+[20:54] <robertle> java has this idea of memory pressure, that it allocates more frequently if it gets short on heap space
+
+[20:55] <robertle> also: when do you extend your heap? I am thinking when the "net" usage of the heap has reached some level
+
+[20:57] <brrt> I don't know that precisely
+
+[20:59] <Geth> ¦ MoarVM: czurnieden++ created pull request #1034: adapt bigint handling to new LibTomMath version
+
+[20:59] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1034
+
+[21:16] *** patrickb left
+[21:30] *** brrt left
+[21:36] *** Kaiepi left
+[21:38] *** Kaiepi joined
+[21:38] *** p6bannerbot sets mode: +v Kaiepi
+
+[23:14] *** MasterDuke joined
+[23:14] *** p6bannerbot sets mode: +v MasterDuke
+
+[23:14] *** MasterDuke left
+[23:14] *** MasterDuke joined
+[23:14] *** herbert.freenode.net sets mode: +v MasterDuke
+
+[23:14] *** p6bannerbot sets mode: +v MasterDuke
+
+[23:16] <MasterDuke> jnthn: have you seen any of my questions the past day or so? timotimo++ helped me figure out the index()/speshresolve problem seems to be deopt related, but i'm now *way* over my head
+
+[23:23] <jnthn> MasterDuke: No, haven't really been about here much over the weekend
+
+[23:23] <jnthn> Will take a look tomorrow
+
+[23:23] <jnthn> Certainly too tired now to think about deopt things :)
+
+[23:25] <MasterDuke> cool, thanks
+

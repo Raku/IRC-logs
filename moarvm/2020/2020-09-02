@@ -1,0 +1,586 @@
+[01:33] *** evalable6 left
+[01:33] *** linkable6 left
+[01:36] *** linkable6 joined
+[01:36] *** evalable6 joined
+[02:16] *** squashable6 left
+[02:18] *** squashable6 joined
+[04:01] *** MasterDuke left
+[06:00] <nwc10> good *, #moarvm 
+
+[06:48] *** MasterDuke joined
+[07:41] *** colomon__ joined
+[07:41] *** colomon_ left
+[08:19] *** sena_kun joined
+[08:54] <jnthn> morning o/
+
+[08:54] <tellable6> 2020-09-01T14:04:13Z #raku <[Coke]> jnthn: can you add your employer to the RSC nomination doc?
+
+[09:02] <nwc10> \o
+
+[09:34] <jnthn> Uff, doing a rebase of new-disp onto master isn't quite easy...
+
+[09:39] <nwc10> my fault? :-(
+
+[09:41] <jnthn> Yeah, though it's maybe not quite so bad as I feared 
+
+[09:41] <jnthn> Coffee is starting to work... :)
+
+[09:41] * timotimo excited to hear about new-disp getting back onto jnthn's desk
+
+[09:42] <nwc10> I *had* thought that ASAN was excited by new-disp, but I can't recraete it currently
+
+[09:45] *** Altai-man joined
+[09:47] *** sena_kun left
+[09:51] <jnthn> src/disp/syscall.h:36:5: error: unknown type name ‘UT_hash_handle’ UT_hash_handle hash_handle;
+
+[09:51] <jnthn> Yeah, I introduced a new hash...
+
+[09:52] <nwc10> oh righto. mmm.
+
+[09:53] <timotimo> shouldn't be harder to use the new hash kind
+
+[09:53] <jnthn> So now I guess I need to figure out how to adapt this.
+
+[09:53] <timotimo> but is it enough to change some names?
+
+[09:53] <timotimo> like, type names and function names?
+
+[09:54] <jnthn> Dunno.
+
+[09:54] <timotimo> nwc10 would know :)
+
+[09:55] <jnthn> nwc10: It's a hash keyed on MVMString* (though can be on char* too) to a C structure; which is the appropriate kind of hash?
+
+[09:55] <nwc10> MVM_fixkey_hash with `name` as the key?
+
+[09:55] <nwc10> at a guess
+
+[09:55] <nwc10> because that's the one where the body doesn't move once you've created one
+
+[09:55] <jnthn> No, in fact the bodys are `static` data :)
+
+[09:55] <jnthn> So it's not even allocated
+
+[09:56] <nwc10> hangon, I'm a bit struggling with too many things here. $ork exists
+
+[09:56] <nwc10> the cheating suggestion is
+
+[09:56] <timotimo> $ork and the alien mindbenders
+
+[09:56] <nwc10> look at many of the things like the dll registery and the extops registry and the nativecall stuff
+
+[09:57] <nwc10> and see which one is closest to the semantics needed
+
+[09:57] <nwc10> and cheat from there
+
+[09:57] <nwc10> and it looks like one of the others, but I forget which
+
+[09:57] <nwc10> [grepping]
+
+[10:00] <nwc10> MVMContainerRegistry
+
+[10:00] <nwc10> commit 040e9d6358cd65dfafb6e5403148c5f72c359e63
+
+[10:00] <linkable6> (2020-05-31) https://github.com/MoarVM/MoarVM/commit/040e9d6358 Implement MVMStrHash, which is UT Hash rearranged to be "right way out".
+
+[10:01] <nwc10> IIRC that was the one with 3 static structures defined in the C code, and then a hash lookup needed for them.
+
+[10:07] * jnthn tries to grok fixkey vs str
+
+[10:07] <nwc10> fixkey indirects
+
+[10:07] <nwc10> it keeps the allocated "thing" in a block of memory that doesn't move
+
+[10:07] <jnthn> ah, ok
+
+[10:08] <nwc10> regular str inlines the allocated "thing" in the top level (ie only) array of hash entries
+
+[10:09] <nwc10> so it might move (on insert or delete of other keys)
+
+[10:09] <jnthn> I'm not allocating anything here really; it's all static memory
+
+[10:09] <nwc10> yes, so a small C structure, which has a pointer to the static memory
+
+[10:09] <jnthn> ah, I need to introduce another struct. OK
+
+[10:09] <nwc10> might be the right thing (in a "str" hash)
+
+[10:09] <jnthn> Yeah, that's what container configurer does. Was trying to see if I could avoid that :)
+
+[10:09] <nwc10> but for the "str" hash you can't perma-root the MVMString * keys
+
+[10:09] <nwc10> (because they might move)
+
+[10:10] <nwc10> whereas a fixkey hash, because of the indirection
+
+[10:10] <nwc10> the key can be in the permanent root set
+
+[10:11] <jnthn> ah, my key is in the permanent root set
+
+[10:12] <nwc10> then that means either: fixkey hash
+
+[10:12] <nwc10> or "take it out of the permanent roots set, str hash, and adding code to root.c"
+
+[10:12] <nwc10> the former seems easier.
+
+[10:12] <jnthn> OK, back to fixkey hash then :)
+
+[10:13] <nwc10> when I was making those sort of choices, I was guessing also that it was slightly more performant. trade off being "indirection" vs "an iterator loop for every GC run"
+
+[10:16] <MasterDuke> i'm not paying 100% attention here, but would this not-moving thing be useful to reinstate that spesh optimization that had to be tossed? the sp_gethashentryvalue op
+
+[10:16] <nwc10> likely not, because that's for the MVMHash
+
+[10:16] <nwc10> which is a 2 pointer structure
+
+[10:17] <nwc10> and you'd have to replace it with a 1 pointer indirecting to a 2 pointer struct
+
+[10:17] <nwc10> so 50% larger, 1 more pointer chase, for *every* NQP-visible hash
+
+[10:18] <nwc10> If the NQP implementation exposed two different hashes to the NQP language level
+
+[10:18] <nwc10> one where "samller, but things move" and "slightly larger, but they don't"
+
+[10:19] <jnthn> Hm, but given I've static memory to point at, and fixkey hash seems to want to allocate for me anyway, so I'll need an indirection struct whatever I do...
+
+[10:19] <nwc10> then the relevant code could choose to use the "slightly larger" hash for whatever-it-is that matters
+
+[10:19] <nwc10> jnthn: yes, sometimes you can't win :-(
+
+[10:19] <jnthn> ...then it may be more efficient to be using the strhash, and just having it marked
+
+[10:19] <jnthn> Since iiuc the fixkey hash will make it 2 levels of indirection
+
+[10:19] <nwc10> it would
+
+[10:20] <jnthn> OK, then strhash
+
+[10:20] <nwc10> but
+
+[10:20] <nwc10> as I sort of am guessing it here
+
+[10:20] <nwc10> if your "static" structure is `struct MVMDispSysCall ~
+
+[10:20] <nwc10> then I think you ned up needing
+
+[10:21] <nwc10> struct MVMDispSysCall {
+
+[10:21] <nwc10>     struct MVMStrHashHandle hash_handle;
+
+[10:21] <nwc10>     ... all the other stuff
+
+[10:21] <nwc10> };
+
+[10:22] <nwc10> where "all the other stuff" is all the current members, *except* `name` and `hash_handle`;
+
+[10:22] <nwc10> because the new hash_handle struct contains the key, which is the name.
+
+[10:39] <MasterDuke> too bad, definite slowdown in accessing dyn vars compared to 2020.07
+
+[10:40] <jnthn> I've got that bit building again and am through the rebase, but the end result doesn't build 'cus it iterated a hash somewhere that has now gone away
+
+[10:45] <jnthn> ah, I just need to find the new way to iterate an MVMHash in code :)
+
+[10:45] <jnthn> uh, from C code
+
+[10:48] <MasterDuke> committable6: 8fd029a3025307f8ccac11adeed77d170408b5a8~1,8fd029a3025307f8ccac11adeed77d170408b5a8 my $a; $a := $*OUT for ^5_000_000; say now - INIT now
+
+[10:49] <committable6> MasterDuke, ¦8fd029a3025307f8ccac11adeed77d170408b5a8~1: «6.3943207␤» ¦8fd029a: «7.86781435␤»
+
+[10:51] <Geth> ¦ MoarVM/new-disp: 156 commits pushed by (Jonathan Worthington)++, (Timo Paulssen)++, (Daniel Green)++
+
+[10:51] <Geth> ¦ MoarVM/new-disp: review: https://github.com/MoarVM/MoarVM/compare/fda7058dda49...b05fbb377c08
+
+[10:52] <jnthn> Well, it builds NQP and passes the NQP tests on the new-disp branch, so it can't be *that* broken
+
+[10:53] <timotimo> whew, already 156 commits
+
+[10:53] <jnthn> I didn't go back and rework all the commits in the branch to actually build, alas
+
+[10:54] <jnthn> Just have the fixup commits at the end
+
+[10:54] <timotimo> MasterDuke: looks like finding/accessing dynamic variables got a bit faster?
+
+[10:54] <timotimo> does that replicate on a local machine that's not doing anything else?
+
+[10:55] <MasterDuke> no the ~1 is before the nqp bump that brought in the moarvm with the new hash
+
+[10:55] <timotimo> ah dang
+
+[10:55] <MasterDuke> i haven't tried to replicate locally. but a couple different run with committable6 show relatively consistent results
+
+[10:56] <jnthn> o MoarVM syscall with name 'dispatcher-delegate' at gen/moar/BOOTSTRAP/v6c.nqp:4204  (/home/jnthn/dev/rakudo/blib/Perl6/BOOTSTRAP/v6c.moarvm:)
+
+[10:56] <jnthn> oh, right, I probably need to make the str keys in that strhash :)
+
+[10:56] <jnthn> *mark
+
+[10:56] <MasterDuke> linkable6: 8fd029a
+
+[10:56] <MasterDuke> Geth: 8fd029a
+
+[10:57] <timotimo> shareable6: 8fd029a
+
+[10:57] <shareable6> timotimo, https://whateverable.6lang.org/8fd029a
+
+[10:57] <timotimo> this one?
+
+[10:57] <MasterDuke> i was just trying to get a link to the commit in the rakudo repo
+
+[10:57] <timotimo> oh
+
+[10:58] <timotimo> linkable6: rakudo/8fd029a
+
+[10:58] <timotimo> linkable6: help
+
+[10:58] <linkable6> timotimo, Like this: R#1946 D#1234 MOAR#768 NQP#509 SPEC#242 RT#126800 S09:320 524f98cdc # See wiki for more examples: https://github.com/Raku/whateverable/wiki/Linkable
+
+[10:58] <timotimo> ok it's supposed to be able to do commits, but perhaps that one was too short?
+
+[10:58] <MasterDuke> 8fd029a3025307f8ccac11adeed77d170408b5a8
+
+[10:58] <linkable6> (2020-08-31) https://github.com/rakudo/rakudo/commit/8fd029a302 Bump NQP to get nwc10++ improved hash implementation
+
+[10:59] <Geth> ¦ MoarVM/new-disp: b2656d7011 | (Jonathan Worthington)++ | src/gc/roots.c
+
+[10:59] <Geth> ¦ MoarVM/new-disp: Mark dispatcher syscall hash
+
+[10:59] <Geth> ¦ MoarVM/new-disp: review: https://github.com/MoarVM/MoarVM/commit/b2656d7011
+
+[10:59] <MasterDuke> hm. maybe committable6, etc need to give longer hashes
+
+[11:00] <timotimo> actually would hope that committable and friends wouldn't always trigger linkable
+
+[11:00] <timotimo> which of course it could just filter by nickname
+
+[11:00] <jnthn> Yup, now Rakudo's rebased new-disp branch builds
+
+[11:01] <jnthn> Pushed rebases of all the new-disp
+
+[11:01] <timotimo> great
+
+[11:02] <jnthn> Which means...lunch time :) bbl
+
+[11:07] <timotimo> you would really expect the dynvar cache to give you performance unrelated to hash access? or is it hash-based too?
+
+[11:08] <timotimo> there's a dynvar cache performance analysis thing in moarvm plus a script to actually analyze the data it spits out
+
+[11:13] <timotimo> OK, MVM_get_lexical_by_name is the top result and it does have MVM_index_hash_fetch
+
+[11:14] <timotimo> but it could be that for this code it's actually not going via the hash route
+
+[11:14] <timotimo> there's a "if there's not enough lexical names, just linear-scan them" in there, too
+
+[11:14] <timotimo> and MVM_string_equal takes a lot of time there
+
+[11:24] <timotimo> oh, it's currently looking for $*PROMISE while inside &DYNAMIC
+
+[11:25] <nine> Yes, IIRC that's where the sp_gethashentryvalue optimization helped
+
+[11:33] <timotimo> who wants to measure if giving root temp push checking for going past the allocated number of temp roots an MVM_LIKELY or MVM_UNLIKELY makes any performance difference at all?
+
+[11:33] <timotimo> quite possible that gcc / clang already get it the right way around already
+
+[11:38] <timotimo> (gdb) print name[0].body.storage.strands[0]
+
+[11:38] <timotimo> $40 = {blob_string = 0x34cd7f0, start = 13, end = 14, repetitions = 0}
+
+[11:38] <timotimo> (gdb) print name[0].body.storage.strands[1]
+
+[11:38] <timotimo> $41 = {blob_string = 0x34cd7f0, start = 14, end = 15, repetitions = 0}
+
+[11:38] <timotimo> (gdb) print name[0].body.storage.strands[2]
+
+[11:38] <timotimo> $42 = {blob_string = 0x34cd7f0, start = 15, end = 18, repetitions = 0}
+
+[11:38] <timotimo> pfft.
+
+[11:38] <timotimo> this is $*OUT btw
+
+[11:39] <timotimo> i thought we had an optimization where concatenating a string to another when the parts fit it will just extend the last strand
+
+[11:46] *** sena_kun joined
+[11:48] *** Altai-man left
+[11:50] *** domidumont joined
+[11:51] *** domidumont left
+[11:56] <nwc10> jnthn: to avoid an assert() fail you need:
+
+[11:56] <nwc10> -#define MVM_REPR_CORE_COUNT                 48
+
+[11:56] <nwc10> +#define MVM_REPR_CORE_COUNT                 47
+
+[12:00] <nwc10> NQP happy, Rakudo has failures, those that I looked at were "Use of Nil in string contex"
+
+[12:00] <nwc10> er, context.
+
+[12:15] <jnthn> Hm, wonder how that didn't end up conflicting somewhere along the way
+
+[12:16] <jnthn> Hm, a bunch of new SIGSEGV in spectest
+
+[12:16] <nwc10> I didn't reach the spectest
+
+[12:17] <jnthn> Oh?
+
+[12:17] <jnthn> ah, debug build maybe
+
+[12:17] <Geth> ¦ MoarVM/new-disp: e3e771400a | (Jonathan Worthington)++ | src/6model/reprs.h
+
+[12:17] <Geth> ¦ MoarVM/new-disp: Correct REPR count; nwc10++
+
+[12:17] <Geth> ¦ MoarVM/new-disp: review: https://github.com/MoarVM/MoarVM/commit/e3e771400a
+
+[12:21] *** krunen left
+[12:22] *** krunen joined
+[12:23] <jnthn> grmbl, none of these feel inclined to SEGV when not being run as part of make spectest
+
+[12:25] <nwc10> I know exactly this feeling
+
+[12:25] <nwc10> timings?
+
+[12:25] <nwc10> or worse
+
+[12:25] <nwc10> I have this problem quite often
+
+[12:32] <jnthn> Dunno, the ones I'm looking at should, in theory, not be timing sensitive. All running with spesh blocking turned on
+
+[12:47] <timotimo> perhaps rr's "chaos mode" could help tease out the problematic execution path
+
+[12:50] <timotimo> otherwise, rr can record multi-process-containing things, too
+
+[12:52] *** brrt joined
+[13:06] *** domidumont joined
+[13:07] <nwc10> I tried rr but it doesn't like all the AMD CPUs I seem to have everywhere.
+
+[13:10] <brrt> \o
+
+[13:11] <brrt> what's the problem that requires rr
+
+[13:11] *** krunen left
+[13:13] *** domidumont left
+[13:13] <nwc10> o/
+
+[13:13] <nwc10> 13:16 < jnthn> Hm, a bunch of new SIGSEGV in spectest
+
+[13:13] <nwc10> 13:23 < jnthn> grmbl, none of these feel inclined to SEGV when not being run as part of make spectest
+
+[13:13] <nwc10> 13:25 < nwc10> I know exactly this feeling
+
+[13:15] *** squashable6 left
+[13:15] *** domidumont joined
+[13:16] *** squashable6 joined
+[13:17] <brrt> ah, I see
+
+[13:17] <brrt> yeah, that's hateful
+
+[13:19] <timotimo> rr uses a performance counter from the cpu that is apparently not reliable/exact enough on some AMD CPUs
+
+[13:21] <[Coke]> jnthn: ignore that employer request. (sent the initial ask directly to a few folks, followup based on convo with lizmat to disregard was just tagging several people)
+
+[13:21] <nwc10> timotimo: that part I didn't know. I didn't spot any "why" as to why AMD wasn't supported. I had just assumed "we're all using Intel; patches weclome"
+
+[13:21] <jnthn> [Coke]: I already added the info anyway
+
+[13:21] <[Coke]> jnthn++
+
+[13:22] <[Coke]> I think everyone knew yours already.
+
+[13:22] <jnthn> :D
+
+[13:22] <jnthn> Goodness, getting back into the dispatch stuff is some effort. :)
+
+[13:22] <jnthn> Probably because I left it at the point I had to solve a hard problem. :)
+
+[13:24] <timotimo> i got that from a ticket tracking the issue
+
+[13:24] <timotimo> https://github.com/mozilla/rr/issues/2034
+
+[13:26] <nwc10> aha, I didn't go looking into tickets
+
+[13:26] *** krunen joined
+[13:46] <jnthn> greppable6: &callsame
+
+[13:46] <greppable6> jnthn, 2 lines, 1 module: https://gist.github.com/3f61b735be32fb492603d6e714f3564e
+
+[14:10] *** domidumont left
+[14:11] *** domidumont joined
+[14:13] *** domidumont left
+[14:13] *** domidumont joined
+[14:13] <MasterDuke> hm. where was i with that zen slice vs whatever slice investigation?
+
+[14:14] <MasterDuke> i think i initially got sidetracked by the oddness with char ranges, but that was a red herring
+
+[14:17] <timotimo> that was a startling performance difference, right?
+
+[14:17] <MasterDuke> m: my @a = (^2_000).pick(*); my @b; @b = @a[] for ^1_000; say @b[(^@a).pick]; say @b[0]; say now - INIT now
+
+[14:17] <camelia> rakudo-moar a9371749f: OUTPUT: «1836␤1606␤1.88939135␤»
+
+[14:17] <MasterDuke> m: my @a = (^2_000).pick(*); my @b; @b = @a[*] for ^1_000; say @b[(^@a).pick]; say @b[0]; say now - INIT now
+
+[14:17] <camelia> rakudo-moar a9371749f: OUTPUT: «421␤1632␤4.4834577␤»
+
+[14:21] <MasterDuke> the whatever slice ends up in a cycle involving N calls to reify-at-least, that then each create a cycle involving two or three other calls and then back in reify-at-least
+
+[14:21] <timotimo> did i ever compare them with callgrind?
+
+[14:21] <MasterDuke> i don't recall seeing any numbers
+
+[14:21] <nwc10> I/O, I/O, it's off to async purgatory we go.
+
+[14:21] <nwc10> I'm still not convinced that async is the future
+
+[14:22] <timotimo> i hope it isn't a case of the profiler going wild
+
+[14:22] <nwc10> and the failure mode seems to be purgatory. Not hell.
+
+[14:22] <MasterDuke> but i'm not profiling and you can see the difference above
+
+[14:22] <nwc10> you know where you are with hell.
+
+[14:22] <timotimo> right, i meant more with that cycle you're refering to
+
+[14:22] <MasterDuke> and no, i added a print in reify-at-least and it goes crazy
+
+[14:23] <timotimo> OK
+
+[14:23] <MasterDuke> the numbers match up with what the profiler showed
+
+[14:27] <MasterDuke> with the array being just 100 elements, callgrind says 3.5B instructions for whatever, 1.3B instructions for zen
+
+[14:32] <MasterDuke> doubling it to 200 elements give 6.1B for whatever, 1.9B for zen
+
+[14:34] *** brrt left
+[14:40] <timotimo> it spends a whole lotta time "resolve_using_guards"ing
+
+[14:40] <timotimo> so my guess is perhaps in the one case it succeeds in inlining something very hot, in the other it doesn't
+
+[14:40] <MasterDuke> there are a ton of deopts
+
+[14:41] <MasterDuke> pretty much one for every call to reify-at-least that's not a start of a cycle
+
+[14:44] <MasterDuke> i think it's doing a type specialization for reify-at-least after the first couple hundred are all for one type, but then almost all of the rest of the hundreds of thousands of calls are with a different type
+
+[14:46] <MasterDuke> timotimo: do you know the answer to this question? https://colabti.org/irclogger/irclogger_log/moarvm?date=2020-08-23#l28
+
+[14:47] <jnthn> MasterDuke: It's correct; it never backs out at the moment.
+
+[14:47] <MasterDuke> k
+
+[14:48] <MasterDuke> jnthn: btw, did you happen to see that recent article (i saw it on HN) about jits and specializations and such?
+
+[14:48] <jnthn> Hm, which one? :)
+
+[14:48] <MasterDuke> it seemed like the sort of thing you'd be interested in
+
+[14:50] <MasterDuke> trying to think of some search terms to find it...
+
+[14:52] <timotimo> i wonder if it would be something for the spesh log
+
+[14:52] <timotimo> putting deopts in there
+
+[14:54] <MasterDuke> jnthn: https://webkit.org/blog/10308/speculation-in-javascriptcore/
+
+[14:55] <MasterDuke> timotimo: i manually added some prints, let me see if i can find that output
+
+[14:55] <jnthn> Hadn't seen that one; thanks
+
+[14:56] <MasterDuke> 246477 Deopt ones requested by interpreter because of sp_guardtype, got 'Rakudo::Iterator::Gather' but want 'Iterator'
+
+[14:56] <MasterDuke> 492954 Deopt ones requested by interpreter because of sp_guardtype, got 'List::Todo' but want 'Iterator'
+
+[14:58] <MasterDuke> timotimo: is ^^^ the sort of info you were thinking of?
+
+[15:01] <timotimo> right
+
+[15:02] <timotimo> but i mean specifically the MVMSpeshLog that records what happened in code to build specializations from
+
+[15:02] <MasterDuke> how easy would it be to "undo" a speshialization? count deopts and if they hit some multiple of successful calls remove the specialization and generate a new one?
+
+[15:03] <MasterDuke> what would that get us in this case?
+
+[15:04] <MasterDuke> it = the MVMSpeshLog
+
+[15:04] <MasterDuke> *that
+
+[15:04] <timotimo> well, it's a relatively cheap way to record stuff-that-happened
+
+[15:05] <timotimo> since the executing thread can just fire more and more info in there and the spesh worker will later figure out how it fits together
+
+[15:05] <MasterDuke> it seems to me that the underlying problem is the cycle that's happening. the cost of it is only exacerbated by the deopts
+
+[15:07] <timotimo> when it's in the interpreter, we could find out which exact guard in the bytecode does the deopt
+
+[15:07] <timotimo> and whether it's near the beginning or end
+
+[15:09] <timotimo> like, if it deopts near the end, the impact shouldn't be as terrible
+
+[15:09] <timotimo> if it deopts near the beginning, we'd be running at no-spesh speeds
+
+[15:09] <MasterDuke> ah, right
+
+[15:10] <timotimo> oh, can you measure how fast it runs when spesh is turned off?
+
+[15:11] <MasterDuke> for an array of 2k elems, 5.9s for whatever, 1.3s for zen
+
+[15:11] <timotimo> and your local timings with spesh were what again?
+
+[15:13] <MasterDuke> approx 2.8s for whatever, 0.2s for zen
+
+[15:13] <jnthn> Wow, even with the deopt horror it still comes out ahead...
+
+[15:15] <MasterDuke> committable6: releases my @a = (^1_000).pick(*); my @b; @b = @a[*] for ^1_000; say @b[0]; say now - INIT now
+
+[15:17] <committable6> MasterDuke, https://gist.github.com/9143496e37dedcce0f27dd4e1df64aff
+
+[15:18] <MasterDuke> eh, not seeing anything terribly useful in there
+
+[15:45] *** Altai-man joined
+[15:48] *** sena_kun left
+[16:02] <jnthn> This took quite a bit of coffee and snacks, but I think I've finally found a way to make a bunch of different outstanding dispatch needs boil down to one key addition to the model... Rough notes at https://gist.github.com/jnthn/1c1d717a235199bf045f9e5d3135c32a
+
+[16:03] <jnthn> I *think* this will all be enough for the specializer to see what is going on too
+
+[16:09] <nwc10> 'naks! My niece knows about 'naks!
+
+[16:11] <nwc10> I have read that and I can't comment usefully on it.
+
+[16:18] <jnthn> I wrote that and I'm not sure I can :P
+
+[16:19] *** zakharyas joined
+[16:19] <jnthn> But I'm happy that it at least seems to be one mechanism to deal with many things.
+
+[16:21] <nwc10> I was going to comment non-usefully that I'm sure that "cats" is a good thing, but then I realised that it's CATS and that seems, um, LTA: https://en.wikipedia.org/wiki/All_your_base_are_belong_to_us
+
+[16:43] *** brrt joined
+[17:19] *** domidumont left
+[17:19] *** domidumont joined
+[17:44] *** brrt left
+[18:31] *** sena_kun joined
+[18:32] *** Altai-man left
+[18:36] *** brrt joined
+[18:42] *** domidumont left
+[19:44] *** AlexDaniel left
+[19:45] *** AlexDaniel joined
+[19:45] *** AlexDaniel left
+[19:45] *** AlexDaniel joined
+[19:45] *** Altai-man joined
+[19:47] *** leont joined
+[19:48] *** sena_kun left
+[20:10] <MasterDuke> well, after a delay, i'm back at this. i think the deopt business is a larger scope problem that's not required to be fixed to improve the example above's behavior. i.e., fixing the reify-at-least cycle will also get rid of the deopts
+
+[21:16] *** zakharyas left
+[21:39] *** brrt left
+[22:00] *** [Coke] joined
+[22:00] *** [Coke] left
+[22:00] *** [Coke] joined
+[22:53] <timotimo> MasterDuke: do you think you can individually back out the optimization that relied on hash entries not moving?
+
+[22:54] <timotimo> that way we can split apart "merge of new hash" and "removal of that one optimization"
+
+[22:54] <timotimo> oh, wait, that's for the dynamic variable thing
+
+[22:54] <timotimo> not the star vs zen slice one
+
+[23:17] *** MasterDuke left
+[23:46] *** sena_kun joined
+[23:48] *** Altai-man left

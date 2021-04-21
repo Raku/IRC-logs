@@ -1,0 +1,336 @@
+[01:06] *** Geth left
+[02:03] *** frost-lab joined
+[07:10] *** domidumont joined
+[07:16] <nwc10> good *, #moarvm 
+
+[07:57] *** zakharyas joined
+[08:00] <MasterDuke> nine: https://github.com/MoarVM/MoarVM/blob/master/src/spesh/optimize.c#L1957 here i assume you mean?
+
+[08:08] <nine> MasterDuke: yes, that block has 2 early returns
+
+[08:09] *** domidumont left
+[08:10] <MasterDuke> yeah, just glancing through it nothing sticks out as to why infix:<**> would exit early
+
+[08:14] <MasterDuke> the 'after' of infix:<**> isn't very big, though `Bytecode size: 1025 byte` is probably still too big to inline
+
+[09:14] <jnthn> Much too big
+
+[09:15] <nwc10> such big | so uninlineable | bother
+
+[09:16] <MasterDuke> jnthn: have you seen https://github.com/rakudo/rakudo/pull/4320 ?
+
+[09:19] *** dogbert11 joined
+[09:19] <jnthn> Well, saw the description at least. Seems like it makes some cases faster and some cases slower?
+
+[09:21] <MasterDuke> yeah, positive exponents faster, negative ones slower (the positive case speedup decreases as the exponent increases though, since more time is spent in the actual pow_I, but i haven't confirmed if the converse is true for negative exponents)
+
+[09:21] *** dogbert17 left
+[09:22] <jnthn> Oh, but we're forcing a bunch of cases through Num that we weren't before
+
+[09:22] <jnthn> That seems like it'll change results
+
+[09:22] <jnthn> Or at least risk losing precision?
+
+[09:23] <MasterDuke> well, it passes a spectest
+
+[09:23] <jnthn> Still makes me a bit uneasy
+
+[09:24] <nwc10> Num to do what operation?
+
+[09:25] <jnthn> I'm certainly not a numerics expert, but it feels risky just out of the fact that given n, 1 / n as a Rat can hold more precision than 1 / n as a double, because an entire double is 64 bits, but the denominator of the Rat is alone 64 bits
+
+[09:26] <jnthn> The significand of the double is only 53 bits
+
+[09:26] <jnthn> nwc10: See the change proposed in https://github.com/rakudo/rakudo/pull/4320/files
+
+[09:26] <nwc10> thanks
+
+[09:28] <MasterDuke> it just seems a little crazy that we're only using the Num return capability of pow_I to signal an error case
+
+[09:31] <MasterDuke> i'm certainly even less of a numerics expert, so please keep the comments/review/suggestions coming
+
+[09:32] <jnthn> Is it only ever used for error cases?
+
+[09:33] <jnthn> If you want to try and get it below the inline limit, extracting the error handling part is likely to be a win
+
+[09:34] <MasterDuke> currently, yes. pow_I returns a Num on (over/under)flow or when the exponent is negative
+
+[09:35] <MasterDuke> but right now we negate a negative exponent and then manually construct the Rat
+
+[09:36] <MasterDuke> ah, got the negative case slowdown to only ~3.1s
+
+[09:37] <MasterDuke> by using more nqp:: ops, but bytecode size is unchanged
+
+[09:38] <jnthn> Yeah, I think always passing a positive to pow_I is probably the right way to do this
+
+[09:38] <nwc10> stuff in $other that I need to pay attention to
+
+[09:38] <nwc10> but I don't get that 1/ bit - it originates in commit 563abdd46845d70483a21180c817de516003309c
+
+[09:38] <jnthn> I do note that it checks b > 0 in two different places
+
+[09:38] <jnthn> In the original code
+
+[09:38] <jnthn> Which seems a bit wasteful too
+
+[09:38] *** linkable6 left
+[09:38] <nwc10> oh, ah, yes I do
+
+[09:39] *** linkable6 joined
+[09:39] <MasterDuke> yeah, if we're going to always pass a positive exponent then i'd work to not do that twice
+
+[09:42] *** dogbert17 joined
+[09:42] <MasterDuke> might make sense to change the nqp op, can simplify the moarvm implementation then
+
+[09:43] <MasterDuke> until/unless we switch to gmp, and then additionally use their rationals
+
+[09:45] *** dogbert11 left
+[09:58] *** MasterDuke left
+[09:58] *** MasterDuke joined
+[10:01] <MasterDuke> jnthn: oh, back to inlining, why does spesh end up in https://github.com/MoarVM/MoarVM/blob/master/src/spesh/optimize.c#L1957 instead of saying it can't inline infix:<**> because it's too big?
+
+[10:05] <jnthn> If it's in there, we haven't even figured out what we're calling
+
+[10:05] <jnthn> Which is a pre-requisite for inlining
+
+[10:06] <jnthn> There's two ways we can know what we're calling
+
+[10:06] <MasterDuke> i see messages about identity getting inlined *into* infix:<**>
+
+[10:06] <jnthn> 1. Statistically, a given static frame almost always shows up
+
+[10:06] <jnthn> 2. We've proven that the code object is a constant
+
+[10:07] <jnthn> 2 is always preferable because we don't need an extra guard
+
+[10:07] <jnthn> But 1 gets us inlining of things like closures where the code object is a closure clone, for example.
+
+[10:07] <jnthn> The code path you asked about happens when 2 is the case
+
+[10:08] <MasterDuke> there is a type specialization of infix:<**>: Callsite 0x7f3e2a886840 (2 args, 2 pos) ... Positional flags: obj, obj ... Which received 291 hits (100% of the 291 callsite hits)
+
+[10:10] <MasterDuke> heh, https://gist.github.com/MasterDuke17/953146698a70a0f47029bb04fef337c3 increases the bytecode size to 4358?
+
+[11:16] *** zakharyas left
+[11:20] <MasterDuke> pushed a newer commit to https://github.com/rakudo/rakudo/pull/4320 that speeds up both positive and negative exponents, but keeps the behavior of only passing positive exponents to pow_I
+
+[11:30] <lizmat> MasterDuke: did you try to not use \a \b but $a $b ?  then you could lose the nqp::decont() s
+
+[11:31] <MasterDuke> i haven't
+
+[11:31] *** frost-lab left
+[11:31] <lizmat> also: perhaps put the Failure.new branch into a separate sub / R:Internals method reducing the bytecode size of the infix:<**> code itself
+
+[11:32] <MasterDuke> i tried that 1.5 versions ago and it didn't make a difference
+
+[11:32] <lizmat> or at least put it's .new outside of the condition
+
+[11:32] <MasterDuke> but, i also noticed bytecode size changed with the moarvm alway-log-deconts commit reverted
+
+[11:33] <lizmat> anyways, that would be things I would try
+
+[11:34] <MasterDuke> and since i'm not entirely sure what's going to happen with that commit, wasn't too worried about bytecode size, since it's currently *way* above the inline limit
+
+[11:36] <lizmat> also: did you consider splitting code paths completely on b being >= 0 ?
+
+[11:36] <MasterDuke> 5th version that does that just about to be pushed
+
+[11:37] <MasterDuke> pushed
+
+[11:51] <MasterDuke> bunch of different versions in https://github.com/rakudo/rakudo/pull/4320 now, tldr; can keep original behavior wrt negative exponents and still be faster for both positive and negative exponents, but (still) nowhere near small enough to inline
+
+[11:52] *** domidumont joined
+[12:52] <lizmat> and another Rakudo Weekly News hits the Net: https://rakudoweekly.blog/2021/04/13/2021-15-first-conf/
+
+[12:56] *** zakharyas joined
+[14:25] <MasterDuke> neither NQP nor Rakudo ever use nqp::pow_I for the Num value (i.e., they only over pass in positive exponents), other than to signify overflow. what about changing its implementation to expect positive exponents and instead return just an Int type object on overflow? then all the nqp::istype($foo, Num) could instead be !nqp::isconcrete($foo) and
+
+[14:25] <MasterDuke> MoarVM's MVM_bigint_pow could be simplified
+
+[14:25] <MasterDuke> greppable6: nqp::pow_I
+
+[14:25] <greppable6> MasterDuke, 1 line, 1 module: https://gist.github.com/cafb15405328489b399eb59329c768c7
+
+[14:28] <MasterDuke> only positive values used there ^^^
+
+[14:29] <jnthn> Are there not different kinds of error that it singals with nan/+inf/-inf?
+
+[14:30] <MasterDuke> yeah. but we never use them and instead figure out in rakudo
+
+[14:32] <MasterDuke> all rakudo ever checks for is istype(Num)
+
+[14:34] <MasterDuke> MVM_bigint_pow returns -inf or +inf, but not nan
+
+[14:36] <MasterDuke> and for negative exponents we just use pow(), libtommath doesn't support them
+
+[15:11] <jnthn> Ah, but we can recreate whether it's +inf or -inf back in Raku land anyway...
+
+[15:11] <jnthn> Yeah, then the simplification seems reasonable to me
+
+[15:13] <MasterDuke> cool. not entirely sure how much it will speed things up, but i don't think it will be a terribly time consuming experiment to try
+
+[15:17] <jnthn> Even if it doesn't, it's a nice simplification?
+
+[15:19] <MasterDuke> hopefully. simplification in the other direction would be pow_I to return a Failure with the appropriate Exception inside, but i don't think we can do that, right?
+
+[15:48] <MasterDuke> arg, bootstrapping in nqp bites again
+
+[15:48] <lizmat> Failure, I'd say no
+
+[15:49] <lizmat> but throwing an exception and catching that with nqp::handle maybe ?
+
+[15:49] <MasterDuke> but is that going to be any faster than the current checking done in rakudo?
+
+[15:57] <jnthn> isconcrete is a pretty cheap check
+
+[15:58] <jnthn> We could also maybe stick logging on the pow_I op so that we log its result and then can do guard and maybe toss out the error branch if we rarely hit
+
+[15:58] <jnthn> it
+
+[15:58] <jnthn> That could get it below the inline size
+
+[15:59] <MasterDuke> btw, returning a type object is just `return MVM_repr_alloc_init(tc, int_type);`, correct?
+
+[16:02] <jnthn> No, it's just `return int_type->st->WHAT;` 
+
+[16:03] <MasterDuke> thanks
+
+[16:24] <cog>  /join #typescript
+
+[16:24] <cog> oops
+
+[16:27] *** zakharyas left
+[16:40] <lizmat> cog: you traitor, you!   :-)
+
+[16:48] <jnthn> I suspect a lot of the things typescript is commonly used for (web frontend) are things you simply can't use Raku for today. :)
+
+[16:49] <nine> I guess we can let this one slide....for now :D
+
+[16:51] <lizmat> actually, it appears that documentable is actually using coffescript
+
+[16:55] <lizmat> dinner&
+
+[16:57] <sena_kun> lizmat, it does because we have no normal code highlighters available other than this one. :S
+
+[18:10] *** domidumont left
+[19:15] *** MasterDuke left
+[19:15] *** MasterDuke joined
+[19:28] <cog> lizmat, if we want to succeed, we must do like Python and connect to the  rest of the world. Here I attempt to write a raku parse tree browser using svelte.
+
+[19:29] <lizmat> ++cog
+
+[19:31] <cog> Too bad the best minds are too busy with optimising raku and MoarVM for lack of manpower
+
+[19:33] <cog> Speaking of connecting to the rest of the world, the jnthn++ talk mentioned in your weekly seems promising.
+
+[19:34] <lizmat> yes, it is!
+
+[19:43] <cog> I hope some day someone will port the grammar engine to wasm. It could be a success independent of raku like PCRE independent of Perl.
+
+[19:44] *** zakharyas joined
+[19:52] <cog> Speaking of connecting I just discovered an old and probably well known Eric Raymond article on why he dropped Perl. Like him about  the same time, I wrote some code using Perl and TCL/TK for the front end. It was not pretty.  https://www.linuxjournal.com/article/3882
+
+[19:55] <lizmat> where has the time gone  :-)
+
+[19:55] <lizmat> nwc10 MasterDuke perhaps some code to run through the various checkers:
+
+[19:55] <lizmat> $ r 'my %h = "a" .. "e" Z=> 1..5; for %h.keys { %h{$_~$_} = 42 }'
+
+[19:55] <lizmat> concatenate requires a concrete string, but got null
+
+[19:55] <lizmat> does so in about 1 in 10 times for me
+
+[19:56] <MasterDuke> dogbert17 is also great at this
+
+[19:56] <cog> In the mean time some guy also realised the Perl limitations and threw mugs at a wall. Hopefully not at Larry Wall.
+
+[19:59] <lizmat> no BDFLs where hurt in that incident  :-)
+
+[20:00] <cog> Sveltes has a raku slang mindset. Messing with CSS, Dom and typescript/js slangs to create components.
+
+[20:16] <dogbert17> lizmat, MasterDuke: you called :) https://gist.github.com/dogbert17/53ac5d327b0e37539374e642a60dc8cf
+
+[20:17] <lizmat> conclusion?
+
+[20:20] <dogbert17> good question, the valgrind error only show up when something goes wrong, but why it wants to print this error is still a myster (to me)
+
+[20:21] <dogbert17> *mystery
+
+[20:28] <MasterDuke> arg. i misspell 'nqp' as 'npq' and get `Cannot find method 'package_at_key' on 'BOOTHash': no method cache and no .^find_method` which is of no help. i'd be a fan of specially casing that error
+
+[20:29] <lizmat> same for nap ?
+
+[20:29] <lizmat> that's a common error I make
+
+[20:29] <lizmat> m: nap:say("foo")
+
+[20:29] <camelia> rakudo-moar 596ccef3b: OUTPUT: «5===SORRY!5=== Error while compiling <tmp>␤Undeclared routine:␤    nap:say<foo> used at line 1␤␤»
+
+[20:29] <lizmat> but the error at least is less LTA
+
+[20:30] <MasterDuke> m: nap::say("foo")
+
+[20:30] <camelia> rakudo-moar 596ccef3b: OUTPUT: «Could not find symbol '&say' in 'GLOBAL::nap'␤  in block <unit> at <tmp> line 1␤␤»
+
+[20:30] <MasterDuke> nqp: nap::say("foo")
+
+[20:30] <camelia> nqp-moarvm: OUTPUT: «Cannot invoke this object (REPR: P6opaque; NQPMu)␤   at <tmp>:1  (<ephemeral file>:<mainline>)␤ from gen/moar/stage2/NQPHLL.nqp:1946  (/home/camelia/rakudo-m-inst-2/share/nqp/lib/NQPHLL.moarvm:eval)␤ from gen/moar/stage2/NQPHLL.nqp:2151  (/home/camelia/rak…»
+
+[20:30] <MasterDuke> nqp: npq::say("foo")
+
+[20:30] <camelia> nqp-moarvm: OUTPUT: «Cannot invoke this object (REPR: P6opaque; NQPMu)␤   at <tmp>:1  (<ephemeral file>:<mainline>)␤ from gen/moar/stage2/NQPHLL.nqp:1946  (/home/camelia/rakudo-m-inst-2/share/nqp/lib/NQPHLL.moarvm:eval)␤ from gen/moar/stage2/NQPHLL.nqp:2151  (/home/camelia/rak…»
+
+[20:30] <lizmat> I guess about the same in nqp  :-)
+
+[20:31] <MasterDuke> i get the error i copied when compiling rakudo
+
+[20:37] <dogbert17> lizmat: the fact that you're changing the hash while iterating its keys, couldn't that be problematic?
+
+[20:37] <lizmat> well, yes, that may be the case...
+
+[20:38] <lizmat> but it was my understanding that nwc10 had fixed any breakage in the iterator, when keys are added
+
+[20:38] <lizmat> if that understanding is wrong, then I guess it's a case of DIHWIDT
+
+[20:39] <dogbert17> try this variant a couple of times      my %h = "a" .. "e" Z=> 1..5; for %h.keys { say $_; %h{$_~$_} = 42 }; say %h
+
+[20:39] <lizmat> or otherwise, maybe we should make .keys on Associative be eager by default, then served by a lazy iterator
+
+[20:39] <lizmat> wow, ASSIGN-POS appearing as name ??
+
+[20:40] <dogbert17> I got BIND-KEY once
+
+[20:41] <lizmat> keys.eager never fails, right ?
+
+[20:41] <lizmat> so that is at least a workaround
+
+[20:42] <dogbert17> perhaps we should check with nwc10
+
+[20:42] <dogbert17> but yes eager works
+
+[20:45] <MasterDuke> there are a couple combinations of options wrt infix:<**> and pow_I: just change how overflows are reported, disallow negative exponents, special case certain values in moarvm, special case certain values in rakudo
+
+[20:48] <MasterDuke> the benefit to special casing certain values (e.g., 0, 1, 2) in rakudo is that you can skip most to all of the error handing required for pow_I. the downside is infix:<**> will get bigger
+
+[20:51] <MasterDuke> the benefit to special casing certain values (e.g., 0, 1, 2) in moarvm is that you can skip some of the overhead of actually calling the libtommath function. the downside is that for every call to pow_I you pay the cost of the extra conditionals
+
+[20:55] <MasterDuke> interestingly, the libtommath function has no special casing itself, but the gmp function does (there is still some benefit to doing the special casing in moarvm before calling the gmp function, just less so than for libtommath)
+
+[21:00] *** zakharyas left
+[21:21] *** dogbert11 joined
+[21:25] *** dogbert17 left
+[22:03] *** dogbert11 left
+[22:11] *** dogbert11 joined
+[22:18] *** dogbert11 left
+[22:18] *** dogbert11 joined
+[22:28] *** dogbert11 left
+[22:29] *** dogbert11 joined
+[22:36] *** dogbert17 joined
+[22:38] *** dogbert11 left
+[22:40] *** dogbert11 joined
+[22:43] *** dogbert17 left
+[22:43] *** dogbert17 joined
+[22:46] *** dogbert11 left
+[22:57] *** dogbert17 left
+[22:58] *** dogbert17 joined
+[23:52] *** MasterDuke left

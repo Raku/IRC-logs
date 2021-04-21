@@ -1,0 +1,437 @@
+[03:00] *** sivoais_ left
+[03:00] *** sivoais joined
+[06:59] *** patrickb joined
+[07:10] <nwc10> good *, #moarvm 
+
+[07:11] <nwc10> jnthn: OK, so, I had a bit of inspiration on how to attack the problem
+
+[07:11] <nwc10> turns out that spesh assumes that hash entries don't move once they exist
+
+[07:11] <nwc10> specifically sp_gethashentryvalue
+
+[07:12] <nwc10> I'm not sure that I like this assumption. I think (not yet tested) that it can remain valid by introducing a level of indirection. But, yes, lots of 8 bytes and cache misses
+
+[07:13] <nwc10> but
+
+[07:13] <nwc10> I think also that it's possible to product 2 branches - one where hash entries move and that spesh optimisation is disabled, and one with indirection where it is not
+
+[07:13] <nwc10> and (if both get to the point of passing)
+
+[07:13] <nwc10> benchmark!
+
+[07:29] <nine> If in doubt, remove that spesh optimization. It's just saving one hash lookup. If hashes become faster, the opt wouldn't do so much good anymore anyway :)
+
+[07:32] <nwc10> well, I don't yet know what else we would hit
+
+[07:32] <nwc10> I've found this by running under ASAN, and malloc/copy/free the hash contents on each insert or delete
+
+[07:39] <nine> I don't think anyone else was audacious enough to rely on this...
+
+[07:40] <nwc10> we will see (at least as far as spectest)
+
+[07:40] <nwc10> but not yet, as I have a bit of $ork to get done
+
+[07:40] *** MasterDuke joined
+[07:41] <MasterDuke> nine: i thought the opt saved two hash look ups and a lock?
+
+[07:42] <nine> MasterDuke: only part of that relies on the hash entry not moving IIRC
+
+[07:43] <MasterDuke> oh, yeah, that makes sense
+
+[07:50] <nwc10> OK, interesting, it's:
+
+[07:50] <nwc10> MVMHashEntry *entry = MVM_str_hash_fetch_nt(tc, hashtable, sym_facts->value.s);
+
+[07:50] <nwc10> if sym_facts isn't visible to NQP code, then *it* can become a hash-with-indirection
+
+[07:50] <nwc10> and the rest not
+
+[07:50] <nwc10> but let's leave that as a future idea
+
+[07:51] <nwc10> and yes, that might mean in the future that MVMHash needs to fork into a second variant with the indirection
+
+[07:51] <nwc10> if we do want these sorts of hashes visible to NQP
+
+[07:51] *** sena_kun joined
+[07:52] <nwc10> sena_kun: I might have found it (my problem). See recent scrollback.
+
+[07:52] <nwc10> but I have to babysit the work $thing for a bit
+
+[07:52] <nwc10> so can't hack on this
+
+[07:52] <nwc10> or the linux isntall on the laptop to my right
+
+[07:53] <nwc10> this tank of a laptop that has a BIOS sufficiently old that it won't USB boot :-(
+
+[07:54] <nwc10> its future role is "USB disk caddy" :-)
+
+[07:54] <nwc10> (well, mobile device photo backup target)
+
+[07:59] <nwc10> oh, I'm misreading that line
+
+[07:59] <nwc10> it's *hashtable* that matters
+
+[07:59] <nwc10> and that is visible to the world
+
+[08:00] <nwc10> anyway, the $ork thing has a new bit of logging, and, interesting....
+
+[08:00] <sena_kun> nwc10, sounds interesting, good luck with sorting it out. :)
+
+[08:00] <tellable6> 2020-07-16T21:24:52Z #raku-dev <patrickb> sena_kun: I'm totally stumped on this one! This builds fine locally and all the tests are green. No idea why nuking should be necessary, but did you try that?
+
+[08:04] <nwc10> also, I realised that there's a potentially (somewhat nutty) optimsation possible with going to a *single* memory block for a hash (including the control structure in that block)
+
+[08:04] <nwc10> hash copy is
+
+[08:04] <nwc10> 1) malloc
+
+[08:04] <nwc10> 2) memcpy
+
+[08:04] <nwc10> 3) fix up the write barriers
+
+[08:24] *** vrurg left
+[08:25] *** vrurg joined
+[08:29] *** vrurg left
+[08:40] <nwc10> bother. that's not it
+
+[09:12] *** Altai-man_ joined
+[09:14] *** sena_kun left
+[09:30] <jnthn> morning o/
+
+[09:31] <nwc10> \o
+
+[09:48] *** vrurg joined
+[09:49] *** vrurg left
+[09:49] *** vrurg joined
+[11:10] *** dogbert17 joined
+[11:13] *** sena_kun joined
+[11:14] *** Altai-man_ left
+[11:44] *** vrurg left
+[11:49] *** vrurg joined
+[11:54] *** vrurg left
+[11:56] <nwc10> dear @all
+
+[11:56] <nwc10> so my error message is this:
+
+[11:56] <nwc10> Method 'hash' not found for invocant of class 'Capture'
+
+[11:57] <nwc10> IIRC I know which rakudo source file that gets reported from
+
+[11:57] <nwc10> but underyling this - what is actually going wrong? Where in the C code should be looking?
+
+[11:59] <nwc10> as in "I see that we throw this from method_not_found_error in src/Perl6/bootstrap.c/BOOTSTRAP.nqp" but how did we get there?
+
+[12:02] <jnthn> Full stack trace?
+
+[12:02] <jnthn> Exception handlers run on the top of the stack before unwinding, so in principle we can see how we got there
+
+[12:02] <jnthn> Methods resolution currently fist looks in the method cache hanging off the STable
+
+[12:03] <jnthn> *first
+
+[12:03] <jnthn> Which is a hash
+
+[12:04] <nwc10> http://paste.scsys.co.uk/592242
+
+[12:05] <nwc10> "is a hash" ought to be the cause here
+
+[12:05] <nwc10> but it's now built with some agressive reallcation
+
+[12:05] <nwc10> (at least it should be, and it found the thing in spesh in the nqp build)
+
+[12:05] <nwc10> but that backtraces is with MVM_SPESH_DISABLE
+
+[12:13] <nwc10> this will all be down somewhere in MVM_6model_find_method() ?
+
+[12:19] <jnthn> Yes
+
+[12:20] <jnthn> And the hash in question is the method cache one hanging off STable
+
+[12:20] <nwc10> Which gets deserialised, it seems, or at least, can do
+
+[12:20] <nwc10> but I was curious which bit of C code I needed to hack in some extra "logging"
+
+[12:22] <nwc10> but "it's not spesh, it's not the subtle one of taking the address of the HashEntry struct (because ASAN triggers on that), and it gets 100% through NQP"
+
+[12:22] <nwc10> and it's not (other) undefined behaviour
+
+[12:22] <jnthn> I'd probably instrument find_method
+
+[12:22] <nwc10> (oh wait, or is it. this hasn't yet been attacked with valgrind since I added the agressive malloc/copy/free)
+
+[12:22] <jnthn> (the one you mentioned)
+
+[12:22] <nwc10> OK, yes, that looks like the candidate
+
+[12:22] <nwc10> that or "attack the weeds in the garden"
+
+[12:23] <jnthn> And see what lookups in the cache fail/succeed
+
+[12:30] *** vrurg joined
+[12:46] <jnthn> Friday afternnon really isn't the time to dig back into the dispatcher stuff...guess I'll give it a couple of days next week.
+
+[12:50] <lizmat> use nqp; my $l := nqp::list_i(42); dd nqp::existspos($l,1)
+
+[12:50] <evalable6> lizmat, rakudo-moar c38b5a366: OUTPUT: «0␤»
+
+[12:50] <lizmat> use nqp; my $l := nqp::list_i(42); dd nqp::existspos($l,0)
+
+[12:50] <lizmat> m: use nqp; my $l := nqp::list_i(42); dd nqp::existspos($l,0)
+
+[12:50] <camelia> rakudo-moar 85320f466: OUTPUT: «MVMArray: atpos expected int register␤  in block <unit> at <tmp> line 1␤␤»
+
+[12:50] <lizmat> weird, huh ?
+
+[12:51] <jnthn> I don't think existspos actually makes sense on a non-object list
+
+[12:52] <nwc10> jnthn: were you planning to POETS, or just to find something shorter to do?
+
+[12:52] <lizmat> jnthn: you're right, but shouldn't it explode as well if the element does not exist ?
+
+[12:53] <jnthn> lizmat: existspos is sugar for elems + isnull(atpos(...))
+
+[12:53] <jnthn> And elems comes first
+
+[12:54] <lizmat> yeah, figured it'd be something like that
+
+[12:54] <jnthn> nwc10: I'll do some more RakuAST bits, 'cus that's mostly swapped in still :)
+
+[12:55] <nwc10> ah righto
+
+[12:56] <jnthn> Also figure I should get some work in on things, 'cus I've got 2 weeks afk vacation coming up :)
+
+[12:57] <nwc10> cool.
+
+[12:57] <jnthn> (From Thursday)
+
+[12:58] <nwc10> you plan to "head for the hills" before the release :-)
+
+[13:12] *** Altai-man_ joined
+[13:15] *** sena_kun left
+[13:19] <timotimo> jnthn: looking forward to your next dispatcher hacking :)
+
+[13:33] <jnthn> .oO( or is it "run to the hills"? :) )
+
+[13:38] <jnthn> grr, whichever end I pick to unravel next, I find it has a yak attached...
+
+[13:39] <timotimo> yaks love to do tug-of-war, i assume that's what's going on here
+
+[13:40] <moritz> drink a yakuccino, maybe it's better afterwards :D
+
+[13:40] <jnthn> Turns out I really need to figure out the whole implicit topic thing
+
+[13:41] <jnthn> I actually wanted to do exception handlers next but those end up implying the same thing :)
+
+[13:47] <nwc10> does the beer fridge have a yak attached?
+
+[13:47] <nwc10> or hiding inside?
+
+[13:48] <timotimo> ah, this is RakuAST work
+
+[13:49] <jnthn> I'm quite sure the beer fridge is yak free
+
+[13:50] <jnthn> timotimo: yes
+
+[13:50] <jnthn> Well, by this point I have a newly written failing test and a cup of tea...
+
+[13:50] <nwc10> "I'm quite sure the beer fridge is yak free" -- that sounds like an interesting challenge for April 1st. Would probbly need an inside collaborator
+
+[13:58] <timotimo> jnthn: is there any specific reason why we can't move getcode + takeclosure closer to before we invoke/use the thing for the first time?
+
+[14:00] <timotimo> like, i would assume we can skip doing that for if/elsif/else branches where we only invoke one of the n
+
+[14:01] <jnthn> Well maybe but then what if it's in a loop?
+
+[14:04] <timotimo> right, we'll have to move it before the first branch that is relevant to the usage site i guess
+
+[14:05] <timotimo> the latest block that dominates it perhaps
+
+[14:05] <timotimo> that doesn't seem right
+
+[14:05] <timotimo> the latest block that dominates both it and the exit block?
+
+[14:07] <timotimo> there's certainly prior art for this simple question :)
+
+[14:08] <timotimo> put it right in front of the thing, then do loop-invariant-code-motion or whatever
+
+[14:18] *** AlexDaniel left
+[14:21] *** vrurg left
+[14:24] *** vrurg joined
+[14:48] <nwc10> jnthn: so I have hacked MVM_6model_find_method a bit
+
+[14:48] <nwc10> it seems that it calls find_method, for "hash", finds a NQPRoutine
+
+[14:49] <nwc10> and yet still it goes wrong soon after.
+
+[14:49] <nwc10> so, random cargo-cult first thought - is something not rooted?
+
+[14:51] <jnthn> Is it a concrete NQPRoutine, not a type object?
+
+[14:51] <nwc10> er, yes, hangon, I don't know that yet.
+
+[14:52] <nwc10> flags = 16
+
+[14:52] <nwc10> I need to look that up
+
+[14:53] <nwc10> MVM_CF_SECOND_GEN = 16,
+
+[14:53] <nwc10> no, it's not a type object
+
+[14:53] <jnthn> OK, then at that point things seem legit
+
+[14:53] <nwc10> :-)
+
+[14:54] <nwc10> "it all goes horribly wrong" is still in the future
+
+[14:54] <nwc10> so, I suspect what I now do is
+
+[14:54] <nwc10> 1) take a break, because I'm still a bit fried
+
+[14:54] <nwc10> then
+
+[14:54] <nwc10> 2) build master in another tree, with the same extra code and same breakpoint
+
+[14:54] <nwc10> and see where they diverge
+
+[14:55] <nwc10> although if I'm feeling lazy I could just set a hardware watchopoint on flags and see where it goes next
+
+[14:56] <nwc10> odd. nowhere. it goos "boom"
+
+[14:56] <nwc10> ie the backtrace
+
+[14:59] *** zakharyas joined
+[15:02] <nwc10> jnthn: it says that it's 88 bytes, and the STable says that it's "NQPRoutine". This means that I can't cast that 88 byets to some C structure and look it it from gdb?
+
+[15:09] *** SmokeMachine left
+[15:09] *** SmokeMachine joined
+[15:10] <nine> nwc10: I'd expect an NQPRoutine to be a P6opaque object. In a debug build you can call MVM_dump_p6_opaque(tc, obj) from gdb to get at its data
+
+[15:11] <nine> If you're interested in low level stuff, just cast it to MVMP6opaque*
+
+[15:11] <nine> Also useful: call MVM_dump_backtrace(tc) and MVM_dump_bytecode(tc) to find out where you actually are exactly and get an idea how a value ended up in a register
+
+[15:11] <nwc10> No symbol "MVM_dump_p6_opaque" in current context.
+
+[15:13] *** sena_kun joined
+[15:13] <nwc10> and git grep ca't find it
+
+[15:14] *** Altai-man_ left
+[15:16] <nine> MVM_dump_p6opaque
+
+[15:16] <nwc10> NQPRoutine.new(#`(from NQPRoutine) $!do, $!signature, $!dispatchees, $!dispatch_cache, $!dispatch_order, $!clone_callback, $!onlystar=0)
+
+[15:16] <nwc10> whee
+
+[15:17] <nwc10> and then I have to know how to do pointer arithmetic to figure out what to cast ot (MVMObject*) ?
+
+[15:18] <nine> Looks like it hardly doesn't contain data
+
+[15:23] <nwc10> OK.
+
+[15:23] <nwc10> I think I'm about to be AFK
+
+[15:23] <nine> The dumper works recursively already
+
+[15:24] <nine> The whole point of that is to not need to do the pointer arithmetic :)
+
+[16:09] *** patrickb left
+[17:12] *** Altai-man_ joined
+[17:14] *** sena_kun left
+[18:04] *** leont left
+[18:10] *** zakharyas left
+[18:53] *** zakharyas joined
+[19:13] *** sena_kun joined
+[19:14] *** Altai-man_ left
+[19:43] <nwc10> the problem seems actually to be earlier
+
+[19:44] <nwc10> in that, master never hits "find_method" for "hash"
+
+[19:44] <nwc10> I now have a very chatty set of output from master and my branch
+
+[19:44] <nwc10> and I'm starting to dig into the diffs
+
+[20:29] *** zakharyas left
+[20:43] *** squashable6 left
+[20:43] *** squashable6 joined
+[21:01] <timotimo> i think i want to do another attempt at named mallocs/callocs and named fsa allocs, and why not also named spesh allocs just for fun
+
+[21:03] <moritz> my malloc is called Fred! :D
+
+[21:04] <MasterDuke> what do you mean named?
+
+[21:07] <timotimo> mostly turning "thing = (Type *)MVM_malloc(count * sizeof(Type))" into "MVM_MALLOCOBJ(count, Type)", but also there's then a systemtap probe point in there that lets you collect stats and such for allocations "by type"
+
+[21:08] <timotimo> er, of course it would be "thing = MVM_MALLOCOBJ(count, Type)"
+
+[21:09] <timotimo> there'll have to be yet another piece of probing in the build system for moarvm ...
+
+[21:09] <timotimo> at some point we will have to run those in parallel, LOL
+
+[21:12] *** Altai-man_ joined
+[21:12] <timotimo> or a flag that turns it on
+
+[21:14] *** sena_kun left
+[21:15] *** MasterDuke left
+[21:21] <lizmat> hmmm pl6anet.org down?
+
+[21:21] <timotimo> i think the greater internet is having a bit of a hiccup at this very moment?
+
+[21:21] <lizmat> nope, it dropped out of DNS ?
+
+[21:22] <lizmat> yeah, same for raku.org
+
+[21:23] <moritz> I get the IPs 104.18.59.39 and 172.67.215.46 for raku.org
+
+[21:23] <lizmat> dig @8.8.8.8 A raku.org
+
+[21:23] <lizmat> nada
+
+[21:24] <moritz> and the response is SLOOOW
+
+[21:24] <moritz> makes me wonder if the .org TLD servers fail
+
+[21:25] <lizmat> dig @8.8.8.8 A perlmonks.org  # works
+
+[21:26] <moritz> a dig @8.8.8.8 SOA raku.org takes 5 seconds here
+
+[21:26] <lizmat> pinging rba
+
+[21:26] <moritz> wtf?
+
+[21:27] <timotimo> don't we have "our own" dns server for our domains?
+
+[21:27] <moritz> according to whois, the raku.org nameservers are VAL.NS.CLOUDFLARE.COM and CLINT.NS.CLOUDFLARE.COM
+
+[21:28] <moritz> and dig @VAL.NS.CLOUDFLARE.COM raku.org errors out with "connection timed out; no servers could be reached"
+
+[21:28] <moritz> timotimo: you mean a hidden primary?
+
+[21:28] <timotimo> i did get an error from somewhere in cloudflare with a "broken gateway" when loading a pastebin
+
+[21:28] <moritz> so cloudflare b0rked?
+
+[21:28] <lizmat> VAL.NS.CLOUDFLARE.COM doesn't resolve for me
+
+[21:29] <lizmat> so something is really borked
+
+[21:29] <timotimo> hearing chatter of cloudflare being down from others
+
+[21:29] <moritz> 173.245.58.234 172.64.32.234 108.162.192.234
+
+[21:33] <timotimo> how do you fall back when cloudflare goes down LOL
+
+[21:34] *** patrickb joined
+[21:42] <moritz> https://www.cloudflarestatus.com/
+
+[21:43] <moritz> "Cloudflare is investigating issues with Cloudflare Resolver and our edge network in certain locations."
+
+[21:44] <moritz> seems it's kinda working again
+
+[21:48] <lizmat> yeah, looks like
+
+[21:48] <lizmat> *phew*
+
+[22:52] *** patrickb left
+[23:13] *** sena_kun joined
+[23:14] *** Altai-man_ left
+[23:18] *** sena_kun left

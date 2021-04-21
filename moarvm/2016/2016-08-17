@@ -1,0 +1,409 @@
+[01:48] *** ilbot3 joined
+[05:49] *** brrt joined
+[06:25] *** brrt joined
+[06:31] *** domidumont joined
+[06:36] *** domidumont joined
+[07:53] *** zakharyas joined
+[09:51] *** zakharyas joined
+[10:45] <jnthn> Hm, we have a case where a p6definite is being optimized into a
+
+[10:45] <jnthn> const_i64_16      r6(2), liti16(0)
+
+[10:45] <jnthn> p6bool            r4(6),   r6(2)
+
+[10:45] <jnthn> However, with no guarding
+
+[10:46] <jnthn> The optimized sequence being
+
+[10:46] <jnthn> decont            r4(5),   r2(3)
+
+[10:46] <jnthn> isconcrete        r6(2),   r4(5)
+
+[10:46] <jnthn> p6bool            r4(6),   r6(2)
+
+[10:49] <jnthn> The opt itself seems OK; the fact it kicked out the guard it depends on is the problem.
+
+[11:06] <dalek> MoarVM: 33c04ce | jnthn++ | src/spesh/facts. (2 files):
+
+[11:06] <dalek> MoarVM: Widen scope of fact dependency function.
+
+[11:06] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/33c04ce76e
+
+[11:06] <dalek> MoarVM: 330b1b4 | jnthn++ | src/spesh/optimize.c:
+
+[11:06] <dalek> MoarVM: Add missing fact dependencies.
+
+[11:06] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/330b1b44ab
+
+[11:06] <jnthn> Those seem needed, but unfortunately do not nail the actual problem.
+
+[11:13] <jnthn> lunch &
+
+[12:15] <jnthn> So, to explain the big problem behind this.
+
+[12:15] <jnthn> It's not actually a missing guard problem
+
+[12:15] <jnthn> Rather, it's a "facts changed since the guard" problem
+
+[12:16] <jnthn> We assume that between the point we looked inside a Scalar and guarded by content, and by the time we pull the content out, things didn't change. And they usually haven't, but of course there are constructs where that can happen
+
+[12:17] <jnthn> A true fix for this has much in common with escape analysis
+
+[12:17] <jnthn> (More generally, it's an alias analysis problem)
+
+[12:18] * nine reads that as jnthn will just go ahead and implement escape analysis this afternoon to get it over with once and for all
+
+[12:18] <jnthn> No :P
+
+[12:18] <lizmat> jnthn: would an extra scope help in that code ?
+
+[12:19] <lizmat> gather { while { } }
+
+[12:19] <lizmat> rather than
+
+[12:19] <jnthn> It's a pretty hard problem
+
+[12:19] <lizmat> gather while { }
+
+[12:19] <jnthn> Thankfully, there's also a fairly easy fix
+
+[12:19] <jnthn> That kinda over-compensates and rules out some optimizations that would be safe, but probably not too many
+
+[12:20] <jnthn> We always know the guarded write, so we look backwards from our current instruction to see if we can find that write. If it's across a BB boundary we treat it as unsafe. If we encounter an alias-introducing operation along the way, same thing.
+
+[12:21] <jnthn> lizmat: No, this wants a fix in spesh, I think, and I don't think that extra scope would help either :)
+
+[12:22] <jnthn> Spesh probably wants to be one of the things next in line for me to look at after the concurrency stuff.
+
+[12:23] <jnthn> In so far as there's a bunch of things I'd like to change. :)
+
+[12:44] *** kjs_ joined
+[12:49] *** kjs_ joined
+[12:53] *** kjs_ joined
+[12:55] *** kjs_ joined
+[13:00] <dalek> MoarVM: 0cb920b | jnthn++ | src/spesh/ (3 files):
+
+[13:00] <dalek> MoarVM: Avoid use of possibly invalidated decont facts.
+
+[13:00] <dalek> MoarVM:
+
+[13:00] <dalek> MoarVM: When we guard a container, we also guard against its content. Since a
+
+[13:00] <dalek> MoarVM: container is mutable, however, the contents will change over time.
+
+[13:00] <dalek> MoarVM: A more accurate tricking of this needs alias analysis; for now, a
+
+[13:00] <dalek> MoarVM: more conservative analysis that treats any aliasing operation as
+
+[13:00] <dalek> MoarVM: invalidating should be sufficient protection against mis-optimization.
+
+[13:00] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/0cb920b69e
+
+[14:07] *** zakharyas joined
+[14:59] *** edehont joined
+[15:15] *** zakharyas joined
+[15:42] *** domidumont joined
+[16:09] *** TheLemonMan joined
+[16:12] <TheLemonMan> ok, I did some more digging into #128803 and found out that it's being caused by keep_caller not being correctly set on some frames
+
+[16:12] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=128803
+
+[16:13] <TheLemonMan> it also seems to happen when you throw a 'take' object using MVM_exception_throwobj
+
+[16:15] <TheLemonMan> if you no-op this condition https://github.com/MoarVM/MoarVM/blob/master/src/core/frame.c#L808 you can see the list of frames isn't truncated anymore
+
+[16:32] <timotimo> wow, that's some good detective-work!
+
+[16:50] <TheLemonMan> I hope it's useful for somebody more knowdlegeable than me to come up with a fix, I think I've reached my limit heh
+
+[16:53] <timotimo> i myself don't really know what keep_caller is about, exactly. probably just CALLER:: related stuff?
+
+[16:59] <TheLemonMan> it's an optimization introduced in cecf5729 that allows the GC to reclaim the caller frames (at least that's what I think it does :) when you don't need those anymore
+
+[16:59] <timotimo> oh, that's interesting
+
+[16:59] <timotimo> when you just no-op that condition, how does a full spec test run look?
+
+[17:00] *** brrt joined
+[17:02] <TheLemonMan> hmm, how do I run one ?
+
+[17:03] <timotimo> with the env var TEST_JOBS set to something like your number of cpu cores run "make spectest" in rakudo's folder
+
+[17:03] <brrt> hey TheLemonMan: just for my sake, do you know / would you like to test if this is senstive to the MVM_JIT_DISABLE env flag
+
+[17:04] <TheLemonMan> brrt, I've already tried disabling both the jit and the spesh, but let me retry one more time
+
+[17:04] <brrt> hmm, i've you've done that, then it is unlikely to be the source of the problem
+
+[17:04] <brrt> also, TheLemonMan++ for persistence
+
+[17:04] <brrt> eh
+
+[17:05] <brrt> perseverance :-)
+
+[17:05] <jnthn> The whole keep_caller thing is a little interesting
+
+[17:05] <jnthn> It dates back to the earliest days of callframes
+
+[17:06] <jnthn> When they were all ref-counted
+
+[17:06] <jnthn> And being able to decrement the ref count on the caller sooner was useful
+
+[17:06] <jnthn> These days, however, we have two cases:
+
+[17:07] <jnthn> 1) The frame is on the call stack. It's thus going away, and there'll be nothing in existence to ever read ->caller
+
+[17:07] <jnthn> 2) It'll be on the heap, having been promoted. The ->caller will also be on the heap. Neither will go away until the next GC run.
+
+[17:07] <jnthn> So there's actually no advantage in clearing ->caller.
+
+[17:08] <jnthn> So it's entirley possible we can entirely remove not only that NULLing, but also the keep_caller flag.
+
+[17:08] <timotimo> neat, another little bit of ram saved
+
+[17:08] <jnthn> Saving us CPU cycles and fixing a bunch on the way
+
+[17:08] <jnthn> Maybe not RAM, given it's probably a byte and we've probably packed a bunch of them together
+
+[17:09] <jnthn> So most likely alignment will mean no real RAM saving
+
+[17:09] <brrt> well, code, at any rate
+
+[17:09] <jnthn> fixing a *bug*
+
+[17:09] <jnthn> Saving code is certianly worth it
+
+[17:09] <jnthn> And saving a branch/write every single return is very worth it.
+
+[17:10] <jnthn> So I'd probably just try killing off the 5 lines under /* Unless we need to keep the caller chain in place, clear it up. */ and the keep_caller flag, spectesting, seeing if there's negative fallout, and if not we can go with that.
+
+[17:13] * brrt nods intelligently
+
+[17:13] <TheLemonMan> ok, I just pulled a fresh rakudo and started the spectest
+
+[17:13] *** brrt joined
+[17:16] <jnthn> The trouble with fixing the worst bugs that afflicted the Perl 6 implementation of the test harness is that the remaining ones don't show up much
+
+[17:17] <jnthn> (Currently well into S06 and going strong)
+
+[17:18] <timotimo> has anyone looked into using a deterministic scheduler thingie library replacement for pthreads or whatever yet?
+
+[17:18] <timotimo> i know there's something out there
+
+[17:18] <timotimo> i'm not sure what it can do for us, though
+
+[17:20] <jnthn> Not me
+
+[17:20] <jnthn> Damn, it's up to S32
+
+[17:20] <nine> jnthn: you sure there's issues left?
+
+[17:20] <TheLemonMan> definitely needs moar cores heh
+
+[17:21] <jnthn> Yes.
+
+[17:21] <jnthn> t/spec/S32-str/utf8-c8.t .................................. ok 0/?  0/?  0/?  0/?  0/?)===
+
+[17:21] <jnthn> ===(       0;450  4/23  0/?  46/165  151/159  0/?  0/?  0/?  0/?  0/?  0/?  0/?)===Heap corruption detected: pointer 0x2b2506ed5ef8 to past fromspace
+
+[17:21] <jnthn> make: *** [m-spectest6] Error 1
+
+[17:21] <hoelzro> timotimo: something that deterministically schedules pthreads for debugging?
+
+[17:21] <timotimo> something like that, yeah
+
+[17:21] <TheLemonMan> t/spec/S15-nfg/regex.t -> dubious
+
+[17:21] <jnthn> I dunno how well that'd work in this case in so far as this involves other processes
+
+[17:21] <timotimo> like Dthreads
+
+[17:21] <jnthn> TheLemonMan: Your NQP is probably outdated
+
+[17:22] <timotimo> i *think* gnu has something for that?
+
+[17:22] <hoelzro> Dthreads?
+
+[17:22] <brrt> timotimo: why would you want that?
+
+[17:22] <timotimo> https://emeryblogger.com/2011/07/06/dthreads-efficient-deterministic-multithreading/
+
+[17:22] <brrt> DrThreads
+
+[17:22] <TheLemonMan> jnthn, it's the one that rakudo pulls in
+
+[17:22] <timotimo> brrt: reproducible crashes
+
+[17:22] <brrt> ah, i see
+
+[17:22] <brrt> hmm
+
+[17:22] <hoelzro> oooo, neat
+
+[17:23] <hoelzro> I had an idea for debugging pthreads a while ago
+
+[17:23] <hoelzro> using LD_PRELOAD and some linker magic to make pthreads cooperatively scheduled and injecting yields into certain locations
+
+[17:23] <hoelzro> sadly, it's NYI =/
+
+[17:24] <hoelzro> how would that work for threads waiting on I/O, though? if I/O is taking longer in the Nth run, the thread isn't schedulable
+
+[17:26] <TheLemonMan> the run is over, https://ptpb.pw/Jdcm
+
+[17:31] <nwc10> jnthn: if I wanted to try to reproduce that "Heap corruption detected" how would I?
+
+[17:38] *** zakharyas joined
+[17:41] *** travis-ci joined
+[17:41] <travis-ci> MoarVM build errored. Jonathan Worthington 'Add missing fact dependencies.'
+
+[17:41] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/152938597 https://github.com/MoarVM/MoarVM/compare/2f269d8a0353...330b1b44ab07
+
+[17:41] *** travis-ci left
+[17:50] *** brrt joined
+[17:56] <TheLemonMan> the former failure is gone with an updated nqp, the one in error-reporting.rakudo.moar is still there
+
+[17:59] <jnthn> nwc10: HARNESS_TYPE=6 make spectest
+
+[17:59] <jnthn> nwc10: With TEST_JOBS set to something non-zero to try the concurrent case
+
+[18:03] <jnthn> Does it go away without your change?
+
+[18:03] <jnthn> If so, worth looking in to
+
+[18:08] <nwc10> ho ho ho, it doesn't do the perl5 thing of keeping its line length under $whatever with a ... if there are more cores than the terminal is wide
+
+[18:16] <TheLemonMan> jnthn, yep, the test fails because now 'Actually thrown at:' is being printed
+
+[18:16] <TheLemonMan> the test's been introduced in https://rt.perl.org/Public/Bug/Display.html?id=127425
+
+[18:20] <jnthn> nwc10: oh, is that way it looks shocking? :)
+
+[18:20] <nwc10> it doesn't keep the output on one line
+
+[18:20] <nwc10> it's accidentally scrolling the terminal
+
+[18:21] <nwc10> anyway, it failed
+
+[18:21] <nwc10> ===(       0;648  1/1  3/3  3/3  3/4  1/8  19/19  1/4  2/13  40/40  50/50  39/39  51/51  45/45  1/2  5/334  314/327  30/30  0/?  0/?  0/?  2/2  0/?  0/?  0/?  0/?)===Internal error: zeroed target thread ID in work pass
+
+[18:21] <nwc10> make: *** [m-spectest6] Error 17
+
+[18:21] <nwc10> no obvious ASAN
+
+[18:22] <jnthn> Aww, too bad
+
+[18:22] <jnthn> What about in the single threaded case? I managed to get a SEGV out of that earlier...
+
+[18:22] <unmatched}> TheLemonMan: what does it show now for say <a b c>.rotor: 1 => -Inf ?
+
+[18:22] <unmatched}> TheLemonMan: I mean if you run perl6 -e 'say <a b c>.rotor: 1 => -Inf' with your change, what's the output?
+
+[18:23] <TheLemonMan> unmatched}, https://ptpb.pw/V2N6
+
+[18:23] <unmatched}> TheLemonMan: that test can be tossed.
+
+[18:25] <TheLemonMan> unmatched}, tossed as in, deleted ?
+
+[18:25] <unmatched}> TheLemonMan: yeah. And methinks this commit can be reverted too then: https://github.com/rakudo/rakudo/commit/67b6544e48
+
+[18:27] <TheLemonMan> it might also be useful to check for possible performance regressions/gains
+
+[18:27] * jnthn suggests callgrind
+
+[18:28] <TheLemonMan> don't you have an automated testing harness for that ? :P
+
+[18:29] *** kjs_ joined
+[18:30] <nwc10> jnthn: this might take some time, as I'm normally using 24 cores
+
+[18:30] <nwc10> don't wait up
+
+[18:30] <nwc10> (or delay eating)
+
+[18:31] <jnthn> I won't :)
+
+[18:31] <jnthn> I'm about done for the day, I think. Getting tired.
+
+[18:31] <jnthn> And wife will be home soon :)
+
+[18:31] <jnthn> (And thus it'll be dinner time :))
+
+[18:33] * jnthn hungry already 'cus it smells nice :)
+
+[18:35] <brrt> hunger is important.... or something
+
+[18:35] * brrt is also hungry but still in train
+
+[18:35] <jnthn> :P
+
+[18:36] <brrt> and i can't get energy usage under control with this damn laptop
+
+[18:36] <brrt> i suspect it's firefox
+
+[18:37] <brrt> nom well :-)
+
+[18:39] <nine> brrt: but but but you are master of energy, aren't you?
+
+[18:39] <timotimo> holy hell, the remote code execution thing that person found in jetbrains ides was worth 50k dollars and he donated "the bulk of the money" to the pypy project
+
+[18:40] <brrt> well, almost :-P
+
+[18:40] <timotimo> i ought to go into security research %)
+
+[18:40] <brrt> or in pypy
+
+[18:40] <brrt> i still have to fix little bugs in the thesis report before it is finally considered complete
+
+[18:40] <timotimo> i've contributed a few lines of code to pypy
+
+[18:41] <timotimo> it was hard for me to learn all the nitty-gritty, so contributing was hard; especially when compared to rakudo and friends
+
+[18:41] <brrt> yeah
+
+[18:42] <brrt> the interesting thing about contributing to pypy is that due to their nonstandard toolchain, contributing is /harder/ than it would be if they had used C
+
+[18:42] <brrt> and much less practical
+
+[18:42] <brrt> compile moarvm: ~20s
+
+[18:42] <brrt> compile pypy: what kind of cluster have you got
+
+[18:43] <brrt> decommute &
+
+[18:44] <timotimo> you don't have to compile pypy to test your changes
+
+[18:45] <jnthn> OK, dinner :)
+
+[18:49] *** TheLemonMan joined
+[19:30] <TheLemonMan> I've opened a PR for MoarVM
+
+[19:44] <timotimo> just thinking about what quality-of-like improvements i could get with such a bug bounty
+
+[19:45] <timotimo> *sigh*
+
+[19:48] *** kjs_ joined
+[20:26] <nwc10> jnthn:
+
+[20:26] <nwc10> moar: 3rdparty/libuv/src/unix/stream.c:1499: uv_read_start: Assertion `((stream)->io_watcher.fd) >= 0' failed.
+
+[20:26] <nwc10> make: *** [m-spectest6] Aborted
+
+[20:26] <jnthn> That's a new one...
+
+[20:27] <jnthn> No stack trace or ASAN barf, I'm guessing?
+
+[20:27] <timotimo> that's like a filesystem change watcher or more like something else?
+
+[20:27] <nwc10> correct, neither
+
+[20:27] <timotimo> like ... watching if a file handle has something ready to read or is ready to be written to?
+
+[20:27] <nwc10> have started building current nom
+
+[20:28] <jnthn> timotimo: Given it's in stream.c I'd say it's about "normal" filehandle reading rather than an explicit filesystem notification thing
+
+[20:32] <timotimo> ah, right, i read over that part
+
+[20:42] *** edehont joined
+[21:52] *** kjs_ joined
+[21:58] *** Zoffix joined
+[22:21] *** stmuk_ joined

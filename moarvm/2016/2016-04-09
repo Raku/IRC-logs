@@ -1,0 +1,309 @@
+[01:11] *** zostay joined
+[01:17] <zostay> hoelzro: i might have a better test for the async crash you tried to help me with before
+
+[01:18] <hoelzro> zostay: interesting
+
+[01:20] <timotimo> well, then, share it with us! :)
+
+[01:20] <zostay> so, i was running a different test from you the whole time :-$
+
+[01:21] <zostay> i forgot to push the last commit
+
+[01:21] <zostay> so... it's pushed now
+
+[01:23] <zostay> clone https://github.com/zostay/HTTP-Supply/ and run: perl6 -Ilib t/http-1.0.t
+
+[01:23] <zostay> the first test runs fine, but the second run chokes
+
+[01:23] <zostay> anyway, putting kiddos to bed, biab
+
+[01:23] * hoelzro builds a fresh rakudo
+
+[01:29] <hoelzro> zostay: when you say it chokes...do you get a crash?
+
+[01:29] <hoelzro> I'm just getting test failures
+
+[01:49] <zostay> zsh: abort      perl6 -Ilib t/http-1.0.t
+
+[01:50] <zostay> all tests should be passing
+
+[01:50] <zostay> my first run went fine, but the second failed with an abort
+
+[01:52] <hoelzro> zostay: which OS are you on?
+
+[01:57] <timotimo> .o( and what exact rakudo, nqp, and moarvm versions )
+
+[01:57] <timotimo> bbl
+
+[01:59] <zostay> i built a recent rakudobrew in the last couple days, building again right now, but this has been very consistent for me on this laptop and on a linux vm
+
+[02:04] <zostay> happening on a brand new fresh build of nom/master/master just now
+
+[02:09] <zostay> i am gettng completely different behavior on my linode though.... hmmm
+
+[02:17] <hoelzro> zostay: which OS do your laptop and linux VM run?
+
+[02:17] <zostay> aha, there we go... it was missing test data :-$
+
+[02:17] <hoelzro> that fixed it?
+
+[02:18] <zostay> no, that made linode repeat the problem i was having rather than test failures
+
+[02:18] <zostay> now linode aborts
+
+[02:18] <hoelzro> ahhh
+
+[02:18] <zostay> so, if you try a fresh pull, maybe now you'll see it?
+
+[02:18] * hoelzro tries
+
+[02:19] <hoelzro> nope, tests all pass =/
+
+[02:19] <zostay> try it a second time
+
+[02:19] <hoelzro> zostay: which linux distro(s) are you trying on
+
+[02:19] <hoelzro> did
+
+[02:19] <hoelzro> three times
+
+[02:19] <zostay> it passes the first time, but fails the second and then after until the cache or whatever clears and try again later
+
+[02:20] <hoelzro> I just tried it about ten times, all passed =/
+
+[02:20] <zostay> OSX 10.11 is my laptop
+
+[02:21] <zostay> the linode is: gentoo Linux 4.1.5-x86_64-linode61 #7 SMP Mon Aug 24 13:46:31 EDT 2015 Intel(R) Xeon(R) CPU E5-2680 v2 @ 2.80GHz GenuineIntel GNU/Linux
+
+[02:23] <zostay> the Linux VM is: Mint Mate Linux 3.16.0-38-generic #52~14.04.1-Ubuntu SMP Fri May 8 09:43:57 UTC 2015 x86_64 x86_64 GNU/Linux
+
+[02:23] <hoelzro> hmm...pretty diverse
+
+[02:24] <hoelzro> welp, I'll fire up a VM
+
+[02:26] * hoelzro builds Rakudo on FreeBSD
+
+[02:27] <hoelzro> I forgot how long interp.c takes to compile on clang =/
+
+[02:38] <hoelzro> zostay: I got it to abort!
+
+[02:38] <hoelzro> I bet it's running out of fds
+
+[02:39] <hoelzro> $ ulimit -a | grep file\ descriptors
+
+[02:39] <hoelzro> -n: file descriptors        58284
+
+[02:39] <hoelzro> ok, so not likely =/
+
+[02:40] <zostay> \o/
+
+[03:03] <hoelzro> yay, I got a stack trace
+
+[03:04] <hoelzro> pthread_mutex_destroy is failing (!?!)
+
+[03:06] <hoelzro> failed to destroy mutex: Device busy o_O
+
+[03:08] <hoelzro> sounds like the mutex is being free'd while locked?
+
+[03:11] <hoelzro> yup
+
+[03:11] <hoelzro> well, that ain't good.
+
+[03:23] <hoelzro> ok, it turns out that the thread that's cleaning up the mutex has still locked it
+
+[03:24] <hoelzro> which is...odd
+
+[03:51] <hoelzro> ha! now that I added some printfs on Arch, it messed up the timing enough to cause the abort!
+
+[04:08] *** geekosaur joined
+[04:11] *** geekosaur joined
+[04:26] <hoelzro> zostay: when you get a chance, could you try with MVM_SPESH_DISABLE=1?
+
+[04:26] <hoelzro> that seems to fix it for me
+
+[05:13] <hoelzro> it's a lock that's being locked via Lock.protect; it looks like it might be getting locked in a Promise vow as well
+
+[05:13] <hoelzro> I'm off to bed; I'll dig in more tomorrow
+
+[06:13] *** geekosaur joined
+[08:09] *** domidumont joined
+[12:14] <zostay> hoelzro: thx... i tried MVM_SPESH_DISABLE=1 and it helps somewhat
+
+[12:14] <zostay> on OS X it gets to ok 24 instead of stopping after ok 20
+
+[12:15] <zostay> it doesn't make any difference on my linode
+
+[12:23] <zostay> no difference on my linux vm either
+
+[12:29] <zostay> a thread cleaning up in a bad state sounds exactly like what i found when i originally dug in with the debugger
+
+[12:29] <zostay> but i am not familiar with mvm internals, so i really didn't know where to go with that
+
+[12:38] *** cognominal joined
+[14:14] <hoelzro> so I've been taking further stabs at the problem this morning
+
+[14:15] <hoelzro> it *looks* like Lock.protect is locking in some situations without an unlock
+
+[14:16] <dalek> MoarVM/circular_outer_fixups: 4cef4ac | timotimo++ | src/core/bytecode.c:
+
+[14:16] <dalek> MoarVM/circular_outer_fixups: don't allow outer frames to create a circle
+
+[14:16] <dalek> MoarVM/circular_outer_fixups:
+
+[14:16] <dalek> MoarVM/circular_outer_fixups: there's a lot of potential for making the code cheaper
+
+[14:16] <dalek> MoarVM/circular_outer_fixups: review: https://github.com/MoarVM/MoarVM/commit/4cef4ac1c0
+
+[14:19] <timotimo> ^- i'm not sure, but i *think* we might only have to actually inspect frames that were "fixed up"
+
+[14:22] <hoelzro> yay, I was able to reproduce zostay's bug
+
+[14:22] <hoelzro> (in a standalone script)
+
+[14:22] <timotimo> cool!
+
+[14:23] <hoelzro> this line in Lock.pm irks me a bit: CATCH { nqp::unlock(self); }
+
+[14:23] <timotimo> hehehe
+
+[14:23] <hoelzro> shouldn't it nqp::rethrow($_) after the unlock?
+
+[14:23] <timotimo> it doesn't need to
+
+[14:24] <hoelzro> or does it already because the exception isn't "handled"?
+
+[14:24] <timotimo> because there's no "default {...}" in there
+
+[14:24] <hoelzro> ahhh, ok
+
+[14:24] <timotimo> should, yeah
+
+[14:24] <hoelzro> timotimo: does that apply to CONTROL as well?
+
+[14:24] <timotimo> i think so
+
+[14:24] <timotimo> should be easy-ish to try
+
+[14:25] <hoelzro> I think the bug is that CONTROL exceptions aren't caught, so no unlock happens
+
+[14:29] <timotimo> well, control exceptions are resumable
+
+[14:29] <timotimo> that makes it very difficult to deal with them properly on a general basis
+
+[14:30] <timotimo> i don't think we have a phaser for "execute this code when the exception has been resumed", so we can't re-lock on resumption
+
+[14:30] <timotimo> and even then we'd have the lock briefly unheld while the code up the stack decides whether to resume or not
+
+[14:32] <hoelzro> "Trying to unwind over wrong handler" weeeeeee
+
+[14:32] <hoelzro> hmm, I hadn't considered that
+
+[14:33] <hoelzro> that makes this *much* more complicated =/
+
+[14:33] <timotimo> yes, very
+
+[14:37] <hoelzro> guess I'll file an RT
+
+[14:43] <hoelzro> zostay: in case you want to track the issue: https://rt.perl.org/Ticket/Display.html?id=127865
+
+[14:43] <zostay> thx, so if it's a control exception that's blowing things up, maybe i can work around it by avoiding the control statement that tosses it?
+
+[14:44] <timotimo> you might have to use .lock and .unlock manually perhaps :(
+
+[14:45] <hoelzro> I just don't know which lock protect is being called on =/
+
+[14:45] <timotimo> then you can output the WHICH :)
+
+[14:45] <hoelzro> that I've done, but I still don't know where it gets created in Perl 6 land =(
+
+[14:46] <timotimo> oh
+
+[14:46] <zostay> yeah, that's what i was thinking... i don't mind putting in manual locks if it's temporary until you guys can think through to a gooder solution
+
+[14:46] <timotimo> OK, in that case you can set breakpoints for the creation of a MVMLock or what it's called REPR
+
+[14:46] <timotimo> and print MVM_dump_backtrace(tc) in there
+
+[14:46] <timotimo> like, break the_line; commands; print MVM_dump_backtrace(tc); print the_address_of_the_lock; c; end
+
+[14:47] *** camelia joined
+[14:47] <zostay> if i can get this to work, i can try and sneak a p6sgi talk in at yapc
+
+[14:56] <zostay> rob, if you're coming to yapc, i will happily buy you lunch for digging that out
+
+[14:57] <hoelzro> ahhhh
+
+[14:57] <hoelzro> good idea timo
+
+[14:58] <hoelzro> zostay: thanks, but sadly I don't think I'll be making to yapc this year =(
+
+[15:03] <hoelzro> timotimo++ # backtrace tips
+
+[15:03] <timotimo> :)
+
+[15:03] <timotimo> inspired by how helgrind works
+
+[15:04] <timotimo> it'll also tell you the stack trace of where something got created for every single lock-like thing whenever it's mentioned somewhere
+
+[15:04] <hoelzro> neat
+
+[15:06] <hoelzro> interesting...it's the SupplyBlockState from Supply.tap
+
+[15:08] <hoelzro> well, something with SUPPLY, anyway
+
+[15:09] * hoelzro goes out for coffee
+
+[16:54] *** zakharyas joined
+[16:56] *** lucasb joined
+[16:56] <lucasb> libuv 1.9 was releases 2 days ago
+
+[16:56] <lucasb> can we get that for the release next week?
+
+[16:57] <lucasb> changelog is here: https://github.com/libuv/libuv/releases/tag/v1.9.0
+
+[17:00] <timotimo> how far behind are we currently?
+
+[17:01] <lucasb> I think moar is at 1.8
+
+[17:02] <timotimo> ah, good, so the changelog is "exhaustive" for us
+
+[17:04] <timotimo> anything in particular that stands out to you?
+
+[17:05] <lucasb> I don't know if any bug fixed in libuv affected moarvm. I suggested just for the sake of keeping things updated :)
+
+[17:09] *** geekosaur joined
+[17:13] *** geekosaur joined
+[17:13] <timotimo> yes, yes
+
+[17:13] <timotimo> but i'm an excitement driven developer :P
+
+[17:16] *** domidumont joined
+[18:13] <jnthn> I tend to feel a bit safer bumping versions of deps just *after* a release so we maximize testing time before the next one :)
+
+[18:13] <jnthn> Though it looks like a fairly low-risk bump in this case
+
+[18:34] *** vendethiel joined
+[18:42] <timotimo> jnthn: +1/-1 on building an op that turns a buffer like VMArray into a Big Integer directly, and perhaps the other way around, too?
+
+[19:37] *** FROGGS joined
+[19:45] <jnthn> timotimo: As in, just using the bits in the array?
+
+[19:58] <jnthn> Also: use case? How will it be used from Perl 6?
+
+[20:06] <timotimo> building random big integers
+
+[20:08] <timotimo> we don't have a way to add two big buffers together and have it proper carry ... without building that yourself
+
+[20:15] *** TimToady joined
+[20:28] *** zakharyas joined
+[20:39] *** Ven joined
+[21:15] <timotimo> i'll try to rebuild moar and see if the resume commandline from the readme works as intended
+
+[21:23] <timotimo> i'm looking at output in a format that i don't recognize ... well, it'll be fine. everything'll be fine.
+
+[21:27] <timotimo> "warning: no new instrumentation output, test case may be useless" - i expect this happens when a bug that had been the basis for a test case to be created was fixed in the mean time and no longer causes a crash
+
+[21:51] *** vendethiel joined
+[21:53] <timotimo> uh oh
+
+[21:53] <timotimo> as expected, i messed it up somehow :)

@@ -1,0 +1,359 @@
+[00:02] <timotimo> the problem is we really want to mprotect jit code regions read-only and executable
+
+[00:02] <timotimo> that means we'd have to at some point decide "we should move some jit segments together" and memcpy them into a big chunk and switch over
+
+[00:07] *** lizmat_ joined
+[00:07] <timotimo> so we won't be faster at setting up stuff
+
+[00:07] <timotimo> we'll just end up using fewer mmaps all in all
+
+[00:15] <timotimo> er, not even "all in all", just "eventually"
+
+[00:18] <timotimo> other JITs must have something for this
+
+[00:19] <timotimo> oh, actually, maybe we can mprotect pieces of an mmap?
+
+[00:19] <timotimo> then we can map big chunks at a time and fill them with jitcode, making parts read-only as we go
+
+[00:21] <timotimo> yes, that should work
+
+[00:40] <japhb> I still don't quite understand why we don't consider persisting JIT output, so we can just mmap it back in when we detect it's safe.  Or perhaps that last bit is too hard right now.
+
+[01:06] <timotimo> we have references to objects (, types, stables) in our jit objects that would have to magically point to the same object afterwards as well
+
+[02:14] <japhb> That's not a hard blocker, that's just a matter of having e.g. a fixup table.  But I understand your basic point that this makes things more difficult.
+
+[03:30] *** ingy joined
+[03:52] *** ilbot3 joined
+[07:30] *** sivoais joined
+[08:06] *** FROGGS joined
+[08:21] *** Ven joined
+[08:25] *** kjs_ joined
+[08:32] *** Ven joined
+[09:02] <jnthn> On the cost of JIT affecting stratup, that probably means we should look at why we do enough work at startup to trigger JIT, or whether we've set JITting thresholds too low.
+
+[09:13] *** kjs_ joined
+[09:45] *** tadzik joined
+[09:55] *** brrt joined
+[09:58] <brrt> timotimo - i'm not sure if you can mprotect pieces-of-an-mmap, and even if you could, i'm less sure windows can
+
+[09:58] <brrt> i believe mprotect relies on the paging hardware of the CPU? and those have page granularity
+
+[09:58] <brrt> and moreover
+
+[09:58] <brrt> moreover
+
+[09:59] <brrt> i don't care about writing a clever allocator-for-rx-memory without exhaustive proof of it's necessity
+
+[09:59] <brrt> its]
+
+[09:59] <nwc10> This is partly what I'm wondering (and I don't know how to benchmark it, or figure it out from docs/code inspection]
+
+[09:59] <jnthn> I'd rather try to other things I suggested first :)
+
+[10:00] <nwc10> is the syscall to change memory protection about as slow as mmap itself
+
+[10:00] <nwc10> both have to fiddle with page tables.
+
+[10:00] <brrt> well, one can check if the # of mmaps goes down significantly with MVM_DISABLE_JIT=1
+
+[10:00] <nwc10> but yes, if JIT thresholds are too low, change them and startup shouldn't hit the JIT
+
+[10:01] <nwc10> and if they aren't, but startup is hitting the JIT, why is the relevant setting code doing work at runtime anyway?
+
+[10:01] <brrt> parsing the file is done at runtime at least?
+
+[10:02] <nwc10> true, but how much parsing does 'say 1' take?
+
+[10:02] <brrt> and regexes / grammars can be compiled
+
+[10:02] <brrt> i don't know
+
+[10:02] <brrt> good point
+
+[10:02] <nwc10> me neither. but it's a good question.
+
+[10:03] <brrt> fwiw, python has 0.010s sys time in a -e 'print "hi"'
+
+[10:03] <brrt> oh, that'd be 0.030 sys time
+
+[10:04] <brrt> ruby has 0.006s sys
+
+[10:04] <brrt> and perl5 has 0.002s
+
+[10:07] <brrt> with JIT the sys time is 0.047s, without it it's 0.03s
+
+[10:07] <brrt> so, ok, significant
+
+[10:08] <brrt> however, both are dwarfed by user time (0.29s w/o JIT, 0.30 with JIT)
+
+[10:09] <brrt> japhb - the main reason is linking
+
+[10:10] <brrt> we typically insert hard pointers to functions, sometimes to nonmoving objects (when this can be proven safe)
+
+[10:10] <brrt> (for not persisting JIT output, btw)
+
+[10:11] <brrt> another reason is that frames would need to be related to another accross VM runs, which is pretty hard actually
+
+[10:11] <brrt> if it weren't i wouldn't have such problems giving a name to a frame
+
+[10:12] <brrt> oh, timotimo alreadty answered that :-)
+
+[10:13] <brrt> another solution would be to batch JIT compilations so a single mmap can be made for all of them
+
+[10:13] <brrt> but that is.. not necessarily awesome
+
+[12:50] <[Coke]> brrt - I can't see the picture in http://brrt-to-the-future.blogspot.com/2015/03/advancing-jit-compiler.html?_sm_au_=iMVNn0FstRrW7PkQ
+
+[13:00] <FROGGS> hmmm, I can
+
+[13:01] <FROGGS> http://3.bp.blogspot.com/-QP33McMn3qQ/VQ_exD_e8NI/AAAAAAAAAO8/y87Vvy2DQ-U/s1600/Rakudo%2BSystem%2BOverview.png
+
+[13:03] <FROGGS> [Coke]: does that work?
+
+[13:09] <[Coke]> ERR_NAME_NOT_RESOLVED
+
+[13:10] <nwc10> does resolve for me (to different places, from machines on different contintents)
+
+[13:11] <[Coke]> mmm, probably just my work proxy & firewall.
+
+[13:13] <nwc10> [Coke]: http://freethoughtblogs.com/lousycanuck/2014/03/21/twitter-blocked-in-turkey-activists-graffiti-alternate-dns-workaround/ :-)
+
+[13:21] <[Coke]> by default, I'm not even using DNS - it's going through work's http proxy, so it's -that- dns. I'd have to do the lookup separately, plug the IP in, still subject to the proxy letting me see anything...
+
+[13:22] <[Coke]> was hoping it was either broken for everyone or there was a copy somewhere. no worries.
+
+[13:39] *** colomon joined
+[13:48] <timotimo> asking around, it seems like many jits actually don't W^X yet
+
+[14:16] *** zakharyas joined
+[14:42] <timotimo> "locking" jit-destination-pages seems like a bad idea, too
+
+[15:05] *** colomon joined
+[15:25] *** ShimmerFairy joined
+[15:42] *** kjs_ joined
+[15:49] <timotimo> if the jit-destination-pages hang off of the TC, that wouldn't be a problem
+
+[15:49] <timotimo> then we'd never be trying to run code in a given segment and appending to the segment at the same time
+
+[16:03] *** Ven joined
+[17:01] *** FROGGS[mobile] joined
+[17:17] <timotimo> pointers are hard sometimes
+
+[17:28] <nwc10> sometimes? :-)
+
+[17:29] <nwc10> pointers are hard, lets go Java!
+
+[17:31] *** rurban_ joined
+[17:35] <timotimo> structs make the whole thing much less annoying to handle
+
+[17:38] * timotimo is building a prototype mmap-consolidation-allocator-thingie
+
+[17:39] <timotimo> and it doesn't work at all m(
+
+[17:58] <jnthn> You can't really easily hang JIT pages off tc
+
+[17:58] <jnthn> Or if you try, your allocator is going to be harder than you imagine
+
+[17:58] <jnthn> Consider a hot EVAL'd bit of code
+
+[17:58] <jnthn> That gets GC later.
+
+[18:06] *** AndChat|228864 joined
+[18:06] <AndChat|228864> aloha
+
+[18:11] <timotimo> wow, it runs now
+
+[18:12] <timotimo> do we actually throw out jit code?
+
+[18:14] <timotimo> oh, we do
+
+[18:15] <timotimo> yeah, my idea wasn't such a good one, apparently
+
+[18:20] <jnthn> Yeah, they hang off MVMStaticCode objects which are GC-able
+
+[18:20] <jnthn> Specializations too
+
+[18:20] <timotimo> ah
+
+[18:20] <timotimo> well, damn
+
+[18:21] <jnthn> So your allocator would need a free operation also, and you don't know which thread will finalize a MVMStaticFrame so it'd need to be a thread-safe allocator off instance rather than per tc
+
+[18:21] <jnthn> So I'm afraid it quickly gets complex :(
+
+[18:21] <jnthn> Better might be to adjust the thresholds for when we spesh
+
+[18:21] <jnthn> And use perl6-m --profile-compile -e '1' to see the % of time spent specializing/JIT-compiling at startup
+
+[18:25] *** Peter_R joined
+[18:25] <timotimo> gaaahh
+
+[18:25] <timotimo> my life: have idea, build it (mostly), find out it's wrong from the start
+
+[18:50] *** FROGGS[mobile] joined
+[18:52] <timotimo> maybe we should just malloc the jit pages and just mark our whole program heap as executable
+
+[19:07] *** FROGGS[mobile] joined
+[19:18] *** FROGGS joined
+[19:21] *** kjs_ joined
+[19:29] <japhb> timotimo: You forget step 4: Learn a ton in the process
+
+[19:30] <japhb> Also, if you push a commit to mark all of heap executable, I shall whip you with a wet noodle until you revert.
+
+[19:30] <timotimo> :)
+
+[20:03] *** brrt joined
+[20:08] <brrt> timotimo: allocaters are hard, but trying is always helpful
+
+[20:12] * jnthn wonders if a wet noodle can actually inflict pain...
+
+[20:12] <brrt> i wonder if pain was the point :-)
+
+[20:16] <japhb> I think it's more a matter of "Eww, would you please STOP THAT?!"  "Sure, just as soon as you revert your commit!"  "FINE, SHEESH."
+
+[20:18] <japhb> Now, a wet mackerel is more likely going to combine *both* the ickiness and the pain.
+
+[20:19] *** colomon joined
+[20:19] <japhb> Don't make me pull out the fermented foods.  Because I will.  You just try me.  ;-)
+
+[20:21] <japhb> .oO( News flash: Hacker threatened with food, story at 11 ... )
+
+[20:22] <jnthn> Noo....no the pickled wallnuts!
+
+[20:22] <jnthn> *not
+
+[20:24] <brrt> http://blog.erratasec.com/2015/03/x86-is-high-level-language.html#.VRMUs-nd-V5 interesting stuff about the x86
+
+[20:27] <jnthn> Aye :)
+
+[20:27] <jnthn> I was reading up on a bunch of that stuff recently. It's pretty fun :)
+
+[20:29] <brrt> yes, rather
+
+[20:30] <brrt> it's also funny that in many cases the old 'high level' ops like push and pop are really slower than the lower-level ops
+
+[20:33] <jnthn> I suspect the clever hanlding of MOV *may* mitigate some of Moar's currently sub-optimal code-gen, but the WORK fetches it really can't help much with, and I suspect those are what cost us the most.
+
+[20:33] <nwc10> WORK fetch?
+
+[20:35] <jnthn> frame->work
+
+[20:36] <jnthn> The VM-level registers
+
+[20:36] <nwc10> aha
+
+[20:36] <jnthn> It's fetched into a register at frame entry known as WORK in the JIT, iirc
+
+[20:38] <nwc10> (in the enterprise edition, this will be called MEETINGS?)
+
+[20:39] <jnthn> Nah, we'll embrace agile and call it STANDUP :P
+
+[20:53] *** FROGGS[mobile] joined
+[20:55] <brrt> lol :-D
+
+[20:56] <brrt> i was wondering about calling them all just REGISTER or REG
+
+[20:56] <jnthn> WORK nicely matches what's in frame, though :)
+
+[20:57] <brrt> true
+
+[21:06] <dalek> MoarVM: e2e908b | jnthn++ | src/spesh/threshold.c:
+
+[21:06] <dalek> MoarVM: Tweak dynamic optimization thresholds.
+
+[21:06] <dalek> MoarVM:
+
+[21:06] <dalek> MoarVM: These are tweaked by considering profiles of NQP and Rakudo startup.
+
+[21:06] <dalek> MoarVM: We now do barely any specialization during NQP startup, and only about
+
+[21:06] <dalek> MoarVM: a third as much as we used to during Rakudo startup. This improves the
+
+[21:06] <dalek> MoarVM: startup time of both a little (measurable outside the profiler in both
+
+[21:06] <dalek> MoarVM: cases too, including NQP "make test" about taking 10% less time).
+
+[21:06] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/e2e908b09a
+
+[21:06] <jnthn> timotimo: If you have a chance to kick off an easy perl6-bench run, could be good to check that this doesn't make things worse there.
+
+[21:08] <timotimo> OK
+
+[21:08] <jnthn> hold on a mo
+
+[21:09] <dalek> MoarVM: a752064 | jnthn++ | src/spesh/osr.h:
+
+[21:09] <dalek> MoarVM: Bump OSR theshold also.
+
+[21:09] <dalek> MoarVM:
+
+[21:09] <dalek> MoarVM: Cuts the number OSRs done during Rakudo startup from 4 to 2.
+
+[21:09] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/a752064501
+
+[21:09] <jnthn> timotimo: That one might as well be included too :)
+
+[21:10] <timotimo> k
+
+[21:22] *** colomon joined
+[21:34] *** FROGGS[mobile]2 joined
+[21:40] <timotimo> jnthn: is going to happen
+
+[21:41] <timotimo> starting the benchmarks right now
+
+[21:44] <jnthn> Very happen :)
+
+[21:44] <jnthn> timotimo++
+
+[21:50] *** tgt joined
+[21:50] *** tgt left
+[21:57] *** travis-ci joined
+[21:57] <travis-ci> MoarVM build passed. jnthn 'Bump OSR theshold also.
+
+[21:57] <travis-ci> http://travis-ci.org/MoarVM/MoarVM/builds/55861712 https://github.com/MoarVM/MoarVM/compare/e2e908b09a1e...a752064501a7
+
+[21:57] *** travis-ci left
+[22:00] <jnthn> Travis seems a little confused...
+
+[22:01] <jnthn> I got emails saying both of my last commits got the build passing again :)
+
+[22:33] <timotimo> guess what, jnthn
+
+[22:33] <timotimo> SUMMARY SCORE                                             108.5                       100.0
+
+[22:33] <timotimo> ^- after tuning gets a better score
+
+[22:34] <timotimo> http://t.h8.lv/p6bench/2015-03-25-threshold_tuning.html
+
+[22:36] <timotimo> i wouldn't have thought the improvements would be this noticable
+
+[22:36] <timotimo> oh, wait
+
+[22:36] <timotimo> derp.
+
+[22:36] <timotimo> i compared moarvm-2013.03 vs moarvm-master
+
+[22:36] <timotimo> that's rather dumb
+
+[22:37] <timotimo> let's try that again...
+
+[22:40] <jnthn> d'oh :)
+
+[23:02] <timotimo> a full-on refresh will give you the new data
+
+[23:07] <jnthn> How on earth has zero got worse, but hello got better?! :)
+
+[23:08] <jnthn> I wonder why while_hash_set got notably better
+
+[23:09] <jnthn> Same with for_hash_set.
+
+[23:19] <jnthn> timotimo: Thanks. I think seeing this, I'm a bit curious about a couple of things, but the change can stay.
+
+[23:19] * jnthn gets some much needed rest
+
+[23:20] <timotimo> maybe we've been occupying slots for any given callsite/target combination with stuff that's only useful in the very beginning of startup and that wastes some time during the "real" program run?
+
+[23:20] <timotimo> i don't really know how all that works :)
+
+[23:52] *** colomon joined

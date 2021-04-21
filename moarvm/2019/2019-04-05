@@ -1,0 +1,229 @@
+[00:06] *** Kaiepi left
+[00:12] *** Kaiepi joined
+[00:44] *** lucasb left
+[00:48] *** MasterDuke joined
+[00:48] *** MasterDuke left
+[00:48] *** MasterDuke joined
+[05:31] *** domidumont joined
+[05:49] *** domidumont left
+[06:10] *** domidumont joined
+[06:31] *** AlexDaniel` left
+[06:31] *** Garland_g[m] left
+[06:43] *** AlexDaniel` joined
+[07:21] *** Garland_g[m] joined
+[08:10] *** zakharyas joined
+[08:17] *** robertle_ joined
+[09:20] <jnthn> morning, #moarvm o/
+
+[09:20] <timotimo> greetings
+
+[09:21] <timotimo> i'm now in the amusing situation where i have to find out why one measurement says a few thousand bytes were freed from the nursery and another says a few ten thousand are, or something like that
+
+[09:22] <timotimo> interesting. i looked at the wrong keys, yet it doesn't add up still
+
+[09:23] <timotimo> does cleared bytes also count unmanaged bytes, i wonder
+
+[09:52] *** domidumont left
+[09:53] *** Garland_g[m] left
+[09:56] *** AlexDaniel` left
+[10:04] *** AlexDaniel` joined
+[10:40] *** Garland_g[m] joined
+[11:00] *** zakharyas left
+[11:44] *** domidumont joined
+[12:50] *** zakharyas joined
+[13:03] <Geth> ¦ MoarVM: a353260539 | (Jonathan Worthington)++ | 2 files
+
+[13:03] <Geth> ¦ MoarVM: Fix MIN/MAX redefinition warnings
+
+[13:03] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/a353260539
+
+[13:09] *** robertle_ left
+[13:27] *** Guest16965 joined
+[13:28] <Guest16965> jnthn: are you doing fixes again? (dogbert17)
+
+[13:30] <jnthn> Taking a look at the leak reported in https://github.com/rakudo/rakudo/issues/2803
+
+[13:37] * lizmat commented on that ticket
+
+[13:38] <timotimo> lizmat: i think the code snippets lack the initial send?
+
+[13:39] <jnthn> lizmat: Not sure what yuou mean; I get loads of output?
+
+[13:39] <jnthn> lizmat: did you accidentally remove the initial .send(0)?
+
+[13:39] <timotimo> hm, in an earlier comment there's a $channel.send: 0 inside the LEAVE of a react block; do we actually fire the LEAVE phaser when the react is still going?
+
+[13:39] <timotimo> i mean, they say it gives output, so i suppose it has to
+
+[13:39] <lizmat> ah, with in initial send it does  :-)
+
+[13:39] <jnthn> timotimo: I'd expect it to fire right away when the react block's setup run is completed
+
+[13:40] <timotimo> OK, good
+
+[13:40] <timotimo> for the other thing there's another phaser
+
+[13:40] <jnthn> *sigh* I tried to --profile it to see what it's allocating, and it SEGVs almost immediately :(
+
+[13:41] <jnthn> (The second version with the .tap, that is)
+
+[13:41] <timotimo> oh, ouchies
+
+[13:41] <jnthn> Thread 1 "moar" received signal SIGSEGV, Segmentation fault.
+
+[13:41] <jnthn> 0x00007ffff76f17ec in MVM_profiler_log_gc_deallocate ()
+
+[13:41] <jnthn>    from /home/jnthn/dev/MoarVM/install/bin/../lib/libmoar.so
+
+[13:42] <jnthn> Will do a debug build to get line numbers
+
+[13:42] <timotimo> oh, i didn't expect that to be explosive
+
+[13:42] <timotimo> feel free to comment out the call to that function
+
+[13:42] <lizmat> cycling&
+
+[13:43] <timotimo> hm, another object with a nulled out stable pointer
+
+[13:43] <jnthn> 0x00007ffff76f126c in MVM_profiler_log_gc_deallocate (tc=tc@entry=0x604a60,
+
+[13:43] <jnthn>     object=object@entry=0x326a4c0) at src/profiler/log.c:293
+
+[13:43] <jnthn> 293         MVMObject *what = STABLE(object)->WHAT;
+
+[13:43] <Guest16965> jnthn: interesting
+
+[13:43] <timotimo> on my end it has its flags = 16, which is only SECOND_GEN
+
+[13:44] <timotimo> i see that the line below that in MVM_gc_collect_free_gen2_unmarked guards against STABLE(obj), i.e. skips objects with nulled out stables
+
+[13:44] <timotimo> what kinds of objects are those?
+
+[13:45] <jnthn> Hm, when is this being called?
+
+[13:45] <timotimo> during a full collection
+
+[13:45] <timotimo> well, after, really
+
+[13:45] <timotimo> when we go through the entire gen2 to rebuild the free list and call ->free on all the objects that have a free function in their REPR
+
+[13:45] <jnthn> Yeah, but I think we chain a free list through the gen2 pages or something
+
+[13:45] <timotimo> yeah, we do
+
+[13:47] <jnthn> Ah, the collection also guards against a null STable
+
+[13:49] <jnthn> Note that you're missing the call to profile in the case of dead oversize objects
+
+[13:49] <timotimo> oh, good catch
+
+[13:51] <Geth> ¦ MoarVM: d68b57580b | (Jonathan Worthington)++ | src/profiler/log.c
+
+[13:51] <Geth> ¦ MoarVM: Guard against objects with null ->st
+
+[13:51] <Geth> ¦ MoarVM:
+
+[13:51] <Geth> ¦ MoarVM: It's not entirely clear when this situation happens, however the GC code
+
+[13:51] <Geth> ¦ MoarVM: itself also guards against that case.
+
+[13:51] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d68b57580b
+
+[13:52] <timotimo> i'll be AFK for a bit, but it does look like things are working again
+
+[13:52] <timotimo> of course you'll need a proper termination for the profiler data to be taken and outputted
+
+[13:52] <jnthn> yeah, already did that
+
+[13:53] <timotimo> what's up in the moarperf repo should currently be totally usable
+
+[14:04] <jnthn> grmbl...even though I ran `zef upgrade App::MoarVM::HeapAnalyzer`, moar-ha on my snapshot blows up immediately
+
+[14:04] <jnthn> Considering the snapshot...oops!
+
+[14:04] <jnthn> Backtrace(27 frames)
+
+[14:04] <jnthn> Cannot unbox 66 bit wide bigint into native integer
+
+[14:07] *** lucasb joined
+[14:08] <jnthn> ah, though maybe it doesn't cope too well with me having Ctrl+C'd it...
+
+[14:08] <jnthn> ah, seems so
+
+[14:10] <jnthn> Yeah. I thought I remembered some discussion to the effect of it wrote the format so you could get away with doing that, and then read the records that were written, but maybe that was a speculated feature? :)
+
+[14:23] <timotimo> yes, sorry, that was still speculation :(
+
+[14:24] <timotimo> it should be possible to attach gdb to it and manually call MVM_profile_heap_end
+
+[14:24] <timotimo> perhaps an "atexit" would have been a good idea for this actually
+
+[14:31] *** squashable6 left
+[14:33] *** squashable6 joined
+[15:52] *** zakharyas left
+[16:00] <AlexDaniel> I'd love to see https://github.com/MoarVM/MoarVM/pull/1072 merged before the release
+
+[16:00] <AlexDaniel> maybe with a tweak to the pad argument, or maybe it's good as is…
+
+[16:01] <AlexDaniel> https://bugs.ruby-lang.org/issues/15667
+
+[16:02] <AlexDaniel> it looks like they use 0
+
+[16:13] *** Kaiepi left
+[16:13] *** Kaiepi joined
+[17:10] *** domidumont left
+[17:20] *** domidumont joined
+[17:29] <Geth> ¦ MoarVM: 25b486dee8 | (Jonathan Worthington)++ | 4 files
+
+[17:29] <Geth> ¦ MoarVM: Avoid preserving ->caller unless we really need it
+
+[17:29] <Geth> ¦ MoarVM:
+
+[17:29] <Geth> ¦ MoarVM: We need it for backtraces and context introspection. Otherwise, it can
+
+[17:29] <Geth> ¦ MoarVM: go. Preserving it can cause leaks involving taken closures: the taking
+
+[17:29] <Geth> ¦ MoarVM: of the closure has an ->outer frame that in turn points to a ->caller
+
+[17:29] <Geth> ¦ MoarVM: and keeps it alive. This was involved in the leak that was reported in
+
+[17:29] <Geth> ¦ MoarVM: https://github.com/rakudo/rakudo/issues/2803.
+
+[17:29] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/25b486dee8
+
+[17:29] <timotimo> in that bug there's another interesting tidbit: we can also just NativeCall into malloc_trim if the user Knows What They Want™
+
+[17:30] *** domidumont left
+[17:50] *** Kaiepi left
+[17:51] *** Kaiepi joined
+[17:51] <jnthn> AlexDaniel: Yeah, I'll experiment a bit with it next week :)
+
+[17:52] <jnthn> AlexDaniel: Interestingly, that leaking example looks stable rather than leaky under massif, which does suggest we might be seeing fragmentation problems
+
+[17:52] *** Kaiepi left
+[17:53] <jnthn> We can often end up with a lot of memory allocated on one thread and then released on another, and maybe that's not always handled too well
+
+[17:53] <jnthn> dinner, bbl
+
+[17:53] *** Kaiepi joined
+[20:46] *** domidumont joined
+[20:53] *** domidumont left
+[21:10] *** releasable6 left
+[21:14] *** releasable6 joined
+[21:56] *** Kaypie joined
+[21:58] *** leedo left
+[21:59] *** harrow` joined
+[22:00] *** samcv_ joined
+[22:01] *** Voldenet left
+[22:01] *** samcv left
+[22:01] *** Ulti_ joined
+[22:01] *** harrow left
+[22:01] *** Ulti left
+[22:01] *** Kaiepi left
+[22:04] *** Voldenet joined
+[22:04] *** Voldenet left
+[22:04] *** Voldenet joined
+[22:09] *** leedo joined
+[23:25] *** AlexDaniel left
+[23:29] *** AlexDaniel joined
+[23:59] *** greppable6 left

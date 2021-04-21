@@ -1,0 +1,140 @@
+[01:48] *** ilbot3 joined
+[06:18] *** TimToady joined
+[07:38] *** domidumont joined
+[07:41] *** brrt joined
+[07:43] *** domidumont joined
+[07:55] <brrt> okay, here's a new idea
+
+[07:56] <brrt> whenever we allocate something, we need to flush all object values into memory
+
+[07:59] <nwc10> "why?"
+
+[08:00] <nwc10> (I'm trying to be a bit more useful than a teddy bear, but I can't work out where you're coming from/where this is going)
+
+[08:02] <nwc10> oh, that's where :-/
+
+[08:05] *** brrt joined
+[08:05] <brrt> they can be moved by the garbage collector
+
+[08:07] <brrt> so, lets suppose i keep a pointer to an object in a register
+
+[08:09] <nwc10> (I think I see where you're going now)
+
+[08:09] <brrt> okay :-) cool
+
+[08:10] <brrt> the second part of the idea was (aside from setting an 'allocates' flag on the op), to maintain both the node and the root for the last definition of a local
+
+[08:11] <nwc10> more pedantically, it's "just before we do anything that potentially might allocate, we need to flush all object values to memory (in case the GC runs)" ?
+
+[08:11] <brrt> why? so if we decide we have to flush them, we can figure out which pointer to update as well
+
+[08:11] <brrt> yes
+
+[08:11] <brrt> that's basically what i was trying to say
+
+[08:12] <nwc10> it feels like maintaing correctness here is going to be expensive. (this feels like a flippant statement too - of course correctness is what really matters.)
+
+[08:12] <brrt> well, yes, it is
+
+[08:13] <brrt> that's why moving generational collectors are not super-awesome from the perspective of JIT compilation
+
+[08:13] <nwc10> this follows now that you make the reason clear, but I wouldn't have reached this conclusion alone
+
+[08:14] <nwc10> (although I might if I'd been studing them hard and trying to implement one)
+
+[08:15] <brrt> the flushing-bit isn't all *that* expensive, though, because spilling values from memory arround a function call is what you'd have to do anyway
+
+[08:16] <brrt> so the difference is mostly that you spill them to an 'approved' location where the GC can update them
+
+[09:46] <jnthn> Functions that really need calling might call into the allocator, and indeed we have to handle them with such spills.
+
+[09:46] <yoleaux> 01:20Z <Zoffix> jnthn: did your encoding rework affect precomp stuff? I'm getting file-rename errors on Win10, and I had no build issues on 2017.05 release, so it's something new: https://rt.perl.org/Ticket/Display.html?id=131378
+
+[09:47] <jnthn> The situation for sp_fastcreate and even create need not be so dire, however.
+
+[09:48] <jnthn> We allocate in the nursery, which is a bump-the-pointer allocator. The allocation will only trigger GC if the bump takes us over the end of the buffer.
+
+[09:49] <jnthn> So the allocation process is just a bit of arithmetic in the common case, which could be emitted directly inline in the JITted code as it's probably small enough
+
+[09:49] <jnthn> Now of course, the occasional allocation could fail, in which case, yes, we'd want to fall back to the function
+
+[09:49] <jnthn> So we could conditionally spill/restore in that slow-path case
+
+[09:51] <jnthn> If the spill/call/restore was emitted at the end of the JITted code and branched to, then we get a predictable (very rare) branch and the rarely executed code will typically not take up I-cache lines 'cus it won't be needed much.
+
+[09:51] *** robertle joined
+[09:55] <jnthn> A mechanism for sticking "oh, dammit" paths at the end of the JITted output is probably generally worthwhile for that reason; deopt handlers could also be pushed down there.
+
+[10:02] <jnthn> .tell Zoffix Hm, I can reproduce it also, though I have no idea at all what could have caused it. As nine++ mentioned on the RT, it's pretty much always about a missing .close
+
+[10:02] <yoleaux> jnthn: I'll pass your message to Zoffix.
+
+[10:29] *** domidumont joined
+[10:37] *** brrt joined
+[10:39] <brrt> .tell jnthn that is a pretty good idea, i think; we could use a separate section for that
+
+[10:39] <yoleaux> brrt: I'll pass your message to jnthn.
+
+[10:45] <brrt> ('bad path' code, i mean)
+
+[10:47] <brrt> would keep the 'good path' code a bit shorter
+
+[10:53] <jnthn> Aye
+
+[10:54] <brrt> hmm
+
+[10:55] <brrt> i don't really have a good hypothesis for my breakage of sp_fastcreate
+
+[10:55] <brrt> it breaks by a segv on elems on.. something, not sure what
+
+[10:55] <brrt> i've created just two objects by then
+
+[10:56] <jnthn> What's the template/assembly look like?
+
+[10:56] <brrt> but i think it also breaks if i create just the first object
+
+[10:56] <brrt> https://gist.github.com/bdw/62320648e0fe0be34684298f4f51b8d5
+
+[10:57] <brrt> the first is the one that is expr-jitted, which breaks, the second is the one which is 'original', which works
+
+[10:58] <brrt> they look functionally pretty much identical to me
+
+[11:05] <jnthn> Is the STable pointer sensible immediately after sp_fastcreate?
+
+[11:06] <jnthn> mov rcx,0x88 mov QWORD PTR [rbx+0xd8],rcx
+
+[11:07] <jnthn> Hm, it spills a constant? :)
+
+[11:10] <jnthn> But yeah, I agree they look functionally identical
+
+[11:47] *** AlexDani` joined
+[12:50] *** brrt joined
+[12:51] <brrt> yes, that needs optimization
+
+[13:49] *** dogbert17 joined
+[15:22] *** domidumont joined
+[15:25] *** committable6 joined
+[15:25] *** bisectable6 joined
+[16:31] *** zakharyas joined
+[16:45] *** brrt joined
+[17:09] *** brrt joined
+[17:25] *** brrt joined
+[18:10] *** brrt joined
+[18:54] *** zakharyas joined
+[19:15] *** brrt joined
+[21:05] <samcv> good *
+
+[21:05] <yoleaux> 14:08Z <Zoffix> samcv: would you have an idea about the bug in this ticket? The bug behaviour feels a lot like that case-insensitive regex match issue we had: https://rt.perl.org/Ticket/Display.html?id=131383
+
+[21:06] <samcv> on it Zoffix
+
+[22:55] *** Zoffix joined
+[23:00] *** benchable6 joined
+[23:00] *** quotable6 joined
+[23:00] *** bloatable6 joined
+[23:00] *** evalable6 joined
+[23:00] *** committable6 joined
+[23:01] *** bisectable6 joined
+[23:29] *** greppable6 joined
+[23:29] *** unicodable6 joined
+[23:29] *** statisfiable6 joined

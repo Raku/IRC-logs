@@ -1,0 +1,179 @@
+[00:07] <MasterDuke> back while pork chops bake. so think this is worth PRing after i clean it up (remove debugging, squash commits, etc.)?
+
+[00:37] <jnthn> https://github.com/MoarVM/MoarVM/compare/master...MasterDuke17:use_fsa_for_string_storage#diff-60b7c4ce4f16e0e46451e0610dbc21b3R84 # should it not set ssize here also so it knows the size to free?
+
+[00:41] <jnthn> MasterDuke: Overall, I think it's worth it.
+
+[00:54] <MasterDuke> jnthn: cool, then i'll work on cleaning it up
+
+[00:57] <jnthn> MasterDuke++
+
+[00:57] <jnthn> 'night
+
+[00:58] <timotimo> MasterDuke: i assume all these $_ ~ rand.Str strings end up being strands-based? it'd probably be interesting to give jnthn's suggestion a shot to use fsa for the strands arrays
+
+[00:59] <MasterDuke> timotimo: i think i do that in my branch already? https://github.com/MoarVM/MoarVM/compare/master...MasterDuke17:use_fsa_for_string_storage#diff-ce2d9effdddfe9f3a8780307f9bb347cR47
+
+[01:00] <timotimo> oh, ok!
+
+[02:56] *** ilbot3 joined
+[07:02] *** domidumont joined
+[07:07] *** domidumont joined
+[07:17] *** geospeck joined
+[07:53] *** brrt joined
+[08:07] *** brrt joined
+[08:17] <nwc10> good *, #moarvm
+
+[09:04] *** brrt joined
+[09:05] <brrt> good * #moarvm
+
+[09:07] *** domidumont joined
+[09:57] *** zakharyas joined
+[10:02] *** zakharyas joined
+[10:06] *** lizmat joined
+[11:09] *** AlexDaniel joined
+[11:18] <MasterDuke> ugh, my branch builds nqp and passes its `make m-test`, and builds rakudo and passes its `make m-test`, but i get a bunch of 'realloc: invalid pointer' and 'free: invalid pointer' during `make m-spectest`
+
+[11:24] *** brrt joined
+[11:37] <MasterDuke> oh, i think it's because i originally branched this from my branch that uses the FSA in VMArray
+
+[11:37] <MasterDuke> but i've now rebased it to master
+
+[13:44] <MasterDuke> hm, the MVMROOT* macros can be annoying, valgrind points to a line with MVMROOT3, but i assume it's actually something inside
+
+[13:44] <jnthn> Try building with --debug=3
+
+[13:44] <jnthn> If you didn't already
+
+[13:44] <MasterDuke> i have --debug=3 and --valgrind
+
+[13:44] <jnthn> Ah
+
+[13:45] <jnthn> Then, I guess a smarter C compiler is wanted :P
+
+[13:45] <MasterDuke> gcc (Ubuntu 7.2.0-8ubuntu3) 7.2.0
+
+[13:46] <jnthn> I've actually no idea what different versions do in this regard, tbh
+
+[13:46] <jnthn> I've certainly seen this issue
+
+[13:46] <jnthn> Oh, it's valgrind doing the pointing
+
+[13:46] <jnthn> And I guess it's in gdb where --debug=3 helps
+
+[13:47] <jnthn> I think there's a way to do the valgrind run under gdb and breakpoint its reporting, though
+
+[13:49] <MasterDuke> i guess if i had to i could also convert to manual push/pop for debugging, but i'd really rather not
+
+[13:51] <timotimo> i think c compilers say "macro expansions being considered a single line is a feature!"
+
+[13:51] <MasterDuke> oh, btw, have you had a chance to look at https://github.com/MoarVM/MoarVM/pull/689 ? (but don't let me distract you from segv hunting)
+
+[13:51] <timotimo> so, uhm, time for a perl6 script that rewrites MVMROOT macros for us :)
+
+[14:02] *** zakharyas joined
+[14:03] *** zakharyas joined
+[14:05] *** zakharyas1 joined
+[14:11] <MasterDuke> ah, i'm trying to fixed_size_free a string with 0 num_graphs or num_strands
+
+[14:12] <timotimo> ah, i know that problem from somewhere
+
+[14:13] <MasterDuke> fwiw it's num_graphs in this instance
+
+[14:15] <MasterDuke> the line is: MVM_fixed_size_free(tc, tc->instance->fsa, (str->body.storage_type == MVM_STRING_STRAND ? str->body.num_strands : str->body.num_graphs) * type , str->body.storage.any);
+
+[14:16] <timotimo> i wonder how often we generate "the empty string"
+
+[14:16] <timotimo> because why else would it try to free something like that? unless we created an empty string somewhere that turned into garbage
+
+[14:17] <MasterDuke> it's happening during in/because of MVM_string_split
+
+[14:23] <MasterDuke> hm, changing the 0 to a 1 doesn't fix anything. how does one MVM_fixed_size_free a 0 sized thing?
+
+[14:23] <jnthn> You don't
+
+[14:23] <jnthn> You can't allocate on in the first place
+
+[14:23] <jnthn> *one
+
+[14:23] <jnthn> iirc, anyway
+
+[14:24] <MasterDuke> "can't" == don't do that, or "can't" == shouldn't be possible ?
+
+[14:24] <timotimo> malloc has some secret sauce for zero-sized allocations that allows you to free them
+
+[14:26] <jnthn> "Don't do that"
+
+[14:26] <jnthn> Though when MVM_FSA_DEBUG is set to 1, we could put in sanity checks for that
+
+[14:30] <MasterDuke> yep, a couple requests for 0 bytes showed up in MVM_fixed_size_alloc
+
+[14:33] <MasterDuke> ok, at least one is from MVM_string_flip
+
+[14:33] <MasterDuke> rbuffer = MVM_fixed_size_alloc(tc, tc->instance->fsa, sizeof(MVMGrapheme32) * sgraphs);
+
+[14:38] <MasterDuke> what's the right behavior? just do `res = (MVMString *)MVM_repr_alloc_init(tc, tc->instance->VMString);`, but don't set any of its fields (e.g., don't do `res->body.storage.blob_32 = rbuffer;`)?
+
+[14:41] <ilmari> timotimo: some mallocs do, but malloc(0) is also allowed to return NULL (and free(NULL) is allowed as well)
+
+[14:42] <jnthn> MasterDuke: That or just detect the case and use the empty_string constant hanging off tc->instance
+
+[14:43] <MasterDuke> ah ha, i thought there was something like that but couldn't come up with the right name
+
+[14:48] *** lizmat joined
+[14:50] <MasterDuke> ugh, now i'm not seeing any 0 byte requests in MVM_fixed_size_alloc, but still getting the 0 bytes free
+
+[15:00] <MasterDuke> none in fixed_size_realloc either...
+
+[15:03] <MasterDuke> oh, it's not just 0 bytes to free, to_free is NULL also
+
+[15:36] <MasterDuke> heh, running under valgrind with --debug=3 and --optimize=0 is not fast
+
+[15:42] *** zakharyas joined
+[15:56] *** geospeck joined
+[18:05] *** domidumont joined
+[18:06] *** brrt joined
+[18:29] *** lizmat joined
+[18:42] *** committable6 joined
+[18:44] *** brrt joined
+[19:49] *** quotable6 joined
+[19:49] *** coverable6 joined
+[19:49] *** greppable6 joined
+[19:49] *** bloatable6 joined
+[19:49] *** nativecallable6 joined
+[19:49] *** tangible6 joined
+[19:49] *** benchable6 joined
+[19:49] *** statisfiable6 joined
+[20:47] <dogbert17> hmm, quite silent in here
+
+[20:49] <nwc10> good *, dogbert17!
+
+[20:49] <dogbert17> any deadlock experts around? Does the last comment in https://github.com/rakudo/rakudo/issues/1202 give any clues as what might be going on?
+
+[20:49] <nwc10> sorry, I'm not a deadlock expert
+
+[20:49] <nwc10> (and I don't know how to flush one out)
+
+[20:49] <dogbert17> good evening nwc10, found any ASAN problems recently?
+
+[20:49] <nwc10> evening! heresey!
+
+[20:50] <nwc10> (and quite accurate, as I'm likely to go to bed soon)
+
+[20:50] <nwc10> no, sadly/usefully not
+
+[20:50] <nwc10> code quality is too good
+
+[20:50] <nwc10> the right sort of problem to have
+
+[20:50] <dogbert17> yes indeed
+
+[20:51] <dogbert17> finding bugs in MoarVM is getting way to hard
+
+[21:10] *** zakharyas joined
+[21:18] *** lizmat joined
+[23:00] <Geth> ¦ MoarVM/jit-expr-optimizer: 11 commits pushed by (Bart Wiegmans)++
+
+[23:00] <Geth> ¦ MoarVM/jit-expr-optimizer: review: https://github.com/MoarVM/MoarVM/compare/a37d05c6ba...60e747882a
+
+[23:25] *** evalable6 joined

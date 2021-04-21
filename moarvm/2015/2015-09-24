@@ -1,0 +1,327 @@
+[01:02] *** colomon joined
+[02:15] *** zakharyas joined
+[02:31] *** tokuhiro_ joined
+[05:25] *** sivoais joined
+[05:33] *** Ven joined
+[05:35] *** sivoais joined
+[05:45] *** sivoais joined
+[06:14] *** FROGGS[mobile] joined
+[06:25] *** aiacob joined
+[06:36] *** FROGGS joined
+[06:42] *** cognominal joined
+[06:50] *** Ven joined
+[07:17] *** Ven joined
+[07:22] *** Ven joined
+[07:46] *** brrt joined
+[07:50] *** Ven joined
+[08:22] *** Ven joined
+[08:36] *** Ven joined
+[08:51] *** Ven joined
+[09:46] <jnthn> Gee, the inline/JIT bug *is* really strange.
+
+[09:47] <jnthn> It can't be that it mis-inlines the multi candidate for new because, well, for one that code isn't hot, but for two you can see it actually has the proto on the call stack
+
+[09:49] <brrt> the proto?
+
+[09:49] <brrt> hmmm
+
+[09:50] <jnthn> proto method new
+
+[09:50] <brrt> aha
+
+[09:50] <jnthn> Well, just ruling out things
+
+[09:50] <jnthn> A mis-compile under JIT is, like, also hard to argue
+
+[09:50] <brrt> it's nearly impossible
+
+[09:50] <jnthn> Simply because the code is in a pre-comp'd module
+
+[09:51] <brrt> i've compiled panda to mast with and without JIT, and save for identifiers (which you can s/[\d_]+//g away), there is no difference whatever
+
+[09:51] <jnthn> Well, but there's the thing
+
+[09:51] <jnthn> If I have a panda built
+
+[09:51] <brrt> i'm listening
+
+[09:51] <jnthn> And I run "panda install Grammar::Debugger"
+
+[09:51] <jnthn> Then App::Panda is pre-compiled
+
+[09:52] <jnthn> And things do work with JIT or inline off
+
+[09:52] <jnthn> But we're running the same compiled App::Panda either way
+
+[09:52] <jnthn> So it can't be anything wrong with the compilation of the callsite
+
+[09:53] <brrt> agreed
+
+[09:54] <brrt> seems like a desparately unlikely bug at any rate
+
+[09:54] <brrt> do you agree the interaction between JIT and inlines is pretty small
+
+[09:54] <jnthn> yes
+
+[09:55] <jnthn> OK, if I --profile panda install Grammar::Debugger, it's kinda interesting
+
+[09:59] <jnthn> I can tell, for example, that we don't pull a result out of the multi dispatch cache at all
+
+[10:01] <jnthn> Because we do enter the multi-dispatcher
+
+[10:01] *** Ven joined
+[10:01] <jnthn> Now, it's *possible* that we do some inlining of some sort inside the multi-dispatcher itself that causes the mis-compile
+
+[10:01] <jnthn> But none of this explains why the "return" affects things
+
+[10:01] <brrt> ahah...
+
+[10:02] <brrt> well, return is an exception innit
+
+[10:02] * brrt goes to lunch &
+
+[10:02] <jnthn> yeah but in the crash case we never make it as far as the return
+
+[10:02] <brrt> that is kind of true
+
+[10:02] * brrt has vanishingly little knowledge of dispatcher inner workings
+
+[10:03] <brrt> see you in a bit over an hour :-)
+
+[10:07] <jnthn> I can clearly see from the profiler that the multi-dispatcher is one huge call frame that only calls one thing (add_to_cache) and is not JITted in any way and there's nothing to inline
+
+[10:07] <jnthn> Add to cache is spesh'd but also a terminal frame
+
+[10:47] *** FROGGS_ joined
+[10:49] * jnthn has tried various things as is now down to binary searching his way to the frame whose inlining busts things
+
+[11:01] *** aiacob joined
+[11:11] *** brrt joined
+[11:12] <brrt> jnthn++. i wonder how you do such a binary search?
+
+[11:12] <brrt> that's much less crude than my exhaustive search methods
+
+[11:13] <jnthn> brrt: Just keep a static int in inline.c :)
+
+[11:13] <jnthn> So far
+
+[11:13] <jnthn> // 475 good, 481 bad
+
+[11:16] <jnthn> // 476 good, 478 bad
+
+[11:20] <jnthn> OK, if we refuse to inline the 478th frame that we're asked to do so, things work :)
+
+[11:22] <brrt> oh, wow
+
+[11:22] <brrt> well, which frame is that
+
+[11:22] <brrt> and which frame is the inliner
+
+[11:28] <jnthn> Just been confirming either side of that have no influence; they don't
+
+[11:28] <jnthn> Guilty: inlining EXPR (cuid_577_1443021743.859) into arglist (cuid_494_1443021743.859)
+
+[11:30] <brrt> aha
+
+[11:30] <brrt> can we haz look at which those are
+
+[11:31] <brrt> reduntdant jnthn++ :-)
+
+[11:35] <jnthn> Yeah, am looking at le spesh log at the moment
+
+[11:35] <jnthn> I see we have 3 inlines in the bad/crashing case, and 2 in the good case where I stop it doing the one that causes issues
+
+[11:35] <brrt> uhuh
+
+[11:36] <jnthn> And it's the first of the inlines
+
+[11:38] *** Ven joined
+[11:39] <jnthn> Well, wow
+
+[11:39] <jnthn> Here is the EXPR method that we inline
+
+[11:39] <jnthn> method EXPR(str $preclim = '') {
+
+[11:39] <jnthn> # Override this so we can set $*LEFTSIGIL.
+
+[11:39] <jnthn> my $*LEFTSIGIL := '';
+
+[11:39] <jnthn> my $*IN_RETURN := 0;
+
+[11:39] <jnthn> nqp::findmethod(HLL::Grammar, 'EXPR')(self, $preclim, :noinfix($preclim eq 'y='));
+
+[11:39] <jnthn> }
+
+[11:39] <jnthn> Note the $*IN_RETURN
+
+[11:39] <jnthn> This prevents promotion of colonpairs to nameds
+
+[11:40] <jnthn> And failing to clear it would thus cause problems
+
+[11:40] <jnthn> The next question is: how does dynamic variable lookup with inlined frames intersect with JIT?
+
+[11:40] <brrt> aha
+
+[11:40] <brrt> good... question
+
+[11:41] <brrt> dynamic variable lookup, i suspect, is handled by.. getdynlex?
+
+[11:41] <jnthn> I suspect MVM_frame_find_contextual_by_name is where to look
+
+[11:41] <brrt> :-)
+
+[11:41] <jnthn> Yeah, the ops for doing it converge on that function I noted
+
+[11:41] <jnthn> It's not simply that it is unaware of JITtedness though
+
+[11:41] <jnthn> if (cand && cand->num_inlines) {
+
+[11:41] <jnthn> if (cand->jitcode) {
+
+[11:42] <brrt> oh, lord, did i touch that code
+
+[11:42] * brrt apologizes for that code
+
+[11:43] <jnthn> It's not worse than the non-JIT case though
+
+[11:43] <jnthn> I mean, in theory it's doing an extent list search
+
+[11:43] <brrt> uhuh
+
+[11:46] <brrt> two possiblities; a) the jit return label isn't set correctly
+
+[11:46] <brrt> b): the inlines table isn't built correctly
+
+[11:51] <jnthn> It's odd how hard it is to reproduce
+
+[11:51] <jnthn> oh wait
+
+[11:52] <lizmat> .oO( the tension is building )
+
+[11:58] <jnthn> I still didn't manage a small reproduction of it.
+
+[12:03] <jnthn> m: class C::C { }; EVAL 'sub foo() { return C::C.new(a => 1, b => 2) }; foo()' for ^100
+
+[12:03] <camelia> rakudo-moar f89dc2: ( no output )
+
+[12:03] <jnthn> m: class C::C { }; EVAL 'sub foo() { return C::C.new(a => 1, b => 2) }; foo()' for ^500
+
+[12:03] <camelia> rakudo-moar f89dc2: OUTPUT«Default constructor for 'C::C' only takes named arguments␤  in sub foo at EVAL_104:1␤  in block <unit> at EVAL_104:1␤  in block <unit> at /tmp/C2xdzB3Egh:1␤␤»
+
+[12:04] <jnthn> There you go
+
+[12:07] <brrt> oh wow
+
+[12:07] * brrt is going to add just that test to the jit-test-repo
+
+[12:08] <jnthn> Think it's lunch time here :)
+
+[12:08] <brrt> well deserved too :-)
+
+[12:08] <jnthn> brrt: Dunno if you want to explore this from here? I can dig back in again if not.
+
+[12:09] <brrt> i want to explore, but i can't guarantee timeliness in that regard :-)
+
+[12:10] * brrt wonders why the EVAL is necessary?
+
+[12:10] <jnthn> brrt: Because we need to get the *compiler* hot
+
+[12:11] <jnthn> It *is* a mis-compile after all
+
+[12:11] <brrt> aha....
+
+[12:11] <jnthn> I forgot panda no longer does pre-comp.
+
+[12:11] <brrt> aw, that hurts
+
+[12:39] <cognominal> what is pre-comp?
+
+[12:40] <[Coke]> pre-compilation.
+
+[12:40] <[Coke]> taking a .pm file and compiling it to bytecode, then running the bytecode later instead of the .pm
+
+[12:42] <cognominal> Makes sense. So why panda does not do it?
+
+[12:42] <[Coke]> because perl6 should be doing it.
+
+[12:43] <[Coke]> and no one was making perl6 do it because panda was doing it. (panda can only do it in very limited cases, whereas perl6 could do it as a matter of course)
+
+[12:43] <cognominal> ok
+
+[12:43] <cognominal> thx
+
+[12:45] <brrt> jnthn: https://github.com/bdw/jit-test fwiw :-)
+
+[12:45] <brrt> seems very sensitive to adding 'say's before and after
+
+[12:45] <brrt> as in
+
+[12:45] <brrt> crashes quite differently in other cases
+
+[12:51] * jnthn back
+
+[12:52] <brrt> \o
+
+[12:58] <brrt> i haven't gotten arround to debugging it, by the way
+
+[12:58] <jnthn> np
+
+[12:59] <jnthn> I'll leave it for somebody else to debug the JIT labels for now, and look again tomorrow if nobody figures it
+
+[13:00] <brrt> very well :-) we have at least a reliable testcase
+
+[13:01] *** Ven joined
+[13:36] *** Ven joined
+[13:43] *** FROGGS joined
+[13:55] *** TimToady joined
+[14:17] *** Ven joined
+[14:34] *** Ven joined
+[14:43] *** tokuhiro_ joined
+[15:02] <hoelzro> o/ #moarvm
+
+[15:44] *** tokuhiro_ joined
+[15:53] *** Ven joined
+[16:28] <hoelzro> if the program break of a program running on MVM is steadly increasing over time, there's probably a memory leak, right?
+
+[16:30] <hoelzro> I think I found a memory leak when calling a sub that uses subsignatures, but I want to confirm my suspicions here before blowing smoke
+
+[17:20] *** cognominal joined
+[17:23] *** Peter_R joined
+[17:46] *** tokuhiro_ joined
+[18:03] *** FROGGS joined
+[18:21] *** tokuhiro_ joined
+[18:22] *** vendethiel joined
+[18:34] <masak> hoelzro: sounds likely, yes.
+
+[18:39] <hoelzro> alright, this should be a fun RT to write then =)
+
+[18:58] <jnthn> valgrind's memcheck may help pint out what's leaking
+
+[18:58] <jnthn> uh, point
+
+[18:59] <lizmat> cheers!
+
+[18:59] <FROGGS> skol!
+
+[18:59] <jnthn> :D
+
+[19:07] <hoelzro> jnthn: I looked at memcheck last night; it gave me a lot of hits, though
+
+[19:07] <jnthn> Yeah. You can maybe get a few less by running Moar and asking it to try and clean up
+
+[19:07] <jnthn> I forget the name of the flag.
+
+[19:07] <hoelzro> and the weird thing was that I have two versions of the program, one with and one without the supposed leak
+
+[19:07] <hoelzro> ahhh
+
+[19:07] <hoelzro> I'll try that
+
+[19:08] <hoelzro> I suspect the binder, but that's more a hunch
+
+[19:51] *** lizmat_ joined
+[20:04] *** lizmat_ joined
+[20:22] *** tokuhiro_ joined
+[21:24] *** TimToady joined
+[22:24] *** tokuhiro_ joined
+[23:25] *** tokuhiro_ joined

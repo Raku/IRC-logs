@@ -1,0 +1,334 @@
+[00:47] *** geekosaur joined
+[00:48] *** geekosaur joined
+[01:11] <japhb> Given the number of times this year we've discovered a lot optimization, it almost seems like we ought to have a tool that builds new releases, profiles them doing standard things like the read/write a million lines or compile the setting benchmarks,
+
+[01:11] <samcv> good *
+
+[01:12] <samcv> so guys i'm thinking about adding an op to let you get the columns and rows of the terminal
+
+[01:12] <japhb> and then messages #perl6-dev if the order of routines in the top 20 inclusive and exclusive most expensive routines changes.
+
+[01:12] <samcv> but i'm wondering. do we want it to be one op that returns an array?
+
+[01:12] <japhb> To catch places that we either lose or gain a significant optimization.
+
+[01:12] <samcv> japhb, that sounds like a good idea
+
+[01:13] <japhb> samcv: It doesn't need to be a fast op.  Getting size of terminal is something you only need to do on TUI startup or on SIGWINCH
+
+[01:13] <japhb> (If that matters to your thinking)
+
+[01:13] <samcv> but it can be resized
+
+[01:13] <japhb> samcv: That's SIGWINCH
+
+[01:13] <japhb> (WINdow CHange)
+
+[01:14] <samcv> well that would require us catching that signal?
+
+[01:14] <japhb> samcv: That can be done in user space, no problem.  The op would just avoid having to call out to `tput` twice -- or parse terminfo.
+
+[01:15] <samcv> well i mean we can use ioctl
+
+[01:15] <samcv> on the filehandle
+
+[01:15] <samcv> are you saying i shouldn't add this to moarvm?
+
+[01:16] <geekosaur> it's more a nativecall thing, I'd think
+
+[01:16] <geekosaur> also consider that you have to do something completely different on Windows...
+
+[01:16] <samcv> well that's what #ifdefs are for
+
+[01:16] <samcv> that's one reason i think having it in moarvm might be good
+
+[01:16] <samcv> so rakudo doesn't have to worry about platforms
+
+[01:17] <japhb> samcv: We already handle termios in module space, I don't know that we need each nqp VM to do this for us.
+
+[01:17] <samcv> hmm
+
+[01:17] <japhb> Certainly, I'm not the arbiter of moarvm, it just seems like premature optimization.
+
+[01:19] <samcv> hmm
+
+[01:19] <japhb> For Terminal::Print, I'd *much* rather have faster string and I/O from moarvm than a special case for getting window size.
+
+[01:19] <samcv> ok good to know your thoughts though
+
+[01:19] <japhb> *string and I/O ops
+
+[01:19] <samcv> well it's not a special case. it'd just let you request the terminal size
+
+[01:19] <samcv> it wouldn't affect any of the other ops
+
+[01:19] * japhb shrugs
+
+[01:20] <japhb> Like I said, not the arbiter of this codebase.  :-)
+
+[01:20] <samcv> heh still glad you spoke up
+
+[01:24] <samcv> japhb, does termios work for windows?
+
+[01:24] <samcv> probably not?
+
+[01:24] <japhb> samcv: Actually, since you appear in the mood to do something different:  There are two features that I really did want from MoarVM.  1. Uni input (instead of Str or Buf, so being able to read codepoints without waiting for combiners)  2. A fast way to determine the wcwidth of any character or sequence (so not just knowing about FullWidth and HalfWidth forms, but also knowing that several things joined by ZWJ can be just 1-2 width)
+
+[01:25] <japhb> samcv: I would think that would only work under the Ubuntu subsystem in Win 10.
+
+[01:25] <samcv> yeah
+
+[01:25] <geekosaur> wcwidth is something of a problem
+
+[01:25] <japhb> geekosaur: Boy howdy.
+
+[01:25] <samcv> well
+
+[01:25] <geekosaur> and no, termios is not going to work on native Windows. I don't think you can even resize a text window normally
+
+[01:26] <japhb> Too much of a problem to do fast on thousands of screen cells at a time.
+
+[01:26] <geekosaur> arguably wcwidth is only determinable per font+output device combo
+
+[01:27] <japhb> geekosaur: Traditional wcwidth would be meaningless on anything but "monospace" fonts, but certainly you have the real-world problem of terminals that do font substitution for missing glyphs.
+
+[01:27] <geekosaur> yep
+
+[01:28] <japhb> The C library call just gives up on a great many sequences.  Anything with a control character in it, for instance.
+
+[01:29] <japhb> But that's a detail (escape stripping) that I can manage in a higher-level library.
+
+[01:32] <samcv> m:  sub thing (Str $thing) { $thing.comb».uniprop('East_Asian_Width').grep({ .substr-eq( 'W'|'F')}).elems + $thing.chars }; say thing("ｈｅｌｌｏblah?Aá\c[united states]")
+
+[01:32] <camelia> rakudo-moar 0b15f6: OUTPUT: «19␤»
+
+[01:32] <samcv> this is approximate. counting full or wide as 2 and all others as 1
+
+[01:33] <samcv> and not counting multiple codepoints within a grapheme
+
+[01:35] <samcv> i mean it'd be way cheaper to do that inside moarvm but i don't think it would be a good idea
+
+[01:39] <japhb> samcv: Right, but it doesn't handle emoji sequences correctly, neh?
+
+[01:39] <samcv> well it does if your display doesn't fallback to multiple codepoints
+
+[01:39] <japhb> Hmmm
+
+[01:40] <samcv> though if you wanted to be technical. with a variation selector after the emoji it would always display that way. and then it wouldn't account for that
+
+[01:40] <japhb> What about if a string has non-breaking space, zwj that doesn't actually join things, etc.?
+
+[01:41] <japhb> Sorry, the non-breaking non-space thing, I forget the name.
+
+[01:41] <samcv> NBSP non breaking space
+
+[01:41] <japhb> u: breaking
+
+[01:41] <unicodable6> japhb, U+2011 NON-BREAKING HYPHEN [Pd] (‑)
+
+[01:42] <samcv> i mean you want to calculate how long the line is? or where you can break it?
+
+[01:53] <samcv> those are two different things
+
+[01:53] <japhb> FEFF, ZERO WIDTH NO-BREAK SPACE
+
+[01:53] <japhb> Should be wcwidth = 0
+
+[01:53] <japhb> 200B, 200C, 200D, FEFF  I guess
+
+[01:53] <samcv> i guess you could special case those?
+
+[01:53] <japhb> samcv: As far as were to break it, that would be valuable too I suppose.
+
+[01:53] <samcv> well there's the "Line_Break" property
+
+[01:53] <japhb> samcv: Right, but as soon as you special-case any particular characters, you're back doing loops in user space, and that's a lot slower.
+
+[01:53] <samcv> agreed
+
+[01:55] *** ilbot3 joined
+[01:55] <samcv> system filehandle
+
+[01:56] <samcv> and we can check if the filehandle is a tty or not as well using moarvm
+
+[01:56] <japhb> samcv: You can get that from user space.
+
+[01:56] <samcv> well i never said you couldn't
+
+[01:56] <geekosaur> that to me just says filehandles, and other "system" objects, should have a way to attach user data that doesn't require monkey-patching
+
+[01:56] <japhb> samcv: See https://github.com/ab5tract/Terminal-Print/blob/master/lib/Terminal/Print/RawInput.pm6
+
+[01:57] <geekosaur> like a hash or stash
+
+[01:57] <japhb> (Lines 29-35 are why I want Uni input; lines 13-20 are checking tty and handling raw fd)
+
+[01:58] <samcv> i mean termios uses nativecall. so it's essentially platform specific code
+
+[01:59] <japhb> And fwiw, your proposed screen size op would replace https://github.com/ab5tract/Terminal-Print/blob/master/lib/Terminal/Print/Commands.pm6#L102
+
+[02:43] *** TimToady joined
+[03:26] <MasterDuke> samcv: what would be an example of joining some strings where concat would not be stable?
+
+[03:35] <samcv> anything that combines
+
+[03:37] <samcv> or if the canonical combining class of the right one is lower than the left one
+
+[03:37] <samcv> CCC has to happen lowest to highest for combiniers
+
+[03:37] <MasterDuke> heh. i don't know combiners. do you have a quick example handy?
+
+[04:29] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #705: Just copy strands in MVM_string_join if able
+
+[04:29] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/705
+
+[04:44] *** geekosaur joined
+[07:18] *** domidumont joined
+[08:06] *** leont joined
+[08:11] *** domidumont joined
+[08:20] <samcv> "á\c[combining caron]".NFD.list.».uniprop('Canonical_Combining_Class').say
+
+[08:20] <samcv> m:  "á\c[combining caron]".NFD.list.».uniprop('Canonical_Combining_Class').say
+
+[08:20] <camelia> rakudo-moar 0b15f6: OUTPUT: «(0 230 230)␤»
+
+[08:21] <samcv> m:  "á\c[combining caron]".NFD.list.».uniname.say
+
+[08:21] <camelia> rakudo-moar 0b15f6: OUTPUT: «(LATIN SMALL LETTER A COMBINING ACUTE ACCENT COMBINING CARON)␤»
+
+[08:21] <samcv> like COMBINING ACUTE ACCENT, and COMBINING CARON. they both happen to have the same CCC so won't be reordered
+
+[08:21] <samcv> but i could probbaly find other combiners that have different CCC that you can't change the glyph by changing the order of the combiners
+
+[10:43] *** domidumont joined
+[10:49] *** geekosaur joined
+[11:52] *** geekosaur joined
+[13:02] *** geekosaur joined
+[13:36] <dogbert11> it's silent around here
+
+[13:40] * dogbert11 is still contemplating the mysteries off callgrind
+
+[13:40] <dogbert11> *of
+
+[13:42] <dogbert11> ramble mode on, yesterday I callgrinded a program with the current version and 2017.07, with and without spesh, the results were as follows
+
+[13:42] <dogbert11> MVM_SPESH_DISABLE=1      WITH SPESH
+
+[13:42] <dogbert11> 2017.07       20,325,247,133 Ir     7,861,290,267 Ir
+
+[13:42] <dogbert11> current       18,419,032,475 Ir    16,440,182,184 Ir
+
+[13:43] <MasterDuke> figure something out?
+
+[13:44] <dogbert11> turns out that there's something fishy going on here, I reran the 'WITH SPESH* tests three more times and here are the results
+
+[13:44] <dogbert11> 2017.07     7,861,290,267 Ir,    7,861,290,265 Ir,     7,861,290,267 Ir quite consistent I'd say
+
+[13:45] <dogbert11> current     9,933,190,170 Ir,    17,370,345,458 Ir,    11,768,107,356 Ir no consistency at all
+
+[13:46] <dogbert11> why are the results from the current version so different?
+
+[13:46] <MasterDuke> did you have MVM_SPESH_BLOCKING=1 set?
+
+[13:46] <dogbert11> no, should I
+
+[13:47] * dogbert11 tries that ...
+
+[13:47] <MasterDuke> yeah, that makes it deterministic since it's threaded now
+
+[13:47] <timotimo> if you set an MVM_SPESH_LOG you can figure out how much work it does in each case
+
+[13:51] <dogbert11> this will take a little more time but it's beginning to look consistent now
+
+[13:52] <dogbert11> current with MVM_SPESH_BLOCKING=1    9,483,385,317 Ir,    9,483,385,662 Ir,    9,483,595,755 Ir good consistency
+
+[13:52] <timotimo> aye
+
+[13:52] <timotimo> callgrind basically randomizes when the only running thread switches over
+
+[13:53] <dogbert11> so to get good results I have to use that flag then
+
+[13:53] <timotimo> right
+
+[13:54] <timotimo> with SPESH_BLOCKING, it'll immediately let the spesh thread do its work once a log is filled with data
+
+[13:54] <dogbert11> so the remaining question then is why is the program ~15% slower compared to 2017.07
+
+[13:54] <timotimo> the logging itself is deterministic, but it only has an effect once the spesh thread runs again
+
+[13:55] <MasterDuke> .oO(if only we had a nice UI to view and diff spesh logs...)
+
+[13:55] <timotimo> and since the optimized versions of routines get installed once the spesh thread is finished, it can have strong effects on the total time spent
+
+[13:56] <timotimo> MasterDuke: it's not in my grant application any more ;(
+
+[13:56] <timotimo> though i also want to have it just in general
+
+[13:56] <timotimo> perhaps it'll happen in between work on the other UIs
+
+[13:56] <dogbert11> I see that the most called routine is, no surprise I guess, MVM_interp_run in bothe version, i.e. 2017.07 and current
+
+[13:57] <timotimo> you're probably looking at "instructions executed inside", not "calls to"
+
+[13:57] <MasterDuke> heh. well the faster you finish up the first grant the faster you can submit another for that. get working! no sleeping! no eating! just coding!
+
+[13:57] <timotimo> yeah, starving timo does the fastest work
+
+[13:57] <MasterDuke> eternal crunch mode always produces the best code
+
+[13:57] <dogbert11> in current MoarVM the function MVM_multi_cache_find_callsite_args is in second place
+
+[13:58] <timotimo> what functions call it the most?
+
+[14:00] <dogbert11> timotimo: here's a gist https://gist.github.com/dogbert17/87247c9265e1f343590412950f32efa2
+
+[14:02] <timotimo> that doesn't tell me what called it :)
+
+[14:02] <timotimo> you can figure that out more easily with kcachegrind
+
+[14:02] <timotimo> because then you can select that function in the left list and then look at "callers" or "all callers" on the right
+
+[14:04] <MasterDuke> ot, but would anyone object to renaming MVM_fixed_size_alloc_zeroed to MVM_fixed_size_calloc?
+
+[14:04] <dogbert11> sry, misread your question, doing what you suggest points to a function called MVM_frame_find_invokee_multi_ok
+
+[14:05] <timotimo> OK, would be interesting to see one more level there
+
+[14:05] <timotimo> you can see that more easily in the graph view perhaps
+
+[14:05] <timotimo> though it's most likely just called from interp.c
+
+[14:06] <dogbert11> MVM_interp_run
+
+[14:07] <timotimo> OK, not terribly surprising, then. also more or less a dead-end :)
+
+[14:07] <dogbert11> it was worth a shot :)
+
+[14:09] <timotimo> hm, so, putting a printf into spesh's getlexperinvtype gives me a lot of successes
+
+[14:10] <dogbert11> please elaborate
+
+[14:11] <timotimo> so one reason we're getting a lot of MVM_string_equals could be from late-bound lookup of $?CLASS in all manner of places in the regex engine
+
+[14:11] <timotimo> when compiling the core setting, i mean
+
+[14:13] <timotimo> there's an optimization in spesh that can turn that into just a constant
+
+[14:13] <timotimo> i thought perhaps that optimization got damaged somehow in the time between the releases
+
+[14:13] <dogbert11> and ...
+
+[14:14] <timotimo> it does seem to trigger and succeed often
+
+[14:15] <dogbert11> does that mean it's ok?
+
+[14:20] <timotimo> well, something's still strange
+
+[15:36] *** domidumont joined
+[17:02] *** AlexDaniel joined
+[19:43] *** geekosaur joined
+[20:43] *** leont joined
+[21:10] *** leont joined
+[21:59] *** geekosaur joined
+[22:33] *** geekosaur joined
+[23:41] *** timo joined

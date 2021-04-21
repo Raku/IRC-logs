@@ -1,0 +1,475 @@
+[00:03] *** AlexDani` joined
+[00:06] *** AlexDaniel left
+[00:12] *** lucasb left
+[01:57] *** AlexDani` is now known as AlexDaniel
+
+[01:57] *** AlexDaniel left
+[01:57] *** AlexDaniel joined
+[02:24] *** AlexDaniel left
+[02:41] *** vesper11 left
+[02:47] *** vesper11 joined
+[02:51] *** AlexDaniel joined
+[02:51] *** AlexDaniel left
+[02:51] *** AlexDaniel joined
+[04:10] <Voldenet> On windows there's DllMain entry point, but it can't use user32.dll, gdi32.dll, a lot from kernel32.dll won't work (processes/threads)
+
+[04:12] <Voldenet> Erm, actually, some things from kernel32 won't work, but more things from it will work than not
+
+[04:28] *** sena_kun joined
+[05:06] <Elronnd> I have some code like this http://ix.io/1UoN/perl6, and I want to have an instance of P6Val where $.value is set.  How do?  Someone on reddit said it's a moarvm problem where $.value is not connected to the right memory area.  Anyone have a good starting point to do that?
+
+[05:06] <Elronnd> I have never done work on moarvm before
+
+[06:17] *** domidumont joined
+[07:39] <nine> Elronnd: the code for different reprs is in src/6model/reprs. There you'll find the implementation of CStruct including e.g. the calculation for memory size and memory locations of the attributes.
+
+[08:05] *** MasterDuke75 left
+[08:06] *** MasterDuke joined
+[08:07] *** domidumont left
+[08:18] *** domidumont joined
+[09:49] *** evalable6 left
+[09:49] *** evalable6 joined
+[09:55] *** Ven`` joined
+[10:22] <dogbert17> nine: stumbled on another fromspace error https://gist.github.com/dogbert17/cb3de5a348f0a74184e09ce72a525fff
+
+[10:55] <nine> dogbert17: I got a suspicion: 1fd0fdcd68eeceaa4a54d2c2f4abb760e6bb20ed introduced calls to MVM_spesh_log_return_type and MVM_spesh_log_return_to_unloggedMVM_spesh_log_return_to_unlogged to MVM_args_set_result_str. These will call commit_entry which in turn may call send_log which can allocate. We surely need to MVMROOT result there
+
+[10:56] <nine> Same for MVM_args_set_result_obj
+
+[11:05] <dogbert17> nine: that's a pretty new commit. Makes sense since I havent stumbled upon this until yesterday.
+
+[11:08] <dogbert17> Running a spectest with a very small nursery suddenly results in a handful of failures with different test files. The one in the gist showed up several times so I concentrated on that one
+
+[11:17] <Geth> ¦ MoarVM: 90252a8fe8 | (Stefan Seifert)++ | src/core/args.c
+
+[11:17] <Geth> ¦ MoarVM: Fix possible access to fromspace in MVM_args_set_result_(obj|str)
+
+[11:17] <Geth> ¦ MoarVM:
+
+[11:17] <Geth> ¦ MoarVM: MVM_spesh_log_return_type and MVM_spesh_log_return_to_unlogged will call
+
+[11:17] <Geth> ¦ MoarVM: commit_entry which in turn may call send_log which can allocate. Need to
+
+[11:17] <Geth> ¦ MoarVM: MVMROOT result, to avoid it becoming outdated.
+
+[11:17] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/90252a8fe8
+
+[11:17] <nine> dogbert17: please test how much this fixes ^^^
+
+[11:17] <dogbert17> nine++, will do
+
+[11:18] *** Altai-man_ joined
+[11:19] *** sena_kun left
+[11:20] * dogbert17 starts a spectest run with a 512 byte nursery
+
+[11:20] *** robertle joined
+[11:22] <nine> Isn't that just a bit too little? I seem to remember getting some failed allocations. Or was that with 256 bytes?
+
+[11:58] <dogbert17> it is to little :) some tests tend not to complete, like t/spec/S17-supply/syntax.t
+
+[12:11] <dogbert17> nine: looks a lot better I'd say. Only one test failed t/spec/S04-phasers/in-loop.rakudo.moar with a SEGV no less
+
+[12:12] <dogbert17> Program terminated with signal SIGSEGV, Segmentation fault.
+
+[12:12] <dogbert17> #0  gc_mark (tc=0x9a9ac0, st=<optimized out>, data=0x9a9ec0, worklist=0x43755a0) at src/6model/reprs/MVMCode.c:55
+
+[12:12] <dogbert17> 55         MVMint64 numlex  = body->sf->body.num_lexicals;
+
+[12:14] <timotimo> well, that doesn't look good
+
+[12:16] <dogbert17> perhaps time to test MVM_GC_DEBUG=3
+
+[12:17] <dogbert17> interesting, with that setting the test file passes
+
+[12:17] <timotimo> how often do you need to run it to make it fail?
+
+[12:18] <dogbert17> for me it fails every time
+
+[12:19] <dogbert17> timotimo: take a peek here https://gist.github.com/dogbert17/7782dce81e8b83d57d180777c727b7db
+
+[12:20] <timotimo> wow and with GC_DEBUG=3 it stops failing forever?
+
+[12:21] <dogbert17> it didn't fail when I ran it a few times, GC_DEBUG is set to 1 it fails every time
+
+[12:21] <dogbert17> ofc, I'm using the slightly unrealistic - #define MVM_NURSERY_SIZE (512 * 1)
+
+[12:33] <dogbert17> timotimo: perhaps the SEGV is something for rr :)
+
+[12:39] <nine> $1 = {sf = 0x0, outer = 0x0, code_object = 0x0, name = 0x0, state_vars = 0x406200, is_static = 0, is_compiler_stub = 0}
+
+[12:39] <nine> Happens also with MVM_SPESH_DISABLE=1
+
+[12:41] *** Altai-man_ left
+[12:41] <dogbert17> nine: you managed to repro?
+
+[12:41] <nine> yes, reliably
+
+[12:41] <dogbert17> yay
+
+[12:45] <timotimo> it could very well be something for rr
+
+[12:45] <timotimo> right now i'm so far behind on the moarperf grant work that i shouldn't let myself get distracted
+
+[12:45] <timotimo> (but of course i'm getting distracted all the time anyway)
+
+[12:46] <dogbert17> :)
+
+[12:53] <dogbert17> the --valgrind switch seems broken
+
+[12:55] <timotimo> does it prevent a build?
+
+[12:56] <nine> timotimo: no need to get distracted. I know what's going on
+
+[12:56] *** brrt joined
+[12:56] <brrt> \o
+
+[12:56] <timotimo> \o/
+
+[12:56] <timotimo> glad to have you, nine ;)
+
+[12:56] <nine> Well sorry to rob you of a perfect distraction from what you should do....just to distract myself from what I should do :P
+
+[12:57] <timotimo> right now i'm distracted by the plugin version of comma not letting me run code in webstorm, because webstorm doesn't have the "project structure" dialog where i would be able to add an SDK
+
+[12:58] <timotimo> so comma-plugin says "please set up an SDK" and webstorm says "that's not a thing"
+
+[12:59] <dogbert17> nine, is it a real bug or should we simply refrain from using 512 byte nurseries?
+
+[12:59] <nine> No it's a bug alright
+
+[12:59] <timotimo> not for long! :D
+
+[13:00] <brrt> .tell jnthn presumably with a WinMain, I'd think
+
+[13:00] <tellable6> brrt, I'll pass your message to jnthn
+
+[13:00] <nine> We're MVMROOTing an allocated but uninitialized code object here: https://github.com/MoarVM/MoarVM/blob/master/src/core/frame.c#L1209
+
+[13:01] <brrt> seems like we are
+
+[13:01] *** lucasb joined
+[13:02] <brrt> it needs to be invoked with 'initialize'?
+
+[13:04] <nine> What doesn't make sense is that body->state_vars is actually set
+
+[13:06] <brrt> what's the REPR in question?
+
+[13:06] <nine> MVMCode
+
+[13:08] <timotimo> brrt: someone mentioned a DllMain earlier today
+
+[13:09] <brrt> yeah, I saw that, I'm not 100% sure that's what I meant, I think that's the equivalent of '_init'
+
+[13:09] <brrt> ld documentation is quite a complex topic...
+
+[13:10] <timotimo> seeing gdi32.dll in that message reminded me i just read an article about how the MSVC /analyze feature had put an internet explorer into every process
+
+[13:11] <brrt> wait, what
+
+[13:11] <timotimo> https://randomascii.wordpress.com/2014/03/31/you-got-your-web-browser-in-my-compiler/
+
+[13:13] *** sena_kun joined
+[13:17] <brrt> I could try it out, though, I have windows + msvc installed
+
+[13:17] <brrt> actual legit windows, even
+
+[13:17] <timotimo> well, that's a post from 2014
+
+[13:18] <timotimo> though the update in the fourth paragraph says vc++2017 still has it in windows 10
+
+[13:18] <brrt> true :-) I was refering to the WinMain/DllMain thing though
+
+[13:18] <brrt> :-o
+
+[13:18] <brrt> llvm toolchain should be getting its own linker one of these days
+
+[13:19] <timotimo> oh, ok!
+
+[13:21] <nine> timotimo: I dare say that's just par for the course for Microsoft engineering
+
+[13:21] <brrt> yeah, I'm also not really surprised
+
+[13:22] <brrt> not just microsoft though... I can think of a few orgaizations that would do something similarily silly
+
+[13:28] <nine> There's something really fishy going on
+
+[13:29] <nine> It's starting to look like MVM_gc_allocate_zeroed does not in fact always return zeroed memory
+
+[13:30] <dogbert17> that sounds like false advertising :)
+
+[13:31] <nine> Well MVM_gc_allocate_zeroed does not even zero anything, but it contains the comment "At present, MVM_gc_allocate always returns zeroed memory."
+
+[13:32] <nine> The odd thing is: if I add a memset to MVM_gc_allocate_zeroed I get "malloc(): corrupted top size" right after startup. If I add such a memset to MVM_gc_allocate_nursery, the bug goes away
+
+[13:33] <dogbert17> that's odd
+
+[13:34] <timotimo> i believe we null out the "new" nursery after copying stuff over? and probably also when allocating a new one when creating an MVMThreadContext?
+
+[13:36] <timotimo> i.e. memory gotten from the nursery is already nulled before gc_allocate_zeroed gets called
+
+[13:38] <nine> timotimo: actually not always. We can also re-use the old_fromspace if the size would stay the same. But we don't zero out that one
+
+[13:38] <timotimo> interesting
+
+[13:38] <nine> But adding that does not yet fix the issue
+
+[13:39] <nine> Oh, scrap that. We do zero it out, just much farther down in the code
+
+[13:40] <nine> That would actually man that we can use MVM_malloc instead of MVM_calloc to allocate a new tospace.
+
+[13:40] <timotimo> worth a try
+
+[13:41] <nine> But first, I'd like to fix this bug before introducing another one :)
+
+[13:41] <timotimo> :)
+
+[13:44] <nine> So, everything is OK, when MVM_gc_allocate_zeroed memsets memory allocated from the nursery. Everything goes up in flames when we allocate from gen2 directly. Which...shouldn't be that surprising since MVM_gc_gen2_allocate_zeroed still sets the MVM_CF_SECOND_GEN flag in the returned object
+
+[13:45] <nine> But still the question remains: why is the memory in the nursery no longer zeroed?
+
+[13:47] <nine> Zeroing from 0x406200 to 0x406400
+
+[13:47] <nine> Allocated 0x406380
+
+[13:47] <nine> So that's right at the end of the nursery with just 32 bytes left. But MVMCode is 72 bytes
+
+[13:50] <dogbert17> aren't any checks done to prevent that from happening?
+
+[14:01] <nine> there are
+
+[14:02] <brrt> oh, jit bug...
+
+[14:03] <brrt> (not this thing nine++ is hnting down, hopefully)
+
+[14:04] <brrt> oh, only in my work-in-prgoress branch
+
+[14:04] <brrt> *progress
+
+[14:05] <nine> dogbert17: luckily it's just me sucking at hexadecimal math. Of course 0x406400 - 0x406380 is not 0x20 but 0x80
+
+[14:06] <nine> Still a mystery why that memory is not zeroed
+
+[14:06] <nine> The only logical conclusion would be that between the zeroing and the allocation it gets written to
+
+[14:09] <dogbert17> so there's code writing to parts of the nursery without having allocated that part first then?
+
+[14:12] <timotimo> nine: you really need rr
+
+[14:13] <timotimo> nine: is the number of gc runs before the crash hits deterministic?
+
+[14:13] <timotimo> if so, the address relative to the nursery start might also be the same every time
+
+[14:13] <timotimo> then you can put a data watchpoint there
+
+[14:13] <dogbert17> I believe nine has a Ryzen 1800X
+
+[14:14] <timotimo> nine also works for a company that has loads of virtual machines, i think? :P
+
+[14:14] <dogbert17> aha
+
+[14:15] <nine> Well with such a small nursery that area is written to quite often. So yes, I'll want rr
+
+[14:15] <timotimo> i hope some of these machines don't have ryzen processors
+
+[14:27] <Geth> ¦ MoarVM/expr-jit-devirtualize: 40e4cad887 | (Bart Wiegmans)++ | src/jit/expr.c
+
+[14:27] <Geth> ¦ MoarVM/expr-jit-devirtualize: [JIT] Bugfix - CALLN yields a value
+
+[14:27] <Geth> ¦ MoarVM/expr-jit-devirtualize: review: https://github.com/MoarVM/MoarVM/commit/40e4cad887
+
+[14:36] <Geth> ¦ MoarVM/expr-jit-devirtualize: ec39fdab32 | (Bart Wiegmans)++ | src/jit/expr.c
+
+[14:36] <Geth> ¦ MoarVM/expr-jit-devirtualize: [JIT] Bugfix - CALLN yields a value
+
+[14:36] <Geth> ¦ MoarVM/expr-jit-devirtualize: review: https://github.com/MoarVM/MoarVM/commit/ec39fdab32
+
+[14:54] *** brrt left
+[15:00] *** Ven`` left
+[15:04] *** zakharyas joined
+[15:09] <nine> VMs even on Intel can be an issue: [FATAL /home/roc/rr/rr/src/PerfCounters.cc:202:get_cpu_microarch()] Intel CPU type 0x660 unknown
+
+[15:13] <nine> Luckily I still have my laptop which is Intel based
+
+[15:20] <timotimo> damn
+
+[16:25] *** zakharyas left
+[16:35] *** chloekek joined
+[17:29] <nine> Got it!
+
+[17:39] <Elronnd> nine: hmmm.  Looks like there is a bit in CStruct.c for handling inlined CUnions?
+
+[17:41] <MasterDuke> nine: nice. easy fix?
+
+[17:41] <nine> MasterDuke: brutally hard to find, but trivial to fix :)
+
+[17:41] <Geth> ¦ MoarVM: 8622835bdf | (Stefan Seifert)++ | src/core/frame.c
+
+[17:41] <Geth> ¦ MoarVM: Fix possible memory corruption in MVM_frame_capture_*
+
+[17:41] <Geth> ¦ MoarVM:
+
+[17:41] <Geth> ¦ MoarVM: In both functions only the code argument was MVMROOTed, but not the local
+
+[17:41] <Geth> ¦ MoarVM: variable used to avoid the type casts to MVMCode*. This could lead to writes to
+
+[17:41] <Geth> ¦ MoarVM: uninitialized areas of the nursery which would later trip up some code that
+
+[17:41] <Geth> ¦ MoarVM: relied on freshly allocated memory to be zeroed out.
+
+[17:41] <Geth> ¦ MoarVM: Fixed by removing those local variables. MVMROOTing them would incure a
+
+[17:41] <Geth> ¦ MoarVM: runtime cost that's not worth a few saved characters of code .
+
+[17:41] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/8622835bdf
+
+[17:42] <timotimo> oh dang
+
+[17:42] <MasterDuke> nine++
+
+[17:43] <dogbert17> nine+++, is it an old bug?
+
+[17:45] <nine> dogbert17: 2016
+
+[17:45] <nine> I guess that fromspace poisoning didn't catch it, because it was writing to outdated pointers instead of reading from them
+
+[17:47] <timotimo> FWIW we could mark the so-far-unused bits of the nursery unaccessible with valgrind client requests
+
+[17:47] <timotimo> and only mark them accessible while we're allocating
+
+[17:47] <timotimo> that could probably have trapped this problem a little better
+
+[17:48] <timotimo> how come the MVM_ASSIGN_REF didn't asplode with the outdated pointer tho?
+
+[17:54] <nine> good question
+
+[18:21] *** AlexDaniel left
+[18:22] *** AlexDaniel joined
+[18:22] *** AlexDaniel left
+[18:22] *** AlexDaniel joined
+[18:25] <nine> Good news is that I added a check to MVM_gc_allocate_zeroed checking the allocated memory is really zeroed and it passes all tests
+
+[19:01] <timotimo> ah, also not a bad idea
+
+[19:34] *** brrt joined
+[20:13] *** sena_kun left
+[20:27] <brrt> deopt is complex....
+
+[20:28] <brrt> ping jnthn?
+
+[20:29] <brrt> I'm of half a mind to just refactor the whole deopt thing... just to hang everything off an explicit deopt idx (why not call it deopt_id at that stage?) and to call deopt_one with just that id
+
+[20:29] <brrt> that's actually quite simple to  do
+
+[20:30] <nine> Simple solution to a complex problem?
+
+[20:30] <brrt> partial solution
+
+[20:40] <brrt> The problem it is a partial solution to, is that we implicitly depend on the place from which we deopt, which is then used to determine what inlines we may or may not be in, and the set of objects that have to be rematerialized
+
+[20:40] <brrt> (open question: how hard would it be to JIT compile code for rematerialization? or to compile interpreted code for rematerialization?)
+
+[20:42] <brrt> ironically, during JIT compilation we use the deopt idx to find the 'proper' deopt offset (lying to the interpreter about where we really are in the code), then during rematerialization, we use that deopt offset to find the proper deopt idx
+
+[20:42] <nine> Isn't deopt supposed to be somewhat rare anyway? So what would be the advantage of JIT compiling rematerialization?
+
+[20:43] <brrt> flexibility, I think
+
+[20:43] <brrt> well, that would be an argument for interpretation, anyway
+
+[20:47] <brrt> currently, we have a list of registers that we assign to attributes of the object
+
+[20:49] <brrt> which must dispatch on the type of the thing to be assigned
+
+[20:50] <timotimo> deopt can happen a whole lot under certain circumstances
+
+[20:50] <brrt> and we could compile the proper assignments to the interpreter.. which makes that bit of code simpler, I think?
+
+[20:50] <timotimo> yeah, compiling the deopt and rematerialization stuff is probably a win
+
+[20:52] <brrt> and in the JIT, I ultimately want to move to a world, where the stores to memory are only executed in the deopt case (if I can prove that they're only necessary for deopt, that is)
+
+[20:52] <brrt> I mean.... it's a long way from perl6 to efficient machine code :-D
+
+[20:53] *** domidumont left
+[21:01] <nine> brrt: oh don't we know that :)
+
+[21:08] *** brrt left
+[21:22] *** Kaiepi left
+[21:52] *** chloekek left
+[22:19] <Geth> ¦ MoarVM: c3e38bb99e | (Timo Paulssen)++ | src/spesh/worker.c
+
+[22:19] <Geth> ¦ MoarVM: Turn pushes/pops into MVMROOT again
+
+[22:19] <Geth> ¦ MoarVM:
+
+[22:19] <Geth> ¦ MoarVM: turns out variable declarations with multiple variables
+
+[22:19] <Geth> ¦ MoarVM: in a single line makes the preprocessor very confused.
+
+[22:19] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/c3e38bb99e
+
+[22:19] <Geth> ¦ MoarVM: 920673f311 | (Timo Paulssen)++ | 2 files
+
+[22:19] <Geth> ¦ MoarVM: heapsnapshot: add per-file/snapshot metadata entries
+
+[22:19] <Geth> ¦ MoarVM:
+
+[22:19] <Geth> ¦ MoarVM: the per-file metadata contains the time the recording
+
+[22:19] <Geth> ¦ MoarVM: started, the PID, a sub-version (currently the version
+
+[22:19] <Geth> ¦ MoarVM: of the format is 3.1, so subversion is 1), and how the
+
+[22:19] <Geth> ¦ MoarVM: highscore fields (topID and topscore) work.
+
+[22:19] <Geth> ¦ MoarVM:
+
+[22:19] <Geth> ¦ MoarVM: <…commit message has 8 more lines…>
+
+[22:19] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/920673f311
+
+[22:19] <Geth> ¦ MoarVM: 1e448ecec0 | (Timo Paulssen)++ | src/profiler/heapsnapshot.c
+
+[22:19] <Geth> ¦ MoarVM: heapsnapshot: Make the leaderboards bigger
+
+[22:19] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/1e448ecec0
+
+[22:20] <timotimo> huh, i didn't realize i hadn't pushed c3e38bb99e yet
+
+[22:21] <timotimo> anyway, that later commit will allow the moarvm heapanalyzer (and moarperf) to show an overview just a second after opening the file
+
+[22:25] <timotimo> oh joy, i seem to have broken teh format tho %)
+
+[22:25] <jnthn> .tell brrt I've looked at deopt a few times and figured there's a simplification to be had. Probably also a memory saving since we only use a fraction of the deopt points we potentially might need.
+
+[22:25] <tellable6> jnthn, I'll pass your message to brrt
+
+[22:27] *** travis-ci joined
+[22:27] <travis-ci> MoarVM build failed. Timo Paulssen 'heapsnapshot: Make the leaderboards bigger'
+
+[22:27] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/582171973 https://github.com/MoarVM/MoarVM/compare/8622835bdf01...1e448ecec078
+
+[22:27] *** travis-ci left
+[22:29] <timotimo> ah, obvious mistake is obvious
+
+[22:40] <timotimo> the heapanalyzer counts one more frame than moarvm's internal stats
+
+[23:13] <Geth> ¦ MoarVM: 5534e95fc1 | (Timo Paulssen)++ | src/profiler/heapsnapshot.c
+
+[23:13] <Geth> ¦ MoarVM: heapsnapshot: get_frame_idx also has to increase frame count
+
+[23:13] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/5534e95fc1
+
+[23:19] *** Kaiepi joined
+[23:21] *** travis-ci joined
+[23:21] <travis-ci> MoarVM build failed. Timo Paulssen 'heapsnapshot: get_frame_idx also has to increase frame count'
+
+[23:21] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/582182647 https://github.com/MoarVM/MoarVM/compare/1e448ecec078...5534e95fc117
+
+[23:21] *** travis-ci left
+[23:25] <Geth> ¦ MoarVM: cadf3a7930 | (Timo Paulssen)++ | src/profiler/heapsnapshot.c
+
+[23:25] <Geth> ¦ MoarVM: properly remove ver3 stuff with #define
+
+[23:25] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/cadf3a7930
+

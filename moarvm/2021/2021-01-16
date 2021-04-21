@@ -1,0 +1,188 @@
+[00:05] *** moon-child left
+[00:46] *** moon-child joined
+[01:26] *** lucasb left
+[02:36] *** raku-bridge1 joined
+[02:36] *** raku-bridge1 left
+[02:36] *** raku-bridge1 joined
+[02:37] *** raku-bridge left
+[02:37] *** raku-bridge1 is now known as raku-bridge
+
+[02:38] *** MasterDuke left
+[04:27] *** evalable6 left
+[04:27] *** linkable6 left
+[04:30] *** evalable6 joined
+[04:30] *** linkable6 joined
+[06:43] *** Altai-man joined
+[06:54] *** Altai-man left
+[09:38] *** domidumont joined
+[10:01] <nine> Good weekend, #moarvm!
+
+[10:32] <nwc10> good *, #moarvm 
+
+[10:38] *** domidumont left
+[10:54] <nine> So I sat down and typed in a systematic list of test cases for NativeCall memory management with functions like void take_string(char *str) {}; void take_and_free_string(char *str) {free(str);}; void take_simple_struct(SimpleStruct *s) {}
+
+[10:54] <nine> I.e. for strings, structs and arrays functions that take those as arguments or return them with either taking/giving ownership of the memory or not.
+
+[10:56] <nine> When calling those I hit the first snag with the second function that takes and frees a string. There's no way to declare this transfer of ownership. But at least there's a way around it with take_and_free_string(explicitly-manage('foo'));
+
+[10:56] <nine> I.e. every caller has to do that.
+
+[10:57] <nine> This only works for strings however. There's currently no way to do the same with structs (i.e. the fourth of 22 test cases).
+
+[11:00] <nine> Then there's char *return_allocated_string() which expects you to free() that string. I don't think there's a way to do that.
+
+[11:33] *** moon-child left
+[11:33] *** samcv left
+[11:33] *** earenndil joined
+[11:34] *** samcv joined
+[11:48] <nine> Nice. For strings we actually already have the infrastructure for communicating to the VM whether an argument must be freed by the VM or not. With this implementing sub take_and_free_string(Str $s is transferring-ownership) is native($lib) { !!! } was a rather trivial change to NativeCall.rakumod.
+
+[11:48] <nine> With that take_and_free_string('foo') no longer leads to a double-free and the caller doesn't have to remember using explicitly-manage
+
+[11:50] <timotimo> i take it you also have a "returns_pointer_into_middle_of_managed_buffer" test
+
+[11:50] <timotimo> or is that equivalent to "return a pointer that must not be freed by the vm"
+
+[11:54] <nine> the latter
+
+[11:54] <nine> Because it really comes down to the question of who is responsible for freeing some memory.
+
+[11:56] <timotimo> ok, how about this then: "returns_pointer_into_a_buffer_that_the_vm_manages" :P
+
+[11:56] <timotimo> can't do that without the GC being aware of the relationship
+
+[11:56] <nine> Isn't that just a pointer that the VM must not free()?
+
+[11:56] <timotimo> not only that
+
+[11:57] <timotimo> it's also that the other pointer must not be freed until this reference is no longer used
+
+[11:57] <timotimo> since in this hypothetical situation the VM is actually responsible for freeing the original buffer when it becomes garbage
+
+[11:58] <nine> Sounds like we can delegate the responsibility for that to the programmer. A typical situation where this occurs would e.g. be you have a string and push it into some parsing library which may return pointers into the original string. The docs will tell you that. And you are responsible for keeping the original string alive.
+
+[11:59] <timotimo> i guess that's fair
+
+[12:00] <nine> No magic on our side will be able to shield a user of a C library from having to think about memory management.
+
+[12:02] <nine> So far NativeCall mostly pretends to do so - and it does get far with that - but that leads directly to these situations we can't handle currently.
+
+[12:03] <timotimo> right
+
+[12:15] <nine> Same trick as for arguments also worked for returned strings. Now on to something more challenging: structs
+
+[12:22] <timotimo> watch out, or you'll be thunderstruct
+
+[12:23] <nine> that....hurt :D
+
+[12:23] <timotimo> hiiyeeah-yeaah
+
+[12:41] <nine> Hm...I guess if one passes a CStruct to a function that wants to take ownership, throwing an exception if we aren't actually owning that wrapped struct is appropriate.
+
+[12:44] <timotimo> anything about nested structs (by which i mean has, not HAS)
+
+[12:45] <nine> ?
+
+[12:46] <timotimo> if you have structs that point at other structs, we will require the programmer to handle ownership transfer?
+
+[12:47] <timotimo> oh btw, passing structs literally via parameters is supported by both dyncall and libffi, you "just" have to give it a representation of the struct's ... structure
+
+[12:47] <timotimo> i looked into doing it once, somehow didn't reach the goal
+
+[12:47] <timotimo> knowing me i was probably just not able to concentrate at that time?
+
+[12:48] <timotimo> the only library i've wanted to bind that uses structs passed by value into a function was SDL_ttf
+
+[12:58] * jnthn wonders if `is transferring-ownership` is a little long, and ponders `is disowned`
+
+[13:00] <nine> As I mentioned when I first wrote about this issue, I'd hate to have to type "is transferring-ownership" all the time. So any better ideas are greatly appreciated :)
+
+[13:00] <timotimo> sad we can't use "will" here
+
+[13:01] <jnthn> More deeply, whether we really want to have the explicitly managed mechanism "survive", or if we'd be better off just attaching the semantics to the parameters, and then passing that info along as part of the signature spec
+
+[13:01] <jnthn> (The explicitly managed mechanism depends on a mixin to each thing we want to manage, and that gets costly)
+
+[13:02] <jnthn> I'm guessing the other situation is when we get memory back as a return value, and then need to deicde if we claim it or not
+
+[13:02] <jnthn> And another - horrors - is rw parameters :)
+
+[13:08] *** MasterDuke joined
+[13:09] <MasterDuke> sounds like moarvm needs some sort of memory lending verifier...
+
+[13:22] <nine> Returned structs are now handled correctly in both cases :)
+
+[13:23] <nine> sub return_simple_struct(--> SimpleStruct) is native($lib) { !!! }; sub return_allocated_simple_struct(--> SimpleStruct) is transferring-ownership is native($lib) { !!! }
+
+[13:24] <nine> jnthn: the great majority of cases will be covered by the parameter and routine traits. But there will still be cases where we have to mark individual objects. E.g. we get a pointer to a struct and are supposed to manage an individual field. Or inverse.
+
+[13:42] *** MasterDuke left
+[14:01] *** sena_kun joined
+[14:39] *** lucasb joined
+[14:56] *** domidumont joined
+[15:12] *** sena_kun left
+[15:12] *** sena_kun joined
+[15:30] *** Altai-man joined
+[15:32] *** sena_kun left
+[15:41] <nine> Strings are a bit of an unpleasent special case in NativeCall. CStruct, CArray and friends can easily contain a flag and manage (or not) the referenced native data structure. But strings are not even aware of their native counter part. So CStruct and friends need to keep track of their string's status
+
+[15:49] *** sena_kun joined
+[16:01] <nine> Next interesting bit: when we get a struct containing a pointer to another struct from a C function and it expects us to free both, there's a difference whether we actually access the contained struct in Raku code or not. If not, we never create a CStruct wrapper object which would handle freeing of that memory
+
+[16:02] <nine> So many things to fix...
+
+[16:34] *** sena_kun left
+[16:38] *** dogbert17 joined
+[16:56] <lizmat> or tests to write  :-(
+
+[16:56] * lizmat just broke %h<a b> = %h<b a>  and spectest was silent  :-(
+
+[16:58] <nine> Yeah, there are just so many interesting cases
+
+[18:36] *** zakharyas joined
+[19:12] *** moon-child joined
+[19:13] *** rba joined
+[19:13] *** earenndil left
+[19:13] *** nine left
+[19:13] *** nine joined
+[19:31] *** sena_kun joined
+[19:32] *** Altai-man left
+[19:55] *** patrickb joined
+[19:58] *** patrickb left
+[20:46] *** Geth joined
+[20:47] <nine> Before https://github.com/MoarVM/MoarVM/commit/e99af058bc4064f2f8630e8618fcb46c3d8b9329 MVM_nativecall_refresh was b0rked for inlined attributes. Now it's b0rked for normal ones :(
+
+[20:48] <lizmat> :-(
+
+[20:52] <nine> At least it pays off that I want to clean up our whole NativeCall memory management mess in one go instead of fixing one issue at a time. Once you're deep in there, it becomes easy to find the correct solution to such trivialities
+
+[20:54] <nine> Once I got that done I will come across the next interesting issue. A function like void take_and_free_struct_with_struct(StructWithStruct *s) { free(s->str); free(s); } will lead to a use-after-free in MVM_nativecall_refresh.
+
+[20:55] <nine> Thing is, once we give away ownership of some memory, we cannot even rely on that memory still being available at the end of a call. So just accessing it again unconditionally is no longer a winning strategy.
+
+[20:56] <nine> Probably better to just mark it dirty (good thing that there's one more bit available in the cstruct's address) and refresh it on the next access to an attribute (at which point it's the user's fault if it blows)
+
+[21:12] <timotimo> we also don't have any way to mark structs or other things "volatile"; would we need to have that?
+
+[21:43] <vrurg> .tell jnthn commaide.com certificate has expired.
+
+[21:43] <tellable6> vrurg, I'll pass your message to jnthn
+
+[21:46] *** domidumont left
+[22:03] <nine> timotimo: well in a sense we treat those things as volatile by default (hence the call to MVM_nativecall_refresh). So we'd need the opposite
+
+[22:04] <timotimo> we don't nativecall_refresh on every access to attributes tho, right?
+
+[22:05] <nine> oh, that's true
+
+[22:05] *** sena_kun left
+[22:14] *** moon-child left
+[22:24] *** zakharyas left
+[22:27] *** moon-child joined
+[22:45] *** moon-child left
+[22:51] *** moon-child joined
+[22:51] *** moon-child left
+[22:52] *** moon-child joined
+[22:53] *** moon-child left
+[23:09] *** moon-child joined

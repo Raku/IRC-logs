@@ -1,0 +1,188 @@
+[01:15] *** sena_kun joined
+[01:17] *** Altai-man_ left
+[02:08] *** farcas1982regreg joined
+[03:14] *** Altai-man_ joined
+[03:17] *** sena_kun left
+[05:15] *** sena_kun joined
+[05:17] *** Altai-man_ left
+[05:33] *** farcas1982regreg left
+[06:47] <nwc10> good *, #moarvm 
+
+[07:07] *** farcas1982regreg joined
+[07:14] *** Altai-man_ joined
+[07:17] *** sena_kun left
+[07:51] *** zakharyas joined
+[08:24] <MasterDuke> ugh, i'd forgotten how much i love debugging memory problems when doing this fsa stuff
+
+[08:39] <nine> Ah the memories...
+
+[09:15] *** sena_kun joined
+[09:17] *** Altai-man_ left
+[10:01] *** zakharyas left
+[10:07] *** zakharyas joined
+[10:10] *** zakharyas left
+[10:10] *** zakharyas joined
+[11:04] *** zakharyas left
+[11:14] *** Altai-man_ joined
+[11:17] *** sena_kun left
+[12:20] *** zakharyas joined
+[13:16] *** sena_kun joined
+[13:17] *** Altai-man_ left
+[13:26] *** farcas1982regreg left
+[13:49] <nine> Wow! It looks like my GCC plugin found it's first actual missing MVMROOT!
+
+[13:49] <nine> Missing root for `lib` in D.21924 = MVM_dll_find_symbol (tc, lib, sym); at src/core/interp.c:3811 used in D.21926 = MVM_string_utf8_encode_C_string (tc, lib); at src/core/interp.c:3813
+
+[13:50] <nine> It does look legit: https://github.com/MoarVM/MoarVM/blob/master/src/core/interp.c#L3813 as MVM_dll_find_symbol will indeed allocate unconditionally.
+
+[13:51] <jnthn> Looks legit to me also
+
+[13:55] <nine> So I guess the concept is proven now :)
+
+[13:56] <lizmat> is dll_find_symbol Win specific?
+
+[13:57] <nine> no
+
+[13:57] <lizmat> I was triggered because of the apparent segfault that still exists in Win
+
+[13:57] <nine> That's what prompted me to continue work on the GCC plugin
+
+[14:02] * moritz didn't even know that GCC supported plugins
+
+[14:05] <nine> Will MVMStaticFrames ever _not_ be allocated in gen2 directly? If they are always in gen2, I can just remove them from my list of managed types to get rid of the false positives they currently cause
+
+[14:08] <MasterDuke> would a VMArray ever be freed somewhere other than https://github.com/MoarVM/MoarVM/blob/master/src/6model/reprs/VMArray.c#L103-L107 ?
+
+[14:10] <jnthn> nine: There's a freshcoderef or some such op that maybe does allocate it in the nursery
+
+[14:10] <jnthn> MasterDuke: I very much hope not
+
+[14:12] <MasterDuke> hm. i'm getting a `free(): invalid pointer` on my newly rebased use_fsa_for_vmarray branch when running t/spec/S32-array/splice.rakudo.moar
+
+[14:44] *** lucasb joined
+[14:49] <MasterDuke> do i need to do anything different in VMArray_gc_mark for FSA allocated stuff?
+
+[14:59] <nine> Hm....MVMROOT is easy. Simulating the temp root stack when MVM_gc_root_temp_push and MVM_gc_root_temp_pop are used manually in conditional branches is much harder
+
+[14:59] <MasterDuke> hm, i use the fsa in two cases, deserializing and cloning. i undid the deserializing and got the same error, so i redid and undid the cloning. the error goes away now
+
+[15:01] <MasterDuke> that code hasn't been touched in 6 years (other than my fsa change). so why do i get these invalid pointer errors now, when i didn't when i first made the branch?
+
+[15:02] <nine> Better checks by glibc?
+
+[15:02] *** Altai-man_ joined
+[15:03] <nine> Also my impression was that glibc being able to detect memory errors was pretty much random. Some unrelated changes in the code can make errors appear or disappear, presumably by changing the malloc pattern
+
+[15:04] <MasterDuke> hm
+
+[15:05] *** sena_kun left
+[15:19] <nine> I get the impression that these are also legit:
+
+[15:19] <nine> Missing root for `name` in lex_reg = MVM_frame_find_contextual_by_name (tc, name, &type, cur_frame, 0, &found_frame); at src/core/frame.c:1666 used in c_name = MVM_string_utf8_encode_C_string (tc, name); at src/core/frame.c:1668
+
+[15:19] <nine> Missing root for `value` in lex_reg = MVM_frame_find_contextual_by_name (tc, name, &type, cur_frame, 0, &found_frame); at src/core/frame.c:1666 used in _3 = value->st; at src/core/frame.c:1675
+
+[15:20] <nine> MVM_frame_binddynlex calls MVM_frame_find_contextual_by_name which calls MVM_frame_find_dynamic_using_frame_walker which roots variables, which it would only do if it could cause allocations.
+
+[15:39] *** MasterDuke left
+[15:49] *** MasterDuke joined
+[15:53] <MasterDuke> if anybody's feeling bored, maybe they could take a look over https://github.com/MoarVM/MoarVM/pull/689 (not a whole lot of changes) and see if there's anything obviously wrong and/or missing that might explain these invalid free()s i'm getting
+
+[15:56] <nine> Ha! These are real clear as day:
+
+[15:56] <nine> Missing root for `flat_list` in class_list = MVM_repr_alloc_init (tc, _6); at src/6model/reprs/CStruct.c:24 used in MVM_repr_push_o (tc, flat_list, attr); at src/6model/reprs/CStruct.c:69
+
+[15:56] <nine> Missing root for `flat_list` in current_slot_obj = MVM_repr_box_int (tc, _18, _16); at src/6model/reprs/CStruct.c:51 used in MVM_repr_push_o (tc, flat_list, attr); at src/6model/reprs/CStruct.c:69
+
+[15:56] <nine> Missing root for `attr_map` in current_slot_obj = MVM_repr_box_int (tc, _18, _16); at src/6model/reprs/CStruct.c:51 used in MVM_repr_bind_key_o (tc, attr_map, name, current_slot_obj); at src/6model/reprs/CStruct.c:64
+
+[15:59] <Geth> ¦ MoarVM/gcc_root_checker_plugin: 4fbd2d0e2e | (Stefan Seifert)++ | tools/check-roots.py
+
+[15:59] <Geth> ¦ MoarVM/gcc_root_checker_plugin: Proof of concept of a GCC plugin for detecing GC violations
+
+[15:59] <Geth> ¦ MoarVM/gcc_root_checker_plugin: review: https://github.com/MoarVM/MoarVM/commit/4fbd2d0e2e
+
+[15:59] <nine> This is obviously something worth surviving a break down of my local infrastructure...
+
+[16:01] <nine> Actually those issues in CStruct are not as clear. The caller's caller sets the gen2_default flag. So actually those MVM_gc_root_temp_push in the same function are pretty useless
+
+[16:03] *** AlexDaniel left
+[16:07] <nine> At least this is real, even if the line numbers are off due to macros: Missing root for `startup_time` in value = MVM_repr_box_num (tc, _106, _104); at src/moar.c:704 used in MVM_repr_bind_key_o (tc, config.69_110, startup_time, value); at src/moar.c:704
+
+[16:12] *** AlexDaniel joined
+[16:13] *** AlexDaniel left
+[16:13] *** AlexDaniel joined
+[16:35] *** zakharyas left
+[16:45] <nine> Definitely right, too: Missing root for `decoder` in result = MVM_repr_alloc_init (tc, buf_type); at src/6model/reprs/Decoder.c:332 used in enter_single_user (tc, decoder); at src/6model/reprs/Decoder.c:333
+
+[17:03] *** sena_kun joined
+[17:05] *** Altai-man_ left
+[17:29] *** colomon___ left
+[17:31] *** colomon_ joined
+[17:50] <MasterDuke> is there anything in particular that needs to be done when memcpying FSA-allocated memory to/from non-FSA allocated memory?
+
+[17:51] *** MasterDuke left
+[18:00] <timotimo> there shouldn't be anything that needs to be done
+
+[18:01] <timotimo> memcpying is just like assigning individual values
+
+[18:01] <timotimo> just have to make sure the place you're copying to is the right size, and that you're not accidentally copying to a too-early or too-late address
+
+[18:09] <timotimo> i left a comment on the vmarray fsa PR, maybe yall can have an additional look: https://github.com/MoarVM/MoarVM/pull/689
+
+[18:19] *** MasterDuke joined
+[18:32] *** colomon_ left
+[18:36] <MasterDuke> timotimo++ think that fixed it. thanks for looking!
+
+[18:38] <MasterDuke> now, where/how do new VMArray's actually get created (so i can start testing using the FSA for all, not just deserialized and clone)?
+
+[18:40] <MasterDuke> huh, should this change (my FSA for VMArrays branch) have slowed down rakudo's parsing? i would have expected a slight improvement if anything, since we have lots of small arrays that should have been more quickly allocated
+
+[18:53] <lizmat> and another Rakudo Weekly News hits the Net: https://rakudoweekly.blog/2020/04/20/2020-16-rash-in-progress/
+
+[19:02] *** Altai-man_ joined
+[19:05] *** sena_kun left
+[19:46] <timotimo> MasterDuke:you don't happen to have some debug flag/feature still turned on, or optimization turned down or any of that?
+
+[19:47] <MasterDuke> oh, don't remember if i turned gc_debug back to 0 before compiling rakudo, let me do it again
+
+[19:47] *** colomon_ joined
+[19:49] <MasterDuke> nope, still slow
+
+[19:49] <MasterDuke> let me make sure it isn't my branch
+
+[19:52] <MasterDuke> hm, definitely seems to be my branch. stage parse was about 2s vs master
+
+[19:52] <MasterDuke> *2s slower
+
+[19:58] <timotimo> can you show outputs of perf report? there's a flag that makes it spit out a text file
+
+[20:05] <MasterDuke> running now
+
+[20:25] <MasterDuke> hm, those runs looked pretty similar
+
+[20:28] <MasterDuke> timotimo: what flag is that?
+
+[20:28] <timotimo> hm, --stdio?
+
+[20:32] <MasterDuke> https://gist.github.com/MasterDuke17/38a0eea1f564ff9551178975ab01fcb4
+
+[20:34] <timotimo> wow, huh, the VMArray_at_pos is really high on one and very not high on the other
+
+[20:35] <timotimo> wait, it's the fsa one that has it lower than the other
+
+[20:36] <MasterDuke> just did a complete recompile and everything seemed normal
+
+[20:36] <MasterDuke> but afk for a bit
+
+[21:03] *** zakharyas joined
+[21:03] *** sena_kun joined
+[21:05] *** Altai-man_ left
+[22:50] *** Kaiepi left
+[22:50] *** Kaeipi joined
+[22:52] *** Kaeipi left
+[22:52] *** Kaeipi joined
+[23:00] *** zakharyas left
+[23:02] *** Altai-man_ joined
+[23:05] *** sena_kun left
+[23:23] *** lucasb left

@@ -1,0 +1,243 @@
+[02:08] *** lucasb left
+[02:57] *** raku-bridge left
+[02:57] *** raku-bridge joined
+[03:58] *** Kaeipi left
+[03:59] *** Kaeipi joined
+[06:31] *** raku-bridge left
+[07:52] *** Kaeipi left
+[07:52] *** Kaeipi joined
+[08:07] *** domidumont joined
+[08:15] *** MasterDuke joined
+[08:20] *** Kaeipi left
+[08:22] *** Kaeipi joined
+[08:26] *** domidumont left
+[08:49] *** domidumont joined
+[08:57] *** zakharyas joined
+[09:24] *** Altai-man joined
+[09:43] *** patrickb joined
+[09:57] *** patrickb left
+[09:58] <MasterDuke> is https://github.com/MoarVM/MoarVM/blob/master/src/strings/ops.c#L474-L539 missing an MVMROOT? if i'm rr'ing correctly (somewhat doubtful to be honest) it seems to indicate this is where the location of an sc_ix gets changed from 0 to 4294967295
+
+[09:58] <tellable6> 2020-11-17T03:50:57Z #raku-dev <melezhik> MasterDuke: ^^
+
+[10:15] <MasterDuke> re nine's comment here https://github.com/rakudo/rakudo/issues/4038#issuecomment-728777480 i did `watch -l watch -l worklist->list[worklist->items]` at the point of the segv, but all i get is `Old value = <unreadable>; New value = (MVMCollectable **) 0x0` when i reverse-cont (or continue from start)
+
+[10:17] <MasterDuke> did i do that watchpoint correctly?
+
+[10:18] <MasterDuke> (copy pasta, i only had one `watch -l` when i actually entered it in rr)
+
+[10:32] *** Kaeipi left
+[10:32] *** Kaiepi joined
+[10:34] <nine> MasterDuke: worklist->list[worklist->items] is the next free slot for adding to the worklist
+
+[10:35] <nine> MasterDuke: you actually want to watch -l gen2roots[i]
+
+[10:43] <MasterDuke> where's the i from?
+
+[10:45] <MasterDuke> tc->gen2roots[sc_idx]?
+
+[10:46] <nine> the MVM_gc_root_add_gen2s_to_worklist frame
+
+[10:47] <MasterDuke> ah, thanks
+
+[10:50] <MasterDuke> ok, i added that, reverse-cont, it hits
+
+[10:51] <nine> Is the object still intact at that point?
+
+[10:53] <MasterDuke> we're at `tc->gen2roots[tc->num_gen2roots] = c;` in MVM_gc_root_gen2_add
+
+[10:53] <MasterDuke> guess i'm interested in the `c`?
+
+[10:55] <MasterDuke> sc = {sc_idx = 4048871824, idx = 21871}
+
+[10:56] <nine> So, already broken when it gets added to gen2roots. Where are we at that point?
+
+[10:56] <MasterDuke> set_obj_at_offset in src/6model/reprs/P6opaque.c:21; bind_attribute in src/6model/reprs/P6opaque.c:389; 
+
+[10:57] <nine> where does the value come from?
+
+[10:57] <nine> MVM_dump_bytecode(tc) comes in handy at that point
+
+[10:57] <timotimo> i recommend routinely asking gdb for "event"
+
+[10:58] <timotimo> i think that's how you spell that command at least
+
+[10:58] <timotimo> gives you a numbe you can use to return to this moment in "time"
+
+[10:58] <nine> isn't that checkpoint?
+
+[10:59] <MasterDuke> https://gist.github.com/MasterDuke17/f263005999495a0aa790783e48e0e72f what i have so far
+
+[11:01] <nine> So you're in line 77 and the broken object is loc_8_obj, i.e. tc->cur_frame->work[8].o
+
+[11:01] <nine> and it's the result of getlex in 70
+
+[11:03] <nine> That's odd, since that's simply the %spec argument to trait_mod:<is>(Routine:D $r, :prec(%spec)!)
+
+[11:04] <nine> So I'd figure that it's not a missing MVMROOT of that object, but something else overwriting it. Thus a watch -l c->sc_forward_u.sc.sc_idx and reverse-cont
+
+[11:05] <MasterDuke> old: 23; new: 30
+
+[11:05] <nine> Oh boy, I'm spending too much time on things like that. I didn't even have to look anywhere to type that command...
+
+[11:05] <nine> wait, 23? that's a sane number
+
+[11:05] <MasterDuke> in rebless
+
+[11:07] <MasterDuke> should i go forward again to the segv and then reverse?
+
+[11:10] <nine> I'd do that, yes. It's always better to be too careful and confirm results than to follow the wrong lead
+
+[11:11] <MasterDuke> old: 4045642928; new: 31
+
+[11:11] <nine> that's the spot!
+
+[11:11] <MasterDuke> deserialize
+
+[11:12] <nine> huh
+
+[11:12] <MasterDuke> gist updated
+
+[11:19] <nine> That's wrong: p (MVMObject)c
+
+[11:19] <nine> Should read p *(MVMObject*)c
+
+[11:39] <MasterDuke> $8 = {header = {sc_forward_u = {forwarder = 0x1600000017, sc = {sc_idx = 23, idx = 22}, st = 0x1600000017}, owner = 1, flags1 = 0 '\000', flags2 = 2 '\002', size = 144}, st = 0x556feffaa300}
+
+[11:40] <nine> so that's actually ok there
+
+[11:40] <nine> if you still got that watch -l c->sc_forward_u.sc.sc_idx active, you can just cont to see where it gets overwritten
+
+[11:41] <MasterDuke> from when the gen2roots[i] hits?
+
+[11:42] <nine> yes
+
+[11:44] <MasterDuke> just to be sure i'm doing the steps right, i continued to the segv, reverse-continued to when the watch -l gen2roots[i] hit, then continued
+
+[11:45] <MasterDuke> the first watch -l c->sc_forward_u.sc.sc_idx gives old: 23; new 31
+
+[11:45] <MasterDuke> next gives old:31; new: 4045642928
+
+[11:45] <nine> Sounds good. Since we know that the object is ok when it gets added to gen2roots, you can also just watch -l c->sc_forward_u.sc.sc_idx when it segfaults and reverse-cont
+
+[11:45] <nine> ok the old:31; new: 4045642928 is where it gets interesting
+
+[11:45] <nine> where is that?
+
+[11:46] <MasterDuke> gist updated, rr3.log
+
+[11:49] <MasterDuke> fyi, this has been run with MVM_SPESH_DISABLE=1 (segvs with or without, i just thought it'd make things simpler)
+
+[11:49] <nine> oh, good
+
+[11:50] <nine> is tc->allocate_in_gen2 set?
+
+[11:50] <MasterDuke> $9 = 1
+
+[11:54] <nine> So, the collectable that gets overwritten is at 0x556ff154e190
+
+[11:54] <nine> The P6Opaque that's deserialized is at address  0x556ff154e118
+
+[11:55] <nine> And we're writing 0x78 bytes in, i.e. at 0x556FF154E190
+
+[11:56] <nine> That seems to suggest that the c pointer is in fact outdated and points at a freed or moved object.
+
+[11:57] <nine> Btw. have you tried with GC_DEBUG enabled?
+
+[11:57] <nine> Since it's clearly a GC issue that might help and at least explode earlier
+
+[11:57] <MasterDuke> haven't
+
+[11:59] <nine> Pro tip to rr users: clean your ~/.local/share/rr from time to time...
+
+[12:01] <MasterDuke> `MoarVM panic: SC index out of range`, no surprise...
+
+[12:01] <MasterDuke> with GC_DEBUG=2
+
+[12:08] <MasterDuke> seems to be the same thing. sc_idx is fine when the gen2roots[i] hits, crazy new value is in deserialize
+
+[12:09] <MasterDuke> just dies at the panic instead of a segv
+
+[12:11] *** sena_kun joined
+[12:13] *** Altai-man left
+[12:14] <nine> Since the issue is that we operate with an outdated pointer to an object, GCing more often with GC_DEBUG=3 may help shake out the actual place where we miss the MVMROOT
+
+[12:15] <MasterDuke> so slow...
+
+[12:15] <nine> I know... OTOH it can run unattended
+
+[12:32] <MasterDuke> another panic, sc_idx = 3532567984. but MVM_gc_root_add_gen2s_to_worklist is not in the backtrace
+
+[12:38] <MasterDuke> but we do seem to be much earlier in the runtime. we're in gen/moar/stage2/QRegex.nqp:868
+
+[12:44] *** zakharyas left
+[13:14] <MasterDuke> still, same crazy sc_id set in deserialize
+
+[13:15] <nine> so you'll have to trace c back to where it comes from
+
+[13:24] <MasterDuke> item right? cause we're in https://github.com/MoarVM/MoarVM/blob/master/src/gc/collect.c#L348
+
+[13:25] <nine> yeah, the broken object
+
+[13:32] <MasterDuke> is https://github.com/MoarVM/MoarVM/blob/master/src/core/interp.c#L1876-L1877 correct? here https://github.com/MoarVM/MoarVM/blob/master/src/core/interp.c#L1876-L1877 value is rooted before allocate() is called
+
+[13:33] <timotimo> where is the root?
+
+[13:33] <timotimo> oh, it gets put into the egister
+
+[13:33] <nine> MasterDuke: the comment above it explains
+
+[13:34] <MasterDuke> well yeah, but the comment is repeated in clone
+
+[13:35] <nine> and both are correct
+
+[13:37] <MasterDuke> ah. value is used later in clone. though the comment has a type, there's no 'obj' in clone
+
+[13:38] <MasterDuke> *typo
+
+[13:45] <MasterDuke> ugh, i did `watch -l item`, but that's just hitting for every call of process_worklist
+
+[13:48] <nine> where do you want it to break?
+
+[13:50] <MasterDuke> well, i guess that could be fine. i'm just not 100% sure which call to process_worklist i care about
+
+[13:51] <MasterDuke> the first one before the sc_idx goes crazy?
+
+[13:51] <nine> I'd say you want to know where it entered the worklist
+
+[13:52] <nine> You already know where and how sc_idx gets overwritten. That didn't help because it's obviously not the writer's fault. It's the fault of whoever holds a pointer to an object and lets it get out-dated
+
+[14:21] *** zakharyas joined
+[14:39] *** MasterDuke left
+[15:16] <timotimo> i wonder what we must do to make perf report able to annotate jitted frames
+
+[15:17] <timotimo> with the perf map it can tell us which piece in the output belongs to what pel6-level frame
+
+[16:04] *** MasterDuke joined
+[16:10] *** Altai-man joined
+[16:12] *** patrickb joined
+[16:13] *** sena_kun left
+[16:20] *** MasterDuke left
+[16:46] *** MasterDuke joined
+[17:05] *** lucasb joined
+[17:21] *** patrickb left
+[18:30] *** Kaiepi left
+[18:31] *** domidumont left
+[18:56] *** zakharyas left
+[20:01] <MasterDuke> hm, where was i
+
+[20:01] <MasterDuke> looks like i did `watch -l *item` for some reason
+
+[20:03] *** brrt joined
+[20:11] *** sena_kun joined
+[20:11] <brrt> \o
+
+[20:12] <nwc10> o/
+
+[20:12] *** Altai-man left
+[21:07] *** brrt left
+[21:27] *** zakharyas joined
+[21:42] *** zakharyas left
+[22:34] <[Coke]> ⏀
+
+[22:45] *** sena_kun left

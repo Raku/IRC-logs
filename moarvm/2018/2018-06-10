@@ -1,0 +1,308 @@
+[00:13] *** Kaiepi left
+[00:14] *** Kaiepi joined
+[01:15] *** MasterDuke left
+[02:12] *** MasterDuke joined
+[07:04] *** lizmat left
+[07:48] *** Tison joined
+[07:48] <Tison> https://github.com/MoarVM/MoarVM/issues/874
+
+[07:56] *** lizmat joined
+[09:03] *** evalable6 left
+[11:23] *** Kaiepi left
+[11:47] *** lizmat left
+[11:50] *** kiwi_51 joined
+[11:50] *** lizmat joined
+[11:58] *** kiwi_51 left
+[12:13] *** robertle joined
+[12:28] *** camelia left
+[12:29] *** camelia joined
+[12:56] *** Kaiepi joined
+[13:38] *** evalable6 joined
+[14:01] *** brrt joined
+[14:01] <brrt> good *
+
+[14:04] <jnthn> o/ brrt
+
+[14:19] *** zakharyas joined
+[14:24] *** zakharyas1 joined
+[14:26] *** zakharyas left
+[14:35] <brrt> ohai jnthn
+
+[14:36] <brrt> yay for merging the spesh-plugin btw :-)
+
+[14:36] <timotimo> yay indeed
+
+[14:36] <brrt> i take it you've all seen the nastiness of t/05-messages/02-errors.t
+
+[14:37] <jnthn> Yeah, that was fallout for something completely unrelated to spesh plugin stuff :)
+
+[14:37] <jnthn> Well, only related in the sense that the NQP change that introduced the issue sneaked in with the version bump
+
+[14:37] <jnthn> I merged a Rakudo PR earlier today that in theory fixes it
+
+[14:37] <brrt> cool
+
+[14:38] <jnthn> Oh, may need another NQP_REVISION bump too
+
+[14:38] <brrt> I was wondering whether or not it would be time to start thinking about a trace compiler for spesh
+
+[14:39] <jnthn> I'm not entirely convinced we need to go in the trace direction at all at, tbh.
+
+[14:39] <brrt> I was hoping you'd have a opinion
+
+[14:40] <brrt> why not? I can give you some reasons why I'd think we can and ought to
+
+[14:42] <brrt> the 'why-we-can' spiel:
+
+[14:42] <jnthn> It feels to me like "method JIT" and "trace JIT" are not too black and white alternatives, but rather areas on a spectrum.
+
+[14:42] <brrt> - we already have inlining, deopt, and OSR mechanics
+
+[14:43] <brrt> fwiw, i agree about that, and the idea was to leverage existing things rather than code them up all new
+
+[14:44] <brrt> - a trace can often ignore hard-to-compile things that happen infrequently
+
+[14:44] <brrt> - a trace can be compiled effectively as a single basic block
+
+[14:44] * jnthn listens to brrt first :)
+
+[14:45] <brrt> well, not entirely as a single basic block, but you get what i mean
+
+[14:45] <brrt> i think of tracing as the advanced version of inlining
+
+[14:46] <brrt> inlining has the problem that as you inline more stuff, you increase the size of the thing that you'd be inlining, and at some point your inliner will refuse to inline further
+
+[14:46] <brrt> e.g. you get these 'blocks' on the call stacks (especially on deep call stacks)
+
+[14:46] <timotimo> time for a spesh snowball
+
+[14:48] <brrt> in a trace, it is relatively straightforward to prove that an object never escapes, and that in turn makes it possible to translate into a 'stack allocation' as it were
+
+[14:48] <brrt> i.e. map all fields to registers, pass those arround
+
+[14:49] <brrt> that's it, basically
+
+[14:50] <mst> tracing as a means to get sufficient branch prediction information to build a highly optimised representation of the common path through a routine seems like a net win, and I don't know enough compilers to know of another way to achieve the same thing that isn't basically tracing in a different costume
+
+[14:50] *** mst sets mode: -o mst
+
+[14:50] <brrt> in short, you can inline deeper, and because the resulting trace is mostly (or almostly) linear, you can analyze better
+
+[14:50] <brrt> that, too
+
+[14:52] <jnthn> What I find interesting is that the tracing approach seems to say "we start off with one trace" but then recognizes that actually, at some points control flow normally diverges as part of the programs semantics, so then ends up attaching subtraces at those points, and so converges on a compiled version that includes the frequently traversed paths of the program.
+
+[14:53] <jnthn> Whereas the specialization appraoch really wants to do the same, but comes at it by keeping stats of what happens in the interpreter and then using those to decide what to throw out.
+
+[14:55] <jnthn> So, if we were to 1) start logging branch outcomes (or inferring branch outcomes) in the spesh stats, and 2) bump the inline size that we allow when we know we're downstream of a loop, then would we not end up producing a very similar result?
+
+[15:00] *** Tison left
+[15:01] <brrt> to a good extent, yes. the difference is then mainly the depth to which you can inline, and the fact that tracing tends to be more aggressive about throwing paths out
+
+[15:02] <brrt> for instance, if the uncommon path of a callee subroutine contains an uninlineable operation, we typically cannot inline that
+
+[15:03] <brrt> the other difference is that the trace gives you (ideally) long stretches of linear code, whereas the current (method specialization + inlining) method would need more intelligent code reorganization to do the same
+
+[15:04] <brrt> and the challenge there is that figuring out this linear 'trace' is easy by means of tracing, and hard otherwise, because inferring is going to end up depending on local decisions
+
+[15:05] <brrt> but I agree that these things are more similar than different
+
+[15:07] <jnthn> If the uncommon path of a callee contains an uninlineable operation but we see it's an uncommon path and throw it out, then we can inline it, though :)
+
+[15:07] <brrt> true, but (I think) that is harder :-)
+
+[15:08] <jnthn> One other thing that worries we is what happens if the trace hits an uninlineable instruction?
+
+[15:09] <brrt> because it relies on a): having accurate information that this path is uncommon, and b): making the local decision that we can throw it out (and insert a guard)
+
+[15:09] <jnthn> Well, we already do a) quite successfully for type information :)
+
+[15:10] <brrt> regarding the uninlineable instruction, either we figure out a way to translate it to something inlineable, or you're just doomed
+
+[15:10] <brrt> also, there's the matter of ordering
+
+[15:11] <brrt> whether we can succesfully inline a callstack of N frames depends greatly on the order in which they all end up being specialized
+
+[15:11] <brrt> traces don't have that problem
+
+[15:11] <jnthn> Today, yes, but that's a solvable problem.
+
+[15:12] <brrt> (they do have another problem, which is that you *have* to instrument the callees of the trace)
+
+[15:12] <jnthn> "you're just doomed" is the performance cliff that I fear
+
+[15:12] <brrt> fair enough. but, that is also the case now, and there's no reason a trace can't bottom out in a call
+
+[15:13] <brrt> (to the uninlineable thing)
+
+[15:13] <brrt> might restrict the ultimate usefulness, though
+
+[15:14] <brrt> ooc, how would you solve the ordering problem? I don't see an obvious solution
+
+[15:15] <jnthn> Well, one way would be to just produce the inlines we need if we turn out to somehow be missing them.
+
+[15:16] <jnthn> We probably do have the information to do that already
+
+[15:17] <jnthn> In that the spesh stats tell us about the connections between frames
+
+[15:19] <brrt> i suppose we could do that, yes
+
+[15:20] <jnthn> Also, if the spesh stats contained the branch information to, would we be able to construct a linear spesh graph by following the log and the instructions together?
+
+[15:20] <jnthn> *too
+
+[15:20] <jnthn> Effectively a kind of "offline" trace?
+
+[15:21] <brrt> yes. I could see that happening
+
+[15:21] <brrt> that would make me equally happy
+
+[15:21] <brrt> i'm more excited about the potential of the result than i am about the technique of producing the trace
+
+[15:21] <brrt> :-)
+
+[15:22] <brrt> my only counterpoint is, this *might* be harder to do. but i haven't thought about this potion for sufficiently long to know either way
+
+[15:24] <jnthn> I guess all software designs are in part a product of how their designer's brain works, and I guess I just find it a lot easier to think about code + stats --> optimier --> better code, as opposed to making and then later trying to link together traces that implicitly contain the stats.
+
+[15:24] <jnthn> OTOH, I'm *already* odd because I don't really find compilers harder than interpreters. :)
+
+[15:25] <jnthn> I guess tracing could be seen as a more an interpreter-centric technique.
+
+[15:26] <brrt> yeah, it kind of is
+
+[15:27] <brrt> what I like about it is, though, is that the structure becomes apparent rather than analyzed
+
+[15:28] <brrt> it is a sort of 'empirical' way of finding the common path, as opposed to an 'analytical' way
+
+[15:28] <timotimo> how far in the future are thoughts about symbolic execution?
+
+[15:29] <brrt> i have no thoughts, because i'm not entirely clear on what you'd want
+
+[15:29] <timotimo> true.
+
+[15:36] <jnthn> Interesting thoughts, anyways. I gotta go afk a bit, but we should explore this more. :)
+
+[15:37] <jnthn> Though I guess one concrete starting point would be to start logging branch outcomes
+
+[15:39] <brrt> speak you later
+
+[15:39] <brrt> i'll think about it some more :-)
+
+[15:51] *** domidumont joined
+[15:55] *** domidumont left
+[15:56] *** domidumont joined
+[16:22] *** zakharyas1 left
+[16:28] <nine> Just a note: I've already experimented with producing missing inlinee candidates when specializing a caller
+
+[16:28] *** zakharyas joined
+[16:31] *** zakharyas left
+[16:33] *** zakharyas joined
+[16:34] <brrt> new blergh perst: http://brrt-to-the-future.blogspot.com/2018/06/controlled-stack-hacking-for-moarvm-jit.html
+
+[16:40] <timotimo> "to force a return the interpreter" + to?
+
+[16:41] <brrt> thanks!
+
+[16:49] *** zakharyas left
+[16:49] <timotimo> i think you linked to the wrong blog post
+
+[16:49] <timotimo> the "this blog post" link i mean
+
+[17:00] <brrt> no, that's the right one
+
+[17:03] <brrt> its an interesting post, that one
+
+[17:04] <brrt> anyway, i'm afk for now
+
+[17:04] <brrt> speak you later
+
+[17:04] *** brrt left
+[17:44] *** ggoebel left
+[17:59] *** ggoebel joined
+[18:03] <timotimo> i just didn't see the link to the benchmark in that post i suppose :)
+
+[18:59] *** domidumont left
+[19:16] *** Kaiepi left
+[19:17] *** Kaiepi joined
+[19:21] *** Kaiepi left
+[19:21] *** Kaiepi joined
+[19:26] <samcv> ok so i made something to sort the expr templates by their order in oplist
+
+[19:26] <samcv> and it retains comments above any op
+
+[19:33] <Geth> ¦ MoarVM: 48827f3e30 | (Samantha McVey)++ | tools/compare-oplist-interp-order.sh
+
+[19:33] <Geth> ¦ MoarVM: Add script to compare order of oplist and interp.c op order
+
+[19:33] <Geth> ¦ MoarVM:
+
+[19:33] <Geth> ¦ MoarVM: This script is fairly simple and shows a diff of the ordering
+
+[19:33] <Geth> ¦ MoarVM: differences between the order of the switch in interp.c and the oplist.
+
+[19:33] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/48827f3e30
+
+[19:33] <Geth> ¦ MoarVM: b5925d1e31 | (Samantha McVey)++ | tools/sort-expr-templates-by-oplist-order.p6
+
+[19:33] <Geth> ¦ MoarVM: Add a script which sorts the expr templates by oplist order
+
+[19:33] <Geth> ¦ MoarVM:
+
+[19:33] <Geth> ¦ MoarVM: This script parses the expression templates and orders it based on the
+
+[19:33] <Geth> ¦ MoarVM: oplist order. It attaches any text between two template definitions
+
+[19:33] <Geth> ¦ MoarVM: (i.e. comments) with the following op so that comments are preserved.
+
+[19:34] <Geth> ¦ MoarVM: Any text before the first template is pinned to the top of the output
+
+[19:34] <Geth> ¦ MoarVM: file. Before writing over the previous expression template file it makes
+
+[19:34] <Geth> ¦ MoarVM: sure the output is the same number of graphemes as the input (minus
+
+[19:34] <Geth> ¦ MoarVM: newlines).
+
+[19:34] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/b5925d1e31
+
+[19:39] <Geth> ¦ MoarVM: def0cbfdc3 | (Samantha McVey)++ | tools/sort-expr-templates-by-oplist-order.p6
+
+[19:39] <Geth> ¦ MoarVM: Add missing script description comment to expr template sorter
+
+[19:39] <Geth> ¦ MoarVM:
+
+[19:39] <Geth> ¦ MoarVM: Make sure the script has a comment at the top that describes what it
+
+[19:39] <Geth> ¦ MoarVM: does.
+
+[19:39] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/def0cbfdc3
+
+[19:39] <Geth> ¦ MoarVM: cc182551b4 | (Samantha McVey)++ | 2 files
+
+[19:39] <Geth> ¦ MoarVM: Sort the expr jit templates with the new script
+
+[19:39] <Geth> ¦ MoarVM:
+
+[19:39] <Geth> ¦ MoarVM: Also add a comment at the top to refer to the new sorting script.
+
+[19:39] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/cc182551b4
+
+[19:39] <Geth> ¦ MoarVM: c926a0cb41 | (Samantha McVey)++ | src/core/interp.c
+
+[19:39] <Geth> ¦ MoarVM: Add a comment to interp.c to mention the oplist interp order comparer
+
+[19:39] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/c926a0cb41
+
+[22:14] <jnthn> ooh, brrtpost
+
+[22:39] *** dogbert2_ joined
+[22:42] *** dogbert2 left
+[22:57] <jnthn> brrt++ # finally read the post, and it's nice :)
+
+[23:12] *** Redfoxmoon left
+[23:18] *** Redfoxmoon joined
+[23:46] *** MasterDuke left
+[23:53] *** Redfoxmoon left
+[23:56] <jnthn> https://patchwork.kernel.org/patch/10339183/
+
+[23:58] *** Redfoxmoon joined

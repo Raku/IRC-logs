@@ -1,0 +1,341 @@
+[01:00] *** lizmat joined
+[01:13] *** lizmat left
+[05:24] *** Kaiepi left
+[07:11] *** domidumont joined
+[07:20] *** Kaiepi joined
+[07:46] *** squashable6 left
+[07:49] *** squashable6 joined
+[09:29] *** Kaiepi left
+[09:32] *** zakharyas joined
+[09:36] *** squashable6 left
+[09:40] *** squashable6 joined
+[10:51] *** domidumont left
+[10:52] <jnthn> Hmm, I think hash randomization is causing me a bit of a headache bissecting the last problem I know of with pea
+
+[10:52] <jnthn> At least, that's the only source of randomness I can see that could be left
+
+[10:56] <jnthn> Hm, odd, even setting hashSecrets to fixed values doesn't get rid of the random behavior though
+
+[11:01] <jnthn> Ah, just found the #define that should turn it of properly :)
+
+[11:10] <jnthn> That helps, and now I can see that for some reason (no idea why yet) we aren't making a materialization/deopt entry for something we should be.
+
+[11:25] *** lizmat joined
+[11:28] *** Kaiepi joined
+[11:56] *** Kaiepi left
+[12:07] *** brrt joined
+[12:09] <brrt> \o
+
+[12:09] *** MasterDuke left
+[12:09] <brrt> jnthn: maybe if we don't get a student for the spesh/jit testing, I'll hack something up myself
+
+[12:09] <brrt> (I tried to make a bunch of projects that were sufficient fun to do myself)
+
+[12:10] <brrt> also, luajit is fascinating
+
+[12:36] *** brrt left
+[12:47] *** brrt joined
+[12:55] *** zakharyas left
+[13:00] *** domidumont joined
+[13:12] <jnthn> brrt: Yeah, it'd be a nice thing to have
+
+[13:13] <jnthn> I think PEA is going to be complex enough to keep me entertained for a while :)
+
+[13:13] <jnthn> The full thing, that is. I plan to fix the remaining issue I'm aware of and merge it, then make a new branch for the next steps.
+
+[13:17] <brrt> what are the next steps?
+
+[13:17] <brrt> I have a half-working s-expr parser in C. I could also invest the time to learn yacc
+
+[13:18] <brrt> what I'm trying to say is, a test-runnner is kind of a tinyish project for me, and it'd be a large project for a student.
+
+[13:18] <jnthn> Well, the immediate next step to get this mergeable is to figure out why it's failing to make a required entry into the deopt table
+
+[13:18] <brrt> I'm willing to put that on hold for the pedagogical benefits though :-)
+
+[13:19] <brrt> Hmm. That's an annoying problem. Do you have a reproduction?
+
+[13:19] <jnthn> After that, there's 3 directions that can be taken (all need doing, but I think any can be the next step)
+
+[13:20] <jnthn> 1) Make it understand situations with interesting control flow. There's two subtasks...
+
+[13:21] <jnthn> 1a) Conditionals (where the object is used across different branches, and so appears in a PHI). Can end up requiring materialization.
+
+[13:22] <jnthn> 1b) Loops. These need iterating to a fixed point, so rather more involved. But worse, what if we have OSR going on, and we come into optimized code that did SR? We need to do the opposite of materialization (take objects apart into registers!)
+
+[13:24] <jnthn> 2) Implement the required stuff to allow us to track situations where one object we create is bound into another object we create. We might be able to SR both. Right now, we just treat the object assigned into an SR'd register as if it can't be replaced.
+
+[13:25] <jnthn> 3) Get us able to deal with putting P6bigint into a register of some sort, so we can do SR of Perl 6 Int, which should in turn let us do a bunch of math a lot faster. Needs careful thought about memory management so we can't ever leak an mp_int, however.
+
+[13:25] <jnthn> There's probably more things that can be done, but those are the most interesting, I think.
+
+[13:26] <jnthn> About the bug - yes, I have the exact frame where it fails to make a materialization/deopt entry.
+
+[13:26] <jnthn> Now I need to figure out why.
+
+[13:43] <jnthn> Hm, I think I see it...kind of.
+
+[13:55] *** Kaiepi joined
+[14:03] <brrt> re: 1b; that's interesting. I think we can do that
+
+[14:12] <jnthn> Yeah, it's just a bit tricky to figure it out
+
+[14:12] <jnthn> I'm starting to think that the reason for our deopt bug comes *really* early
+
+[14:12] <jnthn> Like, before we even start to do optimize_bb, the deopt data looks dubious.
+
+[14:13] <jnthn> It does a register split for before/after when inserting a guard
+
+[14:13] <jnthn> And the deopt usages info is ended up going on the pre-split, not post-split, register
+
+[14:13] <jnthn> So it's then not tracked properly, and I think that might lead to the eventual problem (and perhaps some others...)
+
+[14:15] <jnthn> huh
+
+[14:15] <jnthn>         /* Move deopt usages to the preguard register. */
+
+[14:15] <jnthn>         pre_facts->usage.deopt_users = facts->usage.deopt_users;
+
+[14:15] <jnthn>         facts->usage.deopt_users = NULL;
+
+[14:15] <jnthn> I wonder why I did that...hmm.
+
+[14:17] <jnthn> And commenting out those two lines gets it do insert the entry correctly
+
+[14:17] <jnthn> *to
+
+[14:17] <jnthn> Thus fixing the crash
+
+[14:18] *** brrt left
+[14:18] *** brrt joined
+[14:20] * jnthn tries a BLOCKING/NODELAY with those lines gone on NQP and Rakudo
+
+[14:21] <jnthn> NQP is happy.
+
+[14:23] <jnthn> I'm very surprised this didn't cause more issues
+
+[14:26] <jnthn> Uh-oh, now I see some NativeCall test failures
+
+[14:27] <jnthn> Oh, maybe the answer is that we need to duplicate them over both..hm.
+
+[14:36] <jnthn> Yeah, that looks better...make test in Rakudo with BLOCKING/NODELAY is happy again
+
+[14:37] <jnthn> Even on this fast machine, a spectest with those two isn't too fast :)
+
+[14:37] <jnthn> Sush suspense :P
+
+[14:37] <jnthn> Though many of the failures from this where in S02 anyway
+
+[14:38] <jnthn> And those look good. Yay.
+
+[14:40] *** zakharyas joined
+[14:43] *** brrt left
+[14:44] <Geth> ¦ MoarVM/pea: a6dad31d6e | (Jonathan Worthington)++ | src/spesh/facts.c
+
+[14:44] <Geth> ¦ MoarVM/pea: Copy deopt usage info when doing guard reg split
+
+[14:44] <Geth> ¦ MoarVM/pea:
+
+[14:44] <Geth> ¦ MoarVM/pea: When we insert a guard, we do an SSA split of the pre-guard and
+
+[14:44] <Geth> ¦ MoarVM/pea: post-guard versions. We previously moved the list of deopt indexes that
+
+[14:44] <Geth> ¦ MoarVM/pea: require the register to the preguard register. However, they are also
+
+[14:44] <Geth> ¦ MoarVM/pea: needed on the postguard register too, since that needs to live over any
+
+[14:44] <Geth> ¦ MoarVM/pea: following deopts. Moving them caused the escape analyzer to fail to add
+
+[14:44] <Geth> ¦ MoarVM/pea: required entries into the deopt/materializations table, which in turn
+
+[14:44] <Geth> ¦ MoarVM/pea: led to broken state after deopt in some cases. Copying them satisfies
+
+[14:44] <Geth> ¦ MoarVM/pea: all situations.
+
+[14:44] <Geth> ¦ MoarVM/pea: review: https://github.com/MoarVM/MoarVM/commit/a6dad31d6e
+
+[14:46] <timotimo> this also fixes wrong stringification of code objects, i understand?
+
+[14:47] <jnthn> Yes. The sequence of events was that the deopt/materialization table missed an entry, so upon a deopt that register didn't get written with the materialized object. However, that register had been used previusly (different SSA version, of course) to hold something else.
+
+[14:48] <jnthn> In fact, it was an `invoke_o r8(4), r8(3)`
+
+[14:48] <jnthn> The return value was a Str, that was then passed into another sub/method
+
+[14:48] <jnthn> The EA decided to do away with the Str box
+
+[14:48] <jnthn> But there was a guard between this and the next call, which could fail
+
+[14:49] <jnthn> So r8 was containing the code object for the Str method, rather than having the Str materialized into it at deopt time
+
+[14:54] <jnthn> I think this deals with all PEA-related regressions shown up in spectest with BLOCKING/NODELAY
+
+[14:56] <timotimo> hooray
+
+[14:57] <jnthn> So, let's merge this, at last :)
+
+[15:04] <jnthn> m: say 0.5669 / 0.7561
+
+[15:04] <camelia> rakudo-moar ada116ef9: OUTPUT: «0.749769␤»
+
+[15:04] <jnthn> 25% off that object creation benchmark we were already winning :)
+
+[15:04] <jnthn> Well, winning against Perl 5.
+
+[15:05] *** KDr2 joined
+[15:06] *** KDr2 left
+[15:06] *** Kaiepi left
+[15:11] <timotimo> good progress!
+
+[15:14] <nine> 25 % off!
+
+[15:15] <nine> such wow
+
+[15:15] <jnthn> I'm running a real-world app now, well under cro run too, so seeing its opts
+
+[15:15] <jnthn> But there's quite a few builtins getting opts
+
+[15:17] <nine> Will this get us rid of mandatory boxing of method return values?
+
+[15:17] <timotimo> at most when method calls are inlined, of course
+
+[15:18] <timotimo> i'm looking forward to getting rid of NativeRef in many cases :)
+
+[15:19] <timotimo> since passing native values to functions often causes them
+
+[15:19] <timotimo> because we often don't know if we'll be calling a function that wants "is rw" or not for natives
+
+[15:20] <nine> Which...doesn't have to be that way? AFAIK we create spesh candidates per callsite descriptor, i.e. set of argument types. But if we add a flag indicating whether the return value will be unboxed immediately to the descriptor, we wouldn't have to box anymore?
+
+[15:21] <nine> Shouldn't we know the "is rw"ness for spesh candidates?
+
+[15:22] <jnthn> 534 optimizations just from running a sizeable app under `cro run` and letting it start up, logging in, grabbing some data, etc.
+
+[15:23] <timotimo> we're sometimes getting frustrated from deopt requiring the nativeref to Actually Exist™
+
+[15:23] <timotimo> pea can do that
+
+[15:25] <timotimo> well, not yet i don't think
+
+[15:25] <jnthn> It's fairly limited still :)
+
+[15:26] <jnthn> We'll probably spend the rest of the year getting all we can out of it :)
+
+[15:26] <jnthn> At least
+
+[15:26] <jnthn> nine: We should be able to do a bit better there, yes; I'd also like that for Scalar too
+
+[15:27] <jnthn> Need to figure out the exact factoring
+
+[15:28] <jnthn> Well, this doesn't break spectests and doesn't break big $dayjob app, so..
+
+[15:30] <Geth> ¦ MoarVM/master: 41 commits pushed by (Jonathan Worthington)++, (Carl Masak)++
+
+[15:30] <Geth> ¦ MoarVM/master: review: https://github.com/MoarVM/MoarVM/compare/5431d50fbcc0...2eab275df145
+
+[15:31] <timotimo> hooray
+
+[15:35] <nine> yeah!
+
+[15:35] <jnthn> Glad to have that in :)
+
+[15:36] *** dogbert17 joined
+[15:48] <nine> Seems like pea fixes the inlining problem with the remove_useless_args branch :)
+
+[15:49] <jnthn> :)
+
+[15:49] <jnthn> I think there are a couple of general fixes in there, yes.
+
+[15:50] <nine> Might also be completely incidental, since remove_useless_args's problem was an unfortunate inlining decision.
+
+[15:50] <AlexDaniel> jnthn: sooo, I can bump?
+
+[15:51] <jnthn> Yes :)
+
+[15:51] *** AlexDaniel left
+[15:52] *** AlexDaniel joined
+[15:53] <jnthn> AlexDaniel: Yes, if the message got lost by the disconnect :)
+
+[15:53] <AlexDaniel> my laptop just switched off O_o
+
+[16:05] *** brrt joined
+[16:36] <samcv> i finally got internet yesterday
+
+[16:37] <samcv> and a sofa. things are much better now
+
+[16:38] <nine> The essentials of life :)
+
+[16:39] <timotimo> is the sofa internet-connected?
+
+[16:39] <jnthn> .oO( Coffee machine? Beer fridge? :) )
+
+[16:40] <samcv> timotimo, not yet. well there is a lan cable next to the sofa. since every room has 2 lan. and 4 lan in the living room
+
+[16:43] <timotimo> welll... we might not have lan in any room except the living room, but we do now finally have a light fixture at the ceiling of the living room!
+
+[16:43] <timotimo> instead of just a big lamp in a corner
+
+[16:43] *** domidumont left
+[16:43] <samcv> haha
+
+[16:44] <samcv> most of our light fixtures have lights now. so that's nice. we are planning on constructing some led light boxes from LED strip and arduino
+
+[16:44] <timotimo> ah, blinkenlights are always good
+
+[16:46] <samcv> so each light should have an arduino which just receives commands over the air from the raspi. if no signal it will just go to whatever its last setting was
+
+[16:47] <samcv> but. dunno when that will be done. will be a fun project though
+
+[17:16] <timotimo> i'm about to drill three more holes in some walls, hooray
+
+[17:16] <samcv> hah
+
+[17:21] *** domidumont joined
+[17:23] *** brrt left
+[17:31] *** zakharyas left
+[17:51] *** brrt joined
+[18:05] *** Kaiepi joined
+[18:09] *** brrt left
+[18:13] *** brrt joined
+[18:13] <timotimo> i just got word that the energy provider i've got a contract with has declared bankruptcy/insolvency
+
+[18:14] <lizmat> ugh
+
+[18:29] <timotimo> but there's now two cupboards affixed to the wall in the kitchen
+
+[18:29] <timotimo> so that's nice
+
+[18:35] <samcv> nice
+
+[18:39] *** brrt left
+[18:50] *** lizmat_ joined
+[18:52] *** lizmat left
+[19:13] *** lizmat_ left
+[19:16] *** brrt joined
+[19:17] *** lizmat joined
+[19:24] *** lizmat left
+[19:33] *** lizmat joined
+[19:40] *** lizmat_ joined
+[19:41] *** lizmat left
+[19:52] <AlexDaniel> timotimo: yeah, working with software gets on the nerves sometimes. It's nice to go and do something with your hands
+
+[20:02] *** brrt left
+[20:18] *** Kaiepi left
+[20:19] *** Kaiepi joined
+[20:24] *** lizmat_ left
+[20:43] *** domidumont left
+[20:50] *** lizmat joined
+[21:01] *** lizmat left
+[21:02] *** lizmat joined
+[21:03] *** lizmat_ joined
+[21:06] *** lizmat left
+[21:23] *** lizmat joined
+[21:25] *** lizmat_ left
+[21:54] *** lizmat_ joined
+[21:56] *** lizmat left
+[22:03] *** lizmat_ left
+[22:07] *** lizmat joined
+[22:16] *** Kaiepi left
+[22:17] *** Kaiepi joined
+[22:19] *** lizmat_ joined
+[22:21] *** lizmat left

@@ -1,0 +1,929 @@
+[00:02] <Geth> ¦ MoarVM: 19fc9f0f2b | (Timo Paulssen)++ | src/core/exceptions.c
+
+[00:02] <Geth> ¦ MoarVM: vsnprintf can return more than the max value given
+
+[00:02] <Geth> ¦ MoarVM:
+
+[00:02] <Geth> ¦ MoarVM: so truncate the number there.
+
+[00:02] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/19fc9f0f2b
+
+[00:04] <Geth> ¦ MoarVM: 0f1801655c | (Timo Paulssen)++ | src/spesh/dump.c
+
+[00:04] <Geth> ¦ MoarVM: vsnprintf already writes a nullbyte at the end
+
+[00:04] <Geth> ¦ MoarVM:
+
+[00:04] <Geth> ¦ MoarVM: (and furthermore, the return value might be out-of-range here)
+
+[00:04] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/0f1801655c
+
+[00:07] <timotimo> what's the highest number for a "long long int"?
+
+[00:08] <timotimo> maybe a 64 byte buffer is enough to hold a number stringified with "%lld"
+
+[00:08] <timotimo> okay, i'm off to bed now, i'll look into this last piece after sleep
+
+[00:08] <geekosaur> 9223372036854775807
+
+[00:08] <geekosaur> add one if you want to handle negatives :)
+
+[00:08] <timotimo> okay, that fits comfortably.
+
+[00:09] <timotimo> yeah, +1
+
+[01:05] *** tomboy64 joined
+[01:48] *** ilbot3 joined
+[02:30] *** TimToady joined
+[05:22] *** stmuk_ joined
+[05:32] *** domidumont joined
+[05:41] *** domidumont joined
+[05:58] *** domidumont joined
+[06:00] *** brrt joined
+[07:08] *** brrt joined
+[08:04] <brrt> good * #moarvm
+
+[08:16] <nwc10> good *, brrt
+
+[08:16] <samcv> good *
+
+[08:19] <brrt> \o nwc10, samcv
+
+[08:19] <brrt> i was working on basic block 'patching this morning
+
+[08:19] <brrt> not very surprisingly, it can become pretty nasty
+
+[08:30] <samcv> block patching?
+
+[08:30] <lizmat> good *, #moarvm
+
+[08:31] * lizmat just commented on RT #131134
+
+[08:31] <lizmat> basically, I think we need checking for negative indexes at the VM level for native artrays
+
+[08:31] <lizmat> *arrays
+
+[08:32] <samcv> what should we do for negative. throw?
+
+[08:32] <lizmat> that would be the implication, yes
+
+[08:32] <samcv> k
+
+[08:33] <lizmat> but I'm throwing this in here to see what jnthn has to say on that
+
+[08:33] <lizmat> I vaguely recall having this conversation before  :-)
+
+[08:33] <lizmat> m: my int @a = ^10; my $a = 0; dd @a[$a-1]
+
+[08:33] <camelia> rakudo-moar fbc669: OUTPUT: «9␤»
+
+[08:34] <lizmat> m: my @a = ^10; my $a = 0; dd @a[$a-1]
+
+[08:34] <camelia> rakudo-moar fbc669: OUTPUT: «Failure.new(exception => X::OutOfRange.new(what => "Index", got => -1, range => "0..^Inf", comment => Any), backtrace => Backtrace.new)␤»
+
+[08:35] <lizmat> perhaps jnthn considers this a feature: in which case we should probably document the behaviour  :-)
+
+[08:50] <brrt> samcv: a sequence of code can be divided into 'basic blocks', i.e. sequences of code that always follow linearly (without branches or labels to enter); I want to find the extents of these blocks during list construction; this is simple enough to do (break the blocks at every branch or label), but then i need to assign the successors to the blocks, which is only known at a later phase
+
+[08:50] <brrt> i'm fairly sure i've seen code to deal with that, yes
+
+[08:52] <samcv> interesting
+
+[08:53] <brrt> it's integrated into the tiling process, fwiw
+
+[08:53] <brrt> (tiling is translation between expression-low-level IR to machine-level IR)
+
+[08:54] <samcv> yay i got travis to detect latest clang so i think i almost got the coverage build down
+
+[08:54] <samcv> well. at least generating it. then have to set up the ssh, but that shouldn't be too hard since i've already wrestled with that
+
+[09:06] *** synopsebot6 joined
+[09:08] *** SourceBaby joined
+[09:17] <brrt> and the purpose of doing this extra work is so that i can analyze the live ranges within the basic block and find 'holes' in them
+
+[09:17] <brrt> and the purpose of finding the holes is twofold
+
+[09:17] <brrt> - if i can prove that a spill would be necessary only for the extent of a hole (e.g arround a CALL) then I don't need to spill at all
+
+[09:18] <samcv> sounds very useful
+
+[09:18] <brrt> - if i can prove that i need a register only within the extent of an existing hole, i don't need to spill the larger live range, either
+
+[09:19] <brrt> yes, and it neatly solves the 'garbage restoring' problem i mentioned earlier
+
+[09:23] <brrt> although the second variant is probably best only used for very short live ranges…
+
+[11:58] <lizmat> hmmm... what would be needed to get param_rp_o to spesh/JIT ?
+
+[12:00] <jnthn> spesh typically rewrites those
+
+[12:00] <jnthn> Into faster, unchecked, ops
+
+[12:00] <jnthn> And those are then JITted
+
+[12:00] <jnthn> So if they are making it to the JIT it means spesh couldn't specialize that case
+
+[12:00] <jnthn> That most typically happens when the caller is flattening arguments into the callsite
+
+[12:01] <lizmat> jnthn: this is the naive int candidate of AT-POS on native arrays
+
+[12:02] <lizmat> multi method AT-POS(intarray:D: int $idx) is raw {
+
+[12:02] <lizmat> nqp::atposref_i(self, $idx)
+
+[12:02] <lizmat> }
+
+[12:02] <lizmat> it doesn't JIT
+
+[12:02] <lizmat> MVM_JIT_LOG says: BAIL: op <param_rp_o>
+
+[12:03] <jnthn> What's calling it?
+
+[12:03] <jnthn> (In the case that it doesn't JIT?)
+
+[12:03] <lizmat> my int @a = ^10; my int $a = 5; for ^1000000 { @a[$a] }
+
+[12:04] <jnthn> OK, so postcircumfix:<[ ]>
+
+[12:04] <jnthn> I wonder what that looks like on the inside
+
+[12:04] <jnthn> (On the path it takes)
+
+[12:04] <jnthn> I'd be surprised it it were flattening, though
+
+[12:04] <lizmat> ah, ok, lemme check
+
+[12:04] <jnthn> Which makes it rather odd
+
+[12:05] <jnthn> Also would be odd if the callsite wasn't interned
+
+[12:06] <lizmat> well, actually, if I take out the postcircumfix, but do:
+
+[12:06] <lizmat> my int @a = ^10; my int $a = 5; for ^1000000 { @a.AT-POS($a) }
+
+[12:06] <lizmat> I get the same BAIL:
+
+[12:06] <lizmat> BAIL: op <param_rp_o>
+
+[12:06] <lizmat> but now on AT-POS
+
+[12:06] <jnthn> Hmm
+
+[12:07] <jnthn> What happens if you write `my Int $a = 4` ooc?
+
+[12:07] <jnthn> I wonder if it's part of the whole "we didn't teach spesh enough about native refs" thing...
+
+[12:07] <lizmat> yeah, I'm afraid it's that
+
+[12:07] <jnthn> Yeah, spesh really needs some time spendin gon it
+
+[12:07] <jnthn> *spending
+
+[12:08] <lizmat> same result with $i = 4
+
+[12:08] <jnthn> Hm, OK
+
+[12:08] <jnthn> Then maybe it's not that
+
+[12:08] <lizmat> why would 4 or 5 make a difference?
+
+[12:08] <jnthn> oh
+
+[12:08] <lizmat> ah, you mean Int  :-)
+
+[12:08] <jnthn> I typo'd 5 :P
+
+[12:08] <jnthn> I meant the Int :D
+
+[12:08] <jnthn> haha
+
+[12:08] <lizmat> yeah
+
+[12:09] <lizmat> emit jump to label -1
+
+[12:09] <lizmat> Bytecode size: 3096
+
+[12:09] <lizmat> that emits fine, even with a check for < 0
+
+[12:22] <Geth> ¦ MoarVM/better-fsa: 62d0f7e2f0 | (Jonathan Worthington)++ | src/gc/orchestrate.c
+
+[12:22] <Geth> ¦ MoarVM/better-fsa: Make nursery cleanup non-concurrent, for now.
+
+[12:22] <Geth> ¦ MoarVM/better-fsa:
+
+[12:22] <Geth> ¦ MoarVM/better-fsa: We can't both have thread-local free lists and have the possibility
+
+[12:22] <Geth> ¦ MoarVM/better-fsa: of a work-stolen thread resuming while another thread that stole its
+
+[12:22] <Geth> ¦ MoarVM/better-fsa: GC work frees its nursery, since they can race on the free list. It
+
+[12:22] <Geth> ¦ MoarVM/better-fsa: is possible in the future to only lose the potential concurrency on
+
+[12:22] <Geth> ¦ MoarVM/better-fsa: threads that were stolen, and let non-stolen ones go their own way as
+
+[12:22] <Geth> ¦ MoarVM/better-fsa: <…commit message has 10 more lines…>
+
+[12:22] <Geth> ¦ MoarVM/better-fsa: review: https://github.com/MoarVM/MoarVM/commit/62d0f7e2f0
+
+[12:24] <dogbert17> does this latest commit mean that better-fsa is ready for release?
+
+[12:27] <jnthn> It looks good in spectest
+
+[12:27] <jnthn> There's still a todo however
+
+[12:27] <jnthn> (Which doesn't affect most Perl 6 programs, but should be fixed pre-merge)
+
+[12:28] <dogbert17> was thinking of running with small nursery and the like, but I guess that you've already done that
+
+[12:29] <jnthn> Not yet, wanted to get the missing TODO done first :)
+
+[12:29] <dogbert17> ah, I guess that I'll wait as well then :)
+
+[12:31] * dogbert17 wonders if the new branch might help offset the speed difference (~30%) between harness5 and harness6
+
+[12:31] <jnthn> That is certainly possible
+
+[12:32] <dogbert17> cool
+
+[12:32] <jnthn> Timings welcome :)
+
+[12:33] <dogbert17> I'll do a couple of tests on my system
+
+[12:35] * dogbert17 should be interesting to hear what kind of results IOninja can get on his 24 core box
+
+[12:36] <Zoffix> Busy.
+
+[12:36] <Zoffix> The current harness is exactly 2x slower tho
+
+[12:37] <dogbert17> not on my system :)
+
+[12:39] <Zoffix> stresstest are about: 112s on harness5 and 224s on harness6
+
+[12:40] *** brrt joined
+[12:42] <dogbert17> ah, perhaps it differs from the spectest difference
+
+[12:43] <dogbert17> I'm running on virtualbox with two available cores ...
+
+[12:45] <lizmat> jnthn: do you feel things like atposref_i should have a check for index < 0 in the VM
+
+[12:45] <lizmat> or that that should be handled in e.g. AT-POS ?
+
+[12:46] <jnthn> Well, if we do it in the VM it's harder to get a typed exception to happen
+
+[12:46] <jnthn> otoh the VM has to do it anyway for safety
+
+[12:46] <lizmat> at the HLL it would cause a 10% slowdown in the AT-POS
+
+[12:47] <lizmat> jnthn: in the VM it currently means: from the end
+
+[12:47] <lizmat> so it is already checked, I would say
+
+[12:47] <lizmat> m: my int @a = ^10; say @a.AT-POS(-2)
+
+[12:47] <camelia> rakudo-moar fbc669: OUTPUT: «8␤»
+
+[12:48] <lizmat> m: my int @a = ^10; say @a.AT-POS(-12)
+
+[12:48] <camelia> rakudo-moar fbc669: OUTPUT: «MVMArray: Index out of bounds␤  in block <unit> at <tmp> line 1␤␤»
+
+[12:48] <lizmat> aka, it has old P5 semantics
+
+[12:48] <lizmat> question is: is that a bug or a feature at that level  :-)
+
+[12:49] <lizmat> if it is a feature, we could cponceivably optimize *-1 to -1 for natives :-)
+
+[12:49] <jnthn> Bug, and I dunno why we do those semantics in the VM really
+
+[12:49] <dogbert17> make spectest HARNESS_TYPE=5 TEST_JOBS=4; Files=1176, Tests=56122, 833 wallclock secs ( 9.48 usr  6.89 sys + 1493.20 cusr 103.88 csys = 1613.45 CPU)
+
+[12:53] <Geth> ¦ MoarVM/better-fsa: 3d7b51c98f | (Jonathan Worthington)++ | src/core/fixedsizealloc.c
+
+[12:53] <Geth> ¦ MoarVM/better-fsa: Don't leak per-thread FSA freelists.
+
+[12:53] <Geth> ¦ MoarVM/better-fsa:
+
+[12:53] <Geth> ¦ MoarVM/better-fsa: At thread termination, contribute the freelist entries back to the
+
+[12:53] <Geth> ¦ MoarVM/better-fsa: global freelist.
+
+[12:53] <Geth> ¦ MoarVM/better-fsa: review: https://github.com/MoarVM/MoarVM/commit/3d7b51c98f
+
+[12:56] <jnthn> OK, I think it's ready for fuller testing/merge
+
+[12:58] *** brrt joined
+[13:07] <[Coke]> fsa: financial savings account!
+
+[13:07] <dogbert17> make spectest HARNESS_TYPE=6 TEST_JOBS=4; Files=1176, Tests=56122,  968 wallclock secs
+
+[13:08] <Zoffix> Is there mp_uint?
+
+[13:08] * dogbert17 will now try with 'better-fsa'
+
+[13:08] <Zoffix> m: class { has uint $.x }.new: :x(2**64-1)
+
+[13:08] <camelia> rakudo-moar fbc669: OUTPUT: «Cannot unbox 64 bit wide bigint into native integer␤  in block <unit> at <tmp> line 1␤␤»
+
+[13:09] <Zoffix> This used to work in last release. And in this commit, we're calling count bits function on an mp_int, so it blows up: https://github.com/MoarVM/MoarVM/commit/66dd8c9#diff-7c76a26bfc12243d0362c1b3478553a8R38
+
+[13:23] <Zoffix> .tell MasterDuke any idea for https://rt.perl.org/Ticket/Display.html?id=131149 seems like it can be fixed by just changing the bits check to check for 65 or something; is there a mp_uint?
+
+[13:23] <yoleaux> Zoffix: I'll pass your message to MasterDuke.
+
+[13:23] <Zoffix> m: class { has uint $.x }.new(:x(-2**30)).x.say
+
+[13:23] <camelia> rakudo-moar fbc669: OUTPUT: «-1073741824␤»
+
+[13:24] <Zoffix> Seems that routine is the same place ^ that can be fixed in
+
+[13:30] <dogbert17> with better-fsa; make spectest HARNESS_TYPE=5 TEST_JOBS=4; Files=1176, Tests=56122, 816 wallclock secs ( 9.08 usr  6.88 sys + 1458.77 cusr 103.15 csys = 1577.88 CPU)
+
+[13:33] <lizmat> dogbert17: that's a nice improvement
+
+[13:40] <MasterDuke> committable6: 2017.03,HEAD class { has uint $.x }.new(:x(2**64-1)).x.say
+
+[13:40] <yoleaux> 13:23Z <Zoffix> MasterDuke: any idea for https://rt.perl.org/Ticket/Display.html?id=131149 seems like it can be fixed by just changing the bits check to check for 65 or something; is there a mp_uint?
+
+[13:40] <committable6> MasterDuke, ¦2017.03: «-1» ¦HEAD(fbc6697): «Cannot unbox 64 bit wide bigint into native integer␤  in block <unit> at /tmp/YsLW_nurSL line 1␤ «exit code = 1»»
+
+[13:40] <jnthn> dogbert17: Wait, that's faster than with harness5? o.O
+
+[13:41] <MasterDuke> Zoffix: it was broken before (as you pointed out), uint was acting exactly the same as int
+
+[13:42] <MasterDuke> jnthn: i think he re-ran harness5 with the better-fsa branch?
+
+[13:42] <jnthn> Ohhh...right
+
+[13:42] <jnthn> d'oh
+
+[13:42] <jnthn> I thought it was the harness 6 number with better-fsa :)
+
+[13:42] <Zoffix> MasterDuke: the negative was, but not the failure to accept 2**64-1 as a value
+
+[13:44] <Zoffix> c: 2017.03 class { has uint $.x }.new(:x(2**64-1)).x.say
+
+[13:44] <committable6> Zoffix, ¦2017.03: «-1»
+
+[13:44] <Zoffix> Hmm
+
+[13:44] <Zoffix> I see
+
+[13:45] <Zoffix> Alright
+
+[13:45] <MasterDuke> Zoffix: i've been working on actually getting uint attributes to work correctly, with timotimo++'s help, but it's not quite as easy as a simple fix in mp_get_uint64
+
+[13:45] <Zoffix> MasterDuke: is the ticket I opened a dupe then?
+
+[13:45] <MasterDuke> i believe it's going to require patches in MoarVM, NQP, and Rakudo all coordinated to work
+
+[13:45] <Zoffix> Or rather: is there a ticket for "uint is really int"?
+
+[13:47] <dogbert17> with better-fsa; make spectest HARNESS_TYPE=6 TEST_JOBS=4; Files=1176, Tests=56122,  956 wallclock secs
+
+[13:47] <MasterDuke> not sure
+
+[13:48] <dogbert17> yeah, with my highly unscientific tests it seems if the harness5 tests gain a bit more than harness6, OTOH maybe it's in the margin of error
+
+[13:49] <dogbert17> would be nice if someone with more than two cores could give it a run or two
+
+[13:49] <jnthn> :)
+
+[13:49] * jnthn bbiab
+
+[13:51] * dogbert17 will now do a herness6 run with 192k Nursersy, gc-debug and fsa-debug ...
+
+[13:52] <jnthn> dogbert17: Uh, if you do fsa-debug  you'll completely bypass all the new code I added of any significance :)
+
+[14:05] *** brrt joined
+[14:05] <brrt> fixed size allocator :-P
+
+[14:05] *** brrt left
+[14:05] *** brrt joined
+[14:09] <brrt> .tell lizmat: one of the things to make param_rp_o and friends JIT is to refactor the arg handling into something more jit friendly
+
+[14:09] <yoleaux> brrt: What kind of a name is "lizmat:"?!
+
+[14:09] <brrt> .tell lizmat one of the things to make param_rp_o and friends JIT is to refactor the arg handling into something more jit friendly
+
+[14:09] <yoleaux> brrt: I'll pass your message to lizmat.
+
+[14:09] <brrt> also, ffs, yoleaux, how hard is it to strip a colon
+
+[14:10] <Zoffix> What kind of arg handling is jit friendly?
+
+[14:14] <Zoffix> $ ./perl6 -e '$*VM.version.say'
+
+[14:14] <Zoffix> Segmentation fault
+
+[14:15] <Zoffix> :)
+
+[14:15] <brrt> currently it returns a small struct. not sure again what it was
+
+[14:15] <brrt> i have it written down somewhere
+
+[14:15] <brrt> :-)
+
+[14:16] <Zoffix> Hm, actually everything is segmentation fault
+
+[14:16] <Zoffix> dogbert17: how do I get the better-fsa thing?
+
+[14:17] <Zoffix> I did cd nqp/MoarVM; git checkout better-fsa; perl Configure.pl --prefix=../../install; make -j30; make install; and now any code just segfaults
+
+[14:18] * Zoffix tries running `build-rakudo`
+
+[14:24] <Zoffix> fixed it
+
+[14:33] <Zoffix> Box: 24-cores, 21.75GB RAM, TEST_JOBS=30
+
+[14:33] <Zoffix> c9ab59c, harness5: Files=1238, Tests=133653, 111 wallclock secs (20.90 usr  2.94 sys + 2322.17 cusr 124.95 csys = 2470.96 CPU)
+
+[14:33] <Zoffix> c9ab59c, harness6: Files=1238, Tests=133653,  223 wallclock secs
+
+[14:33] <Zoffix> better-fsa, harness5: Files=1238, Tests=133653, 108 wallclock secs (21.42 usr  2.87 sys + 2225.60 cusr 129.92 csys = 2379.81 CPU)
+
+[14:33] <Zoffix> better-fsa, harness6: Files=1238, Tests=133653,  200 wallclock secs
+
+[14:33] <Zoffix> jnthn: dogbert17 ^
+
+[14:33] <Zoffix> Pretty good improvement in harness6
+
+[14:34] <MasterDuke> ~10%
+
+[14:36] <MasterDuke> it's interesting to look at the difference between your harness5 and harness6 and dogbert17's. it's twice as slow for you, but only ~15% slower for him
+
+[14:37] <MasterDuke> suggests there's some constant overhead
+
+[14:39] <Zoffix> overhead of opening and reading files, I'd guess
+
+[14:43] <dogbert17> Zoffix: nice improvement
+
+[14:44] * dogbert17 the comment from jnthn forces me to rerun my debug test after a quick change, will settle for small nursery and cgdebug
+
+[14:54] <timotimo> i wonder if we should grab all the free lists and sort items by memory address and chop them up to the threads again
+
+[14:57] <dogbert17> slow going, so far I see 't/spec/S17-promise/in.t ........................................... Dubious, test returned 1'
+
+[14:57] <dogbert17> is that a known flapper?
+
+[15:01] <timotimo> i don't think i've seen it fail
+
+[15:01] <timotimo> it could theoretically be sensitive to timing, but i thought we had "virtual time" for those kinds of test
+
+[15:02] <timotimo> oh, except if you want to test the mechanism itself, you can't replace it with another before testing
+
+[15:05] *** AlexDaniel joined
+[15:06] <timotimo> it has to have some cut-off for saying "yup, i told the promise to be kept in 1s, but now it's 3s later and i'm considering this a failure"
+
+[15:08] <dogbert17> so it might have to do with me running on a 192k nursery then :)
+
+[15:08] <jnthn> Yeah, pretty sure that file would be vulnerable to such timing effects
+
+[15:09] <dogbert17> and 't/spec/S17-promise/nonblocking-await.t ............................ Dubious, test returned 255' contains a nasty bug no?
+
+[15:10] <jnthn> I think that one's been known to explode on master of MoarVM too, yeah
+
+[15:11] <dogbert17> then it looks really promising, the spectest is at S32 now
+
+[15:16] <dogbert17> done, only the two files mentioned above failed, run was with '#define MVM_NURSERY_SIZE (32768 * 6)' and '#define MVM_GC_DEBUG 2'
+
+[15:23] *** brrt joined
+[15:41] <jnthn> Alright, guess taht means we can merge it :)
+
+[15:43] <Geth> ¦ MoarVM/master: 6 commits pushed by (Jonathan Worthington)++
+
+[15:43] <Geth> ¦ MoarVM/master: 1bb36428fc | Stub in per-thread FSA data structure.
+
+[15:43] <Geth> ¦ MoarVM/master: 4de9d4dddd | Create and partial destory of thread FSA state.
+
+[15:43] <Geth> ¦ MoarVM/master: 0039cdca98 | Start keeping per-thread FSA free lists.
+
+[15:43] <Geth> ¦ MoarVM/master: 62d0f7e2f0 | Make nursery cleanup non-concurrent, for now.
+
+[15:43] <Geth> ¦ MoarVM/master: 3d7b51c98f | Don't leak per-thread FSA freelists.
+
+[15:43] <Geth> ¦ MoarVM/master: a5607e1188 | Merge branch 'better-fsa'
+
+[15:43] <Geth> ¦ MoarVM/master: review: https://github.com/MoarVM/MoarVM/compare/0f1801655c...a5607e1188
+
+[15:44] <brrt> \o/
+
+[15:46] <jnthn> Thanks for the testing :)
+
+[15:47] <timotimo> cool.
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: b14298108f | (Bart Wiegmans)++ | src/jit/tile.c
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: Propagate block numbers upwards
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit:
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: In a number of cases, the label and branch structure of a child node
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: is the same as the containing conditional structure, e.g. an ALL node
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: 'flows' into its consequent block because it works by branching to the
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: alternative on any failed test. No basic block is started for them.
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: However, the block numbers are also required for correct assignment of
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: successors, and without uppropagation we might need to dig arbitrarily
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: deep to find them.
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: review: https://github.com/MoarVM/MoarVM/commit/b14298108f
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: be591ff274 | (Bart Wiegmans)++ | src/jit/tile.c
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: Patch basic block successors associated with nodes
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit:
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: Because conditonals can be nested (what a novel idea), we can only
+
+[15:55] <Geth> ¦ MoarVM/even-moar-jit: know the exact basic block structure of a block after tiling it, so we
+
+[15:55] <Geth> ¦ MoarVM/even-moar-jit: have to 'patch' the successors back into the blocks.
+
+[15:55] <Geth> ¦ MoarVM/even-moar-jit: review: https://github.com/MoarVM/MoarVM/commit/be591ff274
+
+[15:56] <brrt> so, the above will allow me to start doing data flow analysis
+
+[15:56] <brrt> specifically, it will allow me to discover lifetime holes
+
+[15:57] <brrt> that said, i would like to test the created tructure for a bit
+
+[15:57] <brrt> *structure
+
+[15:57] <brrt> because I don't really trust it as is
+
+[15:58] <brrt> anyway, decommute &
+
+[15:58] <dogbert17> jnthn++, very cool
+
+[16:03] <TimToady> jnthn: I have a weird one; in Perl6/World it calls @components.push(~$name<identifier>); which works until I use --rxtrace, and then ~ gets 'cannot stringify this', but if I change to use .Str, it finds the one from NQP and works
+
+[16:03] <TimToady> but nqp::stringify just looks for .Str in the cache, so somehow .Str isn't in the cache such that nqp::stringify can find it, but calling it directly can
+
+[16:05] <TimToady> the mro is Perl6::Grammar HLL::Grammar NQPMatch NQPCapture NQPMu
+
+[16:05] <TimToady> and NQPMatch is supplying 'method Str()'
+
+[16:06] <TimToady> (this, by the way, is from the last failing .t file for the uncurse branch to pass spectests)
+
+[16:07] <TimToady> the method is actually from NQPMatchRole, which NQPMatch does, but moving the method from the role to the class makes no difference
+
+[16:08] <TimToady> I suppose --rxtrace must be rewriting method calls, and flubbing somehow...
+
+[16:10] <jnthn> That's...odd
+
+[16:10] <jnthn> (The failure itself)
+
+[16:10] <jnthn> rxtrace iirc hooks find_method
+
+[16:11] <jnthn> I wonder if nqp::stringify uses the smart stringify thing
+
+[16:11] <jnthn> Which doesn't know how to do fallback lookups
+
+[16:11] <TimToady> yes, but that only uses the cache
+
+[16:11] <jnthn> Yeah
+
+[16:11] <jnthn> So...why's it not in the cache... :S
+
+[16:12] <TimToady> I tried using nqp::can to preload the cache, but no go
+
+[16:12] <TimToady> maybe that doesn't
+
+[16:13] <jnthn> No, caches are authoritative
+
+[16:13] <jnthn> In general, at least
+
+[16:13] <jnthn> And are pre-populated at composition time
+
+[16:15] <jnthn> Oh
+
+[16:15] <jnthn> Do we ever late-bound add_method on it?
+
+[16:15] <TimToady> not that I know of
+
+[16:15] <jnthn> 'cus that clears the cache out
+
+[16:16] <TimToady> does --rxtrace call add_method?
+
+[16:16] <jnthn> Don't think so
+
+[16:16] <jnthn> What branches do I need to reproduce this?
+
+[16:19] <TimToady> nqp uncurse and rakudo uncurse, but let me push what I have
+
+[16:19] <jnthn> OK
+
+[16:19] <jnthn> And also which test :)
+
+[16:20] * jnthn wonders if match/cursor unification will give us a decent memory use reduction already
+
+[16:20] <TimToady> the test is t/spec/S19-command-line-options/06-dash-rxtrace.t but it suffices to run perl6 --rxtrace -e 'say "hello world"'
+
+[16:21] <jnthn> huh, rxtrace is in spectest?!
+
+[16:21] <TimToady> all it does it test to see that it doesn't blow up
+
+[16:21] <TimToady> (which it does :)
+
+[16:21] <jnthn> :)
+
+[16:21] <jnthn> Building uncurse branches
+
+[16:22] <TimToady> I don't think it'll save memory just yet, since I haven't quite carved away the old match object entirely
+
+[16:23] <TimToady> just got it down to a stub class with a Bool method, but eventually $!match will becomee bool itself or go away entirely in favor of looking for a %!hash or so
+
+[16:25] <timotimo> the worst thing is that --rxtrace doesn't even give interesting output either way
+
+[16:25] <TimToady> is also possible we can do sharing tricks in the time domain like Perl 5 does, but that's kind of a last resort optimization
+
+[16:25] <timotimo> or did that get improved recently?
+
+[16:25] <TimToady> just says which methods are called
+
+[16:25] <timotimo> huh, apparently it works now
+
+[16:25] <timotimo> it used to give like 10 lines that were always the same no matter the code you're parsing
+
+[16:26] <jnthn> hhh
+
+[16:26] <jnthn> *ohh
+
+[16:26] <jnthn> Turning on tracing trashes the method cache
+
+[16:27] <jnthn> So that's why
+
+[16:28] <TimToady> that seems...incompatible...with relying on an authoritative cache...
+
+[16:28] <jnthn> Indeed
+
+[16:28] <jnthn> Well, it was a quick debugging hack rather :)
+
+[16:29] <jnthn> *rather than a carefully considered feature/implementation :)
+
+[16:29] <TimToady> I started changing some ~ to .Str to see how far it goes, but of course we use ~ *everywhere*
+
+[16:29] <TimToady> so I came whining to you instead :)
+
+[16:31] <jnthn> :)
+
+[16:31] <jnthn> Yeah.
+
+[16:31] <jnthn> I guess maybe the easiest thing for me to do is re-write the tracer to just build a cache of tracing things :)
+
+[16:32] <TimToady> what, you don't wanna implement a recache-all-the-things thingie?
+
+[16:41] <jnthn> Pushed a fix that seems to do it
+
+[16:41] <jnthn> I want to re-work how we do method caching stuff in general at some point :)
+
+[16:42] <jnthn> But this should get us over this bump in the road for the moment :)
+
+[16:44] * TimToady yays
+
+[16:55] *** domidumont joined
+[16:56] <jnthn> :)
+
+[17:02] <TimToady> I guess it could give a little memory saving already due to not keeping redundant from/to/orig
+
+[17:06] <timotimo> three pointers per, eh?
+
+[17:06] <timotimo> er, no
+
+[17:06] <timotimo> two 64bit ints, one 64bit or 32bit pointer
+
+[17:06] <timotimo> we might at some point want to have a tool like pahole that tells us where in our P6opaque classes we can save space
+
+[17:07] <timotimo> save space by rearranging
+
+[17:20] <Geth> ¦ MoarVM/even-moar-jit: abcbf000f8 | (Bart Wiegmans)++ | src/jit/expr_ops.h
+
+[17:20] <Geth> ¦ MoarVM/even-moar-jit: Silence a GCC warning
+
+[17:20] <Geth> ¦ MoarVM/even-moar-jit:
+
+[17:20] <Geth> ¦ MoarVM/even-moar-jit: The file ended with an escaped newline, and GCC rightly complained about
+
+[17:20] <Geth> ¦ MoarVM/even-moar-jit: that.
+
+[17:20] <Geth> ¦ MoarVM/even-moar-jit: review: https://github.com/MoarVM/MoarVM/commit/abcbf000f8
+
+[18:15] *** domidumont joined
+[18:59] *** stmuk joined
+[19:43] <samcv> good *
+
+[19:43] <timotimo> oh hey
+
+[22:02] <samcv> woo. ok think it's building the html coverage on travis now. stage 2 begin! getting the ssh key working and copying to gh-pages branch
+
+[22:06] <Geth> ¦ MoarVM/coverage: 4f3798310c | (Jonathan Worthington)++ (committed by Samantha McVey) | src/io/io.c
+
+[22:06] <Geth> ¦ MoarVM/coverage: Remove arbitrary and small length range check.
+
+[22:06] <Geth> ¦ MoarVM/coverage:
+
+[22:06] <Geth> ¦ MoarVM/coverage: This meant we could not slurp a file over 100MB in binary mode without
+
+[22:06] <Geth> ¦ MoarVM/coverage: getting an error. Removing this, such a file is very easily slurped.
+
+[22:06] <Geth> ¦ MoarVM/coverage: review: https://github.com/MoarVM/MoarVM/commit/4f3798310c
+
+[22:06] <Geth> ¦ MoarVM/coverage: f6b3ac1274 | (Samantha McVey)++ | 4 files
+
+[22:06] <Geth> ¦ MoarVM/coverage: Commit coverage report related files
+
+[22:06] <Geth> ¦ MoarVM/coverage: review: https://github.com/MoarVM/MoarVM/commit/f6b3ac1274
+
+[22:06] <samcv> weird. uh
+
+[22:06] <samcv> oh well
+
+[22:07] <samcv> looks like my rebase modified the previous commit. oh well. no matter
+
+[22:08] <samcv> can't test any further on my branch because the ssh key is locked to travis ci on MoarVM/MoarVM
+
+[22:09] <samcv> woo. key decrypted successfully. i'm so excited. for continuous coverage reports
+
+[22:10] <samcv> brb
+
+[22:26] <Geth> ¦ MoarVM/coverage: b049e7114f | (Samantha McVey)++ | tools/update-gh-pages.sh
+
+[22:26] <Geth> ¦ MoarVM/coverage: fix
+
+[22:26] <Geth> ¦ MoarVM/coverage: review: https://github.com/MoarVM/MoarVM/commit/b049e7114f
+
+[22:32] <Geth> ¦ MoarVM/gh-pages: 106a558f23 | (Travis CI)++ | 240 files
+
+[22:32] <Geth> ¦ MoarVM/gh-pages: Travis build 1960 pushed to gh-pages
+
+[22:32] <Geth> ¦ MoarVM/gh-pages: review: https://github.com/MoarVM/MoarVM/commit/106a558f23
+
+[22:37] <jnthn> samcv: What does it run to get coverage data?
+
+[22:38] <jnthn> (As in, just building Rakudo, make test, make spectest?)
+
+[22:38] <samcv> nqp
+
+[22:39] <samcv> make test in nqp
+
+[22:39] <jnthn> Ah
+
+[22:39] <jnthn> OK, that explains a lot :)
+
+[22:39] <jnthn> (Like, why none of the concurrency stuff is covered... :))
+
+[22:39] <samcv> https://moarvm.github.io/MoarVM/libmoar/ did you see
+
+[22:39] <samcv> ah
+
+[22:39] <samcv> yeah
+
+[22:40] <samcv> it worked :)
+
+[22:40] <jnthn> Yeah, that's what I'm looking at :)
+
+[22:40] <jnthn> samcv++
+
+[22:42] <samcv> now i only need to re-enable the noncoverage builds on the coverage branch to make sure i didn't break the other things in the matrix
+
+[22:43] <samcv> i can get roast tests too since people will like that
+
+[22:44] <samcv> as long as travis doesn't cry from it taking too long
+
+[22:45] <Geth> ¦ MoarVM/coverage: c309939841 | (Samantha McVey)++ | .travis.yml
+
+[22:45] <Geth> ¦ MoarVM/coverage: Try readding the noncoverage builds
+
+[22:45] <Geth> ¦ MoarVM/coverage: review: https://github.com/MoarVM/MoarVM/commit/c309939841
+
+[22:46] <jnthn> Yeah, depends how much of a slowdown running coverage is, I guess
+
+[22:48] <samcv> well it doesn't take more time than a normal run really
+
+[22:48] <samcv> maybe like 10 seconds max
+
+[22:48] <samcv> if i take out it building nqp without coverage the 1st time
+
+[22:49] <samcv> atm it runs the normal mvm tests, and then afterward it will run the coverage (same nqp tests, but using nqp-profile script which sets the right env vars and such to save the coverage)
+
+[22:49] <Geth> ¦ MoarVM/coverage: 03d13be72b | (Samantha McVey)++ | .travis.yml
+
+[22:49] <Geth> ¦ MoarVM/coverage: Re-add the MacOS builds too
+
+[22:49] <Geth> ¦ MoarVM/coverage: review: https://github.com/MoarVM/MoarVM/commit/03d13be72b
+
+[23:00] <Geth> ¦ MoarVM/gh-pages: 4ba4c88d6b | (Travis CI)++ | 237 files
+
+[23:00] <Geth> ¦ MoarVM/gh-pages: Travis build 1961 pushed to gh-pages
+
+[23:00] <Geth> ¦ MoarVM/gh-pages: review: https://github.com/MoarVM/MoarVM/commit/4ba4c88d6b
+
+[23:01] <jnthn> I...assume that the push of the updated coverage data doesn't trigger a Travis build? :D
+
+[23:02] <timotimo> if it does, we can blacklist gh-pages
+
+[23:02] <timotimo> but it'd be reasonable if travis already knew about gh-pages
+
+[23:04] <jnthn> I guess the other question is if all the coverage data we're pushing will affect clone times, but I guess it compresses super well
+
+[23:05] <jnthn> If either of those is an issue, I guess we just make a special MoarVM/coverage repo to push to
+
+[23:05] <timotimo> sure
+
+[23:10] <samcv> no it doesn't
+
+[23:10] <samcv> since it has no .travis.yml
+
+[23:11] <timotimo> ah, that makes sense
+
+[23:14] <Geth> ¦ MoarVM/gh-pages: bbc7b1e031 | (Travis CI)++ | 237 files
+
+[23:14] <Geth> ¦ MoarVM/gh-pages: Travis build 1962 pushed to gh-pages
+
+[23:14] <Geth> ¦ MoarVM/gh-pages: review: https://github.com/MoarVM/MoarVM/commit/bbc7b1e031
+
+[23:14] <timotimo> samcv: you see these little graphs? http://irclog.perlgeek.de/
+
+[23:14] <timotimo> it'd be pretty cool if we could have history graphs for each cell in the overview
+
+[23:15] <samcv> that would be nice
+
+[23:15] <samcv> somebody should do that who is not me :)
+
+[23:15] <timotimo> :D
+
+[23:15] <timotimo> i don't know how we'd properly get at data from previous commits
+
+[23:15] <timotimo> don't want to parse a hundred html files for each new report :D
+
+[23:15] <samcv> yeah no. we would not do that
+
+[23:16] <samcv> we'd generate a more parsable thing with `report` instead of the html coverage line by line
+
+[23:16] <timotimo> we could build both the html and the text-only ... yeah
+
+[23:16] <samcv> yea
+
+[23:16] <timotimo> the text-format report will also give prettier "git diff" output
+
+[23:17] <timotimo> though it's kind of likely that it'll very often give us "all these lines changed!" and you can't actually see anything
+
+[23:17] <Geth> ¦ MoarVM/coverage: 79a259c5b8 | (Samantha McVey)++ | .travis.yml
+
+[23:17] <Geth> ¦ MoarVM/coverage: Try and get os x excluding items in travis again
+
+[23:17] <Geth> ¦ MoarVM/coverage: review: https://github.com/MoarVM/MoarVM/commit/79a259c5b8
+
+[23:17] <samcv> oh you want lines? not files?
+
+[23:17] <timotimo> oh
+
+[23:17] <samcv> :O
+
+[23:17] <timotimo> no lines in the report file i mean
+
+[23:18] <timotimo> when you use git log on a text-based report five
+
+[23:18] <samcv> oh number of lines covered
+
+[23:18] <timotimo> git log on the html reports is definitely going to be worthless, as the complete html gets put into just a single line
+
+[23:18] <samcv> yeah
+
+[23:18] <samcv> but would be better if it were processed and extracted as a percentage of the file or something idk
+
+[23:18] <timotimo> i'm not sure if i understand how you mean that?
+
+[23:19] <samcv> uh
+
+[23:19] <samcv> this https://cry.nu/coverage/report-libmoar.html
+
+[23:19] <samcv> is what we'd extract data from. but with no color of course. and not as html just a plain text file
+
+[23:20] <timotimo> ugh, that's *really* wide and my browser's line-wrapping it
+
+[23:20] <timotimo> but yeah, i imagined it like that
+
+[23:20] <samcv> yep
+
+[23:20] <samcv> it is super wide. since they added more columns in llvm 5
+
+[23:20] <timotimo> mhm
+
+[23:22] *** geekosaur joined
+[23:26] <jnthn> 'night o/
+
+[23:26] <Zoffix> night
+
+[23:27] <timotimo> nite jnthn
+
+[23:34] <Geth> ¦ MoarVM/gh-pages: d2bc415c90 | (Travis CI)++ | 237 files
+
+[23:34] <Geth> ¦ MoarVM/gh-pages: Travis build 1963 pushed to gh-pages
+
+[23:34] <Geth> ¦ MoarVM/gh-pages: review: https://github.com/MoarVM/MoarVM/commit/d2bc415c90

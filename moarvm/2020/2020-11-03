@@ -1,0 +1,312 @@
+[03:54] *** MasterDuke left
+[04:31] *** lucasb left
+[07:21] *** sena_kun joined
+[07:59] *** domidumont joined
+[08:08] *** Altai-man joined
+[08:11] *** sena_kun left
+[08:53] *** zakharyas joined
+[09:18] *** MasterDuke joined
+[10:01] *** zakharyas left
+[10:11] <MasterDuke> timotimo, et al.: think https://github.com/MoarVM/MoarVM/pull/1376 needs a visual (output) cleanup before merging?
+
+[10:14] *** zakharyas joined
+[10:58] *** brrt joined
+[10:58] <brrt> \o
+
+[10:58] <nwc10> o/
+
+[10:59] <nwc10> two fun parts frmo that pyston blog post. One -- it is currently closed-source while we iron out our business model.
+
+[11:00] <nwc10> OK, going to be interesting to see how they plan to make money. And whether that plan can be re-used
+
+[11:00] <nwc10> and two - first time I've seen someone benchmark PyPy JIT warmup time.
+
+[11:01] <nwc10> Usually PyPy results are "ooh, it's nice and fast*" "* numbers are once the JIT warmed up"
+
+[11:01] <nwc10> but 85 seconds or 105 seconds are, um, 1.5 to 2 minutes
+
+[11:02] <nwc10> "your webserver takes over a minute to serve requests quickly after a restart" - bit annoying.
+
+[11:03] <nwc10> contrasts with all I read about JS JITs where they try really hard to start "as fast as possible with an interpreter" so that however long you run the code for, it's still faster with the (same tiers of) JIT than not
+
+[11:09] <lizmat> nwc10: mind you, on big server setups having a server at startup to be effectively useless for 2 minutes, may not be such a big issue
+
+[11:09] <lizmat> I think the bigger issue is how to have the JIT warmup *without* diverting traffic to it, and *that* traffic will be sloooow
+
+[11:09] <lizmat> so that's a bit of a catch-22
+
+[11:11] <nwc10> yes. I guess you'd need to create infrastructure to send some requests to the warming up machine (too) and discard the results. Or just send itnernal "Fake" results.
+
+[11:11] <nwc10> It adds complexity
+
+[11:11] <nwc10> The more basic thing that I'd not realised was "PyPy is not a drop in replacement for many cases. Pyston aims to be"
+
+[11:12] <nwc10> do-able, but more complex.
+
+[11:12] <lizmat> yeah, and that becomes pretty messy pretty quickly
+
+[11:12] <nwc10> and I'd never even realised this/thought about this until reading that blog post with its table
+
+[11:18] <MasterDuke> you may already have the infrastructure in place to send duplicate traffic to a subset of your machines to do testing. roll out a new version of your software and send a portion of the traffic and compare
+
+[11:26] <brrt> I think getting the infrastructure done for pypy 'warmup' in a server farm is probably a good scaling/architecture problem but for a large organization very solvable
+
+[11:27] <brrt> for smaller ones, not so much
+
+[11:30] <MasterDuke> depends on how much smaller. AWS, etc. can do a lot of that kind of stuff for you (i.e., automatically/easily segmenting your machines for testing)
+
+[11:46] <brrt> true
+
+[11:49] <nine> Turns out, the biggest remaining issue causing unwanted dependencies was MoarVM's int cache - again. I've disabled it already but didn't know that spesh ops and JITed code will access the const_int_cache directly
+
+[11:50] <nine> int_const_cache rather
+
+[12:04] <nine> I wonder what the real solution will be there. That int const cache is a useful optimization but also rather invasive:
+
+[12:04] <nine> m: my $a = 1; my $b = 1; $a does role { method Str() { "foo" } }; $b.Str.say
+
+[12:04] <camelia> rakudo-moar 85847d2f1: OUTPUT: «foo␤»
+
+[12:07] <lizmat> yikes
+
+[12:07] <lizmat> but also: cool  :-)
+
+[12:07] <lizmat> maybe a fromI_I is missing there ?
+
+[12:09] *** sena_kun joined
+[12:09] <nine> No, that's on purpose. The int const cache contains HLL objects for integers from -1 to 15 to speed up boxing of those (and avoid the memory and deserialization overhead)
+
+[12:10] <nine> To do that it's special cased in several places that would normally return new objects
+
+[12:11] <nwc10> So, I was going to say "sort of feels like the object that the cache gives you needs a flag or soemthing saying 'if you try to "does" me you'll need to copy me first'"
+
+[12:11] *** Altai-man left
+[12:11] <nwc10> and then I thought "oh, but if something else has a reference to the same object..."
+
+[12:11] <nwc10> and that gets me to "does the cache need to move into spesh?"
+
+[12:12] <nine> How would that change anything?
+
+[12:12] <nwc10> I sort of assumed that spesh would know whether the object ever had "does"  done to it.
+
+[12:12] <nwc10> but I figure that that doesn't work out either.
+
+[12:13] <nine> No, because with my $a = 1; my $b = 1; my $c = $a; $a does role { ... }; you'd want $c to carry the mixed into object but not $b
+
+[12:14] <nwc10> really for `my $c = $a` ? Isn't that a value copy? ie `my $c := $a` is the problem?
+
+[12:15] <nwc10> and yes that was where I got to with the " I figure that that doesn't work out either" and I wasn't clear
+
+[12:15] *** Kaiepi left
+[12:16] <nwc10> you need some level of escape analysis. Because if you want the cache, you have to know when to take the two "Different" objects and stop them actually being the same (and the same as the hidden needs-to-be-immutable in the cache)
+
+[12:16] <nine> No, that's confusingly still a reference copy. $c will have a different container (Scalar), but the value $a and $c contain is the same object.
+
+[12:17] <nine> That usually just isn't an issue since we rarely modify Int objects in place (mixing into being the exception), so you don't notice the reference copy
+
+[12:17] *** Kaiepi joined
+[12:19] *** Kaeipi joined
+[12:20] *** Kaiepi left
+[12:28] <nine> Makes me wonder how much we actually gain from that cache
+
+[12:34] *** brrt left
+[12:36] *** zakharyas left
+[12:40] *** Kaeipi left
+[12:50] *** Kaiepi joined
+[12:57] <[Coke]> might be worth an experiment to rip it out and see what happens to performance.
+
+[12:57] <tellable6> 2020-11-03T03:27:47Z #raku <melezhik> [Coke] - "why is there a sparrowdo reference in there?" Rakudist uses sparrowdo to run zef test on docker container, that is it 
+
+[12:57] <tellable6> 2020-11-03T03:30:11Z #raku <melezhik2> [Coke] as for the error mentioned, I see this "t enough positional arguments; needed at least 2" type of errors on and off for some Rakudist builds, I could even grep all the reports having the one, if it helps
+
+[13:00] <MasterDuke> well, a fully rigorous experiment of sticking a `return NULL` at the top of MVM_intcache_get didn't lead to any noticeable changes in two runs of compiling CORE.c
+
+[13:04] <nine> MasterDuke: that's not enough to disable the cache (as I've found out the hard way). You also need to change sp_fastbox_i_ic, sp_fastbox_bi_ic, sp_add_I, sp_sub_I, sp_mul_I and their JIT implementations
+
+[13:05] <MasterDuke> ah, fun
+
+[13:05] *** brrt joined
+[13:05] <nine> https://gist.github.com/niner/09d149b398fc8b5b0af1c310b3938563
+
+[13:08] <nine> Btw. just a teaser to show why all this work is worth it: loading Inline::Perl5 (which consists of just 15 modules) from a cold precomp cache takes 11.5s on rakudo master vs. 8.6s with in-process-precompilation. Code bases consisting of lots of small modules will benefit all the more.
+
+[13:09] <MasterDuke> Xliff might book a ticket to europe just to kiss you
+
+[13:10] <brrt> you're saying the int cache isn't worth it always? hmm
+
+[13:11] <nine> brrt: well we are pretty good at creating objects fast. And the int cache requires branches in several ops.
+
+[13:11] <MasterDuke> after applying nine++'s patch, another rigorous experiment of compiling CORE.c twice seems like it might have ~0.5s slower parse times
+
+[13:11] <lizmat> and memory usage ?
+
+[13:12] <MasterDuke> didn't measure
+
+[13:13] <MasterDuke> https://gist.github.com/MasterDuke17/0ca3fffe5f19688a31e20214e8c5437e has some hit info before i disabled it
+
+[13:14] <MasterDuke> that was from sticking a print right before https://github.com/MoarVM/MoarVM/blob/master/src/core/intcache.c#L52
+
+[13:14] <brrt> that does make sense actually
+
+[13:18] *** lucasb joined
+[13:20] <MasterDuke> another two runs with the patch + two without does seem to show a slowdown plus increased mem usage with intcache disabled
+
+[13:21] <MasterDuke> ~20mb more
+
+[13:22] <MasterDuke> according to /usr/bin/time
+
+[13:24] <nine> So...now we know :) It's not much, but clearly measurable. I may be able to get around that by special casing in the serialization code, adding a flag, or something like that. Of course that won't solve the mixin issue though.
+
+[13:29] <MasterDuke> m: my $a = 1; my $b = Int.new(1); $a does role { method Str() { "foo" } }; $b.Str.say
+
+[13:29] <camelia> rakudo-moar 85847d2f1: OUTPUT: «1␤»
+
+[13:29] <MasterDuke> ^^^ is 'cause Int.new uses fromI_I
+
+[13:44] *** zakharyas joined
+[13:48] *** zakharyas left
+[13:52] <timotimo> did you give the <span title=blah> thing a try yet?
+
+[13:55] <MasterDuke> timotimo: not yet. need to work around https://github.com/MasterDuke17/MoarVM/blob/add_file_causing_coverage_to_parse_coverage_report/tools/parse_coverage_report.p6#L119 somehow
+
+[13:56] <MasterDuke> oh wait. where does the <span ...> go?
+
+[13:56] <timotimo> ah, does the lines array at that point already have the entirety of the output in it, so we can't just change it easily?
+
+[13:56] <MasterDuke> yeah
+
+[13:56] <MasterDuke> https://github.com/MasterDuke17/MoarVM/blob/add_file_causing_coverage_to_parse_coverage_report/tools/parse_coverage_report.p6#L27
+
+[13:57] <timotimo> so the lines.push line wants changed i guess
+
+[13:59] <MasterDuke> guess i could do the escaping there, then add the span later if needed
+
+[13:59] <timotimo> at the moment we're pushing just the c, u, or i in there along with the line
+
+[13:59] <MasterDuke> c|u|i => line
+
+[13:59] <timotimo> like $_ => $line gets us the letter
+
+[14:00] <timotimo> yeah
+
+[14:00] <timotimo> we could do $_ => %covered-lines{...}{...}.keys => $line, or use an array, or whatever
+
+[14:03] <MasterDuke> but there isn't always a %covered-lines{...}{...} entry for each line
+
+[14:04] *** brrt left
+[14:06] <timotimo> then we'll use Any for example
+
+[14:08] *** zakharyas joined
+[15:01] *** zakharyas left
+[15:22] *** zakharyas joined
+[15:48] <MasterDuke> timotimo: what do you think of https://github.com/MoarVM/MoarVM/files/5482383/SETTING__src_core_c_Enumeration_pm6.coverage-v2.html.txt ?
+
+[15:51] <timotimo> i think i would like it to say how many the rest are, is that difficult with your current code?
+
+[15:51] * timotimo checks
+
+[15:52] <timotimo> ah, not yet in the PR?
+
+[15:53] <MasterDuke> right
+
+[15:56] <timotimo> we can throw out the | from the string and turn the "covered from" text into a span of its own, then styling with css can let us differentiate it visually in more craetive ways
+
+[15:56] <timotimo> like border around, or different background colors, and such
+
+[16:08] *** Altai-man joined
+[16:10] *** sena_kun left
+[16:10] *** sxmx left
+[16:11] *** sxmx joined
+[16:13] <MasterDuke> https://github.com/MoarVM/MoarVM/files/5482539/SETTING__src_core_c_Instant_pm6.coverage.html.txt
+
+[16:16] *** sxmx left
+[16:17] *** Altai-man left
+[16:17] <MasterDuke> timotimo: ^^^ just puts the number in the span text
+
+[16:17] *** sxmx joined
+[16:17] *** sena_kun joined
+[16:18] <timotimo> that's good
+
+[16:20] <MasterDuke> the code isn't particularly pretty
+
+[16:27] <MasterDuke> i don't know css. how about i push what i have and you pretty it up?
+
+[16:40] <MasterDuke> timotimo: https://github.com/MoarVM/MoarVM/pull/1376/commits/ad0b487cf5ce467090483a02a97758f3df249447 is how it's done right now
+
+[17:05] *** Geth_ joined
+[17:05] *** Geth left
+[17:57] <timotimo> right
+
+[18:30] *** BinGOs left
+[18:30] *** domidumont left
+[18:43] *** bingos joined
+[18:46] *** bingos is now known as BinGOs
+
+[19:04] *** zakharyas left
+[19:38] *** brrt joined
+[20:08] *** MasterDuke left
+[20:08] *** Altai-man joined
+[20:11] *** sena_kun left
+[20:18] *** MasterDuke joined
+[20:34] *** japhb left
+[20:53] *** zakharyas joined
+[21:26] *** ChanServ left
+[21:32] *** ChanServ joined
+[21:32] *** tepper.freenode.net sets mode: +o ChanServ
+
+[21:42] *** dumarchie joined
+[21:43] *** MasterDuke left
+[21:46] <dumarchie> I tried to build Rakudo Star 2020.10 for Windows, but got the following error when compiling:
+
+[21:47] <dumarchie> MVM_panic(1, "Debugserver: WSAStartup failed with error: %n", error);
+
+[21:47] *** vrurg left
+[21:48] *** vrurg joined
+[21:51] <dumarchie> Ah, never mind, that was just a compiler warning.
+
+[22:00] *** zakharyas left
+[22:00] *** raku-bridge joined
+[22:05] <timotimo> does it suggest what would be correct? i imagine the %n is what it's warning about?
+
+[22:10] <dumarchie> format '%n' expects argument of type 'int *', but argument 3 has type 'int' [-Wformat=]
+
+[22:11] <dumarchie> I think it suggests %d would be correct
+
+[22:15] <timotimo> now why did i put a %n there
+
+[22:16] <dumarchie> Would you like a github issue with all the compiler warnings on Windows? There appear to be less than in the past.
+
+[22:17] <timotimo> maybe a gist first %)
+
+[22:23] *** sena_kun joined
+[22:24] *** Altai-man left
+[22:27] <dumarchie> Here you are: https://gist.github.com/dumarchie/e891f3184ca6d324b90b93712ab2d751
+
+[22:34] *** brrt left
+[22:35] <timotimo> oof...
+
+[22:37] <timotimo> why that pthread stuff broke ...
+
+[22:38] <timotimo> did the configuration probe get it wrong?
+
+[22:39] <dumarchie> Not sure what you mean.
+
+[22:39] <timotimo> so the compilation failed?
+
+[22:40] <dumarchie> I'm not sure. It printed the following to the console:
+
+[22:40] <dumarchie> gmake: *** [Makefile:679: src\debug\debugserver.o] Error 1
+
+[22:41] <dumarchie> And then said:
+
+[22:42] <dumarchie> Command failed (status 512): C:\Strawberry\perl\bin\perl.exe Configure.pl --cc=gcc --make=gmake --optimize --relocatable --prefix=C:\rakudo --make-install
+
+[22:45] <dumarchie> Got to get some sleep now. I'll check in tomorrow.
+
+[22:46] *** dumarchie left
+[22:52] *** Altai-man joined
+[22:55] *** sena_kun left
+[23:06] *** japhb joined
+[23:09] *** sena_kun joined
+[23:11] *** Altai-man left
+[23:45] *** sena_kun left

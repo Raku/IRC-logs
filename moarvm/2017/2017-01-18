@@ -1,0 +1,939 @@
+[00:25] *** Ven joined
+[00:40] *** Ven joined
+[02:49] *** ilbot3 joined
+[03:00] *** dalek joined
+[04:40] *** Ven joined
+[05:10] *** Ven joined
+[07:02] *** domidumont joined
+[07:08] *** domidumont joined
+[07:50] *** brrt joined
+[08:03] *** domidumont joined
+[08:12] *** Ven joined
+[08:29] <brrt> good * #moarvm
+
+[08:29] <timotimo> good brrt
+
+[08:30] <brrt> good timotimo
+
+[08:30] <timotimo> samcv and me were stumbling over columns and columns of null bytes inside libmoar.so; do you have ideas on how to figure out where that kind of stuff comes from?
+
+[08:30] <timotimo> like, what tool would tell me "ah, that address is part of this section" for example?
+
+[08:30] <brrt> not objdump?
+
+[08:30] <brrt> to be honest, i wouuldn't really know
+
+[08:31] <samcv> interesting. second level shift added MOVEMENT-FLOORPLANE and MOVEMENT-WALLPLANE. but i guess it occurs often enough that it saved enough bytes
+
+[08:31] <samcv> because of the big difference in length
+
+[08:33] <timotimo> i didn't even know what movement-floorplane and movement-wallplane are from
+
+[08:33] <samcv> me either
+
+[08:38] *** FROGGS joined
+[08:42] *** Ven joined
+[08:46] <timotimo> ok, a whole lot is actually relocation information
+
+[08:56] *** zakharyas joined
+[09:33] <brrt> translating three-operand to two-operand form is trickier than i thought
+
+[09:38] <timotimo> :o
+
+[09:39] <timotimo> you mean where the first operand is the target vs where some unnamed accumulator is the target?
+
+[09:49] <brrt> well, its named alright
+
+[09:49] <brrt> actually, it's not so tricky at all
+
+[09:50] <brrt> now that i've properly thought about it
+
+[09:50] <brrt> it's just that my current approach is wrong
+
+[09:50] <brrt> basically, three-operand-code is: r0 = r1 <op> r2
+
+[09:50] <brrt> two-operand code is:
+
+[09:50] <brrt> r0 = r0 <op> r1
+
+[09:50] <brrt> so two points
+
+[09:51] <brrt> scrap that, it's more tricky
+
+[09:51] <brrt> a): i can't safely assume i can overwrite anything other than r0
+
+[09:52] <brrt> b): if r0 == r1, i don't really need to do anything
+
+[09:52] <brrt> c): if r0 == r2, then i'm kind of in trouble….
+
+[09:53] <brrt> r0 = r0 <op> r1 is, in general, invalid (consider SUB or XOR)
+
+[09:55] <jnthn> moarning, #moarvm
+
+[09:55] <timotimo> heyo jnthn
+
+[09:55] <brrt> moarning jnthn
+
+[09:55] <samcv> morning jnthn !
+
+[09:55] <brrt> any solution for my conundrum?
+
+[09:56] <nwc10> beer. lots of beer!
+
+[09:56] <brrt> if beer only made programs correct...
+
+[09:56] <samcv> that would be nice
+
+[09:59] <jnthn> Well, beer + typing + time degenerates to the million monkeys approach...
+
+[10:02] <jnthn> brrt: Well, I guess this is one of those cases where it's clear by perfect register allocation is NP :P
+
+[10:02] <jnthn> *clear why
+
+[10:02] <nwc10> jnthn: I got a slightly different ASAN backtrace from spectest6: http://paste.scsys.co.uk/540752
+
+[10:02] <brrt> hehe, aye
+
+[10:02] <nwc10> I got the first one I reported a second time. Then that different one
+
+[10:02] <brrt> otoh, correct register allocation shouldn't be
+
+[10:02] <jnthn> Indeed
+
+[10:03] <jnthn> Well, it's essentially a spill problem, no?
+
+[10:03] <jnthn> If something is going to be clobbered by a result that we still need, it needs moving somewhere else
+
+[10:04] <brrt> yeah. the difficulty in this particular spill problem, is that it's too late for spilling :-)
+
+[10:04] <brrt> well, to be frank, it doesn't have to be
+
+[10:05] <jnthn> Hm, I thought spilling happened as part of reg alloc?
+
+[10:05] <jnthn> Wouldn't this be a constraint the allocator has to take into account?
+
+[10:05] <brrt> yeah, but the register allocator doesn't know about the two-opcode form
+
+[10:05] <brrt> it would be tricky… because the register allocator doesn't look at individual instructions while allocating registers
+
+[10:06] <brrt> it's a long story. i've been trying for weeks to get it to an understandable form :-)
+
+[10:06] <jnthn> It looks at tiles?
+
+[10:06] <jnthn> nwc10: That ASAN output is bonkers...
+
+[10:06] <brrt> it looks at their live ranges, and those live ranges map to a set of tiles, but it doesn't look at individual tiles, or it would have to do so in a separate step
+
+[10:07] <brrt> so there's (currently) no place to assert that we don't have r0 == r2 && r0 != r1
+
+[10:07] <nwc10> ah, OK. I hoped you wouldn't say *that*
+
+[10:07] <jnthn> Well, I mean, the latter part I can look into
+
+[10:08] <jnthn> But how on earth a bigint ends up pointing into a bit of memory allocated for a totally different purpose and apparently freed in the right place is...odd
+
+[10:09] <timotimo> yeah, didn't we already suspect that the pointer of an mp_int is getting corrupted somehow?
+
+[10:11] <jnthn> Well, only because I've seen backtraces in gc_cleanup of P6bigint
+
+[10:11] <timotimo> right
+
+[10:12] <jnthn> Thing is, the pointers are into the middle of the other memory regions
+
+[10:14] <jnthn> It's stranger still that they're apparently valid memory addresses.
+
+[10:15] <timotimo> that's true
+
+[10:15] <timotimo> maybe we want to put a little verification step after every bigint-related operation
+
+[10:16] <timotimo> it could be enough to output the address every time we malloc an mp_int, and then compare the "current" value of the pointer against any previous valid ones
+
+[10:16] <timotimo> to zero in on the location where the pointer gets corrupted
+
+[10:20] <jnthn> Hm, I wonder if ASAN is kinda "lifetime limited" on pointers
+
+[10:20] <jnthn> In that there can be re-use of addresses that are beyond what it trracks
+
+[10:21] <nwc10> that would be my guess, if nothing else makes sense
+
+[10:23] <jnthn> nwc10: How often does ASAN trigger on this, ooc?
+
+[10:23] <jnthn> I had trouble reproducing this
+
+[10:23] <nwc10> might take more than 24 hours of looping
+
+[10:24] <nwc10> "rarely"
+
+[10:24] <jnthn> Urgh :(
+
+[10:26] <timotimo> wow holy shit
+
+[10:28] <jnthn> Yeah, this is going to be quite a pain
+
+[10:28] <jnthn> I've just been through a bunch of "obvious" things to check
+
+[10:28] <jnthn> But don't see anything obvious to blame
+
+[10:28] <jnthn> I think I'll hold off for now on further ASAN traces to see if any further patterns come up
+
+[10:39] * jnthn is looking into the leak in RT #130494 at the moment, fwiw
+
+[10:39] <jnthn> (Which I improved things on before, but it seems it still ain't right)
+
+[10:41] * dogbert17_ feebly tries to clickbait https://github.com/MoarVM/MoarVM/issues/458
+
+[10:43] <jnthn> wat...
+
+[10:44] <dogbert17_> the ASAN stuff that was discussed the other day
+
+[10:46] <jnthn> yes, it's odd in that we get use after free despite the safepoint release mechanism...
+
+[10:47] <samcv> wow this page is horrible http://www.sanmayce.com/Railgun/index.html
+
+[10:47] <samcv> they say they have the fastest string searcher. claim
+
+[10:49] <dogbert17_> one thing I have noticed is that it has become considerably more difficult to find bugs in MoarVM of late :-) jnthn++
+
+[10:50] <samcv> it's like they copy pasted some of their code, and then like just upasted a bunch of random crap also
+
+[10:50] <samcv> and put it all on one page, added images and bad background
+
+[10:51] <timotimo> nwc10: we can perhaps make the issue appear more easily if we patch out the "smallbigint" mechanism
+
+[10:51] <timotimo> nwc10: i.e. we could change the FITS_INTO_32BIT (or whatever) macro to always return "nope"
+
+[10:51] <timotimo> that way every bigint will use a pointer to an mp_int
+
+[10:51] <timotimo> not just high numbers
+
+[10:52] <timotimo> BBIAB
+
+[10:57] *** Ven joined
+[11:07] <dogbert17_> juerd was complaining about memory leaks the other day, https://irclog.perlgeek.de/perl6/2017-01-17#i_13931911
+
+[11:10] <jnthn> heh, and nobody suggested --profile=heap
+
+[11:10] <jnthn> Which works perfectly well in multi-threaded applications :)
+
+[11:10] <jnthn> I've found a notable leak, fwiw
+
+[11:11] <dogbert17_> .oO
+
+[11:13] <jnthn> (Yes, with the help of --profile=heap :))
+
+[11:14] <dogbert17_> nice sales pitch :-)
+
+[11:24] <Geth> MoarVM/inactivate-async-tasks: 5787bc1481 | (Jonathan Worthington)++ | 8 files
+
+[11:24] <Geth> MoarVM/inactivate-async-tasks: Factor out adding to active work list.
+
+[11:24] <Geth> MoarVM/inactivate-async-tasks:
+
+[11:24] <Geth> MoarVM/inactivate-async-tasks: So we'll be able to later easily add re-use of indexes. Also reduces
+
+[11:24] <Geth> MoarVM/inactivate-async-tasks: some code duplication.
+
+[11:24] <Geth> MoarVM/inactivate-async-tasks: review: https://github.com/MoarVM/MoarVM/commit/5787bc1481
+
+[11:42] <Geth> MoarVM/inactivate-async-tasks: fe6af2e873 | (Jonathan Worthington)++ | 8 files
+
+[11:42] <Geth> MoarVM/inactivate-async-tasks: Factor out fetching active async work items.
+
+[11:42] <Geth> MoarVM/inactivate-async-tasks:
+
+[11:42] <Geth> MoarVM/inactivate-async-tasks: And add some sanity checks, in prep for upcoming implementation of
+
+[11:42] <Geth> MoarVM/inactivate-async-tasks: removing items from the list.
+
+[11:42] <Geth> MoarVM/inactivate-async-tasks: review: https://github.com/MoarVM/MoarVM/commit/fe6af2e873
+
+[11:42] <jnthn> lunch, but that prepares the way for fixing things
+
+[11:42] <jnthn> bbiab
+
+[11:57] *** Ven joined
+[12:12] *** Ven joined
+[12:27] *** Ven joined
+[12:29] *** brrt joined
+[12:29] <brrt> okay, i have solution thought up over lunch
+
+[12:30] <timotimo> just always have one register available and use that fro spilling if needed?
+
+[12:30] <brrt> well, precisely that
+
+[12:30] <timotimo> damn, i should have told you when i had that idea even though i thought it was perhaps dumb
+
+[12:30] <timotimo> might have saved you a few minutes
+
+[12:30] <brrt> hehe
+
+[12:30] <brrt> why should it be dumb?
+
+[12:30] <nine> Good thing x86_64 has so many registers
+
+[12:30] <brrt> anyway
+
+[12:30] <brrt> indeed
+
+[12:31] <timotimo> it wastes a register that could otherwise perhaps be used for making everything better
+
+[12:31] <brrt> spilling-because-we-have-insufficient-registers is actually quite rare
+
+[12:31] <brrt> so that's not really a common problem
+
+[12:31] <timotimo> oh, interesting
+
+[12:31] <timotimo> it's mostly that we have all these requirements
+
+[12:31] <timotimo> for calling into functions, for using sse registers, stuff like that?
+
+[12:31] <brrt> what is a common problem: spilling something because an instruction just *has* to use it
+
+[12:32] <brrt> that, too
+
+[12:32] <brrt> the question is
+
+[12:32] <brrt> which register
+
+[12:32] <brrt> i see two very good options
+
+[12:32] <timotimo> one that no instruction will ever force us to use
+
+[12:34] <brrt> well, that's one choice
+
+[12:34] <brrt> that would give you r11 or r10, and i'd prefer the extreme of r11 in that case
+
+[12:34] <brrt> the other choice
+
+[12:34] <brrt> one that will be very often required by an instruction, i.e. rax
+
+[12:34] <timotimo> EXTREME!
+
+[12:35] <timotimo> oh, that is because if the instruction we have prevents us from using a register that we have, it must be some other register than that?
+
+[12:36] <brrt> well, if i use rax as the 'always avaliable' register, then i can always just take it and copy, no spill required
+
+[12:36] <timotimo> i'm not sure i understand, but it sounds good to me
+
+[12:37] <brrt> for instance, signed cast from 32 bits to 64 bits, that requires rax
+
+[12:37] <brrt> another example: div (although that also clobbers rcx)
+
+[12:39] <brrt> so that would be an argument for reserving rax
+
+[12:39] <brrt> however, the same argument could also be used for implementing precoloring (as a separate step)
+
+[12:40] <nine> I dare suggest: do whatever's easiest now and refactor later if needed
+
+[12:40] <brrt> hmmm
+
+[12:41] <brrt> that's a reasonable argument, yes
+
+[12:42] <brrt> hmm, i'm going to go for rax, then
+
+[12:43] <brrt> thanks :-)
+
+[12:44] <brrt> (there is a similar argument to add a bitmap to each and every tile that says 'these registers are currently in use')
+
+[12:44] <brrt> but i'll leave that to the later refactoring
+
+[13:10] <jnthn> om nom pljeskavica
+
+[13:12] <nwc10> I had no idea what that was
+
+[13:12] <nwc10> "mixture of pork, beef and lamb" says wikipedia
+
+[13:12] <nwc10> that's trying hard to give plenty of folks a reason to disagree with it :-)
+
+[13:13] <ilmari> are there anyone who eat meat but not lamb?
+
+[13:13] <nwc10> good question
+
+[13:13] <nwc10> but I know folks who don't like lamb (who do like the other two)
+
+[13:13] <jnthn> It tasted like meat. :)
+
+[13:13] <ilmari> throw some shellfish and dairy in, and you've got a treyffecta
+
+[13:14] <nwc10> ilmari++
+
+[13:14] <ilmari> ah, it already has cream in it
+
+[13:14] * ilmari thinks he'll go for a spicy chicken donburi shortly
+
+[13:15] <jnthn> Throw shellfish in it and I won't be eating it :P
+
+[13:15] <jnthn> Anyway, (pub lunch)++ :)
+
+[13:16] <jnthn> wowser, my patches have upset spectest some
+
+[13:16] <jnthn> oh, duh
+
+[13:16] <jnthn> Flipped a condition for clearer code and did it wrong
+
+[13:18] <Geth> MoarVM/inactivate-async-tasks: 40f4a7e831 | (Jonathan Worthington)++ | 8 files
+
+[13:18] <Geth> MoarVM/inactivate-async-tasks: Factor out fetching active async work items.
+
+[13:18] <Geth> MoarVM/inactivate-async-tasks:
+
+[13:18] <Geth> MoarVM/inactivate-async-tasks: And add some sanity checks, in prep for upcoming implementation of
+
+[13:18] <Geth> MoarVM/inactivate-async-tasks: removing items from the list.
+
+[13:18] <Geth> MoarVM/inactivate-async-tasks: review: https://github.com/MoarVM/MoarVM/commit/40f4a7e831
+
+[13:18] * jnthn blames it on needing lunch :)
+
+[13:21] <[Coke]> (lamb) not very popular in my circle.
+
+[13:21] <yoleaux2> 17 Jan 2017 22:17Z <bartolin> [Coke]: do you have a suggestion whom I could contact about my CLA (cmp https://irclog.perlgeek.de/perl6-dev/2017-01-14#i_13920361 )
+
+[13:23] *** geekosaur joined
+[13:28] <lizmat> .tell jnthn I think the tests in t/spec/S12-construction/destruction.t are bogus in such a way that we can never reliably test it
+
+[13:28] <yoleaux2> lizmat: I'll pass your message to jnthn.
+
+[13:31] <jnthn> heh
+
+[13:31] <yoleaux2> 13:28Z <lizmat> jnthn: I think the tests in t/spec/S12-construction/destruction.t are bogus in such a way that we can never reliably test it
+
+[13:32] <jnthn> Yeah, allocating 100 objects is unlikely to be enough to trigger GC unless the compilation of the code left us just about to anyway.
+
+[13:32] <lizmat> oddly enough, in spectests for me, I got 2 tests passing all of a sudden
+
+[13:32] <lizmat> but not 100% reliably
+
+[13:32] <jnthn> Sure, well, you probably made some other thing allocate more/less
+
+[13:32] <jnthn> So that by the time startup and compilation completed, we were on the threshold of GCing
+
+[13:33] <lizmat> but does it make sense to test this in roast ?
+
+[13:33] <jnthn> Don't think we reliably can
+
+[13:33] <jnthn> I mean, short of allocating a huge number of objects :)
+
+[13:33] <jnthn> But it'll still be fragile
+
+[13:34] <lizmat> so maybe remove it from spectest.data ?
+
+[13:34] <jnthn> count objects repr="AsyncTask"
+
+[13:34] <jnthn> d'oh
+
+[13:34] <timotimo> uh oh?
+
+[13:34] <jnthn> lizmat: We may as well, if it's doomed to flap distracting todos now and then
+
+[13:35] <jnthn> timotimo: Just typed in the wrong window :)
+
+[13:35] <timotimo> ah :)
+
+[13:35] <[Coke]> .tell bartolin got it, pinged on 6-dev, someone will add you shortly.
+
+[13:35] <yoleaux2> [Coke]: I'll pass your message to bartolin.
+
+[13:35] <lizmat> that's what it's doing now
+
+[13:35] <jnthn> The other window is the heap profile analyzer application :)
+
+[13:35] <timotimo> i remember that program
+
+[13:35] <jnthn> It's darned useful :)
+
+[13:36] <jnthn> Pretty sure it must have paid me back for the time it took to build it already
+
+[13:36] <lizmat> [Coke]: so I finally logged into RT, but I can't change anything :-(
+
+[13:37] <jnthn> Anyway, it confirms that with my local changes, RT #130494 no longer leaks AsyncTask instances
+
+[13:37] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=130494
+
+[13:37] <jnthn> Which is good because AsyncTask points to a callbck which in turn points to an entire supply chain
+
+[13:37] <[Coke]> lizmat, let me verify that I gave you rights.
+
+[13:43] <jnthn> Yup, RT #130494 down from 373MB maxresident at the end to 312MB
+
+[13:43] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=130494
+
+[13:47] <timotimo> but it says there it used to reach 1.3 gig?
+
+[13:49] <jnthn> Yeah, that was before a different set of fixes last week :)
+
+[13:49] <jnthn> For 20,000 iterations it was 445MB at the end after my local fixes. Now 322MB.
+
+[13:50] <timotimo> sounds great
+
+[13:50] <jnthn> Will need more measurements to be sure if that's leak or overhead-at-point-of-exit.
+
+[13:51] <jnthn> But big improvement, anyway
+
+[13:57] *** Ven joined
+[13:59] <Geth> MoarVM: MasterDuke17++ created pull request #505: Add some new nqp:: ops for swapping array entries
+
+[13:59] <Geth> MoarVM: review: https://github.com/MoarVM/MoarVM/pull/505
+
+[14:24] <jnthn> Got a legit spectest fail, alas...hunting things down now
+
+[14:24] <lizmat> jnthn: manualling inlining the private method call makes permutations() go 35% faster
+
+[14:25] <lizmat> so it was the private method call overhead causing slowdown, not the actual swapping  :-(
+
+[14:28] <jnthn> ah
+
+[14:28] <dogbert17_> jnthn: do you think this comment from Juerd is/was correct? "Hm, even something as simple as  react { whenever Supply.interval(.001) { say "hi" } }  is leaking :("
+
+[14:29] <jnthn> dogbert17_: Yes, and I've likely got that fixed locally too
+
+[14:29] <jnthn> (Can verify when I'm done triaging the regression)
+
+[14:29] <dogbert17_> ohh, he will rejoice :-)
+
+[14:37] <jnthn> Oh, hmm...not sure about that exact case, in fact
+
+[14:37] <jnthn> I thought it was making new timers each time
+
+[14:38] * timotimo checks to see if it's bounded or unbounded growth
+
+[14:38] <timotimo> well, of course i can only check if it's ever reaches an end point
+
+[14:39] <jnthn> Hm, I see no difference with my hcanges to it
+
+[14:39] <jnthn> Which, now I read it the right way, is what I expect
+
+[14:39] <jnthn> It's sae memory use either way
+
+[14:39] <timotimo> fair enough
+
+[14:39] <jnthn> I added a counter that exited the loop after 10000 iterations
+
+[14:40] <jnthn> Doing 20000 iterations now
+
+[14:40] <jnthn> 100424maxresident
+
+[14:41] <jnthn> 102416maxresident for 30,000
+
+[14:41] <timotimo> it looks unbounded all right
+
+[14:42] <jnthn> HuH/
+
+[14:42] <jnthn> The number was *lower* for 30,000 than 20,000
+
+[14:42] <jnthn> Or close enough to "the same"
+
+[14:42] <timotimo> maybe you just hit a GC run just before you exited?
+
+[14:43] <jnthn> Probably
+
+[14:43] <jnthn> 104288maxresident for 40,000
+
+[14:43] <jnthn> If this is leaking it's doing so very slowly, but it could just be convergence
+
+[14:44] <jnthn> (On the gen2 collection rate)
+
+[14:44] <jnthn> number for 50,000 coming soon
+
+[14:45] <jnthn> 106472maxresident
+
+[14:45] <jnthn> Hmm
+
+[14:46] <timotimo> oh, can't go lower than 0.001
+
+[14:46] <timotimo> i wonder why that is?
+
+[14:46] <timotimo> um, huh
+
+[14:46] <timotimo> i removed the say "hi" and it no longer leaks
+
+[14:47] <jnthn> Because milliseconds is the resolution libuv offers
+
+[14:47] <timotimo> um, it doesn't do anything apparently?
+
+[14:47] <timotimo> there it is
+
+[14:47] <jnthn> I remember patching ThreadPoolScheduler to handle this case
+
+[14:47] <jnthn> (It sets anything < 1ms to be 1ms)
+
+[14:47] <timotimo> right, it says "using 1ms instead"
+
+[14:47] <timotimo> yes
+
+[14:47] <jnthn> Yeah
+
+[14:48] <timotimo> can you reproduce that? removing the say "hi" causes the leak to go away?
+
+[14:48] <Geth> MoarVM/inactivate-async-tasks: 4241f5e9e7 | (Jonathan Worthington)++ | 2 files
+
+[14:48] <Geth> MoarVM/inactivate-async-tasks: Add function to remove active work list entries.
+
+[14:48] <Geth> MoarVM/inactivate-async-tasks:
+
+[14:48] <Geth> MoarVM/inactivate-async-tasks: Later on, we can add re-use of the indexes, to prevent an ever-growing
+
+[14:48] <Geth> MoarVM/inactivate-async-tasks: array.
+
+[14:48] <Geth> MoarVM/inactivate-async-tasks: review: https://github.com/MoarVM/MoarVM/commit/4241f5e9e7
+
+[14:48] <Geth> MoarVM/inactivate-async-tasks: 4fad8111ad | (Jonathan Worthington)++ | 2 files
+
+[14:49] <Geth> MoarVM/inactivate-async-tasks: Have async procs and timers remove from active.
+
+[14:49] <Geth> MoarVM/inactivate-async-tasks: review: https://github.com/MoarVM/MoarVM/commit/4fad8111ad
+
+[14:51] <timotimo> so ... what happens inside say that causes this?
+
+[14:52] <timotimo> interesting! nqp::say also shows this behaviour
+
+[14:52] <jnthn> Well, I tried it with a longer string and got a larger leak
+
+[14:53] <jnthn> I don't see missing freeing fwiw
+
+[14:54] <jnthn> (in syncstream.c)
+
+[14:54] <timotimo> and we're not doing any normalizing or anything there?
+
+[14:54] <dogbert17_> juerd also wrote "Without "say", or with a loop {} instead of the react/whenever, no leaks."
+
+[14:54] <timotimo> yeah
+
+[14:54] <jnthn> No, it's a straight encode into a buffer
+
+[14:55] <jnthn> Which is then freed either on error or on I/O completion
+
+[14:55] <timotimo> and closing the uv runloop makes everything terminate fine?
+
+[14:55] <jnthn> We also free the libuv request handle on either case
+
+[14:55] <jnthn> In the callback on success
+
+[14:55] <timotimo> mhm
+
+[14:56] <jnthn> Does say in a loop have the issue?
+
+[14:56] <timotimo> doesn't seem so
+
+[14:56] <jnthn> without any async stuff?
+
+[14:58] <dogbert17_> is this react code doing any file system stuff behind the scenes?
+
+[14:58] * dogbert17_ was thinking about https://github.com/MoarVM/MoarVM/issues/407
+
+[15:04] <JimmyZ> https://github.com/libuv/libuv/blob/1a96fe33343f82721ba8bc93adb5a67ddcf70ec4/test/test-spawn.c#L307
+
+[15:06] <jnthn> dogbert17_: Don't believe so
+
+[15:06] <jnthn> (pretty sure $*OUT is a tty, and uses syncstream.c rather than syncfile.c)
+
+[15:07] <timotimo> looking up $*OUT over and over also doesn't do it btw
+
+[15:09] <timotimo> start { loop { say "hi" } }; sleep 1000   -   this leaks like an opened firehose
+
+[15:09] <timotimo> if the loop is not in the started thread, and the thread just does nothing, it won't leak
+
+[15:15] <jnthn> Ohhh
+
+[15:15] <jnthn> Duh
+
+[15:15] <jnthn> It's the classic libuv handles across threads thing. Again.
+
+[15:15] * jnthn tosses it on that heap
+
+[15:18] *** d4l3k_ joined
+[15:18] *** hoelzro_ joined
+[15:18] *** avarab joined
+[15:18] *** avarab joined
+[15:18] *** japhb_ joined
+[15:18] *** dalek joined
+[15:19] *** timotimo joined
+[15:23] <timotimo> hum. sending "hi" over a channel from a loop {} in the start {} and receiving it on the main thread to .say it also leaks a bunch
+
+[15:23] <timotimo> that didn't make it before my connection dropped
+
+[15:24] <timotimo> i also spouted some uncouth swear words about the libuv handles across threads thing
+
+[15:24] <timotimo> but those aren't necessary
+
+[15:28] <timotimo> jnthn: got a clue about the channel thing i just mentioned? it shouldn't be doing libuv handles across threads i don't think
+
+[15:29] <jnthn> No
+
+[15:29] <jnthn> Currently looking into sockets
+
+[15:30] <jnthn> Which I've also patched up to release AsyncTask
+
+[15:30] <jnthn> But still seem to leak something
+
+[15:30] <jnthn> Albeit not much either
+
+[15:30] <jnthn> But yeah, their AsyncTask handles are getting collected
+
+[15:30] <jnthn> There's less in memory after GC run 7 than there were at GC run 3 in the profile I'm looking at
+
+[15:31] *** FROGGS joined
+[15:31] <jnthn> huh, the heap profiler things the heap overall is smaller after collection 7 too
+
+[15:31] <jnthn> Wonder if it's an unmanaged leak
+
+[15:32] <Geth> MoarVM/inactivate-async-tasks: 2b015490c9 | (Jonathan Worthington)++ | 2 files
+
+[15:32] <Geth> MoarVM/inactivate-async-tasks: Active work cleanup for async sockets.
+
+[15:32] <Geth> MoarVM/inactivate-async-tasks: review: https://github.com/MoarVM/MoarVM/commit/2b015490c9
+
+[15:33] *** SmokeMachine joined
+[15:34] <timotimo> mhm
+
+[16:01] <Geth> MoarVM/inactivate-async-tasks: 96bc78da0e | (Jonathan Worthington)++ | src/6model/reprs/Decoder.c
+
+[16:01] <Geth> MoarVM/inactivate-async-tasks: Fix missing cleanup of managed DecodeStream.
+
+[16:01] <Geth> MoarVM/inactivate-async-tasks: review: https://github.com/MoarVM/MoarVM/commit/96bc78da0e
+
+[16:01] <Geth> MoarVM/inactivate-async-tasks: f84f2ca66c | (Jonathan Worthington)++ | src/strings/decode_stream.c
+
+[16:01] <Geth> MoarVM/inactivate-async-tasks: Have DecodeStrem clean leftover char buffers.
+
+[16:01] <Geth> MoarVM/inactivate-async-tasks:
+
+[16:01] <Geth> MoarVM/inactivate-async-tasks: This should be relatively unusual, but it seems it can happen.
+
+[16:01] <Geth> MoarVM/inactivate-async-tasks: review: https://github.com/MoarVM/MoarVM/commit/f84f2ca66c
+
+[16:15] <Geth> MoarVM: jnthn++ created pull request #506: Inactivate async tasks
+
+[16:15] <Geth> MoarVM: review: https://github.com/MoarVM/MoarVM/pull/506
+
+[16:20] <Geth> MoarVM/decode-stream-leaks: 60a25a5a5c | (Jonathan Worthington)++ | src/6model/reprs/Decoder.c
+
+[16:20] <Geth> MoarVM/decode-stream-leaks: Fix missing cleanup of managed DecodeStream.
+
+[16:20] <Geth> MoarVM/decode-stream-leaks: review: https://github.com/MoarVM/MoarVM/commit/60a25a5a5c
+
+[16:20] <Geth> MoarVM/decode-stream-leaks: 93b8e1de47 | (Jonathan Worthington)++ | src/strings/decode_stream.c
+
+[16:20] <Geth> MoarVM/decode-stream-leaks: Have DecodeStrem clean leftover char buffers.
+
+[16:20] <Geth> MoarVM/decode-stream-leaks:
+
+[16:20] <Geth> MoarVM/decode-stream-leaks: This should be relatively unusual, but it seems it can happen.
+
+[16:20] <Geth> MoarVM/decode-stream-leaks: review: https://github.com/MoarVM/MoarVM/commit/93b8e1de47
+
+[16:20] <Geth> MoarVM/decode-stream-leaks: e8b31690d8 | (Jonathan Worthington)++ | 10 files
+
+[16:20] <Geth> MoarVM/decode-stream-leaks: Fix a typo in decode stream destroy function.
+
+[16:20] <Geth> MoarVM/decode-stream-leaks: review: https://github.com/MoarVM/MoarVM/commit/e8b31690d8
+
+[16:21] <Geth> MoarVM: jnthn++ created pull request #507: Fix decode stream leaks
+
+[16:21] <Geth> MoarVM: review: https://github.com/MoarVM/MoarVM/pull/507
+
+[16:21] <jnthn> 2 PRs :)
+
+[16:24] <Geth> MoarVM: 396ee37207 | (Jonathan Worthington)++ | src/core/frame.h
+
+[16:24] <Geth> MoarVM: Fix typo in function declaration.
+
+[16:24] <Geth> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/396ee37207
+
+[16:24] <Geth> MoarVM: 787022deb8 | (Jonathan Worthington)++ | src/spesh/graph.h
+
+[16:24] <Geth> MoarVM: Fix typo in a comment.
+
+[16:24] <Geth> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/787022deb8
+
+[16:24] <Geth> MoarVM: 696883728b | (Jonathan Worthington)++ | src/strings/unicode_ops.c
+
+[16:24] <Geth> MoarVM: Fix compile warning in unicode.c.
+
+[16:24] <Geth> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/696883728b
+
+[16:30] <ilmari> there are still 16 occurrences of 'destory'
+
+[16:31] <ilmari> specifically MVM_string_decodestream_destory
+
+[16:31] <jnthn> ilmari: fixed in the PR I filed
+
+[16:32] <ilmari> jnthn: ah
+
+[16:32] <jnthn> (Which was primarily about fixing a leak in decode stream, which is when I noticed the typo :))
+
+[16:33] <nine> jnthn: just wondering. When you access tc->instance->event_loop_active twice in a function. Could there be anything gained by assigning it to a const and access that instead? Or are modern compilers smart enough so it won't make a difference?
+
+[16:34] <nine> And yes, I just like to micro optimize :) Can't help it
+
+[16:34] <Geth> MoarVM: MasterDuke17++ created pull request #508: Fix typo in comment
+
+[16:34] <Geth> MoarVM: review: https://github.com/MoarVM/MoarVM/pull/508
+
+[16:34] <jnthn> nine: I'd hope a modern compiler would get that one :)
+
+[16:35] <jnthn> It happens in one place now after the refactor, though, so we can easily tweak it if we want :)
+
+[16:35] <ilmari> compare the generated asm with and without?
+
+[16:36] <jnthn> It's just not that much of a hot path
+
+[16:36] <jnthn> If you're on this path you're doing either I/O or a timer
+
+[16:37] <Geth> MoarVM: 46cfabe290 | MasterDuke17++ | src/spesh/candidate.c
+
+[16:37] <Geth> MoarVM: Fix typo in comment
+
+[16:37] <Geth> MoarVM:
+
+[16:37] <Geth> MoarVM: Final destory->destroy?
+
+[16:37] <Geth> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/46cfabe290
+
+[16:37] <Geth> MoarVM: 870eeecf42 | (Jonathan Worthington)++ | src/spesh/candidate.c
+
+[16:37] <Geth> MoarVM: Merge pull request #508 from MasterDuke17/patch-1
+
+[16:37] <Geth> MoarVM:
+
+[16:37] <Geth> MoarVM: Fix typo in comment
+
+[16:37] <Geth> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/870eeecf42
+
+[16:37] <nine> Actually I can't imagine it being smart enough. It would have to know that MVM_repr_elems doesn't change *tc.
+
+[16:38] <jnthn> Which it...oh, hmm, there's a virtual call on that path
+
+[16:38] <nine> And as MVM_repr_elems passes tc to a function referenced by a pointer...
+
+[16:38] <jnthn> So LTO probably can't get it
+
+[16:38] <jnthn> Yeah
+
+[16:38] <jnthn> I still think we've spent more time discussing it than changing it will ever save. :)
+
+[16:38] *** brrt joined
+[16:38] <nine> Yeah, this is more about furthering my understanding of C than anything else :)
+
+[16:39] <jnthn> *nod*
+
+[16:39] <jnthn> Yeah, I forgot about the virtual call
+
+[16:40] * brrt will look at the PRs
+
+[16:40] <brrt> i'm getting 'cannot parse source' errors on NQP build
+
+[16:40] <brrt> correction, i was getting them, but am not getting them on master
+
+[16:40] <brrt> perhaps my master is out of date
+
+[16:40] <brrt> (my merge of master in even-moar-jit)
+
+[16:43] <brrt> the decodestream thing looks very sane to me
+
+[16:43] <jnthn> bbi15
+
+[16:45] <brrt> (phew, seems removing rax as an available register didn't cause that much problems after all :-o)
+
+[16:46] <brrt> btw, if we *do* run into the situation in which removing a register is very painfull, we have 2 nonvolatile registers which we can allocate
+
+[16:47] <brrt> just means that we have to take care of that in the function prologue/epilogue
+
+[16:49] <JimmyZ> or remove another one and keep rax
+
+[16:50] <brrt> well, removing rax is arguably beneficial, as i've argued before
+
+[16:50] <JimmyZ> ah
+
+[16:51] <JimmyZ> I just know  compiler uses rax as storing return value :)
+
+[16:51] <brrt> yeah…. well, hmmm
+
+[16:52] <nine> jnthn: so in short, you keep a reference counter for async_tasks in the associated SpawnInfo and use that for deciding whether to keep the async_task alive by way of a reference from the event_loop_active array. Sounds entirely sane :)
+
+[16:52] <brrt> the idea is that if we reserve rax, at worst we have to issue some copies; while if we reserve something else (say r11 or r10), then we're going to have to issue spills whenever we need rax, for instance for div
+
+[16:53] <brrt> or cqo (convert quadword to octoword)
+
+[16:53] <nine> jnthn: re-using slots in that array sounds like a good opportunity to re-use the Parrot Pointer Array trick :)
+
+[16:53] <brrt> what's the parrot pointer array trick?
+
+[16:53] <nine> Though this is probably cold-path enough to just loop until finding a VMNull
+
+[16:55] <nine> brrt: the PPA keeps a pointer to the last free'd slot in the array. The pointer in that slot points to the slot free'd before that but is marked as a deleted slot by setting the LSB. So in essence you have a linked list of freed slot in the array, making all operations pretty much O(1)
+
+[16:56] <brrt> aha, i see
+
+[16:56] <nine> I find this so cute that it made reading all that parrot source totally worth the countless hours for me :)
+
+[16:56] <brrt> that is a pretty nice trick
+
+[16:57] * brrt recalls seeing that in some other context
+
+[16:57] <nine> I also use it in Inline::Perl5's ObjectKeeper which solves pretty much the same problem as the event_loop_active array: https://github.com/niner/Inline-Perl5/blob/master/lib/Inline/Perl5.pm6#L31
+
+[16:58] <brrt> i'm not sure i 100% get the trick that inactive-async-tasks uses
+
+[16:59] <brrt> why only increment on spawn and decrement on read?
+
+[16:59] *** Ven joined
+[17:01] <jnthn> Having to ref-count is actually specific to the processing spawning case.
+
+[17:02] <jnthn> Where the same AsyncTask is used for all of stdout reads, stderr reads, and the process termination
+
+[17:02] <jnthn> And those 3 events can arrive in any order
+
+[17:02] <jnthn> The read functions where we decrement are specific to spawn also.
+
+[17:03] *** brrt joined
+[17:03] <jnthn> nine: About the pointer trick: it's neat, but this is a GC-managed array, so we won't get away with such tricks, sadly
+
+[17:03] <jnthn> nine: My plan was just to keep an integer stack :)
+
+[17:03] <jnthn> So we push free indices onto it and pop them offf
+
+[17:04] <jnthn> The LRU nature of it standing at least some chance of giving you a slot in cache...
+
+[17:13] *** Ven joined
+[17:25] *** domidumont joined
+[17:43] *** Ven joined
+[17:59] *** Ven joined
+[18:16] *** domidumont joined
+[18:24] *** Ven_ joined
+[19:28] <timotimo> i've wondered today if i should change smallbigint to use the least significant one or two bits in the mp_int pointer to signal "this isn't a pointer" and we'd have either 63 or 62 bit smallbigints
+
+[19:28] <timotimo> (and of course pointers are only 32bit on 32bit systems, i forgot how we handle that at the moment)
+
+[19:47] *** brrt joined
+[19:51] <nine> Well, why not?
+
+[19:58] <jnthn> The reason for the 32-bit limit was not about storage
+
+[19:59] <jnthn> It was because if you do most operations on 2 integers that are known to be within the 32-bit range, and you do it at 64-bits, then you know you will not have an overflow situation
+
+[20:00] <jnthn> dinner; bbl
+
+[20:33] <timotimo> oh, i forgot about that
+
+[20:36] <arnsholt> timotimo: Sounds ripe for a comment, perhaps?
+
+[23:49] <Geth> MoarVM: MasterDuke17++ created pull request #509: Remove 'SETTING::' from line directive filenames
+
+[23:49] <Geth> MoarVM: review: https://github.com/MoarVM/MoarVM/pull/509
+
+[23:54] <Geth> MoarVM/line_based_coverage_5: 85b19c1b9c | (Daniel Green)++ | tools/parse_coverage_report.p6
+
+[23:54] <Geth> MoarVM/line_based_coverage_5: Remove 'SETTING::' from line directive filenames
+
+[23:54] <Geth> MoarVM/line_based_coverage_5: review: https://github.com/MoarVM/MoarVM/commit/85b19c1b9c
+
+[23:54] <Geth> MoarVM/line_based_coverage_5: cbc8cb8063 | (Jonathan Worthington)++ | tools/parse_coverage_report.p6
+
+[23:54] <Geth> MoarVM/line_based_coverage_5: Merge pull request #509 from MasterDuke17/line_based_coverage_5
+
+[23:54] <Geth> MoarVM/line_based_coverage_5:
+
+[23:54] <Geth> MoarVM/line_based_coverage_5: Remove 'SETTING::' from line directive filenames
+
+[23:54] <Geth> MoarVM/line_based_coverage_5: review: https://github.com/MoarVM/MoarVM/commit/cbc8cb8063

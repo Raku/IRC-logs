@@ -1,0 +1,232 @@
+[00:06] *** vendethiel joined
+[00:33] <timotimo> by using nqp::bindpos directly in the code, i get the true potential of this code
+
+[00:34] <timotimo> which is a median 48 FPS with a 95th percentile of 50.9 fps (and a 5th percentile of 34.3 fps)
+
+[00:34] <timotimo> and only two GC runs during the whole thing, even though i'm filling an array with frame timings
+
+[00:46] *** vendethiel joined
+[00:50] <timotimo> by turning Bool.roll into rand_n(1e0) < 0.5e0 i get between 158 and 83 fps
+
+[00:50] <timotimo> (though 83 is the 5th percentile, the 25th percentile and 75th percentile are 141.5 and 154 fps respectively)
+
+[01:01] <diakopter> what is fps in this case
+
+[01:01] <timotimo> frames per second of building a 320x240px big image of black and white pixels
+
+[01:01] <timotimo> in this case i'm using a pixelmode that has 8 bits per pixel, 332 bits for RGB respectively
+
+[01:02] <diakopter> ah
+
+[01:05] <timotimo> now that i don't have the p6box_i problem any more (because i uglified the code) i can try RGB888 again
+
+[01:06] <timotimo> that gives me a peak framerate of 173 and median 159
+
+[01:06] <timotimo> that doesn't seem right :D
+
+[01:07] <timotimo> but what do i know, perhaps it's faster because the hardware likes that format much more? but the functions that'd be responsible for moving that texture data around didn't even show up in my profiles
+
+[01:09] <diakopter> I don't see how it wouldn't be right
+
+[01:09] <diakopter> doesn't seem too fast to me
+
+[01:09] <timotimo> it's not fast, no
+
+[01:10] <timotimo> there's still lots and lots of overhead
+
+[01:10] <diakopter> I mean, thousands of frames per second might be too fast
+
+[01:10] <timotimo> yeah
+
+[01:13] <timotimo> 13.18% "self" time in get_int says perf
+
+[01:14] <timotimo> that seems to be the candidate from P6opaque maybe? i can't really tell from the disassembly alone, as for some reason it doesn't seem to show the source file name
+
+[01:15] <timotimo> yeah, looks like it is
+
+[01:15] <timotimo> 7.8% self-time spent in generating more numbers from our tiny mersenne twister random number generator
+
+[01:15] <timotimo> 5.5% self-time spent in sc_get_object. interesting.
+
+[01:16] <timotimo> 3.4% and 3.2% in MV_sc_get_sc_object and MVM_sc_get_sc
+
+[01:17] <timotimo> the first time i see something from i965_dri.so (intel graphics card driver) show up is at 0.25% children and self-time
+
+[01:19] <timotimo> i'm heading towards bed
+
+[01:50] *** vendethiel joined
+[04:14] *** vendethiel joined
+[06:08] *** vendethiel joined
+[07:30] *** vendethiel- joined
+[07:45] *** domidumont joined
+[07:47] *** FROGGS joined
+[07:51] *** domidumont joined
+[08:06] *** zakharyas joined
+[08:35] <lizmat> timotimo: I'm surprised at that difference with Bool.roll, as that is defined as:
+
+[08:35] <lizmat> multi method roll(Bool:U:)    { nqp::p6bool(nqp::isge_n(nqp::rand_n(2e0), 1e0))
+
+[08:35] <lizmat> looks like to me that should get inlined, and then only the p6bool would be extra ?
+
+[08:35] <lizmat> which I was told, was a very cheap operation?  (apparently not?)
+
+[09:12] *** vendethiel joined
+[09:30] *** zakharyas joined
+[10:02] <jnthn> p6bool is; will have to look at exactly what code we're producing after optimization there...
+
+[10:11] *** vendethiel joined
+[12:54] <timotimo> oh. roll isn't being jitted, nor inlined. it *could* be the jit doesn't know about it yet, eh?
+
+[13:00] <jnthn> Is it being specialized?
+
+[13:04] <timotimo> the frame? yes
+
+[13:04] <jnthn> k
+
+[13:04] <jnthn> Maybe we don't JIT rand_n yet?
+
+[13:05] <timotimo> p6bool could probably be specialized into a branch with two wval or getspeshslot calls at the end of 'em
+
+[13:06] <timotimo> we do jit randscale_n, which is what rand_n turns into, iiuc
+
+[13:07] <jnthn> ah, k
+
+[13:07] <jnthn> Guess we'll have to look at the baillog then :)
+
+[13:09] <timotimo> huh. i see a method roll be jitted here
+
+[13:10] <timotimo> let's see ...
+
+[13:10] <timotimo> it shows up as explicitly spesh-entered in the routines tab, though
+
+[13:11] <timotimo> could be the same kind of failure we're having related to counting the int objects that get boxed by returning from postcircumfix:<[ ]> or ASSIGN-POS
+
+[13:11] <timotimo> perhaps multiple consecutive inlines break something in our pipeline
+
+[13:13] <timotimo> i randomly saw atposref_i doesn't get jitted; that could have some effect on the performance of lowercase-int arrays
+
+[13:15] <timotimo> ASSIGN-POS
+
+[13:15] <timotimo> perl#sources/51E302443A2C8FF185ABC10CA1E5520EFEE885A1 (NativeCall::Types):83
+
+[13:15] <timotimo> ^- this. i like this.
+
+[13:16] <timotimo> /home/timo/perl6/ecosystem/SDL2_raw-p6/lib/.precomp/73D4D4C93FE31C1CCF2B20A1F7D157ECB4E85699.1456073030.9528/B2/B2B2B60DC07CD98A96F95F0EDE4CD9790DD4C56D:<unknown>  <- this ... not so much
+
+[14:07] <BinGOs> is 'compiling src/core/interp.o' supposed to take a long time?
+
+[14:08] <FROGGS> BinGOs: with clang, yes
+
+[14:08] <FROGGS> takes seconds with gcc, but potentially minutes with clang
+
+[14:08] <timotimo> yeah, clang is obnoxiously slow at that one
+
+[14:09] <FROGGS> (it is a huuuuuuge switch statement)
+
+[14:09] <jnthn> Well, huge computed goto in clang/gcc also
+
+[14:09] <BinGOs> 23409 bingos        1 103    0 98708K 93252K CPU2    2   5:21 100.00% clang
+
+[14:09] <FROGGS> yeah
+
+[14:09] * BinGOs sighs.
+
+[14:09] <jnthn> optimizers gone wild
+
+[14:09] <BinGOs> okay I shall exercise patience.
+
+[14:10] <geekosaur> there's a file in the clang/llvm source code that translates ARM assembler opcodes. it can take hours to compile with clang
+
+[14:10] <BinGOs> I have another 3 CPUs
+
+[14:27] *** colomon joined
+[15:12] <BinGOs> This is Rakudo version 2016.02-5-g96a1954 built on MoarVM version 2016.02
+
+[15:12] <BinGOs> yay.
+
+[15:13] <lizmat> :-)
+
+[15:27] *** vendethiel joined
+[16:59] *** colomon joined
+[17:29] *** vendethiel joined
+[18:22] *** patrickz joined
+[19:22] *** FROGGS joined
+[19:34] *** colomon joined
+[20:14] *** domidumont joined
+[20:59] *** TimToady joined
+[21:10] *** colomon joined
+[22:20] <timotimo> what's the major difficulty i'm likely not seeing for moving freeing of stuff into a separate thread?
+
+[22:20] <jnthn> Well, the icky races mostly
+
+[22:21] <jnthn> What if it's still freeing when the mutator triggers another collection, etc.
+
+[22:21] <timotimo> mhm
+
+[22:21] <timotimo> what kind of datastructure do we have that'd be good for passing the data around? just an array with a semaphor? perhaps one inbox-array per thread that's under the control of the freeing thread?
+
+[22:21] <jnthn> We don't need to pass data around really...
+
+[22:22] <jnthn> Well, hm
+
+[22:22] <jnthn> It's a bit tricky :)
+
+[22:22] <timotimo> there needs to be some kind of command queue or something
+
+[22:22] <jnthn> Sorta
+
+[22:22] <jnthn> I was thinking of running a general "service" thread that can do this, but also spesh
+
+[22:22] <jnthn> Need to think about it when I've not been busy thinking about $dayjob stuff :)
+
+[22:23] <timotimo> ah, right, right
+
+[22:23] <timotimo> maybe it's not something i should try to tackle without some design work from you up front
+
+[22:24] <timotimo> thoughts about a heap explorer and potential ways to implement it have been terrorizing me when i tried to sleep myself to health during the day
+
+[22:27] <timotimo> i was thinking that perhaps the explorer might want to be a separate process. with ptrace on linux it could attach to the moarvm process and then read /proc/$pid/mem with seek and read to read out data
+
+[22:27] <timotimo> but that's hardly cross-platform
+
+[22:38] <timotimo> OTOH, if i have to stop the whole thing anyway, might as well have something inside moar's process (dynamically loaded comes to mind) and dig around in its own memory, because that's bound to be quite a bit faster than going through syscalls
+
+[23:01] *** BinGOs joined
+[23:01] *** timotimo joined
+[23:01] *** harrow joined
+[23:01] *** ashleydev joined
+[23:01] *** lnx joined
+[23:01] *** geekosaur joined
+[23:01] *** camelia joined
+[23:01] *** [Coke] joined
+[23:01] *** moritz joined
+[23:01] *** mst joined
+[23:01] *** cognominal joined
+[23:01] *** xiaomiao joined
+[23:01] *** leedo joined
+[23:01] *** nebuchadnezzar joined
+[23:01] *** pochi joined
+[23:01] *** ilmari joined
+[23:01] *** jnthn joined
+[23:01] *** nwc10 joined
+[23:01] *** retupmoca joined
+[23:01] *** dalek joined
+[23:01] *** _longines joined
+[23:01] *** synopsebot6 joined
+[23:01] *** hoelzro joined
+[23:01] *** flussence joined
+[23:01] *** sivoais joined
+[23:01] *** avar joined
+[23:01] *** FROGGS joined
+[23:03] *** pyrimidine joined
+[23:03] *** orbus joined
+[23:03] *** mtj_ joined
+[23:03] *** khagan joined
+[23:03] *** colomon joined
+[23:06] *** patrickz joined
+[23:06] *** ggoebel16 joined
+[23:06] *** lizmat joined
+[23:06] *** nine joined
+[23:06] *** ChanServ joined
+[23:07] *** lizmat_ joined
+[23:09] *** vendethiel joined

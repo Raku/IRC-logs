@@ -1,0 +1,833 @@
+[00:06] <jnthn> Will do the "fun parts" of that tomorrow. 'night
+
+[00:27] *** mst left
+[00:34] *** mst joined
+[00:34] *** mst left
+[00:34] *** mst joined
+[00:34] *** ChanServ sets mode: +o mst
+
+[01:04] *** Kaypie left
+[01:05] *** lizmat left
+[03:00] *** Kaypie joined
+[03:53] *** MasterDuke left
+[06:25] *** robertle joined
+[06:25] *** nebuchadnezzar joined
+[07:10] *** domidumont joined
+[07:17] *** domidumont left
+[07:18] *** domidumont joined
+[07:44] *** lizmat joined
+[07:58] *** ilogger2 joined
+[09:01] <lizmat> good *
+
+[09:01] <lizmat> how are we doing on the GSR (Great Scalar Refactor) today ?
+
+[09:03] <jnthn> lizmat: Well, we aren't, in that so far as I'm aware of all regressions arising from the rescalar merge are resolved.
+
+[09:03] <jnthn> lizmat: What's left largely seems to be issues exposed by more aggressive inlining
+
+[09:06] <samcv> ok so i've been working on the SCRef crash
+
+[09:07] <samcv> so i have a solution though it's not totally elegant. but also makes me more confused. well the solution is to just iterate through the whole hash and if we find the pointer we delete it
+
+[09:07] <samcv> and i checked which bucket it thought it'd be in based on the hashv and it gives a different one than where it actually finds it
+
+[09:09] <jnthn> o.O
+
+[09:09] <jnthn> Odd
+
+[09:09] <lizmat> if I run t/spec/S06-currying/positional.t with MVM_JIT_DISABLE=1 I get:
+
+[09:09] <jnthn> Is this the SC weakhash?
+
+[09:09] <lizmat> ===SORRY!===
+
+[09:09] <lizmat> SC not yet resolved; lookup failed
+
+[09:10] <jnthn> haha... :)
+
+[09:10] <lizmat> which is weird, as it looks like a compile error ?
+
+[09:10] <jnthn> Perfect timing :P
+
+[09:10] <jnthn> lizmat: Well, SORRY means that it broke during compile time
+
+[09:11] <lizmat> indeed, but the script had been running 100_+ tests at the time
+
+[09:11] <samcv> jnthn: yes. very odd
+
+[09:11] <jnthn> samcv: Yeah, though that hash is a tad special in that I think we mark it fairly late on to try and weaken its content
+
+[09:11] <samcv> Expecting it in bucket 4 (Total buckets 64)
+
+[09:11] <samcv> Actually found in bucket 20
+
+[09:11] <samcv> Expecting it in bucket 4 (Total buckets 64)
+
+[09:11] <samcv> Actually found in bucket 1
+
+[09:11] <samcv> Expecting it in bucket 4 (Total buckets 64)
+
+[09:11] <lizmat> ah, some Test::Assuming under the hood
+
+[09:11] <samcv> Actually found in bucket 25
+
+[09:11] <samcv> see ^
+
+[09:11] <jnthn> lizmat: I think maybe it's that .assuming uses EVAL on the inside too
+
+[09:11] <samcv> so… wtf
+
+[09:12] <jnthn> samcv: wtf indeed...it's special but not *that* special
+
+[09:12] <lizmat> jnthn: yeah, doublechecking that
+
+[09:12] <samcv> where are we putting it into the hash?
+
+[09:12] <samcv> i mean i'm not sure what code we're using for that
+
+[09:12] <samcv> it's obviously using some other information than just the hash value
+
+[09:12] <jnthn> I think there's two paths
+
+[09:12] <jnthn> One is if we create an SC from the op for doing so
+
+[09:13] <jnthn> Another is if we see an SC dependency in a bytecode file we're loading, then we put it in there to resovle later
+
+[09:13] <jnthn> Lemme see if I can find where those happen
+
+[09:13] <samcv> i mean this tells me why it wasn't working right when i tried to locate the key in the hash though :)
+
+[09:13] <lizmat> jnthn: yeah, Test::Assuming uses Code.assuming, which uses EVAL
+
+[09:14] <jnthn> samcv: MVM_sc_create in src/6model/sc.c is handling the first path and is called directly from the interpreter
+
+[09:15] <jnthn> samcv: The second case is in deserialize_sc_deps in src/core/bytecode.c
+
+[09:18] <dogbert2> good *, I see a hive of activity here. Does that mean that all ENOCOFFEE/TEA errors have been resolved :)
+
+[09:18] <jnthn> lizmat: That said, there *is* a problem with bogus SORRY
+
+[09:19] <lizmat> jnthn: anything I can do to help, track it further down ?
+
+[09:19] <jnthn> lizmat: A couple of my compilers written in Perl 6 (private projects) have `compile` multis, and it wrongly reports SORRY for those
+
+[09:19] <samcv> dogbert2: i need tea tbh
+
+[09:19] <jnthn> m: multi compile(Int $x) { }; compile(42.Str)
+
+[09:19] <camelia> rakudo-moar dd0cea31a: OUTPUT: «Cannot resolve caller compile(Str); none of these signatures match:␤    (Int $x)␤  in block <unit> at <tmp> line 1␤␤»
+
+[09:19] <jnthn> m: class C { multi method compile(Int $x) { } }; C.compile(42.Str)
+
+[09:19] <camelia> rakudo-moar dd0cea31a: OUTPUT: «Cannot resolve caller compile(C: Str); none of these signatures match:␤    (C: Int $x, *%_)␤  in block <unit> at <tmp> line 1␤␤»
+
+[09:19] <lizmat> that seems valid ?
+
+[09:20] <jnthn> Hmm, but that doesn't trigger it :(
+
+[09:20] <jnthn> Yeah, that's now what I've seen elsewhere.
+
+[09:20] <jnthn> I'll have to try and golf it at some point
+
+[09:24] <dogbert2> jnthn: so what are you up to today, more regressions?
+
+[09:25] <jnthn> Working on the new frame walker
+
+[09:25] <dogbert2> the one you started on last night?
+
+[09:25] <jnthn> Yeah. Just digging in to the headache part of it :)
+
+[09:26] <dogbert2> uh oh
+
+[09:26] <dogbert2> m: my @a = []; for ^10 { POST @a.push($_); 42 }; say @a
+
+[09:26] <camelia> rakudo-moar dd0cea31a: OUTPUT: «WARNINGS for <tmp>:␤[(Mu) (Mu) (Mu) (Mu) (Mu) (Mu) (Mu) (Mu) (Mu) (Mu)]␤Useless use of constant integer 42 in sink context (line 1)␤»
+
+[09:27] <lizmat> dogbert2: yeah, I believe that's one of the fails that occurred after the last MoarVM bump that *I* did
+
+[09:27] <samcv> jnthn: as well, this seems like a huge red flag, if we actually try and find the hash value we'll never find it. though maybe we never look for it?
+
+[09:27] <samcv> or only iterate the hash or something?
+
+[09:28] <lizmat> dogbert2: 359ac12d9753fc87d2
+
+[09:28] <dogbert2> lizmat: this is the failing test from t/spec/S04-phasers/in-loop.t
+
+[09:28] <lizmat> yup, that's the one: it started failing after I did 359ac12d9753fc87d2
+
+[09:30] <dogbert2> yes, you're right, it seems as if I'm the one suffering from ENOCOFFEE :(
+
+[09:49] <Geth> ¦ MoarVM: 85bf30b0bc | (Samantha McVey)++ | 2 files
+
+[09:49] <Geth> ¦ MoarVM: In SCRef gc_free search hash for pointer manually to delete (fix SEGV)
+
+[09:49] <Geth> ¦ MoarVM:
+
+[09:49] <Geth> ¦ MoarVM: This is a workaround to get gc_free actually removing entries from the
+
+[09:49] <Geth> ¦ MoarVM: hash. It patches over an issue where the hash handle is not in the
+
+[09:49] <Geth> ¦ MoarVM: bucket we would expect based on its hash value + num_buckets. This fixes
+
+[09:49] <Geth> ¦ MoarVM: the SEGV. See issue #906
+
+[09:49] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/85bf30b0bc
+
+[09:52] *** zakharyas joined
+[10:04] <dogbert2> src/strings/uthash.h:361:5: error: ISO C90 forbids mixed declarations and code [-Werror=declaration-after-statement]
+
+[10:04] <dogbert2>      struct UT_hash_table *ht;\
+
+[10:05] <dogbert2> samcv ^^
+
+[10:05] <samcv> b-but i want toooooooo :(
+
+[10:05] <dogbert2> :)
+
+[10:06] <samcv> also it shouldn't say that unless you set HASH_DELETE_PTR_DEBUG_SET?
+
+[10:06] <samcv> or maybe it somehow does...
+
+[10:06] <dogbert2> just did a git pull
+
+[10:06] <samcv> well there is a macro that should go away
+
+[10:06] <dogbert2> src/6model/reprs/SCRef.c:116:5: note: in expansion of macro ‘HASH_DELETE_PTR’
+
+[10:06] <dogbert2>      HASH_DELETE_PTR(tc, hash_handle, tc->instance->sc_weakhash, sc->body, MVMSerializationContextBody);
+
+[10:08] <samcv> not sure why it's showing up when the macro removes it. though i guess it depends on how the compiler internally represents things
+
+[10:08] <samcv> since if you just used a preprocessor before compile it'd probably just remove any text there. anyway i will fix
+
+[10:09] <lizmat> samcv: that last fix indeed fixed the segfaults in spectest
+
+[10:09] <samcv> also msvc seems mad
+
+[10:09] <lizmat> however, it didn't fix the test dogbert2 mentioned earlier
+
+[10:09] <jnthn> MSVC gets made about declaration after statement
+
+[10:09] <jnthn> *mad
+
+[10:09] <samcv> ugh
+
+[10:10] <samcv> lizmat: which one?
+
+[10:10] <lizmat> S04-phasers/in-loop.t
+
+[10:10] <lizmat> test 14
+
+[10:11] <jnthn> I think that one is unrelated to hashing changes
+
+[10:11] <Geth> ¦ MoarVM: 0daa14c874 | (Samantha McVey)++ | src/strings/uthash.h
+
+[10:11] <Geth> ¦ MoarVM: Make sure declarations happen before code
+
+[10:11] <Geth> ¦ MoarVM:
+
+[10:11] <Geth> ¦ MoarVM: Even though the macro should remove the code, it seems plausible that
+
+[10:11] <Geth> ¦ MoarVM: it still triggers the compiler error/warning anyway. So move the
+
+[10:11] <Geth> ¦ MoarVM: declaration after the macro.
+
+[10:11] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/0daa14c874
+
+[10:12] *** travis-ci joined
+[10:12] <travis-ci> MoarVM build failed. Samantha McVey 'In SCRef gc_free search hash for pointer manually to delete (fix SEGV)
+
+[10:12] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/404816883 https://github.com/MoarVM/MoarVM/compare/2f807cd59c7d...85bf30b0bc07
+
+[10:12] *** travis-ci left
+[10:13] <samcv> thanks travis :)
+
+[10:13] *** robertle joined
+[10:19] <dogbert2> samcv++ it works perfectly and the SEGV is gone
+
+[10:20] <samcv> not sure if i said it here but said it in #perl6-dev and put it on the issue https://github.com/MoarVM/MoarVM/issues/906#issuecomment-405526393
+
+[10:20] <samcv> my fix probaly fixes other more rare issues
+
+[10:23] <samcv> (or not rare) but at least not as common. if the thing we tried to delete was the first thing in a bucket it would cause the scref hash to get messed up
+
+[10:23] <samcv> when we delete it. well actually it'd probably cause it NOT to be deleted
+
+[10:26] <samcv> well it'd actually mess up the count of items in each bucket as well but that won't cause any crashes
+
+[10:31] <dogbert2> now the number of failed spectests has gone down
+
+[10:40] *** brrt joined
+[10:40] <brrt> \o
+
+[10:40] <yoleaux> 16 Jul 2018 20:07Z <geekosaur> brrt: I disabled spesh entirely and still got them. there were segfaults coming from gc after a recent patch though, which seem unrelated.
+
+[10:40] <yoleaux> 16 Jul 2018 20:07Z <geekosaur> brrt: (unrelated to spesh, that is)
+
+[10:40] <brrt> i suspect samcv++ has just fixed that
+
+[10:40] <lizmat> brrt: I thnk so
+
+[10:40] <brrt> jnthn: was there something expr JIT breaking?
+
+[10:40] <lizmat> *think
+
+[10:41] <brrt> also, was there some urgency to the request for the expr JIT guard implementation?
+
+[10:42] <jnthn> Whoa...so I was just refactoring deopt, trying to work out how on earth my refactor had broken things, so went back and did it step by step
+
+[10:42] <jnthn> Just discovered: https://github.com/MoarVM/MoarVM/blob/master/src/spesh/deopt.c#L292
+
+[10:43] <jnthn> What on earth is that break doing there?
+
+[10:44] <brrt> i dunno but I think that's been there for ages
+
+[10:44] <jnthn> It's basically meaning in JIT mode we deopt less, I guess?
+
+[10:45] <brrt> there's a very similar break in the other branch of that if
+
+[10:45] <jnthn> And the error matches https://github.com/rakudo/rakudo/issues/2072
+
+[10:45] <jnthn> Yes, because that's brekaing out of the enclosing for loop
+
+[10:45] <jnthn> So basically that break means we don't really deopt the whole stack
+
+[10:45] <brrt> d'oh
+
+[10:45] <jnthn> And thus hides a deopt bug but only when we JIT
+
+[10:46] * brrt is not sure whether to smile about this
+
+[10:46] * brrt isn't sure whether he can claim that it is there for that purpose
+
+[10:47] <jnthn> Apparently hiding bugs :P :P
+
+[10:47] <jnthn> Anyway, this does at least mean I don't need to find a 32-bit system to debug that issue :P
+
+[10:49] <brrt> :-)
+
+[10:52] <jnthn> But it does mean one more thing to fix
+
+[10:53] <samcv> ok to make things weirder. i added code in HASH_FSCK to check if things were in the correct bucket and it didn't cause any issues. but i'm not sure how that could be given i can't find it in the right bucket
+
+[10:58] <Geth> ¦ MoarVM/frame-walker: 6ae63d2a5b | (Jonathan Worthington)++ | 2 files
+
+[10:58] <Geth> ¦ MoarVM/frame-walker: Factor deopt index finding out of deopt all
+
+[10:58] <Geth> ¦ MoarVM/frame-walker:
+
+[10:58] <Geth> ¦ MoarVM/frame-walker: So that we can re-use this part of the functionality in the frame
+
+[10:58] <Geth> ¦ MoarVM/frame-walker: walker. This also reduces the complexity and eliminates duplication in
+
+[10:58] <Geth> ¦ MoarVM/frame-walker: deopt_all as a pleasant side-effect.
+
+[10:58] <Geth> ¦ MoarVM/frame-walker: review: https://github.com/MoarVM/MoarVM/commit/6ae63d2a5b
+
+[10:59] *** stmuk joined
+[11:05] <samcv> jnthn: ok well it seems that it's in the right bucket given its hashv, but if you try and find it based on what's in .key and .keylen it won't give the same hashv
+
+[11:05] <samcv> so maybe the data changes or something, or something else very weird
+
+[11:08] <timotimo> let's look for really improbable things
+
+[11:08] <timotimo> like, do we somehow have multiple versions of our hash code in our codebase and the sc one just happens to use other code?
+
+[11:09] <timotimo> nah, it just includes moar.h like everything else
+
+[11:13] <samcv> timotimo: i'm thinking maybe the data changes? that's only thing i can think of
+
+[11:14] <timotimo> maybe it'd be worthwhile to have a debug mode for hashes that complains if multiple threads try to modify it at the same time, but it's rather unlikely that we've forgotten to use the mutex for the weakhash somewhere ...
+
+[11:15] <timotimo> hm, can't MVM_cu_string allocate?
+
+[11:16] <timotimo> the only thing that gets used after MVM_cu_string in deserialize_sc_deps is cu->common.header in the ASSIGN_REF, though
+
+[11:17] <timotimo> haha, "make instacc"
+
+[11:17] <timotimo> wouldn't that be nice, a C compler that finishes instantly ...
+
+[11:18] <nwc10> It generates a binary that SEGVs whenever run?
+
+[11:18] <nwc10> after all, any non-trivial C code has *some* undefined behaviour in it...
+
+[11:19] <timotimo> t/spec/S06-currying/positional.t - is that the one that we're getting the error from, samcv?
+
+[11:19] <samcv> well no error anymore. but yes
+
+[11:19] <lizmat> that one got fixed
+
+[11:19] <timotimo> how reliable is it?
+
+[11:19] <samcv> well fully reliable fix
+
+[11:20] <timotimo> which test file were you working on where the buckets didn't match?
+
+[11:20] <samcv> that test fix you mentioned
+
+[11:20] <timotimo> hm
+
+[11:20] <samcv> well they match inside the hash table
+
+[11:20] <samcv> but if i rehash the key then i get a different expected bucket
+
+[11:23] <timotimo> does that mean the handle string has a different cached hash code from what you get when you re-calculate?
+
+[11:24] <samcv> uh it's SCRef.c:116
+
+[11:26] <samcv> at HASH_DELETE_PTR. before i did the fix, it tried to find the hash item and then delete, so it'd hash the key and then locate it. which didn't work
+
+[11:26] <samcv> it's type MVMSerializationContextBody
+
+[11:26] <samcv> so i'm guessing the data must change
+
+[11:27] <nwc10> didn't say - that would be my guess. Something somewhere is overwriting the data without realising that there is an associated hash integer value
+
+[11:29] <samcv> i mean it's probably unavoidable, but idk if this is right but it doesn't seem we ever try and find things in sc_weakhash
+
+[11:30] <samcv> by their key
+
+[11:30] <samcv> well we do in bytecode.c but
+
+[11:31] <samcv> but it only checks to make sure it doesn't add the same thing
+
+[11:31] <jnthn> Hurrah, I think my frame walker works
+
+[11:31] <yoleaux> 11:08Z <Zoffix> jnthn: do you know why `is required` appears to accept various numeric values? It restricts to Cool and has `$attr.set_required(nqp::istype($required,Bool) ?? +$required !! $required)`... Is there any meaning other than "yes" and "no"? Wanting to change it to Any type and boolify it
+
+[11:31] <yoleaux> 11:12Z <Zoffix> jnthn: nm, looks like it's for error message, but it's broken ATM: http://colabti.org/irclogger/irclogger_log/perl6-dev?date=2018-07-17#l88
+
+[11:32] <samcv> well it binds a vmstring as the key, so maybe that's why what i was doing was wrong?
+
+[11:32] <samcv> so maybe it was my mistake. idk
+
+[11:32] <samcv> but i can see
+
+[11:32] <jnthn> Fixes the Yapsi regression
+
+[11:32] <nwc10> jnthn: yoleaux made me thing of this (earlier today, elsewhere):
+
+[11:32] <nwc10> 08:41 <@davorg> I didn't duck quickly enough as cmmit bits were being
+
+[11:32] <nwc10>                 distributed :-/
+
+[11:32] <samcv> though in any case, using how i am doing it now, by using the existing hash value is probably faster
+
+[11:32] <jnthn> :-)
+
+[11:32] <nwc10> in that, you put your head above the parapet and messages get fired at you
+
+[11:32] <samcv> well i know for sure it's faster
+
+[11:33] <jnthn> I like how the second part of the message is "never mind" :)
+
+[11:36] <Geth> ¦ MoarVM/frame-walker: 198f5e46b7 | (Jonathan Worthington)++ | 2 files
+
+[11:36] <Geth> ¦ MoarVM/frame-walker: Teach frame walker to understand inlines
+
+[11:36] <Geth> ¦ MoarVM/frame-walker:
+
+[11:36] <Geth> ¦ MoarVM/frame-walker: Thus fixing MVM_frame_find_lexical_by_name_rel_caller in the case that
+
+[11:36] <Geth> ¦ MoarVM/frame-walker: inlining has taken place.
+
+[11:36] <Geth> ¦ MoarVM/frame-walker: review: https://github.com/MoarVM/MoarVM/commit/198f5e46b7
+
+[11:36] <samcv> ok so that may have been it. that the key is at sc->body->handle which is non-standard
+
+[11:36] <samcv> well as long as it gets fixed
+
+[11:37] <jnthn> samcv++ # bug hunting
+
+[11:42] <timotimo> cool
+
+[11:44] <brrt> jnthn++ for frame walker
+
+[11:44] <brrt> samcv++ for bughunting
+
+[12:27] *** releasable6 joined
+[12:27] <jnthn> Yay, spectest with frame walker clean except that in-loop test that fails
+
+[12:28] <jnthn> Well, with framewalker merged into master so I have the samcv++ fixes too :)
+
+[12:28] <Geth> ¦ MoarVM/master: 4 commits pushed by (Jonathan Worthington)++
+
+[12:28] <Geth> ¦ MoarVM/master: fc747c94dd | Extract frame walking logic from getlexcaller
+
+[12:28] <Geth> ¦ MoarVM/master: 6ae63d2a5b | Factor deopt index finding out of deopt all
+
+[12:28] <Geth> ¦ MoarVM/master: 198f5e46b7 | Teach frame walker to understand inlines
+
+[12:28] <Geth> ¦ MoarVM/master: db6cc49caf | Merge branch 'frame-walker'
+
+[12:28] <Geth> ¦ MoarVM/master: review: https://github.com/MoarVM/MoarVM/compare/0daa14c8743f...db6cc49cafd1
+
+[12:29] <brrt> \o/
+
+[12:33] <dogbert2> jnthn++
+
+[12:34] <AlexDaniel> jnthn: oh please can you give MasterDuke++ a commit bit for MoarVM
+
+[12:34] <AlexDaniel> :)
+
+[12:36] <AlexDaniel> just so that there's a shorter path for fixing typos… :)
+
+[12:36] <jnthn> haha, yes :)
+
+[12:37] <jnthn> AlexDaniel: Do you know their GitHub handle?
+
+[12:37] <jnthn> There's a few candidates :)
+
+[12:37] <AlexDaniel> MasterDuke17
+
+[12:38] <dogbert2> the number of regressions is going down rapidly
+
+[12:38] <AlexDaniel> same as in https://github.com/MoarVM/MoarVM/compare/0daa14c8743f...db6cc49cafd1#commitcomment-29729144
+
+[12:38] <jnthn> oh, found it
+
+[12:38] <jnthn> Done
+
+[12:39] <AlexDaniel> .tell MasterDuke you now have a commit bit for MoarVM repo \o/
+
+[12:39] <yoleaux> AlexDaniel: I'll pass your message to MasterDuke.
+
+[12:40] <jnthn> The JIT deopt all regression was introduced in April, it seems
+
+[12:40] <jnthn> So has been in the last couple of releases
+
+[12:40] <jnthn> 4ec948a5310
+
+[12:41] <jnthn> The `break` was left behind when the loop was removed
+
+[12:42] <jnthn> I really hope I can find a test it breaks outside of CORE.setting, or that's going to be one very slow bug hunt
+
+[12:42] <AlexDaniel> just 2018.06 I think
+
+[12:43] <jnthn> ah, ok
+
+[12:43] <dogbert2> jnthn: which bug are you looking for now?
+
+[12:44] <jnthn> dogbert2: https://github.com/rakudo/rakudo/issues/2072
+
+[12:48] <dogbert2> I've been running my 32 bit builds without the commit mentioned in the case in order to be able to build without problems
+
+[12:53] <jnthn> grr, no issues like that one in stresstest with blocking and JIT disabled
+
+[12:56] *** buggable joined
+[12:57] <dogbert2> I get an error (32 bit) when running t/spec/S12-class/attributes-required.t - ===SORRY!=== Object of type Str in QAST::WVal, but not in SC
+
+[12:57] <lizmat> dogbert2: you need the latest rakudo for that
+
+[12:58] <dogbert2> oops
+
+[12:58] <lizmat> I just pushed a fix *and* added a test
+
+[12:58] <dogbert2> damn, you're fast :)
+
+[13:10] <dogbert2> updating rakudo did the trick, lizmat++
+
+[13:17] <jnthn> Hm, there's some odd instability in trying to spesh bissect what in the ANTLR failure causes the problems, even though I'm using MVM_SPESH_BLOCKING=1 and I don't see any threading in there
+
+[13:18] <jnthn> Though given the stack trace, it's almost certainly due to nqp::ctx and friends
+
+[13:19] <brrt> jnthn: oops 😬
+
+[13:19] <brrt> (the JIT deopt regression, I mean)
+
+[13:20] <brrt> jnthn: is there any nativecall in there?
+
+[13:20] <brrt> also, precompilation can bite
+
+[13:23] <jnthn> Don't believe so
+
+[13:24] <brrt> hmmm
+
+[13:24] <brrt> then, I don't knwo
+
+[13:24] <brrt> *know
+
+[13:27] <jnthn> Hmm...I wonder if a better way to deal with nqp::ctx traversal is to not actually traverse it right away
+
+[13:27] <jnthn> But instead to just record the displacements we want to do
+
+[13:27] <jnthn> And return an object with those
+
+[13:27] <jnthn> Then we interpret those when we need to do a symbol resolution
+
+[13:27] <jnthn> Then it doesn't matter if there's a deopt between two lookups
+
+[13:28] <lizmat> that feels like a correct lazy way to do that
+
+[13:28] <jnthn> Then we only need nqp::ctx to be no-inline so that the initial follow is easily done
+
+[13:28] <jnthn> (which it already is)
+
+[13:29] <jnthn> But won't need to make it cause a deopt
+
+[14:11] *** zakharyas left
+[14:11] *** zakharyas joined
+[14:15] *** zakharyas left
+[14:19] *** brrt left
+[14:31] <timotimo> oh joy, somehow thread 7 is counted as participating twice in GC run 18
+
+[14:32] <timotimo> i wonder how i got that
+
+[15:10] * [Coke] sees "well SORRY" in the scrollback and does a double take before realizing that it's not someone being snarky.
+
+[15:15] <jnthn> :D
+
+[15:17] *** zakharyas joined
+[15:28] <Geth> ¦ MoarVM: 39a2e71b44 | (Samantha McVey)++ | src/strings/uthash.h
+
+[15:28] <Geth> ¦ MoarVM: Optimize uthash ptr delete code
+
+[15:28] <Geth> ¦ MoarVM:
+
+[15:28] <Geth> ¦ MoarVM: The best course seems to be to go off of the pointer's hash value
+
+[15:28] <Geth> ¦ MoarVM: instead of searching the whole hash.
+
+[15:28] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/39a2e71b44
+
+[15:28] <Geth> ¦ MoarVM: c568655948 | (Samantha McVey)++ | src/strings/uthash.h
+
+[15:28] <Geth> ¦ MoarVM: Check if bucket is correct in HASH_FSCK
+
+[15:28] <Geth> ¦ MoarVM:
+
+[15:28] <Geth> ¦ MoarVM: Add this additional check that is used if HASH_DEBUG is defined.
+
+[15:28] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/c568655948
+
+[15:28] *** zakharyas1 joined
+[15:28] *** zakharyas left
+[15:41] <Geth> ¦ MoarVM/ctx-lazy: 4fa8c85529 | (Jonathan Worthington)++ | src/6model/reprs/MVMContext.h
+
+[15:41] <Geth> ¦ MoarVM/ctx-lazy: Stub in new fields for lazy context traversal
+
+[15:41] <Geth> ¦ MoarVM/ctx-lazy: review: https://github.com/MoarVM/MoarVM/commit/4fa8c85529
+
+[15:41] <Geth> ¦ MoarVM/ctx-lazy: 940c02be45 | (Jonathan Worthington)++ | 7 files
+
+[15:41] <Geth> ¦ MoarVM/ctx-lazy: Move context creation to MVMContext.c
+
+[15:41] <Geth> ¦ MoarVM/ctx-lazy: review: https://github.com/MoarVM/MoarVM/commit/940c02be45
+
+[15:56] *** brrt joined
+[15:58] *** zakharyas1 left
+[16:03] *** brrt left
+[16:06] *** robertle left
+[16:37] <Geth> ¦ MoarVM/ctx-lazy: 7e3ef550d8 | (Jonathan Worthington)++ | 4 files
+
+[16:37] <Geth> ¦ MoarVM/ctx-lazy: Sketch out lazy context traversal handling
+
+[16:37] <Geth> ¦ MoarVM/ctx-lazy:
+
+[16:37] <Geth> ¦ MoarVM/ctx-lazy: Including operations on the frame walker, and functions that will be
+
+[16:37] <Geth> ¦ MoarVM/ctx-lazy: used to construct contexts with traversals.
+
+[16:37] <Geth> ¦ MoarVM/ctx-lazy: review: https://github.com/MoarVM/MoarVM/commit/7e3ef550d8
+
+[17:05] *** domidumont joined
+[17:22] <timotimo> i don't know how to read instruction set documentation %)
+
+[17:25] *** zakharyas joined
+[17:29] <timotimo> so if i use ptest on a 128 or 256 slice of the array as both the first and second argument, it'll set ZF to 1 if all bits were 0, because it ANDs the two arguments and then checks for all zeroes (-> set ZF)
+
+[17:32] <timotimo> the docs for this instruction say "the first source register is an xmm register. The second source register can be an xmm register or a 128 bit memory location. the destination register is not modified"
+
+[17:32] <timotimo> but i don't see a destination register anywhere on the page
+
+[18:05] *** domidumont left
+[18:06] *** domidumont joined
+[18:10] *** domidumont left
+[18:11] <TimToady> [Coke]: Nobody's ever SNARKY here...
+
+[18:22] *** zakharyas left
+[18:23] <[Coke]> well SORRY====
+
+[18:23] <[Coke]> m: say <g> ~ e x 20.rand ~ <z>
+
+[18:23] <camelia> rakudo-moar 7a7e5e96f: OUTPUT: «g2.7182818284590452.7182818284590452.7182818284590452.7182818284590452.7182818284590452.7182818284590452.7182818284590452.7182818284590452.718281828459045z␤»
+
+[18:24] <[Coke]> ... ok, that was funny, oops. :)
+
+[18:24] <[Coke]> m: say <g> ~ <e> x 20.rand ~ <z>
+
+[18:24] <camelia> rakudo-moar 7a7e5e96f: OUTPUT: «geeeeeeeeeeeez␤»
+
+[18:24] <[Coke]> dammit. :)
+
+[18:37] * TimToady is happy we gave ~ and x their own precedence levels so that'd work with math
+
+[18:38] <TimToady> m: say <g> ~ <e> x rand * 20 + 5 ~ <z>
+
+[18:38] <camelia> rakudo-moar 7a7e5e96f: OUTPUT: «geeeeeeeeeez␤»
+
+[18:38] <TimToady> m: say <g> ~ <e> x rand * 20 + 5 ~ <z>
+
+[18:38] <camelia> rakudo-moar 7a7e5e96f: OUTPUT: «geeeeeeeeez␤»
+
+[18:38] <TimToady> m: say <g> ~ <e> x rand * 20 + 5 ~ <z>
+
+[18:38] <camelia> rakudo-moar 7a7e5e96f: OUTPUT: «geeeeeeez␤»
+
+[18:38] <TimToady> m: say <g> ~ <e> x rand * 20 + 5 ~ <z>
+
+[18:38] <camelia> rakudo-moar 7a7e5e96f: OUTPUT: «geeeeeez␤»
+
+[18:38] <TimToady> hmm, why so short?
+
+[18:39] <TimToady> m: say <g> ~ <e> x rand * 20 + 5 ~ <z>
+
+[18:39] <camelia> rakudo-moar 7a7e5e96f: OUTPUT: «geeeeeeeeez␤»
+
+[18:39] <TimToady> m: say <g> ~ <e> x rand * 20 + 5 ~ <z>
+
+[18:39] <camelia> rakudo-moar 7a7e5e96f: OUTPUT: «geeeeeeeeeeeeeeeeeeeeeeez␤»
+
+[18:39] <TimToady> there we go :)
+
+[18:41] <geekosaur> (are you saying you're a geeeeeeeeezer?)
+
+[18:45] <TimToady> er...
+
+[18:51] <[Coke]> :)
+
+[19:30] *** japhb__ joined
+[19:30] *** japhb__ left
+[19:39] *** brrt joined
+[20:02] *** brrt left
+[20:14] *** Ven`` joined
+[20:17] *** zakharyas joined
+[20:20] *** zakharyas1 joined
+[20:21] *** zakharyas left
+[20:29] *** zakharyas1 left
+[21:35] <jnthn> Righty, time for the evening hack session :)
+
+[21:35] <lizmat> .oO( Just In Time hacking :-)
+
+[21:36] <jnthn> :)
+
+[21:38] *** MasterDuke joined
+[21:39] <timotimo> jnthn: how would you make asynclisten "return" the "actually used port number" to the caller? i'd probably ask the user to pass in a nqp::list and pull it out after the call finished
+
+[21:40] <timotimo> though if there were many more pieces of data, maybe a hash would be more appropriate
+
+[21:40] <timotimo> we should also at some point think about letting the users put in more options to fine-tune stuff ...
+
+[21:45] <jnthn> It's async, so callback, probably
+
+[21:45] <jnthn> (All async stuff sends a message to the event loop, and it sends messages back through the specified concurrent queue)
+
+[22:03] <Geth> ¦ MoarVM/ctx-lazy: 02cedc15fc | (Jonathan Worthington)++ | src/spesh/frame_walker.c
+
+[22:03] <Geth> ¦ MoarVM/ctx-lazy: Fix initialization of frame walker
+
+[22:03] <Geth> ¦ MoarVM/ctx-lazy:
+
+[22:03] <Geth> ¦ MoarVM/ctx-lazy: It would mistakenly think we wanted to traverse an inline if we were
+
+[22:03] <Geth> ¦ MoarVM/ctx-lazy: using it with initial traversals.
+
+[22:03] <Geth> ¦ MoarVM/ctx-lazy: review: https://github.com/MoarVM/MoarVM/commit/02cedc15fc
+
+[22:39] *** Ven`` left
+[23:03] <samcv> jnthn: also thanks for the endorsement of "Perl" and "C" on linkedin. i didn't know that was a thing since i'm fairly new to using it. but thank you
+
+[23:07] <jnthn> samcv: Welcome. :-)
+
+[23:07] <timotimo> jnthn: i'm not sure if the port isn't already available immediately after we uv_bind or uv_listen
+
+[23:08] <timotimo> since the error code happens immediately and there's no on_error callback that could do it asynchronously
+
+[23:09] <jnthn> timotimo: Yeah, but we don't do uv_bind or uv_listen synchronously, because it has to run on the event loop thread
+
+[23:13] <Geth> ¦ MoarVM/ctx-lazy: df6271af9d | (Jonathan Worthington)++ | 4 files
+
+[23:13] <Geth> ¦ MoarVM/ctx-lazy: Update MVMContext at_key/exists_key to traverse
+
+[23:13] <Geth> ¦ MoarVM/ctx-lazy: review: https://github.com/MoarVM/MoarVM/commit/df6271af9d
+
+[23:13] <Geth> ¦ MoarVM/ctx-lazy: b2c8d3ff95 | (Jonathan Worthington)++ | 5 files
+
+[23:13] <Geth> ¦ MoarVM/ctx-lazy: Update forceouterctx to traverse
+
+[23:13] <Geth> ¦ MoarVM/ctx-lazy: review: https://github.com/MoarVM/MoarVM/commit/b2c8d3ff95
+
+[23:15] <timotimo> "Most of the setup functions are synchronous since they are CPU-bound. uv_listen is where we return to libuv’s callback style."
+
+[23:15] <timotimo> that's from the "networking" page of the libuv guide
+
+[23:16] <jnthn> Yeah, but we still can't just go calling libuv functions on the event loop from any old thread. That's why we marshall them all over to the event loop thread.
+
+[23:16] <jnthn> It's that marshalling I'm saying is async, not the libuv bind bit
+
+[23:19] <timotimo> how do i know if a function is okay to call on the eventloop? in this case i want uv_tcp_getsockname
+
+[23:20] <jnthn> Event loops are per thread
+
+[23:20] <jnthn> So it's only safe to call it on the owning thread
+
+[23:21] <timotimo> i'm not sure i'm communicating right %)
+
+[23:22] <timotimo> i want to get the tcp port immediately between bind and listen, which are two consecutive lines in the C code and even in the same "if"
+
+[23:24] <jnthn> Link to the code?
+
+[23:24] <timotimo> a sec
+
+[23:25] <timotimo> https://github.com/MoarVM/MoarVM/blob/master/src/io/asyncsocket.c#L737
+
+[23:40] <Geth> ¦ MoarVM/ctx-lazy: 93b1ee2c31 | (Jonathan Worthington)++ | 5 files
+
+[23:40] <Geth> ¦ MoarVM/ctx-lazy: Update context iterator to traverse
+
+[23:40] <Geth> ¦ MoarVM/ctx-lazy: review: https://github.com/MoarVM/MoarVM/commit/93b1ee2c31
+
+[23:44] <jnthn> timotimo: Yes, at that point the code is running on the event loop thread and async with regard to the code that called nqp::listenasync. So to send something back would need a callback passed from that code, which is then invoked like the error one right below
+
+[23:46] <timotimo> oh!
+
+[23:47] <timotimo> OK, so i'll really, really have to pass a callback
+
+[23:47] <jnthn> Indeed :)
+
+[23:47] <jnthn> No cheating here, I'm afraid
+
+[23:48] <timotimo> the perl6-level API is also a question; should you just be able to .localport on the tappable you get from the listen socket?
+
+[23:50] <jnthn> That would be one way
+
+[23:51] <jnthn> Perhaps the best one.
+
+[23:51] <timotimo> i assume that'll return a promise that will be kept when the result comes in from the task queue
+
+[23:51] <jnthn> Yes
+
+[23:52] <Geth> ¦ MoarVM/ctx-lazy: d7733c89e2 | (Jonathan Worthington)++ | 2 files
+
+[23:52] <Geth> ¦ MoarVM/ctx-lazy: WIP
+
+[23:52] <Geth> ¦ MoarVM/ctx-lazy:
+
+[23:52] <Geth> ¦ MoarVM/ctx-lazy: Remaining to do:
+
+[23:52] <Geth> ¦ MoarVM/ctx-lazy:
+
+[23:52] <Geth> ¦ MoarVM/ctx-lazy: * MVM_frame_lexical_primspec
+
+[23:52] <Geth> ¦ MoarVM/ctx-lazy: * The remaining MVMContext methods
+
+[23:52] <Geth> ¦ MoarVM/ctx-lazy: * MVM_frame_find_lexical_by_name_rel
+
+[23:52] <Geth> ¦ MoarVM/ctx-lazy: * getlexreldyn (MVM_frame_getdynlex)
+
+[23:52] <Geth> ¦ MoarVM/ctx-lazy: * MVM_frame_find_lexical_by_name_rel_caller
+
+[23:52] <Geth> ¦ MoarVM/ctx-lazy: * ctxcode
+
+[23:52] <Geth> ¦ MoarVM/ctx-lazy: review: https://github.com/MoarVM/MoarVM/commit/d7733c89e2
+

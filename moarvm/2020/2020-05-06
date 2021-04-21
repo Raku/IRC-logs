@@ -1,0 +1,367 @@
+[01:13] *** Merfont joined
+[01:13] *** Kaeipi left
+[02:29] *** squashable6 left
+[02:31] *** squashable6 joined
+[03:32] *** pamplemousse left
+[05:52] *** squashable6 left
+[05:53] *** squashable6 joined
+[07:52] <nwc10> good *, #moarvm
+
+[07:53] *** zakharyas joined
+[08:57] *** MasterDuke left
+[09:05] *** farcas1982regreg joined
+[09:06] *** Altai-man_ joined
+[09:13] *** robertle joined
+[09:22] <jnthn> o/
+
+[09:23] <Altai-man_> o/
+
+[09:24] <Altai-man_> jnthn, don't want to be pushy, but slack please (not a command to slack, though if you want to...)
+
+[09:27] *** sena_kun joined
+[09:28] *** Altai-man_ left
+[09:32] *** MasterDuke joined
+[09:43] <nwc10> \o
+
+[09:53] <MasterDuke> hm. `my @a = ^1000; my @b; for ^1_000 { @b = @a.rotate(3); }; say @b.head` causes 2040708 to MVM_spesh_arg_guard_run. that seems like a few more than there should be?
+
+[09:55] <jnthn> Well, there's a million elements to process, that's 2 arg guard checks per element
+
+[09:56] <jnthn> "should be" is kinda hard to say; does it run faster with spesh disabled? If not, it's coming out ahead even wit them.
+
+[09:56] <jnthn> *with
+
+[09:56] <jnthn> Of course it's nice when it can do specialization linking and avoid it.
+
+[09:59] <MasterDuke> if i increase the for look to 10k, with spesh is about 0.5s faster, ~5.8s instead of ~6.3s
+
+[09:59] <MasterDuke> *for loop
+
+[10:00] <MasterDuke> but a perf report shows more time in MVM_spesh_arg_guard_run and resolve_using_guards than most other code
+
+[10:02] *** robertle left
+[10:02] *** robertle joined
+[10:03] <MasterDuke> and this is the code that has a weird discrepancy between what a --profile shows and a spesh log says. fwiw, the profile says 50% of time is spent in interpreted code
+
+[10:04] *** robertle left
+[10:05] <MasterDuke> and the other 50% in jitted code, 0% in specialized
+
+[10:06] <MasterDuke> no change with BLOCKING and NODELAY
+
+[10:10] <jnthn> What about disable?
+
+[10:10] <jnthn> e.g. are we looking at a situation where spesh makes things worse, or just could do better than it currently does?
+
+[10:10] <jnthn> (Agree something sounds a bit off, but coming out ahead is still coming out ahead... :))
+
+[10:14] <jnthn> In the end, though, the spesh arg guard selects a specialization that depends on those guards, and that in turn means it's absorbing the cost of parameter type checking and probably other type checks in the original code.
+
+[10:14] *** Altai-man_ joined
+[10:16] <MasterDuke> disabling spesh is 0.5s slower (when the loop is 10k instead of 1k)
+
+[10:17] *** sena_kun left
+[10:17] <MasterDuke> so yes, spesh is helping, it just seems to be sub-optimal somehow
+
+[10:21] <MasterDuke> fwiw, https://gist.github.com/MasterDuke17/6e63df1a2c7e92b52b58b00974ea521d has a count of current_node values at the end of each iteration of https://github.com/MoarVM/MoarVM/blob/master/src/spesh/arg_guard.c#L417-L472, if this info can be useful somehow
+
+[12:06] <MasterDuke> how/where does a profile know that a function was speshed or jitted?
+
+[12:08] <lizmat> MasterDuke: how does that compare to my @a = ^1000; my @b; for ^1000 { @b = @a.map: * + 1 }
+
+[12:09] <lizmat> that passes the same .push-all / .push path, afaik, but it *does* spesh and makes the .push only .02% of CPU or so
+
+[12:11] <MasterDuke> yeah, i see that
+
+[12:13] <jnthn> MasterDuke: optimize.c in spesh rewrites the profile enter ops, iirc
+
+[12:14] <jnthn> MasterDuke: To call a "we're profiled" vesrion
+
+[12:14] <jnthn> oops, we're specialized
+
+[12:14] <jnthn> And then the JIT emits them as "we're jitted" :)
+
+[12:16] *** sena_kun joined
+[12:16] <MasterDuke> jnthn: https://github.com/MoarVM/MoarVM/blob/master/src/spesh/optimize.c#L2937-L2940 ?
+
+[12:17] <timotimo> and the jit jits "enterspesh" to pass "entered via jit" instead
+
+[12:17] <jnthn> yes, that looks like it
+
+[12:17] <MasterDuke> is there an easy way to log the function name at that point?
+
+[12:17] <MasterDuke> i.e., via a printf
+
+[12:17] <jnthn> probably g->sf->body.name
+
+[12:18] <jnthn> You'll need to call the thingy to turn it into a C string first
+
+[12:18] <MasterDuke> k, thanks
+
+[12:18] *** Altai-man_ left
+[12:18] *** Merfont left
+[12:18] <jnthn> So...hm, what next...
+
+[12:19] *** pamplemousse joined
+[12:20] *** Kaiepi joined
+[12:20] <jnthn> At first I figured I could think about my ideas for changing how callstack is used (so we can have non-frame things on it) until I actually needed resumable dispatchers.
+
+[12:21] <jnthn> uh, put off, not think about :)
+
+[12:21] <jnthn> Wonder where I was originally going with that sentence...
+
+[12:21] <jnthn> Anyway, I started looking into capture transformations and so forth and figure I'll need working space for those beyond the immediate boring cases.
+
+[12:22] <jnthn> So it probably comes sooner rather than later.
+
+[12:23] <jnthn> (Latest notes on the capture stuff are at https://gist.github.com/jnthn/e81634dec57acdea87fcb2b92c722959#capture-operations )
+
+[12:25] <nwc10> jnthn: "what next..." surely is one of "coffee", "lunch" or "beer" depending on what time of the day, er, morning, it is.
+
+[12:26] <jnthn> I already did coffee and lunch :)
+
+[12:26] <MasterDuke> hm. there's only one push hit in that example. it shows up at optimize_bb_switch 22 times. when profiling, it hits the case linked above 2 times
+
+[12:26] <nwc10> you're allowed "walk" under the current rules?
+
+[12:26] <jnthn> Yes 
+
+[12:26] <jnthn> So long as I'm wearing a face covering.
+
+[12:26] <nwc10> "washing up" seems to be a thing too
+
+[12:27] <jnthn> I think I'll implement the new capture representation, and see where that takes me :)
+
+[12:27] <MasterDuke> so why would the profile think it wasn't speshed at all?
+
+[12:27] *** regreg joined
+[12:28] <jnthn> I actually arrived at working thinking about a beer today...my walk to work coincided with the big brewery I walk near making a batch and the wind direction being correct to carry it to where I walk :)
+
+[12:29] <MasterDuke> i have one of those small home-brew kits. i have about a gallon of irish stout sitting right next to me that i need to check if it's ready to be bottled
+
+[12:30] *** farcas1982regreg left
+[12:30] *** regreg_ joined
+[12:32] *** regreg left
+[12:35] *** regreg_ left
+[12:36] <MasterDuke> lizmat: interesting, that push isn't being called for the code in the loop. it's creating the initial array from the range
+
+[12:37] <MasterDuke> well, in the case of rotate it's also getting hit there. but in the other examples it's just create the initial array
+
+[12:37] <lizmat> so you're saying it's reifying every time ?
+
+[12:38] <MasterDuke> maybe?
+
+[12:39] <lizmat> sticking in a @a[999] before the loop, doesn't seem to change it
+
+[12:40] <MasterDuke> it seems to perform the type specialization after 1000 hits. so i thought that might explain why it wasn't shown as speshed/jitted initially, since we were only creating a 1k array
+
+[12:41] <lizmat> afk for a bit&
+
+[12:41] <MasterDuke> but that doesn't actually make sense, because in the rotate example it's also being hit in the loop body, and the profile shows 1001000 calls
+
+[12:52] <Geth> ¦ MoarVM/new-disp: 1f7e27a5c5 | (Jonathan Worthington)++ | 8 files
+
+[12:52] <Geth> ¦ MoarVM/new-disp: Stub in new MVMCapture REPR and BOOTCapture
+
+[12:52] <Geth> ¦ MoarVM/new-disp: 
+
+[12:52] <Geth> ¦ MoarVM/new-disp: To be used as part of the new dispatch mechanism, and will eventually
+
+[12:52] <Geth> ¦ MoarVM/new-disp: take over from the current MVMCallCapture (which will, when it's no
+
+[12:52] <Geth> ¦ MoarVM/new-disp: longer needed, be removed).
+
+[12:52] <Geth> ¦ MoarVM/new-disp: review: https://github.com/MoarVM/MoarVM/commit/1f7e27a5c5
+
+[12:56] <jnthn> I'm steadily coming to terms with the fact that all of argument processing is going to have to change, and I'll need two versions of it...
+
+[12:56] <jnthn> (for the migration period)
+
+[12:57] *** farcas1982regreg joined
+[13:04] <MasterDuke> a profile of `my @a = ^2_000; my @b; for ^1_000 { @b = @a.rotate(3); }; say @b.head` shows 2001172 logs of push with mode MVM_PROFILE_ENTER_NORMAL, 656 logs of mode MVM_PROFILE_ENTER_JIT_INLINE, and 172 logs of mode MVM_PROFILE_ENTER_JIT
+
+[13:04] <jnthn> Is there any evidence in the spesh log of it not rewriting the profile instruction properly?
+
+[13:05] <jnthn> (Note: there may be multiple specializations of it)
+
+[13:09] <MasterDuke> nothing it jumping out at me
+
+[13:15] <MasterDuke> first instruction in BB of after for 'push' is prof_enterspesh
+
+[13:16] <MasterDuke> BB 1
+
+[13:45] <lizmat> jnthn: if all of argument processing is going to change, would that be an opportunity to fix some dispatch quirks ?
+
+[13:46] <lizmat> m: multi a($a) { "one" }; multi a($a, *%_) { "two" }; a 42   # specifically
+
+[13:46] <camelia> rakudo-moar ef90599e2: OUTPUT: «Ambiguous call to 'a(Int)'; these signatures all match:␤:($a)␤:($a, *%_)␤  in block <unit> at <tmp> line 1␤␤»
+
+[13:56] <jnthn> lizmat: Argument processing at the VM level, which is well below the decision making of the multi-dispatcher
+
+[13:56] <lizmat> ok
+
+[13:59] <jnthn> Having played with some ideas for a while, I think I've found a way to have all of 1) no copying to a temporary argument buffer in the common case, 2) no branching in argument fetch instructions depending on if the args we get came directly from the dispatch instruction or via a capture/flattening/whatever, and 3) a quite simple design.
+
+[14:02] <moritz> that sounds pretty awesome!
+
+[14:02] <moritz> now let's hope that step 3 doesn't involve solving the halting problem :D
+
+[14:05] <MasterDuke> nice
+
+[14:06] <jnthn> I'm gonna get funny looks for it 'cus it also involves an array of the form [0,1,2,3,4,...] :)
+
+[14:10] * nine starts practicing his funny looks
+
+[14:15] *** Altai-man_ joined
+[14:18] *** sena_kun left
+[14:33] *** zakharyas left
+[14:55] <jnthn> Written up here: https://gist.github.com/jnthn/e81634dec57acdea87fcb2b92c722959#capture-operations
+
+[14:55] <jnthn> (as much because writing it up helps me get the idea straight in my head...)
+
+[15:03] <jnthn> I figure that flattening results will also be something that lives on our (soon to be more genearl purpose) call stack.
+
+[15:03] <jnthn> *general, gah :)
+
+[15:16] <jnthn> So, next question: how much does today's arg handling code need to change to deal with this... :)
+
+[15:18] <MasterDuke> if you care about editing corrections: "the destination of the call will will", "brining the baggage of argument processing" (i prefer picked arguments), "expanded flattening arguemnts"
+
+[15:18] <jnthn> No, I don't really
+
+[15:19] <jnthn> It's my personal notes that I'm sharing as go :)
+
+[15:19] <jnthn> *as I go
+
+[15:19] <jnthn> I'll spend some time turning appropriate parts into docs when I'm through.
+
+[15:19] <nine> Your personal notes tend to end up as our only documentation ;)
+
+[15:19] <MasterDuke> arg, and i even had a typo in my snide comment!
+
+[15:24] *** robertle joined
+[15:31] <MasterDuke> so the after speshed version of push does in fact have prof_enterspesh, and says at the end "Specialization took ..." and "JIT was successful ...". push is called a couple million times, so is it somehow not getting the new optimized version? something about the guard tree?
+
+[15:32] <jnthn> Maybe, or something inappropriate about the call site (like flattening)?
+
+[15:33] <jnthn> Currently if the call flattens args, no spesh for you
+
+[15:33] <jnthn> (Thus why flattening is moving to being the first step with `dispatch`)
+
+[15:37] <MasterDuke> in push's BB 7: "prepargs        callsite(0x7f28000356c0, 2 arg, 2 pos, nonflattening, interned)"
+
+[15:38] <MasterDuke> that was in the before, no mention at all in the after
+
+[15:38] <jnthn> ah, then it was inlined
+
+[15:39] <MasterDuke> push inlines assign-scalar-no-whence-no-typecheck. later push-all inlines push
+
+[15:40] <MasterDuke> push is just 3 BBs in its after state
+
+[15:41] <MasterDuke> oops, four, the numbering starts at 0
+
+[15:43] <MasterDuke> don't think i've ever looked at a spesh log taken while profiling (it's usually one or the other), but it's nice to see the prof_enters and prof_enterinlines, and the paired prof_exits
+
+[15:48] *** robertle left
+[15:53] <timotimo> https://t.co/0sdmkJmW5r - beautiful, and probably applies very well to comp sci
+
+[15:53] <jnthn> :D
+
+[16:16] *** sena_kun joined
+[16:18] *** Altai-man_ left
+[17:40] <Geth> ¦ MoarVM/new-disp: 8e5095262d | (Jonathan Worthington)++ | 13 files
+
+[17:40] <Geth> ¦ MoarVM/new-disp: Prepare the way for new args handling
+
+[17:40] <Geth> ¦ MoarVM/new-disp: 
+
+[17:40] <Geth> ¦ MoarVM/new-disp: Split the param context up into legacy, new, and common parts. Go
+
+[17:40] <Geth> ¦ MoarVM/new-disp: through all the places broken by this. In most of them, panic if we
+
+[17:40] <Geth> ¦ MoarVM/new-disp: shouldn't be there with non-legacy args, or if we didn't implement
+
+[17:40] <Geth> ¦ MoarVM/new-disp: handling of dispatch args. In some places, update them with handling for
+
+[17:40] <Geth> ¦ MoarVM/new-disp: the new dispatch args approach too.
+
+[17:40] <Geth> ¦ MoarVM/new-disp: <…commit message has 7 more lines…>
+
+[17:40] <Geth> ¦ MoarVM/new-disp: review: https://github.com/MoarVM/MoarVM/commit/8e5095262d
+
+[17:44] <jnthn> Took a bit of doing, but probably the best migration strategy
+
+[17:46] <jnthn> And gets me to a point where I think that my path to having the `dispatch` callback of a built-in dispatcher being called is "just write code"
+
+[17:48] <jnthn> And getting beyond *that* point means I need to actually work out how the dispatch program representation will look. :)
+
+[17:50] <jnthn> Anyways, home time, I think
+
+[18:15] *** Altai-man_ joined
+[18:18] *** sena_kun left
+[18:39] *** Kaeipi joined
+[18:40] *** zakharyas joined
+[18:43] *** Kaiepi left
+[18:45] *** farcas1982regreg left
+[18:46] *** farcas1982regreg joined
+[19:57] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #1283: Fix the order of some MVM_calloc arguments
+
+[19:57] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1283
+
+[20:16] *** sena_kun joined
+[20:18] *** Altai-man_ left
+[20:29] *** robertle joined
+[20:48] *** MasterDuke left
+[20:56] *** zakharyas left
+[21:23] *** MasterDuke joined
+[21:34] *** pamplemousse left
+[21:35] *** farcas1982regreg left
+[21:35] *** pamplemousse joined
+[21:40] *** robertle left
+[21:52] <MasterDuke> should this template exist? https://github.com/MoarVM/MoarVM/blob/master/src/jit/core_templates.expr#L2813-L2818
+
+[21:54] <MasterDuke> the lego jit doesn't have a prof_enter implementation, so i guess it'll never be called. but isn't the point of calling MVM_profile_log_enter with MVM_PROFILE_ENTER_NORMAL to mean it was interpreted?
+
+[22:15] *** Altai-man_ joined
+[22:18] *** sena_kun left
+[22:36] *** Kaeipi left
+[22:36] *** Kaeipi joined
+[22:36] <timotimo> oh, that should definitely not be ENTER_NORMAL
+
+[22:37] <timotimo> but it's also not supposed to be survive speshing nor jitting
+
+[22:39] <MasterDuke> and templates don't get called without a lego jit implementation, right?
+
+[22:40] <timotimo> no, a template can be used even if the lego jit doesn't have anything for it
+
+[22:42] <MasterDuke> ah. well, changing it to MVM_PROFILE_ENTER_JIT didn't change anything about a profile of that rotate example
+
+[22:45] *** Altai-man_ left
+[22:52] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #1284: Use correct mode when JITting prof_enter
+
+[22:52] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1284
+
+[22:53] <timotimo> OK
+
+[22:58] <MasterDuke> i'm still trying to figure out why that push isn't being reported as speshed or jitted
+
+[23:49] *** MasterDuke left
+[23:58] <Geth> ¦ MoarVM: 565e55ce17 | (Daniel Green)++ | 3 files
+
+[23:58] <Geth> ¦ MoarVM: Fix the order of some MVM_calloc arguments
+
+[23:58] <Geth> ¦ MoarVM: 
+
+[23:58] <Geth> ¦ MoarVM: It's number of elements then size.
+
+[23:58] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/565e55ce17
+
+[23:58] <Geth> ¦ MoarVM: c4917b192b | (Jonathan Worthington)++ (committed using GitHub Web editor) | 3 files
+
+[23:58] <Geth> ¦ MoarVM: Merge pull request #1283 from MasterDuke17/fix_order_of_calloc_arguments
+
+[23:59] <Geth> ¦ MoarVM: 
+
+[23:59] <Geth> ¦ MoarVM: Fix the order of some MVM_calloc arguments
+
+[23:59] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/c4917b192b
+

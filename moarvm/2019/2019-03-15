@@ -1,0 +1,296 @@
+[01:53] <MasterDuke> timotimo: you around?
+
+[02:06] <timotimo> i am now
+
+[02:06] <timotimo> MasterDuke: what's up? :)
+
+[02:07] <MasterDuke> does https://www.joyfulbikeshedding.com/blog/2019-03-14-what-causes-ruby-memory-bloat.html#a-magic-trick-trimming look relevant?
+
+[02:09] <timotimo> oh! i like that visualization!
+
+[02:16] <MasterDuke> would it make sense to add a malloc_trim(<something>) to full GC runs?
+
+[02:16] <timotimo> we could surely try
+
+[02:16] <timotimo> do we really only have to call malloc_trim(0) or so?
+
+[02:17] <timotimo> seems so
+
+[02:19] <timotimo> wanna give it a try?
+
+[02:20] <MasterDuke> in here? https://github.com/MoarVM/MoarVM/blob/master/src/gc/orchestrate.c#L226-L232
+
+[02:23] <MasterDuke> huh. seems to cause a `Command terminated by signal 11` when profiling
+
+[02:23] <timotimo> that'd probably be a fine spot
+
+[02:23] <timotimo> ouchies
+
+[02:24] <MasterDuke> but does reduce maxresident for 'for ^50 { my $cmd = run « cat input.txt », :out; $cmd.out.close; }' from ~1132152maxresident to ~878972maxresident (only measured on a couple runs)
+
+[02:24] <timotimo> that's certainly noticeable
+
+[02:24] <MasterDuke> where input.txt is 130M and 2306812 lines
+
+[02:25] <MasterDuke> a little slower though. 0:08.19elapsed to 0:08.47elapsed
+
+[02:28] <MasterDuke> any idea how to fix profiling?
+
+[02:29] <MasterDuke> the "command terminated..." happens after the "Writing profiler output to..."
+
+[02:35] <timotimo> well, without knowing what caused the segfault, dunno
+
+[02:39] <MasterDuke> (gdb) bt #0  0x0000555500000002 in ?? () #1  0x00007ffff79a9ecd in MVM_coerce_smart_stringify (tc=0x55555555acb0, obj=<optimized out>, res_reg=0x555557e3eff8) at src/core/coerce.c:289
+
+[02:40] <MasterDuke> with MVM_SPESH_DISABLE=1
+
+[02:40] *** lucasb left
+[02:43] <timotimo> oh? i'd say "tell me what the object is", but it's probably b0rked all to hell
+
+[02:46] <MasterDuke> turned off optimization, now have `$1 = (MVMObject *) 0x55555866df70`
+
+[02:49] <MasterDuke> (gdb) p REPR(obj)->name
+
+[02:49] <MasterDuke>  $4 = 0x0
+
+[02:53] <timotimo> what address does the REPR have?
+
+[02:53] <timotimo> perhaps the object itself is already bogus
+
+[02:53] <MasterDuke> oh, it works fine under valgrind
+
+[02:53] <timotimo> turning the GC debug thing on could perhaps give an earlier detection of the problem
+
+[02:53] <timotimo> haha, of course it would
+
+[02:54] <timotimo> could be a multithreading-exacerbated problem
+
+[02:55] <MasterDuke> should that malloc_trim() happen in the coordinator instead of each thread?
+
+[02:56] <MasterDuke> here perhaps? https://github.com/MoarVM/MoarVM/blob/master/src/gc/orchestrate.c#L187
+
+[02:58] <MasterDuke> nope, exact same behavior
+
+[02:59] <MasterDuke> well, i have to afk for tonight. might not be available much the next couple days, hopefully you can figure something out
+
+[05:13] *** Kaiepi left
+[05:15] *** Kaiepi joined
+[06:26] *** robertle left
+[06:56] <samcv> morgen
+
+[07:14] *** domidumont joined
+[07:43] *** brrt joined
+[07:44] <brrt> morgen samcv
+
+[08:09] *** robertle joined
+[09:07] *** lizmat left
+[09:24] *** brrt left
+[09:32] *** brrt joined
+[10:10] *** lizmat joined
+[10:14] *** brrt left
+[10:24] *** brrt joined
+[10:38] *** zakharyas joined
+[10:45] *** brrt` joined
+[10:46] *** brrt left
+[10:50] *** domidumont left
+[10:58] *** lizmat left
+[10:59] *** brrt` left
+[11:00] *** brrt` joined
+[11:02] *** lucasb joined
+[11:09] *** lizmat joined
+[11:12] *** lizmat left
+[11:17] *** lizmat joined
+[11:23] *** Guest4810 left
+[11:25] *** Guest4810 joined
+[11:35] *** brrt` left
+[12:04] *** lizmat left
+[12:04] *** lizmat_ joined
+[12:13] *** lizmat_ left
+[12:19] *** lizmat joined
+[12:34] *** brrt` joined
+[12:44] *** zakharyas left
+[12:49] *** domidumont joined
+[13:18] *** domidumont1 joined
+[13:22] *** domidumont left
+[13:25] *** AlexDani` joined
+[13:29] *** AlexDaniel left
+[13:30] *** brrt`` joined
+[13:32] *** brrt` left
+[13:35] *** brrt`` left
+[13:41] *** domidumont joined
+[13:43] *** AlexDani` is now known as AlexDaniel
+
+[13:44] *** domidumont1 left
+[13:45] *** domidumont1 joined
+[13:45] *** AlexDaniel left
+[13:46] *** AlexDaniel joined
+[13:47] *** domidumont left
+[14:08] *** MasterDuke left
+[14:12] *** Guest4810 left
+[14:16] <timotimo> so, how do we feel about zstd in moarvm? should i try to do it all via dlopen, or would it be fine to statically or dynamically link an actual zstd library? including it in 3rdparty yea/nay?
+
+[14:18] <timotimo> building a derived zstd that only encodes and only contains a single compression level, would that be a thing?
+
+[14:19] *** Guest77544 joined
+[14:21] <jnthn> Hmm, issues are 1) size, 2) licensing, 3) what packagers would make of it :)
+
+[14:21] <jnthn> (Debian doens't like embedded things, for example)
+
+[14:22] <timotimo> This dumper is also not thread-safe. It does not acquire any ptmalloc2 mutexes. When using it, make sure that the process you're dumping is idling in all threads.
+
+[14:22] <timotimo> Although I haven't explicitly tested, this dumper is probably incompatible with swapping. It uses mincore() to check whether a page is in use or whether it has been madvise(MADV_DONTNEED)'ed, but I suspect that if a page has been swapped to disk then mincore() would return the same result. So disable swap space.
+
+[14:22] <timotimo> ^- that's the malloc heap dumper/visualizer thing from that article about ruby
+
+[14:22] <timotimo> not exactly fantastic, but if i put it in the right spot in the gc it'll probably work
+
+[14:22] <timotimo> zstd is dual-licensed BSD and GPL2
+
+[14:25] <timotimo> moar should probably not fail to build if zstd is missing, it'd just mean that it wouldn't write heap snapshots, or if it does it wouldn't compress them
+
+[14:25] <jnthn> I think "don't compress" is the more resonable fallback.
+
+[14:26] <timotimo> given the compressed size is about 5% of the uncompressed size ...
+
+[14:27] <jnthn> Hm, what happens on Windows? MacOS?
+
+[14:28] <timotimo> yeah, "dump uncompressed" is probably the right fallback after all. or keep the version 2 format around
+
+[14:33] *** brrt`` joined
+[14:37] *** Kaiepi left
+[14:37] *** Kaiepi joined
+[14:38] *** Kaypie joined
+[14:38] *** Kaiepi left
+[14:55] <jnthn> hmm, I just merged postrelease-opts, but it doesn't build
+
+[14:56] <jnthn> src/jit/x64/emit.dasc: In function ‘MVM_jit_emit_primitive’:
+
+[14:56] <jnthn> src/jit/x64/emit.dasc:796:5: error: duplicate case value
+
+[14:56] <jnthn>      case MVM_OP_sp_bind_i32: {
+
+[14:56] <jnthn>      ^
+
+[14:56] <jnthn> src/jit/x64/emit.dasc:768:5: error: previously used here
+
+[14:56] <jnthn>      case MVM_OP_sp_bind_i32:
+
+[14:56] <jnthn>      ^
+
+[14:56] <timotimo> oh, a merge conflict that wasn't properly resolved?
+
+[14:56] <jnthn> Wonder if that's merge fail or a problem in the work pushed to that branch...
+
+[14:56] <brrt``> probably yes
+
+[14:56] <timotimo> or something cherry-picked?
+
+[14:56] <jnthn> Well, there wasn't a conflict there
+
+[14:56] <timotimo> well with lines that far away it wouldn't conflict
+
+[14:57] *** domidumont1 left
+[14:58] <jnthn> Looks like I can remove the second ocurrence since the first is doing the same codegen
+
+[15:12] *** lizmat_ joined
+[15:12] <timotimo> OK, so i got three different formats for the same heap snapshot now
+
+[15:13] <timotimo> one is the current "stable" format, aka v2; the file is 1.1 gig big
+
+[15:13] <timotimo> another format is all individual fields in individual text files as ascii numerals, all gzipped individually, which is 161 megs big
+
+[15:14] <timotimo> the last one uses the framing format that i'll use for the upcoming format. it currently contains gzipped sequences of same-sized raw integers for individual fields; it's 147 megs big
+
+[15:14] <timotimo> decompressing the gz files and recompressing them as zstd should give me an idea how big the final new format size will be when using zstd
+
+[15:15] *** lizmat left
+[15:17] *** Guest77544 left
+[15:17] *** lizmat_ is now known as lizmat
+
+[15:24] *** domidumont joined
+[15:31] <Geth> ¦ MoarVM/master: 20 commits pushed by (Jonathan Worthington)++, (Timo Paulssen)++
+
+[15:31] <Geth> ¦ MoarVM/master: review: https://github.com/MoarVM/MoarVM/compare/7ae6684f4235...6c7810ce7ca9
+
+[15:40] <Geth> ¦ MoarVM/more-pea: 4 commits pushed by (Jonathan Worthington)++
+
+[15:40] <Geth> ¦ MoarVM/more-pea: d5ae9c38c5 | Don't let proven guards block EA
+
+[15:40] <Geth> ¦ MoarVM/more-pea: 16524a4d62 | Better fact propagation on tracked set/PHI
+
+[15:40] <Geth> ¦ MoarVM/more-pea: 8f61dd35ab | First steps towards transitive scalar replacement
+
+[15:40] <Geth> ¦ MoarVM/more-pea: 92b5127d6b | Deal with transitive escapes
+
+[15:40] <Geth> ¦ MoarVM/more-pea: review: https://github.com/MoarVM/MoarVM/compare/b585349d5026...92b5127d6b14
+
+[15:41] <timotimo> hm, catting all the zstd files for one number series together gives about 6x as much memory usage than catting the source files and compressing them in one session
+
+[15:42] <timotimo> but i'd prefer being able to random access the individual snapshots
+
+[15:47] <jnthn> The moar-pea push was a rebase
+
+[15:48] <jnthn> Now trying to reproduce the asan explosion nwc10 mentioned that branch had
+
+[15:48] <jnthn> Doesn't seem to happen with normal configuration
+
+[15:51] <jnthn> nwc10: Can you still reproduce the asan explosion with latest more-pea (rebased on latest master), and if so, what have you got set besides MVM_SPESH_NODELAY=1 MVM_SPESH_BLOCKING=1 ?
+
+[15:51] *** travis-ci joined
+[15:51] <travis-ci> MoarVM build errored. Jonathan Worthington 'Merge branch 'postrelease-opts''
+
+[15:51] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/506829978 https://github.com/MoarVM/MoarVM/compare/7ae6684f4235...6c7810ce7ca9
+
+[15:51] *** travis-ci left
+[15:55] <jnthn> epic fail, that benchmark I thought had got slower hadn't; I'd modified the Perl 6 version of it and then forgotten that
+
+[15:55] <timotimo> whoops. but yeah, i've done that kind of thing before, too
+
+[16:02] *** domidumont left
+[16:11] *** robertle left
+[16:19] *** domidumont joined
+[16:59] *** mgoebel joined
+[17:00] *** domidumont left
+[17:02] *** domidumont joined
+[17:08] *** mgoebel left
+[17:43] *** domidumont left
+[17:44] *** brrt`` left
+[18:45] <Geth> ¦ MoarVM: 5e3633987d | (Jonathan Worthington)++ | 2 files
+
+[18:45] <Geth> ¦ MoarVM: Avoid a bunch of malloc/free churn in code-gen
+
+[18:45] <Geth> ¦ MoarVM:
+
+[18:45] <Geth> ¦ MoarVM: We can use the same arrays over and over again, so just clear them
+
+[18:45] <Geth> ¦ MoarVM: instead.
+
+[18:45] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/5e3633987d
+
+[18:47] <timotimo> huh, how does that macro work?
+
+[18:47] <timotimo> i mean the init one also uses "x ## _foo"
+
+[18:47] *** Kaypie is now known as Kaiepi
+
+[19:06] *** travis-ci joined
+[19:06] <travis-ci> MoarVM build passed. Jonathan Worthington 'Avoid a bunch of malloc/free churn in code-gen
+
+[19:06] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/506922411 https://github.com/MoarVM/MoarVM/compare/6c7810ce7ca9...5e3633987d12
+
+[19:06] *** travis-ci left
+[19:58] *** committable6 left
+[19:58] *** reportable6 left
+[19:58] *** shareable6 left
+[19:58] *** greppable6 left
+[19:58] *** evalable6 left
+[19:58] *** releasable6 left
+[19:59] *** committable6 joined
+[19:59] *** greppable6 joined
+[20:00] *** releasable6 joined
+[20:00] *** shareable6 joined
+[20:01] *** reportable6 joined
+[20:02] *** evalable6 joined
+[20:29] *** AlexDaniel left
+[20:29] *** AlexDaniel joined
+[20:38] *** AlexDaniel left

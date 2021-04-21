@@ -1,0 +1,403 @@
+[01:19] *** zakharyas joined
+[02:48] *** ilbot3 joined
+[03:39] *** agentzh joined
+[06:28] *** mtj_ joined
+[06:30] *** mtj_ joined
+[07:06] *** domidumont joined
+[07:11] *** domidumont joined
+[08:05] *** brrt joined
+[08:06] <brrt> good * #moarvm
+
+[08:17] <brrt> i almost had a fix for the round to zero error..
+
+[08:34] <samcv> jnthn, any reason failed UTF-8 kills the VM, is there a way to make it not totally die?
+
+[08:34] <samcv> hello br
+
+[08:34] <samcv> err i guess you're gone
+
+[08:34] <samcv> *brrt
+
+[08:35] <nwc10> good *, #moarvm
+
+[08:35] <samcv> :)
+
+[08:58] *** brrt joined
+[08:59] <brrt> but, it's not correct
+
+[09:00] <brrt> the tl;dr is, the interpreter uses one algorithm for round-towards-minus-infinity, the JIT uses another, this casues the JIT and the interpreter to disagree in the range [-1,0]
+
+[09:03] <brrt> i replaced that with a check of the operand and modulus; but that doesn't work either, since, if you divide by a negative number, the modulus may be positive
+
+[09:04] <brrt> so it needs to be (result < 0 && modulus != 0 || result == 0 && modulus < 0)
+
+[09:05] <brrt> but there's not really a cute and quick expression for that...
+
+[09:45] <jnthn> samcv: Uh...I thought we already fixed all places that happened?
+
+[09:46] <jnthn> Unless somebody introduced a new one :P
+
+[09:47] <jnthn> There is still some async string I/O code that can do so, but all of the ops leading to it are deprecated and can be tossed already.
+
+[10:18] *** brrt joined
+[10:25] *** dogbert17_ joined
+[10:39] <samcv> oh
+
+[10:39] <samcv> dunno. but i remember it crashing
+
+[10:40] <jnthn> Now I've had coffee, the obvious question I shoulda asked is "what code did you run to make this happen" :)
+
+[10:45] <samcv> m: Buf.new((0..255).pick(100)).decode('utf8'); say 'hi'
+
+[10:45] <camelia> rakudo-moar 5b7b7f: OUTPUT: «Malformed UTF-8 at line 1 col 1␤  in block <unit> at <tmp> line 1␤␤»
+
+[10:45] <samcv> it never gets to the `say 'hi'` part
+
+[10:50] <dogbert17_> m: say 'Hi'
+
+[10:50] <camelia> rakudo-moar 5b7b7f: OUTPUT: «Hi␤»
+
+[10:50] <jnthn> You didn't catch the exception
+
+[10:51] <jnthn> m: try Buf.new((0..255).pick(100)).decode('utf8'); say 'hi'
+
+[10:51] <camelia> rakudo-moar 5b7b7f: OUTPUT: «hi␤»
+
+[10:51] <dogbert17_> jnthn: here's idiomatic :) code you can run in order to repro the decoderstream bug https://gist.github.com/dogbert17/037f464c4da80a286f9e0895fae63ed9
+
+[10:55] <jnthn> samcv: Maybe you're wanting a way to do a replacement char or something, though?
+
+[10:56] <jnthn> In which case that's NYI
+
+[10:56] <samcv> not really. just wanting it to continue the rest of the script
+
+[10:57] <samcv> so maybe i am wrong, but i thought i put it in a try block and it still messed it all up. but i'll let you know if i have any code
+
+[10:59] <jnthn> OK :)
+
+[10:59] <jnthn> Yeah, it's meant to throw a catchable exception
+
+[11:09] <brrt> so, here's an idea
+
+[11:09] <brrt> what if we add an opcode that reliably prevents JITting
+
+[11:09] <brrt> so you could add nqp::dont_jit_me() or nqp::no_jit();
+
+[11:10] <brrt> and just always bail when we see that
+
+[11:18] <dogbert17_> jnthn, timotimo: could this be the break we've been looking for ? https://gist.github.com/dogbert17/e0a63ea2e4f3d03b033814f657313c1e
+
+[11:22] <jnthn> Yes, that looks very wrong o.O
+
+[11:22] <jnthn> Can you MVM_dump_backtrace(tc) on each of those threads?
+
+[11:29] <Geth> ¦ MoarVM: be37105fea | (Bart Wiegmans)++ | src/jit/emit_x64.dasc
+
+[11:29] <Geth> ¦ MoarVM: Fix div_i JIT round to negative infinity
+
+[11:29] <Geth> ¦ MoarVM:
+
+[11:29] <Geth> ¦ MoarVM: Compute a bias as (modulo < 0) & ((num < 0) ^ (denom < 0)); this gets
+
+[11:29] <Geth> ¦ MoarVM: rid of a conditional move and branches that would achieve the same.
+
+[11:29] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/be37105fea
+
+[11:30] <brrt> i should probably update MoarVM and rakudo to point to this new version
+
+[11:31] <IOninja> This fixes the div_i JIT bug?
+
+[11:31] <brrt> …  how is that done, anyway
+
+[11:31] <brrt> yes
+
+[11:31] <IOninja> brrt++ sweet
+
+[11:31] <brrt> IOninja; if you could in my stead, i'd be grateful
+
+[11:31] <brrt> (i would go to lunch, in that case)
+
+[11:32] <IOninja> Version bumps? I need to get ready to work
+
+[11:32] <IOninja> I can do it in 1.5 hours.
+
+[11:32] <brrt> hmm
+
+[11:32] <brrt> i can probably do it as well
+
+[12:11] * dogbert17_ sry, had to run away for a while
+
+[12:37] <dogbert17_> jnthn, I could get only get one trace: https://gist.github.com/dogbert17/e0a63ea2e4f3d03b033814f657313c1e
+
+[13:25] <dogbert17_> have yet another gist which I believe clarifies things a bit don't you think. https://gist.github.com/dogbert17/4d360c57f0520a8384dc35dd30703b93
+
+[13:28] <jnthn> Hmm...yes, that's interesting
+
+[13:36] <dogbert17_> how should that sequence of events be avoided?
+
+[13:51] * dogbert17_ is happy that progress has been made wrt the decoderstream bug :)
+
+[13:55] <jnthn> dogbert17_: I'll have to take a closer look to figure out exactly which of the troublesome scenarios is going on
+
+[13:55] <timotimo> i've opened this gist three times in a row now and i'm not quite sure i understand it ... but it's gone into GC in the middle?
+
+[13:56] <timotimo> i mean ... it went GC in one thread and it was (still? already?) doing something with the same decoder in another?
+
+[13:59] *** Guest45345 joined
+[14:03] <dogbert17_> one thread sets the 'in-use' flag (via MVM_decoder_take_available_chars) then goes in to GC and when the other thread tries to get into single user mode things asplode :)
+
+[14:04] * dogbert17_ I think :)
+
+[14:12] <jnthn> It's possible that the decoder object moves and we end up zeroing the wrong thing at exit thanks to said GC
+
+[14:13] <jnthn> But that may not entirley explain it
+
+[14:13] <jnthn> Because we're *in* GC
+
+[14:13] <jnthn> And in the decoder
+
+[14:13] <jnthn> And nothing else should be
+
+[14:13] <jnthn> So even if we're got a single use bug, I still thing we've got a real bug too
+
+[14:18] <dogbert17_> could it be bad enough to mess up bigints?
+
+[14:19] <timotimo> .o( when do bigints come out of the decoder? )
+
+[14:19] <jnthn> If it's really a "thread is running when it should be GCing or blocked" then yes
+
+[14:19] <jnthn> But I'd expect it to fail much more explosively and variedly than we're seeing
+
+[14:20] <dogbert17_> we've seen lots of nasty stuff when running harness6, SEGV's, corrupted linked lists etc
+
+[14:21] <dogbert17_> I still have gdb running (the latest gist), which thread should I run a MVM_dump_backtrace on?
+
+[14:22] <dogbert17_> notes that another thread seems to be doing gc as well, thread 2
+
+[14:23] *** lizmat joined
+[14:23] * dogbert17_ meant thread 3
+
+[14:24] <dogbert17_> #0  AO_load_acquire (addr=0x804c248) at 3rdparty/libatomic_ops/src/atomic_ops/sysdeps/gcc/generic-small.h:490        # thread 3
+
+[14:24] <dogbert17_> #1  finish_gc (is_coordinator=<optimized out>, gen=<optimized out>, tc=<optimized out>) at src/gc/orchestrate.c:195
+
+[14:24] <dogbert17_> #2  run_gc (tc=tc@entry=0x9fa41c0, what_to_do=what_to_do@entry=1 '\001') at src/gc/orchestrate.c:333
+
+[14:24] <dogbert17_> #3  0xb7c5a7e6 in MVM_gc_enter_from_interrupt (tc=tc@entry=0x9fa41c0) at src/gc/orchestrate.c:511
+
+[14:25] <dogbert17_> i.e. for the untrained eye it seems as if two threads are doing gc at the same time (must be wrong)
+
+[14:25] <timotimo> no, gc is multithreaded
+
+[14:28] <dogbert17_> aha thx, I did update the gist with data from two other threads, there's lots of gc happening at the same time
+
+[14:30] <timotimo> that's interesting. two threads are waiting for gc to finish, but two other threads are still working towards their goals
+
+[14:30] <timotimo> finish_gc is basically "let's wait for all other threads to signal that they're finished"
+
+[14:31] <timotimo> and collect_free_nursery_uncopied is for cleaning up stuff that has died but can't just be ignored (i.e. they have pointers to buffers or own file handles)
+
+[14:33] <dogbert17_> timotimo, here's the golfed code if you wish to try it https://gist.github.com/dogbert17/037f464c4da80a286f9e0895fae63ed9
+
+[14:34] <timotimo> how many runs did it take you to crash that?
+
+[14:35] <timotimo> oh that was quick
+
+[14:36] <dogbert17_> it crashes after a while, just let it run (check that you have jnthn's fixes for src/6model/reprs/Decoder.c)
+
+[14:36] <timotimo> oh, i might not have it
+
+[14:37] <timotimo> no, i do have it
+
+[14:37] <dogbert17_> cool
+
+[14:39] <dogbert17_> it should throw an exception after a while
+
+[14:40] <dogbert17_> unless you have a breakpoint around line 107
+
+[14:41] <timotimo> yeah, it gets to the decoder-multi-use exception quickly
+
+[14:42] <timotimo> am i supposed to get that from multiple threads at the same time?
+
+[14:42] <dogbert17_> good question :)
+
+[14:42] <timotimo> but you get it, too?
+
+[14:42] <dogbert17_> yes
+
+[14:42] <timotimo> i.e. multiple lines of "unhandled exception on thread n"
+
+[14:42] <dogbert17_> yup
+
+[14:43] <dogbert17_> sometimes it shows up immediately
+
+[14:43] <timotimo> and only one time it has "decoder may not be used concurrently"
+
+[14:43] <dogbert17_> yes
+
+[14:45] <dogbert17_> sometimes it crashes on the first run like this:
+
+[14:45] <dogbert17_> Starting...
+
+[14:45] <dogbert17_> Unhandled exception in code scheduled on thread 3
+
+[14:45] <dogbert17_> Unhandled exception in code scheduled on thread 8
+
+[14:45] <dogbert17_> Deocder may not be used concurrently
+
+[14:55] <timotimo> have you ever gotten it to crash under valgrind?
+
+[14:56] <dogbert17_> haven't tried
+
+[14:56] * dogbert17_ tries
+
+[14:57] <dogbert17_> valgrind and mt-programs are a bit meh
+
+[14:57] <timotimo> yeah
+
+[14:58] <dogbert17_> ASAN might be better
+
+[15:02] <timotimo> It is also possible to mark up the effects of thread-safe reference counting using the ANNOTATE_HAPPENS_BEFORE, ANNOTATE_HAPPENS_AFTER and ANNOTATE_HAPPENS_BEFORE_FORGET_ALL, macros. Thread-safe reference counting using an atomically incremented/decremented refcount variable causes Helgrind problems because a one-to-zero transition of the reference count means the accessing thread has exclusive ownership of
+
+[15:02] <timotimo> the associated resource (normally, a C++ object) and can therefore access it (normally, to run its destructor) without locking. Helgrind doesn't understand this, and markup is essential to avoid false positives.
+
+[15:02] <timotimo> do we have anything that'd have the same problem as this here?
+
+[15:03] <timotimo> However, it is common practice to implement memory recycling schemes. In these, memory to be freed is not handed to free/delete, but instead put into a pool of free buffers to be handed out again as required. The problem is that Helgrind has no way to know that such memory is logically no longer in use, and its history is irrelevant. Hence you must make that explicit, using the VALGRIND_HG_CLEAN_MEMORY client
+
+[15:03] <timotimo> request to specify the relevant address ranges. It's easiest to put these requests into the pool manager code, and use them either when memory is returned to the pool, or is allocated from it.
+
+[15:03] <timotimo> ^- it feels like this definitely applies
+
+[15:07] <timotimo> okay, the program dies under valgrind, but it doesn't output anything interesting
+
+[15:11] <timotimo> oh, neat
+
+[15:11] <timotimo> my valgrind support branch has made it into master
+
+[15:11] <timotimo> i wasn't sure if it did
+
+[15:12] <dogbert17_> what does that support branch do?
+
+[15:13] <timotimo> you can call Configure.pl with --valgrind
+
+[15:13] <timotimo> and it'll put redzones into the fixedsize allocator and also tells valgrind more clearly how that allocator operates
+
+[15:14] <timotimo> i.e. instead of getting "address is 10000000 bytes into block of size 99999999" it'll give a fine-grained resolution of those chunks of data
+
+[15:14] <timotimo> and when something writes past its allowed size in the FSA, it'll asplode
+
+[15:15] <dogbert17_> very cool
+
+[15:16] <timotimo> ayup
+
+[15:16] <timotimo> it's not quite as simple to make the same thing work for the nursery, though :(
+
+[15:16] <timotimo> so i haven't tackled that last time i worked with this code
+
+[15:17] <timotimo> but telling helgrind that the fromspace is "now completely freed" should be easy
+
+[15:17] <timotimo> i was hoping i could give locks names with annotations, but it doesn't seem to allow for that
+
+[15:18] <timotimo> oh, would you look at that
+
+[15:18] <timotimo> helgrind's docs point out that posix condition variables aren't properly supported
+
+[15:18] <timotimo> but libuv uses them for stuff
+
+[15:19] <timotimo> the docs say it'll generate lots of false positives if you do use them. and i do see reports from inside pthread_cond_wait and such
+
+[15:19] <jnthn> We use them for "stuff" doo
+
+[15:19] <jnthn> *too
+
+[15:20] <jnthn> Like, every Promise :P
+
+[15:21] <timotimo> oh, ok
+
+[15:21] <timotimo> helgrind docs say to plesae use semaphores instead
+
+[15:21] <timotimo> here i see it's detecting a data race for fsa->freelist_spin %)
+
+[15:24] <jnthn> Does it understand our CAS functions?
+
+[15:25] <timotimo> Do not roll your own threading primitives (mutexes, etc) from combinations of the Linux futex syscall, atomic counters, etc. These throw Helgrind's internal what's-going-on models way off course and will give bogus results.
+
+[15:27] <timotimo> we can call ANNOTATE_RWLOCK_CREATE/_DESTROY and ANNOTATE_RWLOCK_ACQUIRED/_RELEASED around our spinlock
+
+[15:27] <timotimo> that should make it understand
+
+[15:28] <timotimo> oh, rwlock may not be the right one
+
+[15:29] <timotimo> then it'd be VALGRIND_HG_MUTEX_* that i'd have to use
+
+[15:29] <timotimo> INIT_POST, LOCK_PRE, LOCK_POST, UNLOCK_PRE, UNLOCK_POST, and DESTROY_PRE
+
+[15:33] <timotimo> i'm not sure how to annotate our race to add stuff to the freelist
+
+[15:35] <timotimo> wow.
+
+[15:35] <timotimo> googling "helgrind trycas" finds just a single result
+
+[15:35] <timotimo> and it's a tumblr tag "really-bad-hair-day." ?!?!
+
+[15:38] <jnthn> lol
+
+[15:45] * timotimo also added a MEMORY_CLEAN annotation to where we allocate a frame from our framestack
+
+[15:49] <timotimo> hum.
+
+[15:49] <timotimo> could our decodestream thing have to do with passing work to other threads? :\
+
+[15:49] <timotimo> because finish_gc is also the function that calls into "process_in_tray"
+
+[15:53] <timotimo> it's complaining that the memset that zeroes a block allocated in the FSA can potentially race with a read by process_worklist, and i'm not sure how to interpret tihs
+
+[15:53] <timotimo> huh. that fixed_size_alloc_zeroed was called by allocate_frame where it sets up the ->work block
+
+[15:54] <timotimo> maybe i should set the memory to cleaned again after the memset finishes
+
+[15:54] <timotimo> oh, huh. i clean when i free, not when i alloc. maybe i should do that differently actually
+
+[15:55] <timotimo> "It's easiest to put these requests into the pool manager code, and use them either when memory is returned to the pool, or is allocated from it."
+
+[15:56] <timotimo> so i ought to decide whether i want to clean the memory when i alloc, or when i free, but not both
+
+[15:56] <timotimo> IIUC
+
+[15:57] <timotimo> (insert obligatory "i don't know what i'm doing" picture-of-dog here)
+
+[15:58] <IOninja> https://candlesandherbs.files.wordpress.com/2015/02/d6a1143f571184db25f94613edd43b40af6d3a629221aba00d9efdcfef5efd84.jpg
+
+[15:58] <timotimo> TYVM
+
+[15:58] <timotimo> http://i1.kym-cdn.com/photos/images/facebook/000/234/739/fa5.jpg - i think this is my fav
+
+[16:08] *** brrt joined
+[16:17] <timotimo> with the incredible amount of output helgrind spits at me i find it very hard to verify if my additions of annotations help at all
+
+[16:30] * dogbert17_ relocates
+
+[16:41] *** zakharyas joined
+[17:54] *** Geth joined
+[18:15] *** lizmat joined
+[18:18] *** vendethiel joined
+[18:25] *** domidumont joined
+[18:28] *** domidumont1 joined
+[18:29] *** Ven joined
+[18:30] *** domidumont joined
+[18:31] *** domidumont joined
+[18:36] *** domidumont1 joined
+[18:49] *** Ven joined
+[18:53] *** domidumont joined
+[19:09] *** Ven joined
+[19:14] *** TimToady joined
+[19:29] *** Ven joined
+[19:40] *** lizmat_ joined
+[19:49] *** Ven joined
+[20:09] *** Ven joined
+[20:23] *** lizmat joined
+[20:29] *** Ven joined
+[20:49] *** Ven joined
+[21:02] *** Ven joined
+[23:26] *** mst joined

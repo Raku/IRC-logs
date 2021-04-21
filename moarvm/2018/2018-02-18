@@ -1,0 +1,588 @@
+[00:28] *** Kaiepi joined
+[01:38] *** brrt joined
+[02:37] *** brrt joined
+[02:56] *** ilbot3 joined
+[03:26] *** lizmat joined
+[09:41] <nine> MasterDuke: that must be an issue. One gets away with a lot of inaccuracies in C because the compiler does implicit casts. Not so much in assembly. For a quick tests you could change MVM_spesh_log_is_logging's signature to return an MVMint64
+
+[09:42] <nine> MasterDuke: better in the long term would be to just inline the function (as it's meant to be according to the comment above it). It's just: tc->cur_frame->spesh_cand == NULL && tc->cur_frame->spesh_correlation_id && tc->spesh_log
+
+[11:52] *** brrt joined
+[11:57] <brrt> good *
+
+[12:10] <nine> brrt: whatever good to you, too!
+
+[12:10] <nine> brrt: https://irclog.perlgeek.de/moarvm/2018-02-17#i_15828814 don't you mean some 0 value that is smaller than 64 bits?
+
+[12:11] <nine> MVM_spesh_is_logging returns an MVMint32, but I guess the code the JIT creates for an NZ test looks at the full 64 bit register?
+
+[12:12] <brrt> correct
+
+[12:12] <brrt> but that can not really be the problem
+
+[12:12] <brrt> as I understand the x86-64 ABI, an assignment of 0 to a 32-bit register, or indeed, the assignment of anything to a 32 bit register
+
+[12:13] <brrt> will automatically clear the upper 32 bits
+
+[12:13] <nine> Even return values of functions?
+
+[12:13] <brrt> yes
+
+[12:13] <brrt> smaller values, not
+
+[12:13] <brrt> because the return value is stored in %eax (or %rax)
+
+[12:13] <brrt> so, hypothesis disproved, i say
+
+[12:14] <brrt> :-)
+
+[12:14] <nine> We could easily test the hypothesis by changing MVM_spesh_log_is_logging's signature to return an MVMint64
+
+[12:15] <brrt> true
+
+[12:16] <brrt> but i'm not getting a replication right now, on macOS + clang
+
+[12:16] <brrt> I did get them when running with --debug --optimize=0
+
+[12:16] <brrt> so there's something going on there, too
+
+[12:22] <brrt> bbiab
+
+[12:50] <jnthn> Wait, are we calling MVM_spesh_log_is_logging from the JIT?
+
+[12:50] <jnthn> That should never happen
+
+[12:50] <jnthn> Logging is something the interpreter does to figure out what types are showing up
+
+[12:51] <jnthn> Once we're in specialized code, we're already optimizeed
+
+[12:51] <jnthn> *optimized
+
+[12:51] <jnthn> And there's always a ->spesh_cand
+
+[12:57] <timotimo> i told them that :|
+
+[13:08] *** brrt joined
+[13:09] <brrt> not only that, we're calling MVM_spesh_log_is_static, from the JIT
+
+[13:09] <brrt> yeah, i'm puzzled as well
+
+[13:09] <brrt> i mean,
+
+[13:09] <brrt> i can fix it with not emitting that code
+
+[13:09] <brrt> but why is it returning true in the first place?
+
+[13:11] <MasterDuke> fwiw, i did try changing MVM_spesh_log_is_logging signature to an MVMint64 and still got segfaults
+
+[13:11] <jnthn> Dunno, maybe that means there's some other bug
+
+[13:12] <jnthn> Is tc getting passed correctly?
+
+[13:12] <jnthn> But yeah, we should remove any calls to that
+
+[13:13] <MasterDuke> tc=0x555555758c40
+
+[13:14] <brrt> print *tc
+
+[13:14] <brrt> wil give information
+
+[13:14] <brrt> that seems high though
+
+[13:14] <brrt> usually tc is allocated to a lowish page
+
+[13:15] <MasterDuke> i'll trying rebuilding and rerunning gdb and see what that says
+
+[13:16] <MasterDuke> https://gist.github.com/MasterDuke17/9f386a024a4be69572a9a45fbab53376 updated
+
+[13:18] <jnthn> Hm, looks legit at least
+
+[13:18] <jnthn> oh, though if it's about the is_logging returning true when it shouldn't, then it'd be the thing we passed there that's in question
+
+[13:19] <jnthn> Hm, I thought the "are we spesh logging" thing was a static inline function
+
+[13:19] <brrt> i'm thinking of a MVM_spesh_debug_is_active() to replace all checks for tc->instance->spesh_log_fh
+
+[13:19] <brrt> compilers will create an uninlined variant of that if you take a pointer
+
+[13:19] <brrt> anyway
+
+[13:19] <MasterDuke> gist updated with print *value output
+
+[13:19] <jnthn> Ah, ok
+
+[13:20] <brrt> one think you can do is wrap the (when) with a (guard (when ...) control_breakpoint 0)
+
+[13:20] <brrt> then under a debugger (*not* gdb) you will be interrupted and can step through
+
+[13:21] <MasterDuke> lldb?
+
+[13:21] <brrt> (gdb will assume it has placed the breakpoint, will try to restore an instruction, presumably from a hash table, will reinsert the an instruction from uninitialized memory, and crash)
+
+[13:21] <brrt> lldb will work
+
+[13:22] <brrt> i mean to fix this in gdb at some point :-)
+
+[13:22] <brrt> seems like a legit *tc
+
+[13:22] <brrt> yes
+
+[13:23] <brrt> the other hack i sometimes do, is to copy or wrap the definition of the called function, e.g. MVM_spesh_is_logging, and replace it with MVM_spesh_is_logging_jit_version()
+
+[13:23] <brrt> and then break on that
+
+[13:24] <MasterDuke> gotta go feed a baby, might be back in a bit
+
+[13:24] <brrt> :-)
+
+[13:26] <brrt> timotimo: you had a tool to visualize spesh logs, didn't you
+
+[13:31] <brrt> can i ask why there's a file called 'gh-pages-deploy_key.enc' in our 'tools' directory
+
+[13:33] <brrt> hmmm, graph_spesh.p6 seems to have bitrotted
+
+[13:33] <brrt> there's no MAST::Ops
+
+[13:36] <brrt> can we still load a '.moarvm' file as a library
+
+[13:43] <brrt> aha, i have a hypothesis
+
+[13:44] <brrt> i'm seeing a 'lowered' istrue+unless_i, where the frame-handler (start, goto) annotations are on the unless_o, and the istrue on the unless_i
+
+[13:44] <MasterDuke> i'm in lldb, anything i can do in ~3m?
+
+[13:44] <brrt> so those need to be moved to the istrue
+
+[13:44] <brrt> i dunno
+
+[13:45] <brrt> can you break set --name MVM_spesh_is_logging
+
+[13:45] <brrt> well, better yet
+
+[13:45] <MasterDuke> i did the guard thing
+
+[13:45] <brrt> oh
+
+[13:45] <brrt> can you run it
+
+[13:45] <brrt> (it'll break before you enter the MVM_spesh_is_logging)
+
+[13:46] <brrt> then, when you have, use 'step' ('s') or 'step-instruction' ('si') to step into the frame
+
+[13:46] <MasterDuke> gist updated
+
+[13:46] <brrt> that will be a call
+
+[13:46] <brrt> (callq)
+
+[13:46] <brrt> ok, step until you return from the frame, and report the result of 'print $rax'
+
+[13:47] <MasterDuke> gist updated, was that what you meant?
+
+[13:48] <brrt> continue pls :-)
+
+[13:48] <MasterDuke> or step further?
+
+[13:48] <brrt> step further, and print all you can :-)
+
+[13:48] <brrt> the $rax is the value after the 'return'
+
+[13:49] <brrt> oh, and can you print *cur_frame
+
+[13:50] <MasterDuke> updated
+
+[13:53] <MasterDuke> or did you want cur_frame inside MVM_spesh_is_logging?
+
+[13:56] <brrt> kind of, but never mind :-)
+
+[13:57] <brrt> hmm
+
+[13:57] <brrt> see, $rax is 0
+
+[13:57] <brrt> ok, can you step further and see if you enter MVM_spesh_log_static
+
+[13:57] <brrt> maybe it doesn't happen in the first run
+
+[13:57] <MasterDuke> yep
+
+[13:58] <MasterDuke> took about 8 steps
+
+[13:58] <brrt> (i sometimes use the tc->frame_sequence_nr for determining the correct frame to break in)
+
+[13:58] <brrt> uhuh
+
+[14:00] <MasterDuke> afk for a while, but i'll leave lldb running if there's anything i can do when i get back
+
+[14:00] <brrt> awesome
+
+[14:01] <brrt> (i hope to replicate it myself by that time, but alright)
+
+[14:01] <brrt> I think I have a fix for that issue
+
+[14:04] <timotimo> brrt: that module exists, but it's under tools/lib or something
+
+[14:04] <brrt> uhuh
+
+[14:09] <brrt> I think I have a fix for zoffix's issues
+
+[14:11] <brrt> then again...
+
+[14:12] <brrt> .ask jnthn I think when I split the if_o into istrue + if_i, I think i need to move at least some annotations onto the istrue, but possibly not all
+
+[14:12] <yoleaux> brrt: I'll pass your message to jnthn.
+
+[14:12] <brrt> I'm not sure which is which, to be honest
+
+[14:12] <timotimo> mhh, good idea
+
+[14:12] <timotimo> well, istrue is the one that might invoke, so it probably wants most annotations
+
+[14:12] <brrt> uhuh
+
+[14:14] <brrt> well, some instructions are supposed to be 'before' an instruction, and some are 'after'
+
+[14:15] <timotimo> s:1st/instructions/annotations/
+
+[14:15] <brrt> right :-)
+
+[14:18] <timotimo> oh, so after splitting, we do need to put those that were meant to come after on the second resulting instruction
+
+[14:18] <timotimo> here's a thought that makes things much easier:
+
+[14:19] <timotimo> we introduce another instruction that is exactly like if_o and unless_o, but it takes a third argument, which is just a scratch register that spesh allocates for us
+
+[14:19] <brrt> uhuh....
+
+[14:19] <brrt> i'm listening
+
+[14:19] <brrt> i'm skeptical but listening :-)
+
+[14:19] <timotimo> that's already everything
+
+[14:19] <brrt> oh,
+
+[14:19] <brrt> i see
+
+[14:20] <brrt> yeah, and then do the split just in the JIT
+
+[14:20] <brrt> hmmm
+
+[14:20] <timotimo> we'll no longer need to split up the instruction, because we now have the register "for free"
+
+[14:20] <timotimo> aye, jit is already rather "splitty" by its nature
+
+[14:20] <brrt> nah, i think this is quite alright
+
+[14:20] <timotimo> also, we won't be able to forget adapting the splitting code to new annotations as they show up in the future
+
+[14:22] <timotimo> the interp.c implementation of sp_if_o (or what we end up calling it) will be identical to the if_o and unless_o ones we had so far
+
+[14:22] <timotimo> the only effect on speshed-but-not-jitted will be that the register set will grow a little
+
+[14:29] <brrt> uhuh
+
+[14:30] <brrt> then again, i never really quite liked the implementation in jit/graph.c
+
+[14:34] * timotimo is going to do some grant work now
+
+[14:44] <timotimo> i think next up is making gc recording "proper" when multi-threaded
+
+[14:48] <Geth> ¦ MoarVM: 22d2db5e08 | (Bart Wiegmans)++ | 2 files
+
+[14:48] <Geth> ¦ MoarVM: [Spesh] Move annotations to istrue when split from if_o
+
+[14:48] <Geth> ¦ MoarVM:
+
+[14:48] <Geth> ¦ MoarVM: In commit c7774e37d2 we unconditionally split if_o/unless_o into
+
+[14:48] <Geth> ¦ MoarVM: istrue + if_i/unless_i, which fixed rakudo issue #1483.
+
+[14:48] <Geth> ¦ MoarVM:
+
+[14:48] <Geth> ¦ MoarVM: However, the annotations that would indicate the start of the if_o
+
+[14:48] <Geth> ¦ MoarVM: instruction, would now inadvertently be placed in the middle of the
+
+[14:48] <Geth> ¦ MoarVM: <…commit message has 8 more lines…>
+
+[14:48] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/22d2db5e08
+
+[15:22] * timotimo re-fiddled the datastructure for profiles a little, and also how the sql output backend goes through the threads object
+
+[15:22] <timotimo> now the threads object should have all threads in it, also the "profile" table will have one entry per thread, including its thread id
+
+[15:27] *** zakharyas joined
+[15:29] <nine> JFTR spectest seems to be back to the usual 2 backtrace related failurs with BLOCKING and NODELAY except for t/spec/S09-typed-arrays/hashes.t which fails with "Incompatible MROs in P6opaque rebless for types NQPClassHOW and QAST::WVal+{QAST::SpecialArg}"
+
+[15:30] <nine> .tell brrt MVM_SPESH_BLOCKING=1 MVM_SPESH_NODELAY=1 perl6 -Ilib t/spec/S09-typed-arrays/hashes.t
+
+[15:30] <yoleaux> nine: I'll pass your message to brrt.
+
+[15:30] <nine> .tell fails with "Incompatible MROs in P6opaque rebless for types NQPClassHOW and QAST::WVal+{QAST::SpecialArg}" but passes with MVM_JIT_EXPR_DISABLE=1
+
+[15:30] <yoleaux> nine: I'll pass your message to fails.
+
+[15:30] <nine> .tell brrt fails with "Incompatible MROs in P6opaque rebless for types NQPClassHOW and QAST::WVal+{QAST::SpecialArg}" but passes with MVM_JIT_EXPR_DISABLE=1
+
+[15:30] <yoleaux> nine: I'll pass your message to brrt.
+
+[15:30] *** zakharyas joined
+[15:32] <timotimo> pro-tip: make sure you configure with the right --prefix...
+
+[15:34] <nine> timotimo: oh yes, that one can bite sooo hard
+
+[15:34] *** zakharyas joined
+[15:37] *** zakharyas joined
+[15:42] *** zakharyas joined
+[15:45] <timotimo> i was ack-ing the source for the message that was messing up my display, but i couldn't find it :D
+
+[15:53] <timotimo> Unhandled exception: const_n32 NYI - damn it!
+
+[15:59] <nine> .tell brrt Please disregard that. I didn't realize that I was running with an experimental patch applied.
+
+[15:59] <yoleaux> nine: I'll pass your message to brrt.
+
+[16:18] <timotimo> oh, fun! joining a thread destroys the tc, and with it all profiler-related data
+
+[16:34] *** robertle joined
+[16:38] *** AlexDaniel joined
+[16:38] <MasterDuke> timotimo++ --profiling multi-threaded will be awesome
+
+[16:40] <timotimo> next up will be figuring out what causes the start time of a node to not be set
+
+[16:40] <timotimo> INSERT INTO profile VALUES (18446635666303613,0,1);
+
+[16:40] <timotimo> ^- this doesn't make much sense :)
+
+[16:45] <MasterDuke> fwiw, i still get the segfault when building nqp if i enable getlextatic_o on top of HEAD
+
+[16:51] <timotimo> the problem was a problem i thought i'd fixed before o_O
+
+[16:51] <timotimo> anyway, that's kinda nice now
+
+[16:55] <MasterDuke> are these mostly moarvm fixes or nqp?
+
+[16:57] <timotimo> changes and fixes in moarvm, changes to fix stuff and changes to work with the new data in nqp
+
+[16:57] <timotimo> rsi rest break time
+
+[16:58] <timotimo> though actually, let me push what i have so you can play around with it for a moment :)
+
+[16:58] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: 8 commits pushed by (Timo Paulssen)++
+
+[16:58] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: bc55210649 | record when gc happens (msecs since start)
+
+[16:58] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: 901d421f17 | more prep work for multithreaded profiler stuff
+
+[16:58] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: a14981a1a3 | count spesh time properly
+
+[16:58] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: aeabc1d98f | optimize eq_s and ne_s against empty string in spesh
+
+[16:58] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: 7753fc5a29 | record if a thread is responsible for a gc
+
+[16:58] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: 8c1f6bc623 | record thread id in profile data
+
+[16:58] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: 6b7532ae42 | account for thread_join deleting tc from threads
+
+[16:58] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: 0761eaf64e | init main thread "end_time" before use
+
+[16:58] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: review: https://github.com/MoarVM/MoarVM/compare/0000000000...0761eaf64e
+
+[16:59] <timotimo> the branch name is a bit strange, because the first thing was to make the profiler UI not show spesh time as time "not spent running code" since it moved to another thread
+
+[16:59] <timotimo> but really i'll want to teach the profiler about vars like SPESH_BLOCKING so that can be actually correct
+
+[17:03] <MasterDuke> cool, i'll play around with it
+
+[17:05] *** Ulti joined
+[17:05] <Ulti> just an FYI, this dir is mostly full of 0byte files so I assume something somewhere is a bit wonky http://www.moarvm.org/measurements/perl6-bench/
+
+[17:05] <Ulti> \o.
+
+[17:10] <timotimo> MasterDuke: the html frontend doesn't know what's up with extra threads yet i believe
+
+[17:10] <timotimo> so only the sql makes much sense right now
+
+[17:10] <MasterDuke> looks like you made some changes to the html though?
+
+[17:10] <timotimo> barely
+
+[17:11] <MasterDuke> ah
+
+[17:15] <timotimo> in the future our profiler frontends will have to merge trees from different threads, i assume
+
+[17:15] <Geth> ¦ MoarVM: jstuder-gh++ created pull request #806: Rakudo RT#102994: Add flag indicating HLL init status on CodeRef (CodeRef edition)
+
+[17:15] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/806
+
+[17:15] <synopsebot> RT#102994 [open]: https://rt.perl.org/Ticket/Display.html?id=102994 [BUG] State variables are never initialized if the first call of the containing block does not reach them
+
+[17:25] *** zakharyas joined
+[17:29] <timotimo> MasterDuke: looks like i forgot to commit syntax/typo fixes for the generated sqlite code
+
+[17:31] <AlexDaniel> Ulti: heh! What a find
+
+[17:31] <timotimo> neat. p6profiler-tools's graphviz target already shows every thread entry
+
+[17:32] <timotimo> yeah, jnthn's home desktop (i think?) used to generate those and one day it just stopped generating actual results
+
+[17:32] <Ulti> AlexDaniel: yeah I noticed at Xmas for the blog post about perf but didnt mention it
+
+[17:32] <AlexDaniel> I didn't know this page existed :)
+
+[17:32] <Ulti> then recently came up in my browser autocomplete
+
+[17:33] <AlexDaniel> (browser autocomplete)++
+
+[17:33] <timotimo> oh, maybe i just forgot "make install"
+
+[17:42] <AlexDaniel> samcv: I think we'll be ready much sooner this time. How is the changelog going?
+
+[17:56] *** domidumont joined
+[18:04] <MasterDuke> timotimo: i attempted to --profile `my @p = (^30_000).race.grep(*.is-prime); say @p.elems`, but it seemed to hang after `took data from main thread` at 100% cpu (i killed it after a couple min)
+
+[18:05] <timotimo> oh, that must be the other thing i fixed and apparently didn't commit
+
+[18:05] <timotimo> it's probably entered gc
+
+[18:06] <timotimo> oooh
+
+[18:06] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: c6d1115d7a | (Timo Paulssen)++ | 3 files
+
+[18:06] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: record a gc's sequence number
+
+[18:06] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: review: https://github.com/MoarVM/MoarVM/commit/c6d1115d7a
+
+[18:06] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: b6e8639302 | (Timo Paulssen)++ | src/profiler/instrument.c
+
+[18:06] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: keep main thread in gen2 mode
+
+[18:07] <Geth> ¦ MoarVM/profiler_new_spesh_semantics:
+
+[18:07] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: as the other functions use its tc to allocate
+
+[18:07] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: objects.
+
+[18:07] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: review: https://github.com/MoarVM/MoarVM/commit/b6e8639302
+
+[18:07] <timotimo> try this
+
+[18:09] <timotimo> oh whoops?
+
+[18:09] <MasterDuke> `MoarVM oops: Cannot leave gen2 allocation without entering it`
+
+[18:11] <timotimo> yeah
+
+[18:12] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: 3484ba9189 | (Timo Paulssen)++ | src/profiler/instrument.c
+
+[18:12] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: keep main thread in gen2 mode
+
+[18:12] <Geth> ¦ MoarVM/profiler_new_spesh_semantics:
+
+[18:12] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: as the other functions use its tc to allocate
+
+[18:12] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: objects.
+
+[18:12] <Geth> ¦ MoarVM/profiler_new_spesh_semantics: review: https://github.com/MoarVM/MoarVM/commit/3484ba9189
+
+[18:12] <timotimo> ^- a force-push
+
+[18:12] <MasterDuke> btw, do you plans include incorporating --telemeh output in profiles?
+
+[18:13] <timotimo> not sure yet
+
+[18:13] <MasterDuke> ooo, the --profile succeeded!
+
+[18:13] <timotimo> i don't have a good reason for it yet, but i do have more timeline-like data now
+
+[18:13] <timotimo> like the absolute time a gc started will be interesting i bet
+
+[18:14] <timotimo> RSI rest break &
+
+[18:14] <MasterDuke> heh, 10m file though, not gonna open that in my browser
+
+[18:17] <MasterDuke> 1524ms in Channel.pm's receive for `my @p = (^10_000).race.grep(*.is-prime); say @p.elems`, and it's not jitted
+
+[18:24] <timotimo> that's most likely almost exclusively waiting for something to become available on the channel
+
+[18:25] <timotimo> m: say (^10_000).pick(*)[*-1]; say now - INIT now
+
+[18:25] <camelia> rakudo-moar f74890550: OUTPUT: «6433␤0.03790328␤»
+
+[18:25] <timotimo> i wonder if shuffling the input numbers would do you much good, because lower numbers are quicker to test (i guess at least?)
+
+[18:32] <AlexDaniel> 99999999999999999999 .is-prime.say
+
+[18:32] <evalable6> AlexDaniel, rakudo-moar f74890550: OUTPUT: «False␤»
+
+[18:37] <timotimo> scratch that, it most probably takes about the same amount of time
+
+[18:37] <timotimo> unless you reach big integer territory
+
+[18:37] <timotimo> hm, though actually, i bet we force a big int for .is-prime even if we fit into 32bit
+
+[19:00] *** zakharyas joined
+[19:02] *** buggable joined
+[19:23] *** Geth joined
+[19:27] <timotimo> it should make sense to take the lowest start time for a given gc sequence number and the maximum of start time + time to figure out how long a given gc run took in total, right?
+
+[19:27] <timotimo> because the program resumes only when all gcs have finished?
+
+[19:33] <timotimo> occasionally i still get "profiler lost sequence"; i'd really like to know how that happens ...
+
+[19:57] *** Geth joined
+[20:06] *** Geth joined
+[20:08] *** zakharyas joined
+[20:42] <MasterDuke> timotimo: you think it would make sense to have an is_prime in addition to is_prime_I? or MVM_int_is_prime in addition to MVM_bigint_is_prime?
+
+[20:43] <MasterDuke> but yeah, MVM_bigint_is_prime does a `mp_int *ia = force_bigint(ba, tmp);`
+
+[21:02] <timotimo> i don't think it should be an extra op; it should probably just decide based on the size
+
+[21:49] *** Kaiepi joined
+[21:58] *** zakharyas joined
+[22:17] <timotimo> now i have to decide whether i want to accept inclusive times > 100%
+
+[22:18] <timotimo> tbh, i could go that route
+
+[22:24] <timotimo> fun! i was wondering what in the heck was calling "sleep" so much in my profile. turns out i get the thread pool scheduler's supervisor thread in my profile now <3
+
+[22:43] <timotimo> currently we're removing retained_bytes + gc_promoted_bytes from cleared_bytes to get the final cleared_bytes count
+
+[22:43] <timotimo> it turns out, however, that gc_promoted_bytes also contains the unmanaged size of objects
+
+[22:43] <timotimo> a few times in this particular profile we ended up promoting more bytes than we freed, thus causing the cleared bytes count to go negative
+
+[22:44] <timotimo> i might want to split up those numbers into bytes "directly" promoted from the nursery and unmanaged bytes promoted out of the nursery
+
+[22:45] <timotimo> it's especially muddy because the unmanaged size of objects can change over their lifetime, whereas the regular size will not (except when we mixin? but i think that has a pointer and adds to unmanaged size instead?)
+
+[22:48] <timotimo> m: say 140106937758704.base(16)
+
+[22:48] <camelia> rakudo-moar f74890550: OUTPUT: «7F6D304173F0␤»
+
+[22:48] <timotimo> i don't know how we reach this kind of size, though
+
+[22:53] <timotimo> OK, so there's a few SpeshLogs which are all 384 KBytes, 1397 KBytes in one SCRef, 1237 KBytes in an NFAType
+
+[22:54] <timotimo> still don't know how it reaches that incredible number, though
+
+[22:57] <timotimo> m: say 34677491 / 140106937758704
+
+[22:57] <camelia> rakudo-moar f74890550: OUTPUT: «0.0000002475073080␤»
+
+[22:57] <timotimo> i can account for this tiny amount over the whole run time of the program, but the huge number was from just a single gc run
+
+[22:58] <timotimo> rsi rest break &
+
+[23:04] <AlexDaniel> timotimo: by the way, that nice piece of software for taking breaks…
+
+[23:04] <AlexDaniel> timotimo: had to disable it because it was getting too much in the way :(
+
+[23:05] <AlexDaniel> but the concept is wonderful and the execution is great too, just doesn't work for me I guess
+
+[23:05] <AlexDaniel> ( http://www.workrave.org/ )
+
+[23:09] <timotimo> have you tried its less intrusive mode?
+
+[23:09] <timotimo> "quiet" mode

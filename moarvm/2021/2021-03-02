@@ -1,0 +1,276 @@
+[00:05] *** vrurg joined
+[00:09] *** vrurg left
+[00:10] *** MasterDuke left
+[00:46] *** leont left
+[01:03] *** vrurg joined
+[03:01] *** klapperl left
+[03:01] *** klapperl joined
+[03:04] *** avar left
+[03:16] *** avar joined
+[03:16] *** avar left
+[03:16] *** avar joined
+[04:03] *** bartolin left
+[04:17] *** bartolin joined
+[06:33] *** frost-lab joined
+[07:58] *** domidumont joined
+[08:26] *** patrickb joined
+[08:31] *** MasterDuke joined
+[08:35] <patrickb> o/
+
+[08:39] <MasterDuke> \o
+
+[08:55] *** zakharyas joined
+[08:57] *** sortiz left
+[08:59] *** sena_kun left
+[09:02] *** sena_kun joined
+[09:07] *** leont joined
+[09:12] *** Geth joined
+[09:47] <MasterDuke> i'm looking at a perf report of a tiny script that defines some custom operators (essentially taken from https://www.khanate.co.uk/blog/2021/02/23/weekly-challenge-in-raku-week-101-part-2/), but takes 9s to run
+
+[09:48] <lizmat> could you see if it is as slow when the code is precomped?
+
+[09:48] <MasterDuke> there are 1.35m calls to MVM_coerce_smart_intify, hitting this case https://github.com/MoarVM/MoarVM/blob/master/src/core/coerce.c#L417-L418 and i logged the types: `1349339 intifying an object of type P6int (BOOTInt)`
+
+[09:50] <MasterDuke> is that faster `REPR(obj)->box_funcs.get_int` faster than the above block https://github.com/MoarVM/MoarVM/blob/master/src/core/coerce.c#L393-L409 which i would have though would have been hit?
+
+[09:54] <MasterDuke> i assume the get_int is just https://github.com/MoarVM/MoarVM/blob/master/src/6model/reprs/P6int.c#L89-L97 which should be pretty fast, but MVM_coerce_smart_intify was higher in the perf report than i'd expect
+
+[09:56] <MasterDuke> lizmat: the runtime isn't very much (so i'm sure precompiling would make the entire script much faster), but it's the compiling of it i'm trying to speed up
+
+[09:56] <lizmat> ack ++MasterDuke
+
+[09:59] <MasterDuke> run time is 41 ms, compile time is 9s
+
+[10:01] <MasterDuke> 6s of which are spent in https://github.com/Raku/nqp/blob/master/src/QRegex/NFA.nqp#L813-L1007 but i don't know if there are any more micro-optimizations to be done there, i suspect something algorithmic is needed
+
+[10:01] *** frost-lab left
+[10:05] <lizmat> Looks to me line 966 is dead code ?
+
+[10:06] <nine> indeed
+
+[10:07] <MasterDuke> yeah, same with 873. but i don't think those are going to significantly impact the time
+
+[10:07] <lizmat> lemme remove them and runs the tests
+
+[10:07] <nine> I'm pretty sure spesh would optimize away 873 and likely 966, too
+
+[10:08] <nine> OTOH removed code is debugged code
+
+[10:08] <lizmat> 873 appears to be needed for debugging
+
+[10:09] <nine> both are
+
+[10:09] <MasterDuke> same with 966 (used in 969)
+
+[10:09] <lizmat> aaahh  ok
+
+[10:09] <nine> but they may be commented out
+
+[10:10] <MasterDuke> but they should be commented out with the debugging code
+
+[10:10] <lizmat> doing that now
+
+[10:11] <MasterDuke> fwiw, process_worklist, MVM_VMArray_at_pos, VMArray_gc_mark are the top moarvm functions according to perf
+
+[10:12] <nine> I'm a bit surprised at MVM_VMArray_at_pos, since that ought to get devirtualized in the JIT
+
+[10:12] <nine> Or, no
+
+[10:13] *** frost-lab joined
+[10:13] <nine> Well it would get devirtualized, but that only means that we get rid of MVM_repr_at_pos and replace it with MVM_VMArray_at_pos. And the latter is probably a bit too complicated to implement in the JIT directly
+
+[10:14] <jnthn> The array element type is, however, hung off the REPR data, and so if we know the type we know the element type, so any branching on the array kind goes away
+
+[10:15] <jnthn> I'd suggest we get the re-org of VMArray done first
+
+[10:15] <MasterDuke> re-org? the FSA work i've yet to finish?
+
+[10:15] <nine> Yeah, looking at it, the code is very repetitive and the only real difference is the multiplier for the index to get the memory address
+
+[10:16] <jnthn> MasterDuke: Yes, and I think moving the length information into the chunk allocated with the FSA, to give us safety
+
+[10:16] <jnthn> After that I guess it JITs into an offset calculation and a bounds check
+
+[10:16] <jnthn> Then the deref
+
+[10:16] <MasterDuke> yeah, that's the part i haven't finished yet
+
+[10:16] <MasterDuke> that is, moving the length information into the chunk allocated with the FSA
+
+[10:17] <jnthn> OK. The JIT output would change with that, so probably it's worth doing first.
+
+[10:17] <jnthn> I'll try and backlog here a bit later. Still suffering limited keyboard time due to wrist.
+
+[10:18] <nine> oh...still not better?
+
+[10:18] <MasterDuke> i think the remove candidates PR is pretty close to done, hope to finish up the VMArray FSA stuff next
+
+[10:19] <jnthn> nine: Well, in the absolute sense no, in the relative sense, improvement since I started using some gel and realizing that less keyboard time is useless if I don't also do less smartphone time :)
+
+[10:19] <MasterDuke> (just distracted from either this morning by the slow custom operator compiling)
+
+[10:20] <jnthn> Custom op compilation is slow more 'cus of the NFA design than anything, I suspect
+
+[10:20] <MasterDuke> heh, yeah, i just keep hoping to find something lower hanging than the very top of the tree...
+
+[10:21] <nine> jnthn: I can tell from experience that playing piano is also not the smartest idea in that case :)
+
+[10:21] <MasterDuke> or throwing/catching an (american) football
+
+[10:21] <nine> MasterDuke: too late! Considering the path you're on, you'll keep jumping from tree top to tree top
+
+[10:23] <MasterDuke> ha
+
+[10:35] *** frost-lab left
+[10:38] <nine> Why does CStruct's storage spec claim that it needs only space the size of a pointer for inlining: https://github.com/MoarVM/MoarVM/blob/master/src/6model/reprs/CStruct.c#L793 when its body actually contains 2 pointers? https://github.com/MoarVM/MoarVM/blob/master/src/6model/reprs/CStruct.h#L21
+
+[10:42] <nine> Ah, because it cannot be inlined according to the same storage spec
+
+[10:46] *** patrickb left
+[11:12] <MasterDuke> btw, is there anything that can be done for all those MVM_coerce_smart_intify calls where the type is P6int (BOOTInt)? don't know if it matters, but they're coming from that NFA optimize method and NQPMu's BUILDALL
+
+[12:08] *** zakharyas left
+[12:33] <MasterDuke> oh, https://github.com/MoarVM/MoarVM/blob/master/src/spesh/optimize.c#L1006 is supposed to take care of it. but then why is there still a smrt_intify in the 'after' of NQPMu's BUILDALL...?
+
+[12:37] <MasterDuke> smrt_intify      r13(3),   r8(9)
+
+[12:37] <MasterDuke> ...
+
+[12:37] <MasterDuke> r8(9): usages=1, deopt=9, flags=0
+
+[12:37] <MasterDuke> ...
+
+[12:37] <MasterDuke> r13(3): usages=6, deopt=53,51,50,49,48,47,46,45,44,43,42,41,40,39,38,37,36,35,34,32,31,30,29,28,27,25,26,22,21,20,19,18,17,16,15,14,13,12,11,10, flags=0
+
+[12:37] <MasterDuke> i don't know how to read facts
+
+[12:39] * lizmat resists the urge to mention something with "alternative" in it
+
+[12:39] <MasterDuke> heh
+
+[12:42] <MasterDuke> fwiw, it's this line https://github.com/Raku/nqp/blob/master/src/core/NQPMu.nqp#L23
+
+[12:46] <lizmat> you could try removing the "int" part ?
+
+[12:47] <lizmat> but I guess that will cascade into a lit of calls in the nqp::iseq_i 's ?
+
+[12:47] <lizmat> *lot
+
+[12:47] <MasterDuke> that's what i assume
+
+[12:53] *** patrickb joined
+[13:08] <MasterDuke> i think it doesn't get into the body of the optimize_coerce because it fails `if (facts->flags & (MVM_SPESH_FACT_KNOWN_TYPE | MVM_SPESH_FACT_CONCRETE) && facts->type) {`
+
+[13:08] <MasterDuke> `facts->flags & (MVM_SPESH_FACT_KNOWN_TYPE | MVM_SPESH_FACT_CONCRETE)` is 0 and `facts->type` is 0x0
+
+[13:10] <lizmat> so is the location of the code the reason?
+
+[13:12] <MasterDuke> i assume it's because spesh doesn't know for sure what the type is of the thing it's pulling out with the nqp::atpos. compared to atpos_i which would always be an int
+
+[13:15] <lizmat> yup, I'd say
+
+[13:15] <lizmat> sadly, that array cannot be turned into a list_i, as it can also contain code objects for BUILD and TWEAK, if I recall correctly
+
+[13:16] <lizmat> and in any case, in Rakudo this is all codegenned for each class, so it actually won't run BUILDALL in most cases
+
+[13:16] <lizmat> well, *that* BUILDALL
+
+[13:18] <MasterDuke> luckily this isn't the most expensive thing going on, but i thought it might be more easily optimized
+
+[13:20] <lizmat> but you raise a good point
+
+[13:21] <lizmat> I wonder though if it would be worthwhile to port the "create a custom BUILDALL method for a class" approach would be worthwhile in NQP, or even possible?
+
+[13:24] <MasterDuke> i'm afraid i can only be a rubber duck here, i know absolutely nothing about the BUILDALL stuff
+
+[13:25] <lizmat> how big a part is BUILDALL execution of what you're benchmarking ?
+
+[13:26] <MasterDuke> it's the 6th most expensive function, but in absolute time values almost nothing in comparison
+
+[13:27] <lizmat> ok, then let's focus on the top 5  :-)
+
+[13:28] <MasterDuke> 6.2s, 4.4s, 2s, 440ms, 240ms, then BUILDALL at 190ms
+
+[13:30] <lizmat> and the 6.2s one is?
+
+[13:30] <MasterDuke> those top three are optimize gen/moar/stage2/QRegex.nqp:817, mergesubstates gen/moar/stage2/QRegex.nqp:665, mergesubrule gen/moar/stage2/QRegex.nqp:560
+
+[13:31] <MasterDuke> i've looked at all three a bunch and i think the micro-optimizations are pretty much all found. like jnthn++ said, a re-design is needed
+
+[13:33] <lizmat> line 384 maybe better written as "elsif $to && @edges[0] == $EDGE_FATE  and lose the inner if ?
+
+[13:34] <lizmat> that would first check $to (which is probably cheaper), and only then index into @edges
+
+[13:34] <lizmat> also: it's checking twice for @edges[0], maybe store that in a temp ?
+
+[13:36] <MasterDuke> isn't the second one @sedges (note the initial 's')
+
+[13:36] <MasterDuke> oh, you mean 831 and 834?
+
+[13:37] <lizmat> 830 yeah
+
+[13:37] <lizmat> sorry, what was I typing
+
+[13:42] *** zakharyas joined
+[13:49] <MasterDuke> no noticeable change in time with those changes
+
+[13:52] <lizmat> yeah, it was a long shot: those were in the initial setup, not in the actual optimization
+
+[13:52] <lizmat> afk for a few hours&
+
+[14:12] <MasterDuke> jnthn: i'm not sure about https://github.com/MoarVM/MoarVM/pull/1426/commits/c6066ce04e2430bc0f6bde31896d132c17b3e282 but that was needed to actually trigger the optimization being removed in that example you gave
+
+[14:34] <nine> I'm pretty sure all the regex code is from the era of "make it work somehow" rather than the later "make it work efficiently" stage
+
+[14:37] <MasterDuke> i know there's that "passing fates somewhere" optimization i've asked about before, i've been thinking about trying to give that a go once i finish up the current stuff
+
+[14:39] <MasterDuke> regexes/nfas/etc are not really my area of expertise, but then again, none of the rakudo/moarvm stuff i've done really are either...
+
+[14:44] <nine> I think regexes/nfsas/etc are the last large white area on my map, too :)
+
+[14:47] <MasterDuke> i really like using regexes (mastering regular expressions was only the second programming reference book i read cover-to-cover besides programming perl), but have never really spent any time with their implementation
+
+[15:16] <nine> At university (I studied on-the-job with already 15 years of experience) as a beginner example for programming C we had to implement a grep-like tool and just for fun I implemented a very basic backtracking regex engine :) It's really the best way to understand how these things work
+
+[15:22] *** linkable6 left
+[15:22] *** evalable6 left
+[15:22] *** linkable6 joined
+[15:24] *** evalable6 joined
+[15:32] <MasterDuke> my algorithms course had some stuff about NFAs/DFAs, but i don't remember any particularly practical exercises
+
+[15:35] *** patrickb left
+[15:37] *** patrickb joined
+[16:09] *** sortiz joined
+[16:54] *** patrickb left
+[17:05] *** cog left
+[17:06] *** cog joined
+[18:59] *** zakharyas left
+[19:33] *** domidumont left
+[20:21] *** sxmx left
+[20:38] *** sxmx joined
+[20:55] *** zakharyas joined
+[21:48] *** zakharyas left
+[22:28] <lizmat> https://eprint.iacr.org/2021/232   # RIP RSA ?
+
+[22:33] <moritz> the linked PDF says "work in progress 31.10.2019"
+
+[22:33] <moritz> if it's as revolutionary as the abstract claims, why hasn't it destroyed RSA yet in the last year?
+
+[22:34] <moritz> I don't understand number theory, so cannot judge the paper on its contents
+
+[22:35] <leont> Given the name on it, I would take it serious
+
+[22:37] <leont> Any idea I may have had of understanding a little number theory was quickly put to rest by that paper…
+
+[22:37] <moritz> aye, it's pretty dense :D
+
+[22:37] <MasterDuke> dense is the word i was just going to use
+
+[22:38] <moritz> and according to the Wikipedia, it does look like he's got some good credentials in the field
+
+[22:38] <leont> Then again, my understanding of number theory is based on having read Applied Cryptography like 15 years ago :-p
+
+[22:47] <leont> (and that's probably also why I had heard of Schnorr signatures)
+
+[23:10] *** Kaiepi left
+[23:11] *** Kaiepi joined

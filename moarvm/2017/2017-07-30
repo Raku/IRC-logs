@@ -1,0 +1,248 @@
+[00:02] *** deep-book-gk_ joined
+[00:02] *** deep-book-gk_ left
+[01:52] *** ilbot3 joined
+[02:07] *** vendethiel joined
+[05:18] *** ilbot3 joined
+[09:24] *** brrt joined
+[09:35] <brrt> timotimo++ seems like a legit fix
+
+[09:35] <brrt> also, wtf deny_execmem
+
+[09:35] <brrt> (although yeah, we should've checked the return code)
+
+[10:14] <samcv> i'm thinking of having MVM_string_codes cache the number when it's called
+
+[10:14] <samcv> so if the op is called again, it doesn't have to iterate through the whole string to get the value.
+
+[10:16] <samcv> i guess i would need to add it to the struct and then also make sure it gets initiated in all the places we create strings
+
+[10:17] <samcv> brimonk, do you know if we initiate any of the values in the struct when we create a MVMString or do we have to set up all of them each time? i know we do it with some values like storage_type num_strands, num_graphs
+
+[11:03] *** dogbert2 joined
+[11:54] <jnthn> samcv: I don't really want to make MVMString any bigger for something relatively rarely wanted.
+
+[11:54] <jnthn> So -1 to caching code
+
+[11:54] <jnthn> *codes
+
+[11:54] <samcv> ok
+
+[11:55] <jnthn> Plus it matches the general principle that to ask the length in something other than the current level you're working in requires O(n) work (like asking the number of bytes means doing the encoding)
+
+[11:56] <jnthn> MVMString is GC-allocated though, and the GC promises us zeroed memory
+
+[11:59] <samcv> what does that have to do with zeroed memory?
+
+[11:59] <timotimo> you don't have to put code everywhere that zeroes out the codes field
+
+[11:59] <jnthn> You were asking if we need to intialize values in MVMString
+
+[11:59] <samcv> ah
+
+[11:59] <samcv> ok i see what you mean
+
+[12:00] <samcv> though some that may need to use codes to actually find out the codes could be annoyed that it's On every time it's asked for. but i don't personally need .codes. just seeing it could be something useful for people
+
+[12:01] *** brrt joined
+[12:02] <samcv> jnthn, also issue: repetitions is not normalized
+
+[12:04] <samcv> m: my $v = ''; for ^100 { $v ~= "\c[ZWJ]" }; say $v.chars
+
+[12:04] <camelia> rakudo-moar 51e59e: OUTPUT: «1?»
+
+[12:04] <samcv> m: my $v = "\c[ZWJ] x 100; say $v.chars
+
+[12:04] <camelia> rakudo-moar 51e59e: OUTPUT: «===SORRY!=== Error while compiling <tmp>?Cannot use variable $v in declaration to initialize itself?at <tmp>:1?------> my $v = "\c[ZWJ] x 100; say $?v.chars?    expecting any of:?        double quotes?        term?»
+
+[12:04] <samcv> m: my $v = "\c[ZWJ]" x 100; say $v.chars
+
+[12:04] <camelia> rakudo-moar 51e59e: OUTPUT: «100?»
+
+[12:04] <jnthn> Hmm...I thought it checked if the first and last char were concat-stable and refused to do the strand trick if so
+
+[12:04] <jnthn> Seems not though :(
+
+[12:04] <samcv> no clue
+
+[12:05] <jnthn> I'm just looking at the code. It doesn't check.
+
+[12:05] <timotimo> committable6: releases my $v = "\c[ZWJ]" x 100; say $v.chars
+
+[12:05] <committable6> timotimo, https://gist.github.com/e1e43586a30bbfac2791437d38bf7082
+
+[12:05] <jnthn> I thought I'd fixed that but apparently not
+
+[12:05] <samcv> but i encountered that issue when i tried to concat things and so i had to make sure neither were repetitions to work around that bug
+
+[12:05] <jnthn> I think the same check we do for "can we just concat these without re-normalizing" should work though
+
+[12:05] <samcv> jnthn, i want to look in MVM_string_repeat right? want me to fix it when i get around to it?
+
+[12:05] <samcv> yeah
+
+[12:06] <jnthn> Yeah, please do :)
+
+[12:06] <samcv> well with a bit more work in certain cases
+
+[12:06] <jnthn> I think if the answer is "no" then we can just skip the strand repetition opt
+
+[12:07] <jnthn> I struggle to imagine this actually coming up in any real-world use cases
+
+[12:07] <samcv> for what?
+
+[12:07] <jnthn> I can't think of any real-world situation when the x operator would be used on something that needs re-normalization
+
+[12:08] <samcv> by accident :-)
+
+[12:08] <samcv> that is a real world case :)
+
+[12:08] <jnthn> Right, pretty much
+
+[12:08] <timotimo> "i want a hundred grave accents on this a"
+
+[12:08] <samcv> also i know it happens in roast
+
+[12:08] <samcv> because when i did my concat optimization, i had to not allow repetitions
+
+[12:08] <samcv> otherwise it would break
+
+[12:08] <samcv> some tests
+
+[12:08] <jnthn> *nod*
+
+[12:10] <jnthn> Anyway, since it should be relatively rare I think we can just say that if concating two of the things we're repeating would need re-normalization, then we just produce a single flat normalized result string
+
+[12:11] <jnthn> Rather than a strand string with repetitions set
+
+[12:11] <jnthn> I think this still isn't sufficient for concat however because you can have like
+
+[12:11] <jnthn> 'z' x 100 ~ "\c[COMBINING ACUTE]"
+
+[12:11] <jnthn> And the x of z is totally fine
+
+[12:12] <jnthn> Where the repetition was fine but the concat needs to renormalize the final repetition
+
+[12:13] <jnthn> So afaict even fixing MVM_string_repeat won't be sufficient alone without some extra care in concat for that case
+
+[12:14] <samcv> well. for that i'd take off a repetition and combine it to the acute
+
+[12:14] <samcv> but it would be more work. i considered doing it though
+
+[12:14] <jnthn> Yeah, that's do it but...it's work :)
+
+[12:28] <brrt> jnthn: how would you feel about introducing even-moar-jit in this months release, or the next?
+
+[12:44] *** brrt joined
+[13:04] <jnthn> brrt: I think if it can be merged in the next week, that gives 2 weeks of testing before the next release, which is pretty decent.
+
+[13:05] <jnthn> I figure you're best placed to know if it's ready :)
+
+[13:08] *** stmuk_ joined
+[13:30] *** zakharyas joined
+[13:49] *** zakharyas joined
+[13:52] <nwc10> samcv: Stage mast       : No registered operation handler for 'codes'
+
+[13:53] <nwc10> samcv: do you have a commit or branch locally that you're using but you've not pushed?
+
+[13:54] <nwc10> mmm, or is this PEBKAC?
+
+[13:56] <Zoffix> nwc10: are you sure you're using latest and greatest of everything? Someone else had that issue and it should've been fixed by https://github.com/rakudo/rakudo/commit/e051dd2def
+
+[13:56] <nwc10> Zoffix: I thought I was at 13:52 but by 13:54 I wasn't any more
+
+[14:19] <nwc10> Zoffix: yes, you/it is right, I'm mistaken. Sorry for the noise
+
+[14:19] <nwc10> samcv: good *, and ignore me for now :-)
+
+[15:27] *** leego joined
+[15:27] *** Geth___ joined
+[15:27] *** buggable joined
+[15:27] *** Zoffix joined
+[16:13] <timotimo> samcv: it seems like your implementation of codes that iterates the codepoint iterator isn't in moarvm yet
+
+[16:40] <nwc10> master/master/nom works for me
+
+[16:42] <timotimo> what do you mean works?
+
+[16:42] <nwc10> bulds, runs spectest
+
+[16:42] <timotimo> right
+
+[16:42] <nwc10> doesn't go "No registered operation handler for 'codes'"
+
+[16:42] <timotimo> yeah, that part was fixed
+
+[16:42] <nwc10> OK
+
+[16:42] <timotimo> thing is, the codes op already existed, it just wasn't registered in nqp (and thus not used in rakduo)
+
+[16:42] <nwc10> I'm not very awake today, so likely I've missed soemthing else
+
+[16:43] <timotimo> rakudo used to create a full decoder with the full result to count the codes
+
+[16:43] <timotimo> right now it just outputs the number of graphemes, which is wrong, and the spec tests should have alerted us
+
+[16:44] <timotimo> m: say "foo\r\nbar".codes
+
+[16:44] <camelia> rakudo-moar e051dd: OUTPUT: «7?»
+
+[16:44] <timotimo> look, that's wrong, and we have a spec test that requires this to be 8
+
+[16:44] <nwc10> running the spectests in parallel with an ASAN build seems to be causing some to fail (I think due to timing issues, but not dug hard to see if it's also temp filename clashes) so I've not paid massive attention to track whether the "broken windows" are increasing
+
+[16:44] <nwc10> I slack at that
+
+[16:44] <timotimo> ok :)
+
+[16:45] <timotimo> thing is, before last night that test should have succeeded
+
+[16:45] <timotimo> huh, i might have misunderstood you
+
+[16:46] <nwc10> "the spectests run. not all are passing for me, but not all were yesterday either"
+
+[16:46] <timotimo> ah, yes
+
+[17:12] *** zakharyas joined
+[18:04] *** dogbert2 joined
+[18:59] *** domidumont joined
+[19:02] *** ZofBot joined
+[19:48] <Geth> ¦ MoarVM: ed84a6329b | (Samantha McVey)++ | src/strings/ops.h
+
+[19:48] <Geth> ¦ MoarVM: Have MVM_string_codes iterate the string with codepoint iterator
+
+[19:48] <Geth> ¦ MoarVM:
+
+[19:48] <Geth> ¦ MoarVM: Previously it just returned the number of graphemes.
+
+[19:48] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ed84a6329b
+
+[19:53] * jnthn blug: https://6guts.wordpress.com/2017/07/30/shrinking-moarvm-call-frames/
+
+[20:06] * lizmat rades
+
+[20:16] <timotimo> nice
+
+[21:09] *** lizmat joined
+[21:26] *** deep-book-gk_ joined
+[21:28] *** deep-book-gk_ left
+[21:57] <timotimo> wow, a piece of code where perf shows 24% time spent in memset
+
+[22:03] <jnthn> timotimo: Wow o.O I just managed to get rid of two big sources of those in the last week
+
+[22:04] <jnthn> Off to relax a bit then sleep, but would be interested to see it :)
+
+[22:04] <timotimo> from frames
+
+[22:04] <timotimo> let me be extra sure i have latest everything
+
+[22:36] <timotimo> this script starts a bunch of threads while i'm expecting no threads to be started
+
+[22:41] <timotimo> oh, there's a part to this library that's "no precompilation"
+
+[23:22] <timotimo> well, core setting takes a very small amount of time in memset
+
+[23:24] <timotimo> many examples in Terminal::Print takes at least 15% of time in memset
+
+[23:25] <timotimo> okay, this one was just 11%
+
+[23:35] *** ilmari[m] joined

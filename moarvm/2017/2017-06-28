@@ -1,0 +1,573 @@
+[00:09] *** AlexDaniel joined
+[00:46] <samcv> get the recursive collation data lookup *mostly* working. hopefully sometime this week can actually integrate it into my Moar fork
+
+[00:50] <samcv> i'm almost certain that there's no special codepoint sequences that are subsequences of a longer sequence. i.e. if there's a special collation for abc then there is no special collation for ab
+
+[00:51] <samcv> (that's not including lone codeponints obviously. since if you include that all sequences would start with another :P)
+
+[01:48] *** ilbot3 joined
+[02:40] *** btyler joined
+[05:40] *** brrt joined
+[06:20] <brrt> theory!
+
+[06:21] <brrt> a): we really do the OSR in that frame
+
+[06:24] <brrt> b): but we allocate a new frame for the OSR'd variant (which may be bigger)
+
+[06:25] <brrt> c): but we don't take the size increase from the JIT into account in there
+
+[06:44] *** brrt joined
+[06:45] *** brrt left
+[06:45] *** brrt joined
+[06:46] <brrt> d): that only happens in OSR though, so that's why the bug is OSR specific
+
+[06:46] <brrt> e): we overwrite our tempoary when we invoke a invokish thing
+
+[07:15] *** domidumont joined
+[07:27] *** patrickz joined
+[07:52] *** zakharyas joined
+[08:07] *** TimToady joined
+[08:46] <jnthn> morning o/
+
+[08:46] <jnthn> brrt: Hmm, was the size increase from JIT being handled separately from the existing size increase mechanism for frames?
+
+[09:25] *** zakharyas joined
+[09:36] *** brrt joined
+[09:40] <brrt> yes, for newly created frames, no for OSR frames
+
+[10:31] *** FROGGS joined
+[10:55] *** sivoais joined
+[11:05] <jnthn> lunch &
+
+[11:30] *** domidumont joined
+[11:41] *** brrt joined
+[11:55] *** AlexDaniel joined
+[13:28] <timotimo> i might be able to write a little python script for gdb that'd output a complete spesh dump after every step in the optimizer, store all of the outputs in a file versioned in git, and making a git log -u from that
+
+[13:41] <brrt> that'd be awesome
+
+[13:41] <brrt> if evil
+
+[13:41] <brrt> i approve
+
+[13:43] <[Coke]> timotimo++
+
+[14:07] <timotimo> first trial run to see if it actually works :)
+
+[14:09] <timotimo> m(
+
+[14:10] <timotimo> i have to put the python code at zero indent inside the gdb commands
+
+[14:10] <timotimo> so it's like
+
+[14:10] <timotimo> define trace_spesh_optimize
+
+[14:10] <timotimo> python
+
+[14:10] <timotimo> import gdb
+
+[14:27] <timotimo> hrmpf. using git while outside the directory :|
+
+[14:27] <brrt> it can be done
+
+[14:27] <brrt> it needs parameters
+
+[14:30] <timotimo> i set the GIT_WORK_TREE env var
+
+[14:30] <timotimo> as well as the GIT_DIR env var
+
+[14:30] <timotimo> now it works
+
+[14:31] <timotimo> "works"
+
+[14:31] <timotimo> turns out the to_string argument in gdb's "execute" function is really only for gdb's own output
+
+[14:32] <timotimo> and when i just print the resulting string from the spesh dump, i get an escaped string containing only the first hundred characters
+
+[14:33] <timotimo> http://imgur.com/a/uB6oA - so insightful!
+
+[14:45] *** FROGGS joined
+[14:46] <[Coke]> those number sure are going up!
+
+[14:48] * timotimo looks at lots of "nothing to commit" messages
+
+[14:48] <timotimo> i think i'm making headway, though
+
+[14:49] <timotimo> i see a few commits with additions/deletions
+
+[14:49] <timotimo> it's doing a whole lot of dumps here
+
+[14:51] <timotimo> ooooh way cool!
+
+[14:54] <timotimo> https://gist.github.com/timo/d4aa8c533c12c425e0fcbfc80553058f/revisions - how awesome is that?
+
+[14:55] <nine> timotimo: bloody brilliant!
+
+[14:55] <timotimo> https://gist.github.com/timo/554a993c659f1fcac49c2a13a625ceaa - here's the code that makes it happen
+
+[14:58] <timotimo> hey this is weird
+
+[14:58] <timotimo> -      const_i64_16    r13(11), liti16(0)
+
+[14:58] <timotimo> -      set              r37(1), r13(11)
+
+[14:58] <timotimo> +      const_i64_16     r37(1), liti16(0)
+
+[14:58] <timotimo> -     r37(1): usages=1, flags=2     KnVal
+
+[14:58] <timotimo> +     r37(1): usages=1, flags=2     KnVal DeadWriter
+
+[14:58] <timotimo> why'd it get DeadWriter set on it? that's not right!
+
+[14:58] <timotimo> it's because we throw out the set!
+
+[14:58] <timotimo> and throwing out any instruction now means the thing written to gets considered dead!
+
+[14:59] <timotimo> hmm, gist doesn't show the commit messages in the revision history
+
+[15:06] <jnthn> If you delete an instruction that writes something, surely its writer is dead
+
+[15:06] <jnthn> Though maybe we're using delete instruction when we're not *really* deleting it...
+
+[15:07] <jnthn> Which seems to be the case there
+
+[15:07] <jnthn> Oh but
+
+[15:07] *** brrt joined
+[15:08] <jnthn> We really ned the r13(11) marked as dead there
+
+[15:09] <timotimo> right, this needs to be a bit different
+
+[15:09] <timotimo> i'm already patching it
+
+[15:14] <timotimo> i'm trying to conditionally break on MVM_spesh_candidate_specialize based on the name of the frame being specialized
+
+[15:15] <timotimo> but it always hits the breakpoint :(
+
+[15:15] <timotimo> aha! my condition was lacking a body. in the middle
+
+[15:16] <timotimo> hah, now it stumbles upon invalid utf8 because the contents of the string aren't in 8bit grapheme mode
+
+[15:17] <timotimo> and that makes the condition "stop the program" instead of "ignore this breakpoint"
+
+[15:23] <timotimo> warmed up a little snack :3
+
+[15:24] <timotimo> the whole second_pass was expecting to be able to delete instructions that write to places without being careful
+
+[15:28] <timotimo> for testing purposes i introduced a delete_ins_raw that does the exact same as delete_ins but doesn't clean up the deps
+
+[15:31] <timotimo> bugh. the breakpoint command disappeared from my terminal because of this gdb TUI frontend prettyfier i have
+
+[15:31] <timotimo> oh, it keeps commands in a persistent history!
+
+[15:32] <timotimo> this ought to become a command, too
+
+[15:33] <timotimo> in fact, the command could immediately take a frame name and skip ahead to where it gets speshed
+
+[15:33] <timotimo> (or backwards)
+
+[15:37] <timotimo> -      sp_getspeshslot r18(60), sslot(26)
+
+[15:37] <timotimo> sp_getspeshslot r18(60), sslot(14)
+
+[15:37] <timotimo> -    r18(60): usages=2, flags=2     KnVal
+
+[15:37] <timotimo> +    r18(60): usages=2, flags=2     KnVal DeadWriter
+
+[15:38] <timotimo> this will most certainly have caused a problem here or there?
+
+[15:44] <jnthn> Could well have, though since it's the last step...
+
+[15:52] <jnthn> Draft proposal for stage 1 of spesh changes, to start addressing some of the spesh shortcomings: https://gist.github.com/jnthn/8ee6dc06edc7cd860059b87ffabb86b5
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: 6f1b246ca3 | (Bart Wiegmans)++ | src/jit/graph.c
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: Don't try to reprocess same instructions
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit:
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: An obvious inefficiency; if we had to bail out, it makes little
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: sense to restart and make a new tree, only to bail out again.
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: review: https://github.com/MoarVM/MoarVM/commit/6f1b246ca3
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: 9a3caa22c9 | (Bart Wiegmans)++ | 2 files
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: Allocate the correct size for OSR'd JIT frames
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit:
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: JIT compiled frames may now be larger than spesh frames, so we should
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: take that into account for OSR'd frames as well.
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit:
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: This does not fix the infinite loop problem.
+
+[15:54] <Geth> ¦ MoarVM/even-moar-jit: review: https://github.com/MoarVM/MoarVM/commit/9a3caa22c9
+
+[15:54] <timotimo> ah, of course, after the second_pass nothing else happens
+
+[15:55] <timotimo> so all it did was muddle up the facts displayed in the spesh dump at the end
+
+[16:01] <timotimo> ooh, compiling guards down to actual code, i like that idea
+
+[16:03] <timotimo> i'm not sure what "guarding on static frame type" means?
+
+[16:05] <timotimo> "incremetned" :)
+
+[16:11] <jnthn> Well, on the static frame itself really, not type
+
+[16:11] <Geth> ¦ MoarVM: 9a480f61c0 | (Timo Paulssen)++ | src/core/bytecodedump.c
+
+[16:11] <Geth> ¦ MoarVM: can also dump byecode from a staticframe (debughelper)
+
+[16:11] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/9a480f61c0
+
+[16:12] <timotimo> that's what i expected, yeah
+
+[16:12] <jnthn> You say hi code, I say bye code...
+
+[16:14] <timotimo> oops :D
+
+[16:14] <Geth> ¦ MoarVM: 78bf8ad311 | (Timo Paulssen)++ | tools/trace_spesh_optimizer.gdb
+
+[16:14] <Geth> ¦ MoarVM: gdb command to give a history of spesh optimization decisions
+
+[16:14] <Geth> ¦ MoarVM:
+
+[16:14] <Geth> ¦ MoarVM: commits one spesh dump after every bb handled, and before/after
+
+[16:14] <Geth> ¦ MoarVM: facts discovery, and other places. then displays the resulting
+
+[16:14] <Geth> ¦ MoarVM: git log with diffs.
+
+[16:14] <Geth> ¦ MoarVM:
+
+[16:14] <Geth> ¦ MoarVM: source this from your ~/.gdbinit or directly from your gdb shell
+
+[16:14] <Geth> ¦ MoarVM:
+
+[16:14] <Geth> ¦ MoarVM: it expects to be run from the beginning of MVM_spesh_candidate_specialize
+
+[16:14] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/78bf8ad311
+
+[16:16] <timotimo> i'll clean up the spesh dump output a tiny bit. less trailing spaces in lines, and empty lines between blocks of registers with the same "orig" in the facts list
+
+[16:16] <timotimo> (that'll give better diffs from before-facts to after-facts)
+
+[16:22] <Geth> ¦ MoarVM: 3953a20b9f | (Timo Paulssen)++ | src/spesh/dump.c
+
+[16:22] <Geth> ¦ MoarVM: speshdump: less trailing spaces, chop up facts list by register
+
+[16:22] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/3953a20b9f
+
+[16:39] <timotimo> that document looks sane
+
+[16:40] <jnthn> Cool
+
+[16:40] <jnthn> Hopefully brrt++ might have a moment to look over it too
+
+[16:40] * TimToady thought it looked fine, but he's not a spesh-ialist
+
+[16:42] <DeadDelta> is spesh the same thing as dynamic optimizer?
+
+[16:42] <timotimo> it's our name for a dynamic optimizer, yeah
+
+[16:42] <DeadDelta> cool
+
+[16:46] <jnthn> DeadDelta: It works by producing specialized variants of code (that remove lots of dynamic checking and so forth). The name was picked to be short and unambiguous.
+
+[16:46] <jnthn> ("spec" would be pronounced wrong and get confused with specification...)
+
+[16:50] <TimToady> Glo sometimes shortens "dictionary" to "diksh", which is about the only way you can spell that
+
+[16:51] <ilmari> but sounds dangerously like "dickish" if you're not careful
+
+[16:51] <TimToady> that's okay, we're married
+
+[16:52] <jnthn> Here we can just go with "slovnik", which is half the syllables :)
+
+[16:53] <jnthn> Well, probably time to think about dinner
+
+[16:54] <timotimo> jnthn: maybe i'll get a head start on implementing that repr you mentioned
+
+[16:54] <timotimo> probably over night, though
+
+[16:54] <timotimo> now it's laundry, dinner, stuff like that
+
+[16:54] <jnthn> :)
+
+[16:54] * jnthn heads afk to do afk stuff
+
+[16:57] *** robertle joined
+[16:59] <DeadDelta> While those documents are over my head, I think they should take prime spot on some Weekly. Especially the shortcommings document, as it clearly answers the questions people like me have: "is Perl 6's current performance the best it can get?" It's nice to see a list of all the things that could be better but currently aren't, when you have no clue about this stuff.
+
+[16:59] <DeadDelta> I mean this shortcomings doc: https://gist.github.com/jnthn/95d0705d225ebfbad5dee0faa337624b
+
+[18:00] *** Voldenet joined
+[18:00] *** Voldenet joined
+[18:10] *** AlexDaniel joined
+[18:18] *** FROGGS joined
+[18:50] *** FROGGS_ joined
+[18:52] *** MasterDuke joined
+[19:44] <jnthn> DeadDelta: It's not "all the things", fwiw, just the ones that stand out as the most pressing performance pain points :)
+
+[19:48] <DeadDelta> jnthn: it's much better than the generic "we're working on it". For example, I'd be hard-pressed to find optimization opportunities in IO code (at least before recent refactors) in Rakudo's source. I also have no clue about these lower-level perf improvemnt possibilities. So these two points converge on: IO is as fast as it'll ever get.
+
+[19:48] <DeadDelta> But with this extra info, it feels like there's plenty of opportunity for perf gains
+
+[19:50] <jnthn> DeadDelta: Yeah, there are relatively few folks who have good top-to-bottom knowledge of the stack and can see these things, I guess.
+
+[19:50] <dogbert2> timotimo: are you writing some kind of spesh disassembler?
+
+[19:50] <timotimo> not quite
+
+[19:50] <timotimo> the spesh dump feature has always been there
+
+[19:50] <timotimo> but it'd just go to a file you pass as an environment variable
+
+[19:51] <timotimo> the gdb trace thingie is for getting in-between steps to figure out what spesh is thinking at what stage and how it affects the bytecode
+
+[19:51] <dogbert2> will you be able to find errors with it?
+
+[19:51] <timotimo> so i can figure out what's killing that "get the parameter" op from that one frame that explodes things when we profile
+
+[19:52] <dogbert2> have you figured it out yet?
+
+[19:54] <timotimo> not yet, i was rather close, but got distracted by 1) other suspicious (but ultimately harmless) spesh stuff and 2) housework and other stuff
+
+[19:55] <timotimo> i'm not sure if it was you who suggested it, but rr really is pretty darn useful
+
+[19:55] <dogbert2> I would like to say it was me but alas :)
+
+[19:56] <MasterDuke> i at least seem to remember a conversation with you about it before, but i think then you hadn't gotten it working
+
+[19:56] <timotimo> OK!
+
+[19:56] <timotimo> i don't remember what ailed me back then
+
+[19:56] <timotimo> gotta do some dishes
+
+[19:57] <MasterDuke> it just works now?
+
+[19:57] <dogbert2> MasterDuke: have a Ryzen 1600 incoming
+
+[19:58] <MasterDuke> i'm jealous
+
+[19:59] <MasterDuke> how much are the motherboards?
+
+[20:00] <dogbert2> guess it depend if you're going for x370 or b350 chipset, $100-$300
+
+[20:01] <dogbert2> have only ordered case and CPU so far, still contemplating which MB to get
+
+[20:03] <dogbert2> most seem to be targeted towards young gamers, many of them have support for LED strips
+
+[20:05] <MasterDuke> heh, i don't really care about those any more
+
+[20:05] <MasterDuke> have ram prices gone up recently? it's looking to be ~$215 for 32Gb now, thought i remembered it closer to $160 a while ago
+
+[20:06] <dogbert2> yes they have gone through the roof and there is also fewer high end video cards available, miners pick them up
+
+[20:07] <MasterDuke> ugh
+
+[20:07] <dogbert2> will start with 16 gigs I think. I have 8 on my surrent system
+
+[20:07] <dogbert2> *current
+
+[20:10] <MasterDuke> 8 now also, but definitely want to jump to 32 if i upgrade
+
+[20:10] *** lizmat joined
+[20:17] <timotimo> yes rr just works now
+
+[20:17] <timotimo> though it complains i'm using the powersave scaling governor and i have some flag set in the kernel that prevents rr from being superfast
+
+[20:18] <samcv> good *
+
+[20:18] <yoleaux> 14:00Z <DeadDelta> samcv: is BOM supposed to be valid in latest utf8?  Buf[uint8]:0x<ff fe>.decode.say dies. Perl 5 does the same. But here people are saying that it's not supposed to die: https://irclog.perlgeek.de/perl6/2017-06-28#i_14798132
+
+[20:19] <MasterDuke> if i just barely know how to use gdb is there any reason to try and use rr?
+
+[20:19] <samcv> rr?
+
+[20:19] <DeadDelta> \o
+
+[20:19] <samcv> hi DeadDelta
+
+[20:19] <timotimo> rr records a running application and later lets you debug forwards and backwards in it
+
+[20:19] <timotimo> the exact same execution as often as you want
+
+[20:20] <timotimo> and you can probably share recordings with others, as long as they have the same .so files as you i guess?
+
+[20:20] <DeadDelta> samcv: also later in that chat log, raschipi is saying per Unicode 10 we shouldn't die at all but sub invalid sequences with bom marks or something or other
+
+[20:20] <samcv> well BOM is not recommended
+
+[20:20] <jnthn> huh, the utf-8 BOM is 3 bytes long, not too
+
+[20:20] <jnthn> *two
+
+[20:20] <samcv> it shouldn't die though
+
+[20:20] <jnthn> And we recognize it
+
+[20:20] <DeadDelta> Oh
+
+[20:20] <samcv> it's strongly not recommended
+
+[20:20] <samcv> Use of a BOM is neither required nor recommended for UTF-8, but may be encountered in contexts where UTF-8 data is converted from other encoding forms that use a BOM or where the BOM is used as a UTF-8 signature.
+
+[20:20] <jnthn> And yeah, agree with samcv that a utf-8 BOM is not recommended
+
+[20:20] <samcv> so don't use it. but we should still handle it
+
+[20:20] <jnthn> But uh
+
+[20:21] <DeadDelta> Well, that's why then. The person who supplied the test data had a teo byte bom
+
+[20:21] <jnthn> samcv: We do. But the thing DeadDelta showed is not it, it's 3 bytes long
+
+[20:21] <DeadDelta> s/teo/two/
+
+[20:22] <jnthn> https://github.com/MoarVM/MoarVM/blob/master/src/strings/utf8.c#L360
+
+[20:23] <DeadDelta> Then there's just the never-dying-on-invalid-utf8 thing
+
+[20:23] * DeadDelta rakes log
+
+[20:24] <DeadDelta> Here https://irclog.perlgeek.de/perl6/2017-06-28#i_14798298
+
+[20:29] <timotimo> dinner time \o/
+
+[21:05] <[Coke]> if it's getting sent into a Str, we have to die on invalid utf8, no?
+
+[21:16] <DeadDelta> [Coke]: that was raschipi's point that we don't and the fact that we currently do is opening us to DoS attacks, since any old joker can send invalid UTF8 to programs that don't handle the dying
+
+[21:17] <DeadDelta> and thr quoted unicode 10 para allegedly says we don't have to  die and can sub invalid codepointswith something
+
+[21:19] <jnthn> We can provide that as an option
+
+[21:19] <jnthn> Just didn't implement it for input yet
+
+[21:19] <jnthn> It's already there on output
+
+[21:19] <jnthn> Uh, encoding should say
+
+[21:20] <jnthn> Anything that's accepting data from the outside world needs to be robust in many, many ways, though. Not just to stuff that won't decode right.
+
+[21:22] <jnthn> Not to mention that being overly liberal can be a source of different security issues.
+
+[21:29] <DeadDelta> Yeah. I can't really imagine where it'd be a DoS attack instead of just "your program crashes when I feed it crap"
+
+[21:30] <jnthn> Well, "your program crashes when I feed it crap" is denying the service provided by that program. If you can remotely crash a web app that sucks.
+
+[21:30] <jnthn> But one would hope that any web framework worth its salt would not bring the whole app down because of one invalid request
+
+[21:31] <timotimo> and also if the server crashes it'd restart really quickly
+
+[21:31] <geekosaur> until someone manages to figure out how to get it to write the invalid input to a file/database such that subsequent accesses crash on a decode error
+
+[21:31] <timotimo> though if you rapid-fire push these erroneous requests you can keep it down
+
+[21:31] <timotimo> hehehe.
+
+[21:32] <timotimo> dyncall_callvm_arm32_arm_armhf.c:119:5: error: ISO C90 forbids mixed declarations and code [-Werror=declaration-after-statement]
+
+[21:32] <timotimo> fun times
+
+[21:34] <nwc10> win 1
+
+[21:34] <buggable> nwc10, Thank you for entering Accidental /win Lottery! The next draw will happen in 2 days, 2 hours, 25 minutes, and 37 seconds
+
+[21:34] <timotimo> i still think -Werror=declaration-after-statement should only be turned on for developers
+
+[21:34] <nwc10> oh, midnight UTC
+
+[21:42] <DeadDelta> Well, that was my point, a "web app" would already have something sane handling raw input from the wild.
+
+[21:45] <geekosaur> famous last words
+
+[21:46] <DeadDelta> So what you're left with are apps that do stuff like `say prompt` and no checking and the crash affects just the user using it.
+
+[21:47] <DeadDelta> No, not famous. I just think the "DoS attack" is a more serious problem than "somehow I was able to expose to a world a service that failed to do even the basic check on the data and not it was crashed remotely"
+
+[21:48] <DeadDelta> *now
+
+[21:51] <timotimo> i'm now tracing the exact spesh progress on the explosive frame in profiling stuff
+
+[22:00] <timotimo> well, this is kinda weird
+
+[22:11] *** AlexDaniel joined
+[22:25] * jnthn goes to rest
+
+[22:27] <timotimo> okay, so
+
+[22:27] <timotimo> the optimization for prof_allocated is kicking out the sp_getarg_o because at that point its usage counter is 1
+
+[22:29] <timotimo> oh, could it be ...
+
+[22:30] <timotimo> i got a whole lot closer!
+
+[22:31] <timotimo> turns out we kill dead bbs, but we don't properly throw them out of the "childrens" tree or something
+
+[22:32] <timotimo> so first the cleanup_dead_bbs function reduces the usage counts from that block that starts with the prof_allocated for the argument
+
+[22:32] <timotimo> but the instruction remains in the bb
+
+[22:32] <timotimo> and later the second_pass goes over that bb *again*
+
+[22:32] <timotimo> now seeing that the usage counter for the argument is 1, and concluding that the prof_allocated op was the single user of the instruction
+
+[22:32] <timotimo> and that kicks it out completely
+
+[22:33] <timotimo> a hotfix is setting first_ins and last_ins to NULL in the killed BB, but i'll maybe try to make it properly throw out BBs from the children tree instead?
+
+[22:33] <samcv> ugh my script was working all nicely. and now it turns out that there ARE substrings of collation elements that exist inside each other. :( eek
+
+[22:33] <samcv> the c code is easy enough to fix but the code that generates it is now pretty broken as i'm trying to fix it :P
+
+[22:33] <timotimo> that whole business also explains why it only happens when the profiler is active; the prof_allocated op is the only one that is handled like this
+
+[22:34] <timotimo> oh that sounds terrible, samcv
+
+[22:34] <samcv> and uh magically i'm getting no data at certain points in my recursive functions
+
+[22:34] <samcv> so i'm throwing types on all the variables and working my way down
+
+[22:35] <samcv> i need more caffeine i think
+
+[22:38] <Geth> ¦ MoarVM: 3d3d0d05df | (Timo Paulssen)++ | src/spesh/optimize.c
+
+[22:38] <Geth> ¦ MoarVM: empty out bbs that were killed
+
+[22:38] <Geth> ¦ MoarVM:
+
+[22:38] <Geth> ¦ MoarVM: they were still being kept in the tree made by "children" vertices,
+
+[22:38] <Geth> ¦ MoarVM: and so other functions, most notably second_pass, would iterate over
+
+[22:38] <Geth> ¦ MoarVM: them again, seeing already-updated usage counts for actually-dead
+
+[22:38] <Geth> ¦ MoarVM: instructions.
+
+[22:38] <Geth> ¦ MoarVM:
+
+[22:38] <Geth> ¦ MoarVM: <…commit message has 6 more lines…>
+
+[22:38] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/3d3d0d05df
+
+[22:40] <timotimo> did we have an RT for this ...
+
+[22:40] *** AlexDaniel joined
+[22:40] <timotimo> there it is
+
+[22:44] <MasterDuke> timotimo++
+
+[22:48] *** AlexDaniel joined
+[22:50] *** AlexDaniel joined
+[22:54] <timotimo> https://rt.perl.org/Ticket/Display.html?id=131653
+
+[23:20] * timotimo to bed

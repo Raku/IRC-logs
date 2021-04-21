@@ -1,0 +1,114 @@
+[03:12] <samcv> did anyone look into the run() memory use issue?
+
+[03:12] <samcv> loop { my $cmd = run « cat ubuntu.iso », :out; $cmd.out.close }
+
+[03:12] <samcv> and shows memory usage like this after 5 calls https://gist.github.com/samcv/7c8c225eabed1cec83398eb6093d9609
+
+[03:14] <samcv> my friend's server keeps getting OOM for a long running script and it kills his server
+
+[03:15] <samcv> they're not specifically catting an ubuntu iso, but that just causes it to be visible much faster
+
+[03:19] <MasterDuke> samcv: i think peak consumption is misleading because that libuv function also frees the memory. leaked might be the more interesting metric to look at
+
+[03:21] *** AlexDani` joined
+[03:22] <MasterDuke> i tried that example, but not in a loop(). i did something like for ^10 and for ^100 but saw the same values for leaked. which would seem like it reaches a steady state very quickly
+
+[03:25] *** AlexDaniel left
+[04:08] *** squashable6 left
+[04:09] *** squashable6 joined
+[06:01] *** Kaypie joined
+[06:04] *** Ulti_ joined
+[06:05] *** nwc10_ joined
+[06:07] *** Kaiepi left
+[06:07] *** Ulti left
+[06:07] *** nwc10 left
+[06:07] *** krunen left
+[06:12] *** krunen joined
+[06:22] *** nwc10_ is now known as nwc10
+
+[06:28] *** domidumont joined
+[06:48] *** domidumont left
+[06:52] *** zakharyas joined
+[07:14] *** domidumont joined
+[07:59] *** robertle joined
+[09:00] *** zakharyas left
+[09:50] *** MasterDuke left
+[09:57] *** AlexDani` is now known as AlexDaniel
+
+[10:40] *** zakharyas joined
+[11:11] *** domidumont left
+[11:42] *** zakharyas left
+[12:22] <timotimo> i would expect peak consumption to also take into account when stuff gets freed
+
+[13:00] *** domidumont joined
+[13:00] *** domidumont left
+[13:57] <Geth> ¦ MoarVM: 7ae6684f42 | (Elizabeth Mattijsen)++ | CREDITS
+
+[13:57] <Geth> ¦ MoarVM: Add my personal info
+
+[13:57] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/7ae6684f42
+
+[14:02] *** leedo left
+[14:04] *** nine_ joined
+[14:04] *** scovit_ joined
+[14:09] *** scovit left
+[14:09] *** nine left
+[14:35] *** lizmat left
+[14:56] *** leedo joined
+[15:05] <timotimo> ==24106== 1,072,693,120 bytes in 2,770 blocks are still reachable in loss record 2,626 of 2,626
+
+[15:05] <timotimo> [...]
+
+[15:05] <timotimo> ==24106==    by 0x5277FC3: on_alloc (procops.c:516)
+
+[15:05] <timotimo> ==24106==    by 0x534CC67: uv__read (stream.c:1161)
+
+[15:05] <timotimo> so yeah, that's that
+
+[15:06] <timotimo> but actually, after closing you can still read bytes from the pipe
+
+[15:06] <timotimo> so it's literally just keeping all the bytes for you to read
+
+[15:16] <timotimo> so the question is: if you're running the cat and not interested in reading the output, why not just use :!out to ignore it?
+
+[15:18] <timotimo> maybe all we need is to have filling up read buffers from subprocesses increase the pressure on the GC so it runs more often, thus cleaning up after a finished process earlier
+
+[16:09] *** robertle left
+[16:51] *** lizmat joined
+[17:30] *** AlexDaniel left
+[17:30] *** AlexDaniel joined
+[17:43] <samcv> timotimo, well the issue is my friend is using run() and capturing the output. and it is leaking
+
+[17:44] <samcv> and then consumes the entire system's memory. and it isn't present if they don't use run()
+
+[17:47] <samcv> timotimo, it doesn't. that is peak
+
+[17:47] <samcv> i'm running my script and it's at 8GB memory usage
+
+[17:47] <samcv> and this is closing the $proc.out each loop
+
+[17:48] <samcv> ah i see what you're saying. even after close it's not freeing it
+
+[17:49] <samcv> timotimo, is there any reason we wouldn't be able to free all the space after file close? we shouldn't be able to read from a closed handle right?
+
+[17:52] <lizmat> could it be that the thing that gets loaded (which is ~2GB) is never in the nursery but handled differently ?
+
+[17:53] <samcv> lizmat, https://termbin.com/en2e
+
+[17:56] <timotimo> yes, the data doesn't land in the nursery, it's "unmanaged" data
+
+[17:56] <timotimo> which just means it gets allocated with malloc or the fixed size allocator
+
+[17:56] <timotimo> rather than GC-owned data
+
+[18:05] <timotimo> well, i made a heap snapshot of reading a smaller file, but it's got about 180 snapshots in it and the old format balloons up too big for usage, and the new format is probably small enough, but can't yet be written by moar or read by moar-heapanalyzer :)
+
+[20:22] *** MasterDuke joined
+[20:23] *** MasterDuke left
+[20:23] *** MasterDuke joined
+[20:57] *** bartolin left
+[21:00] *** lizmat left
+[21:02] *** bartolin joined
+[21:25] *** bartolin left
+[21:28] *** bartolin joined
+[23:29] *** lizmat joined

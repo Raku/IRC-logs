@@ -1,0 +1,558 @@
+[00:16] <timotimo> heck yeah!
+
+[00:17] <timotimo> i see Str being inlined into what used to be a smrt_strify
+
+[00:18] <jnthn> Well, that sounds nice :)
+
+[00:18] <jnthn> timotimo++
+
+[00:19] <jnthn> Though since we're just before a release (I think?), maybe a branch that we merge right afterwards (provided it passes tests)?
+
+[00:19] <timotimo> of course
+
+[00:19] <timotimo> it'll hit .Str of NQPGrammar and NQP::Regex and friends!
+
+[00:20] <timotimo> i'll extra-check what types are being optimized for
+
+[00:20] <timotimo> it should also hit .Str on hash iterators
+
+[00:22] <timotimo> ok, only NQP::Regex, NQPRegex, and NQP::Grammar at the moment
+
+[00:23] <jnthn> That could still be quite a win
+
+[00:23] <jnthn> Those are probably all over the grammar
+
+[00:23] <jnthn> *compiler
+
+[00:23] <jnthn> Well, probably the grammar too :)
+
+[00:35] <timotimo> OK, the hash iterator only gets strified with smrt_strify in SET_BLOCK_OUTER_CTX, which never gets speshed at all, in compile_node, which has barely any hits, and in local. also in !precompute_nfas
+
+[00:40] <timotimo> i wonder why type "int" returns -1 for "do you have a .Num method?", i.e. the cache doesn't consider itself authoritative?
+
+[00:52] <AlexDaniel> jnthn: btw have you seen this? https://github.com/rakudo/rakudo/issues/2623
+
+[01:02] <timotimo> Stage optimize   : MoarVM oops: Spesh inline: unhandled case of return_o
+
+[01:02] <timotimo> well, that's not fun
+
+[01:02] <timotimo> sounds like it's missing code-gen for automatic boxing on return
+
+[01:03] <timotimo> would be nice if it didn't cause an oops, though :)
+
+[01:17] *** MasterDuke left
+[01:21] <timotimo> i wonder how this case of return mismatch blew up but otherwise it never does? hmm.
+
+[01:46] <timotimo> maybe all rakudo ever does is return_o?!
+
+[01:46] <timotimo> or maybe there's just one .Str or .Int that returns an object, which makes sense in rakudo land where Str is a thing
+
+[02:05] *** MasterDuke joined
+[02:05] *** MasterDuke left
+[02:05] *** MasterDuke joined
+[02:06] <MasterDuke> timotimo: around?
+
+[02:10] <timotimo> ya
+
+[02:12] <MasterDuke> so i made a change for intify, but the optimize_coerce function isn't being called because of an intify, but a numify when the blow up happens
+
+[02:12] <MasterDuke> in fact, it doesn't get called because of an intify at all before the nqp build dies
+
+[02:13] *** dogbert17 left
+[02:14] <MasterDuke> https://gist.github.com/MasterDuke17/a618b3e46db4f7ea9fac78d984af2d3e has my most recent change
+
+[02:15] <MasterDuke> and this is what happens https://gist.github.com/MasterDuke17/c1ea4c783d549bf10c60805d2f84f48f
+
+[02:15] <timotimo> ugh i wish i could just click and get the context of the original file in that diff
+
+[02:16] <MasterDuke> heh
+
+[02:16] <timotimo> can you give me a diff with a higher -u number?
+
+[02:16] <timotimo> sorry
+
+[02:16] <timotimo> -U
+
+[02:16] <MasterDuke> should i just put the whole thing in also
+
+[02:16] <timotimo> like, 25 mybe?
+
+[02:16] <timotimo> it's still useful to have the colors from the diff in the middle
+
+[02:17] <MasterDuke> -U10 good?
+
+[02:17] <timotimo> 25
+
+[02:18] <MasterDuke> gist updated
+
+[02:18] <timotimo> Perl6-Optimizer's simplify_refs is the only case ever where it gets a return_o that hits an invoke_n/i/s
+
+[02:18] <timotimo> ah!
+
+[02:18] <timotimo> guess what
+
+[02:18] <timotimo> the code i had in there was wrong
+
+[02:19] <timotimo>          if (is_strify && ss->can_box & MVM_STORAGE_SPEC_CAN_BOX_STR) {
+
+[02:19] <MasterDuke> yay?
+
+[02:19] <timotimo> +        else if (is_intify && ss->can_box & MVM_STORAGE_SPEC_CAN_BOX_INT) {
+
+[02:19] <timotimo> these have to change
+
+[02:19] <timotimo> if (is_strify && (ss->can_box & MVM_STORAGE_SPEC_CAN_BOX_STR)) {
+
+[02:19] <timotimo> and
+
+[02:19] <timotimo> else if (is_intify && (ss->can_box & MVM_STORAGE_SPEC_CAN_BOX_INT)) {
+
+[02:21] <timotimo> i've done this mistake multiple times in the past, and if i don't better myself i'll do it again :(
+
+[02:21] <timotimo> anyway, this could have caused issues
+
+[02:23] <MasterDuke> oh! i did at least once get into the intify branch during the nqp build, but it still dies with the same error
+
+[02:24] <timotimo> well, it's good to know at least that it's not this problem
+
+[02:28] <timotimo> oh
+
+[02:28] <timotimo> the first if in that function also seems to have that bug with & mixed with &&
+
+[02:30] <MasterDuke> same error
+
+[02:32] <timotimo> can you shoot the spesh log my way?
+
+[02:32] <MasterDuke> for just the part that dies assume?
+
+[02:34] <timotimo> yeah, rxjump, right?
+
+[02:35] <MasterDuke> hm, when run by itself with a spesh log it doesn't seem to want to die....
+
+[02:35] <MasterDuke> ok, does first time with BLOCKING=1
+
+[02:36] <timotimo> good
+
+[02:38] <MasterDuke> https://gist.github.com/MasterDuke17/8eaff66a3eff6438920eb3c0c269fd1e
+
+[02:39] <timotimo> huh, do i take the one or the other?
+
+[02:39] <MasterDuke> the .zstd
+
+[02:40] <MasterDuke> other was a typoo
+
+[02:43] <timotimo> OK, so
+
+[02:43] <timotimo> it's a smrt_intify
+
+[02:43] <timotimo> it turns into an unbox_n, because it's called on a Num object
+
+[02:43] <timotimo> the num register goes immediately into the position argument of bindpos_o
+
+[02:44] <MasterDuke> huh. why don't i see a smrt_intify in my stderr output?
+
+[02:44] <timotimo> i'll leave that for you to figure out %)
+
+[02:44] <timotimo> i'll probably go sleep real soon
+
+[02:45] <timotimo> but yeah, look at line 1465451
+
+[02:45] <timotimo> that's the get_n that pulls the num out of the BOOTNum object it creates just above
+
+[02:46] <MasterDuke> ok. btw, is my is_intify branch correct? i really just need those two lines?
+
+[02:46] <timotimo> it looks like it started as a smrt_numify on a VMArray, that got turned into elems + coerce_in
+
+[02:46] <timotimo> i think it is
+
+[02:46] <timotimo> do you have a clue how you'll be able to fix this problem?
+
+[02:47] <MasterDuke> not really. i haven't actually changed the numify branch at all, so i don't know why it's developed a problem
+
+[02:47] <MasterDuke> but i also haven't spent much time on it yet
+
+[02:49] <MasterDuke> if i figure something out tonight i'll leave you a note
+
+[02:49] <timotimo> the smrt_intify turns into an unbox_n but no coerce_in, why? :\
+
+[02:50] <timotimo> we don't have an is_numify && (ss->can_box & ...) thing that'd build an unbox_i
+
+[02:50] <timotimo> judging from the stderr output it looks like it's thinking it's got a smrt_numify when it actually has a smrt_intify?
+
+[02:51] <timotimo> can you output all three is_...ify variables?
+
+[02:51] <MasterDuke> where?
+
+[02:51] <timotimo> if there's more than one that's 1, that'd be strange trouble
+
+[02:51] <timotimo> hm, no, that can't actually happen though?
+
+[02:52] <timotimo> how about this, set a conditional breakpoint in optimize_smart_coerce under the condition that is_intify is true, then see what path it takes
+
+[02:52] <timotimo> oh
+
+[02:52] <timotimo>              } else if(ss->can_box & (MVM_STORAGE_SPEC_CAN_BOX_NUM | MVM_STORAGE_SPEC_CAN_BOX_INT)) {
+
+[02:52] <timotimo>                  MVMuint16 register_type =
+
+[02:52] <timotimo>                      ss->can_box & MVM_STORAGE_SPEC_CAN_BOX_INT ? MVM_reg_int64 : MVM_reg_num64;
+
+[02:52] <timotimo> these lines there
+
+[02:53] <timotimo> this code isn't right any more
+
+[02:53] <timotimo> it'll trigger for the num case, but there's nothing in it for handling unboxing to an int register
+
+[02:54] <timotimo> it's only got logic for str vs int
+
+[02:54] <timotimo> errr, str vs num
+
+[02:54] <timotimo> as the target
+
+[02:54] <MasterDuke> hmm
+
+[02:55] <timotimo> it'll always generate an unbox_i or unbox_n depending on what kind of object is being smrt_strify'd or smrt_numify'd
+
+[02:55] <MasterDuke> ah, intead of what is being done to it
+
+[02:56] <timotimo> and then if the object boxes a num, it'll generate a coerce_ns, otherwise a coerce_is if it's a smrt_strify, and a set or coerce_in otherwise
+
+[02:56] <timotimo> i think that's the exact point it goes wrong
+
+[02:56] <timotimo> it just things "not strify must mean numify"
+
+[02:56] <timotimo> thinks*
+
+[02:56] <MasterDuke> i'll play around there
+
+[02:57] <timotimo> i think register_type will always™ be right
+
+[03:00] <MasterDuke> hm, adding `else if (is_intify) new_ins->info = MVM_op_get_op(register_type == MVM_reg_num64 ? MVM_OP_coerce_in : MVM_OP_set);` didn't fix anything
+
+[03:01] <timotimo> i think it has to be ni rather than in?
+
+[03:03] <MasterDuke> oh hey! nqp built
+
+[03:03] <MasterDuke> now to take out those prints which just slow things down...
+
+[03:03] <timotimo> sweet
+
+[03:03] <MasterDuke> timotimo++
+
+[03:10] *** MasterDuke_ joined
+[03:10] <MasterDuke_> ugh, my laptop battery is just not working well at all
+
+[03:10] <timotimo> d'oh
+
+[03:10] *** MasterDuke left
+[03:13] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: f30a806fc5 | (Timo Paulssen)++ | src/spesh/inline.c
+
+[03:13] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: Teach Spesh Inline About Returning By Unboxing
+
+[03:13] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls:
+
+[03:13] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: Needed whenever an inlinee has a return_o op that
+
+[03:13] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: matches up to an invoke_i/n/s in the inliner.
+
+[03:13] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls:
+
+[03:13] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: Interestingly, seems to only happen once during
+
+[03:14] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: the entirety of rakudo's build process: in the
+
+[03:14] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: <…commit message has 6 more lines…>
+
+[03:14] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: review: https://github.com/MoarVM/MoarVM/commit/f30a806fc5
+
+[03:14] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: a2f1cd4b50 | (Timo Paulssen)++ | 2 files
+
+[03:14] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: Emit Deopt Annotations For smrt_strify/smrt_numify
+
+[03:14] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls:
+
+[03:14] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: These have to be present so that these ops can
+
+[03:14] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: be turned into a method call that's supposed to
+
+[03:14] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: be inlinable.
+
+[03:14] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: review: https://github.com/MoarVM/MoarVM/commit/a2f1cd4b50
+
+[03:14] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: 6d5a49b393 | (Timo Paulssen)++ | src/spesh/optimize.c
+
+[03:14] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: Turn smrt_strify/_intify Into Method Calls
+
+[03:14] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls:
+
+[03:14] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: and potentially inline them immediately.
+
+[03:14] <Geth> ¦ MoarVM/inline_smart_coerce_methodcalls: review: https://github.com/MoarVM/MoarVM/commit/6d5a49b393
+
+[03:14] <timotimo> this will of course have to be changed a little when smrt_intify lands in master
+
+[03:14] <timotimo> okay, time to get some sleep!
+
+[03:15] *** MasterDuke_ left
+[03:17] <timotimo> .tell MasterDuke if you haven't seen it in the backlog yet, my new branch has just appeared, "inline_smart_coerce_methodcalls"; after smrt_intify lands (along with the rest of nqp-int) i'll make the necessary changes unless you want to do it yourself
+
+[03:17] <yoleaux> timotimo: I'll pass your message to MasterDuke.
+
+[03:19] *** robertle left
+[03:19] *** robertle joined
+[03:24] *** MasterDuke joined
+[03:24] *** MasterDuke left
+[03:24] *** MasterDuke joined
+[03:24] <MasterDuke> timotimo++, passes spectest
+
+[03:24] <yoleaux> 03:17Z <timotimo> MasterDuke: if you haven't seen it in the backlog yet, my new branch has just appeared, "inline_smart_coerce_methodcalls"; after smrt_intify lands (along with the rest of nqp-int) i'll make the necessary changes unless you want to do it yourself
+
+[03:25] <MasterDuke> nice. i'll work on cleaning up my branches and should be PRing them in the next couple days
+
+[03:32] *** AlexDani` joined
+[03:36] *** AlexDani` left
+[03:36] *** AlexDani` joined
+[03:36] *** AlexDaniel left
+[03:36] *** AlexDani` is now known as AlexDaniel
+
+[03:49] *** robertle left
+[03:49] *** robertle joined
+[03:51] *** martin__ joined
+[03:55] *** ufobat_ left
+[04:01] *** MasterDuke left
+[04:02] *** MasterDuke joined
+[04:04] *** MasterDuke left
+[04:04] *** MasterDuke joined
+[06:49] *** domidumont joined
+[07:20] *** domidumont left
+[07:50] *** patrickb joined
+[07:51] *** martin__ is now known as ufobat
+
+[08:10] *** domidumont joined
+[08:25] *** zakharyas joined
+[09:16] *** robertle left
+[09:17] *** robertle joined
+[10:59] *** dogbert2_ joined
+[12:28] <Geth> ¦ MoarVM/jit-2op-form: dff6109658 | (Bart Wiegmans)++ | 4 files
+
+[12:28] <Geth> ¦ MoarVM/jit-2op-form: [JIT] Enfore input/output registers better
+
+[12:28] <Geth> ¦ MoarVM/jit-2op-form:
+
+[12:28] <Geth> ¦ MoarVM/jit-2op-form: Also do it for unary input/output operators (NOT). Remove
+
+[12:28] <Geth> ¦ MoarVM/jit-2op-form: register-moving code in most tiles.
+
+[12:28] <Geth> ¦ MoarVM/jit-2op-form: review: https://github.com/MoarVM/MoarVM/commit/dff6109658
+
+[12:31] *** brrt joined
+[12:32] <brrt> o
+
+[12:32] <yoleaux> 06:55Z <AlexDaniel> brrt: some cool hardcore ideas from you? :) https://github.com/perl-gsoc-2019/ideas
+
+[12:32] <brrt> AlexDaniel: I've got a few ideas, for sure :-)
+
+[12:32] <brrt> .ask AlexDaniel how can I submit an idea?
+
+[12:32] <yoleaux> brrt: I'll pass your message to AlexDaniel.
+
+[12:33] *** lucasb joined
+[12:35] <patrickb> brrt: Just add a pull request to that repo
+
+[12:36] <patrickb> There is a template file in there.
+
+[12:41] *** zakharyas left
+[12:53] *** jpf1 left
+[12:53] *** jpf1 joined
+[13:20] *** dogbert2_ left
+[13:23] *** patrickb left
+[13:25] <MasterDuke> ugh, my branches pass all tests and spectests, but they are not the cleanest series of commits. not looking forward to trying to tease some semblance of order out of them
+
+[13:29] <brrt> MasterDuke: just put up a PR and we'll bully you into conformity :-P
+
+[13:43] <MasterDuke> heh. i'm going to do a little cleanup, but not gonna be exhaustive about it
+
+[13:56] *** zakharyas joined
+[15:06] <Geth> ¦ MoarVM/jit-expr-float: 5 commits pushed by (Bart Wiegmans)++
+
+[15:06] <Geth> ¦ MoarVM/jit-expr-float: d33e1c1002 | [JIT] Try to select the first input register as output register
+
+[15:06] <Geth> ¦ MoarVM/jit-expr-float: 135c10cf0a | [JIT] Basic expression support for floating point operators
+
+[15:06] <Geth> ¦ MoarVM/jit-expr-float: 5d0e4e7963 | [JIT] Split type check from expr type resolution
+
+[15:06] <Geth> ¦ MoarVM/jit-expr-float: baceedf37c | [JIT] More rigorous type checking
+
+[15:06] <Geth> ¦ MoarVM/jit-expr-float: 1a6ea0c347 | [JIT] Make STORE polymorphic on input
+
+[15:06] <Geth> ¦ MoarVM/jit-expr-float: review: https://github.com/MoarVM/MoarVM/compare/98bd613c3942...1a6ea0c34738
+
+[15:06] <Geth> ¦ MoarVM/jit-expr-float: 14 commits pushed by (Bart Wiegmans)++
+
+[15:06] <Geth> ¦ MoarVM/jit-expr-float: review: https://github.com/MoarVM/MoarVM/compare/1a6ea0c34738...b022a8069b64
+
+[15:07] <brrt> rebase of jit-expr-float on top of jit-2op
+
+[15:07] <brrt> the tl;dr - now the register allocator handles the conversion to two-opernds form, and tiles can be a bit dumber
+
+[15:14] *** dalek left
+[15:15] *** dalek joined
+[15:15] *** brrt left
+[15:18] *** robertle left
+[15:18] *** robertle joined
+[15:33] *** lucasb left
+[15:34] *** [Coke] left
+[15:41] *** brrt joined
+[16:22] *** domidumont left
+[16:45] *** brrt left
+[17:03] *** lizmat left
+[17:05] <timotimo> https://wdtz.org/files/oopsla18-allmux-dietz.pdf
+
+[17:05] <timotimo> o_O
+
+[17:06] <timotimo> "statically link together all programs from a given package to make it a lot smaller in total, and quite a bit faster, too"
+
+[17:06] <timotimo> BTW is there a reliable API for figuring out what actual address a dynamically-resolved function will call so that our jit could skip one layer of indirection?
+
+[17:18] <timotimo> As
+
+[17:19] <timotimo> another example, for a set of 10 applications using Qt, the disk size of the multiplexed version is
+
+[17:19] <timotimo> 17% smaller than shared and 66% smaller than static, in aggregate, and the memory usage (when all
+
+[17:19] <timotimo> 10 run concurrently) is 40% less than shared and 63% less than static.
+
+[17:28] *** patrickb joined
+[18:24] *** dogbert17 joined
+[18:25] *** patrickb left
+[19:50] <timotimo> hum. the JIT is in the same shared object as most of the functions it likes to put into code as calls, does that mean that maybe it already gets a "proper" address for the function rather than a forwarder stub?
+
+[19:55] *** robertle left
+[19:55] *** robertle joined
+[19:56] *** robertle left
+[19:56] <timotimo> at least op_to_func gives a function pointer that looks very much like the final function itself
+
+[19:56] *** robertle joined
+[20:03] *** robertle left
+[20:05] *** lizmat joined
+[20:07] <timotimo> no opportunity for cheap speedups here :(
+
+[20:10] *** robertle joined
+[20:24] *** brrt joined
+[20:25] <brrt> timotimo: I'm not entirely sure what your question is
+
+[20:26] <brrt> our state of the art is that we load the in-memory function pointer into the '.data' section of the code
+
+[20:26] <timotimo> right, this is all just about "is the function pointer that we get from our C code direct or indirect"
+
+[20:29] *** AlexDani` joined
+[20:31] *** AlexDaniel left
+[20:33] <brrt> hehe, well, I don't exactly know that, tbh
+
+[20:33] <brrt> you can't really be sure
+
+[20:33] <brrt> libraries can do what they want
+
+[20:34] <timotimo> well, i grabbed the pointer in gdb and disassembled it and at least in that case it looked direct
+
+[20:36] <brrt> hmm. yes, they tend to
+
+[20:40] *** AlexDani` is now known as AlexDaniel
+
+[20:41] <timotimo> OK, so what other ops sometimes turn into a method call that we could theoretically spesh + inline
+
+[20:41] <timotimo> i believe decont does this for proxies
+
+[20:43] *** zakharyas left
+[20:44] <brrt> oh, you're making invokish things actually invoke?
+
+[20:44] <brrt> that's a good idea
+
+[20:46] <timotimo> yeah
+
+[20:46] <timotimo> hopefully :)
+
+[20:51] <timotimo> got any suggestion where i should look next?
+
+[20:53] <brrt> anything marked invokish in oplist, I'd guess
+
+[20:54] <brrt> exit
+
+[20:54] *** brrt left
+[21:10] <timotimo> oh, hum.
+
+[21:10] <timotimo> i think i got the precedence of & and && right when i thought i had it wrong
+
+[21:11] <timotimo> value & testbit && othercondition seems to actually correctly turn into (value & testbit) && othercondition
+
+[21:19] *** robertle left
+[21:23] <timotimo> jnthn: do you think it's a good time to look into inlining FETCH and STORE for proxies?
+
+[21:24] <jnthn> timotimo: Sure, why not... :)
+
+[21:24] <timotimo> .o( am i going to regret this ... )
+
+[21:24] <jnthn> Well, with the "but maybe merge after release" thing :)
+
+[21:24] <jnthn> 9 blockers in Rakudo is...already a lot to deal with
+
+[21:25] <timotimo> aye
+
+[21:25] <timotimo> i'm not sure i can help with any of them, though if you think one seems up my alley, feel free to ping
+
+[21:25] <timotimo> i'm just experiencing a random spurt of spesh-focussed productivity
+
+[21:26] <timotimo> do you have a clue if it's wrong that i had to give smrt_*ify a :deoptonepoint and a :deoptallpoint so that i get those annotations in the spesh graph?
+
+[21:26] <timotimo> it seems like :invokish and/or :maycausedeopt should already cause them to appear
+
+[21:26] <timotimo> but it seemed like they didn't
+
+[21:26] <timotimo> AFK for a bit first
+
+[21:26] <jnthn> There's no implicit flags
+
+[21:26] <jnthn> You'd have to spell those out
+
+[21:27] <jnthn> Though I think you only need a deoptallpoint
+
+[21:40] *** Kaiepi left
+[21:46] *** Kaiepi joined
+[21:59] *** MasterDuke left
+[22:22] <timotimo> OK!
+
+[22:38] <timotimo> hum. with code_pair, we'll be grabbing the code object at run time, not yet know it at spesh time ...
+
+[22:39] <timotimo> perhaps we could actually log the invoked thing at the address of the op, even though it's not an actual invoke op
+
+[22:40] <timotimo> otherwise it feels like a long way until inlining of store/fetch works :)
+
+[23:06] <jnthn> timotimo: Hm, ain't the code objects hung off the stable pointer?
+
+[23:06] <jnthn> Under invocation_spec
+
+[23:12] *** MasterDuke joined
+[23:12] <timotimo> oh, do we actually have an STable per pair of fetch/store?
+
+[23:12] *** MasterDuke left
+[23:12] *** MasterDuke joined
+[23:13] <timotimo> you're right, it does hang off of the STable
+
+[23:13] <timotimo> that makes it easier for sure
+
+[23:13] <jnthn> So if the type is known...:)
+
+[23:13] <timotimo> does that mean we generate a crapton of Proxy objects that all close over something else, that spesh would get kind of confused?
+
+[23:14] <timotimo> i might be confused.
+
+[23:20] <jnthn> Yeah, I guess there's then another level of call
+
+[23:21] <jnthn> So an improvement is possible now, but not a full inlining of the two levels
+
+[23:21] <timotimo> oh, so it goes off to grab the actual proxy object itself which then has the closure
+
+[23:34] <timotimo> the only way i was able to get spesh on decont able to stumble into the code path for code_pair was to actually put a literal nqp::decont into the source of my test code
+
+[23:40] <timotimo> i'll just put an MVM_oops in and see if many test cases die ...
+

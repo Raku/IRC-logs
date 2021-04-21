@@ -1,0 +1,312 @@
+[00:18] *** MasterDuke joined
+[00:27] *** AlexDaniel joined
+[00:28] *** buggable joined
+[01:56] *** ilbot3 joined
+[06:30] *** evalable6 joined
+[06:36] *** FROGGS joined
+[07:13] <FROGGS> .tell AlexDaniel sure, I'll commit that today
+
+[07:13] <yoleaux> FROGGS: I'll pass your message to AlexDaniel.
+
+[08:53] *** AlexDaniel joined
+[10:41] *** domidumont joined
+[10:49] *** domidumont joined
+[11:28] <Geth> ¦ MoarVM/lazier_inline_fixups: c2d20bab9b | (Timo Paulssen)++ | 2 files
+
+[11:28] <Geth> ¦ MoarVM/lazier_inline_fixups: more WIP on lazier inline fixups
+
+[11:28] <Geth> ¦ MoarVM/lazier_inline_fixups: review: https://github.com/MoarVM/MoarVM/commit/c2d20bab9b
+
+[11:34] <dogbert17> oh, it's timotimo
+
+[11:44] <timotimo> oh no!
+
+[11:45] <dogbert17> you're in some trouble :)
+
+[11:45] <dogbert17> look here: https://github.com/rakudo/rakudo/issues/1733
+
+[11:53] <timotimo> guess what lazier_inline_fixups is for
+
+[11:53] <timotimo> the bigpackids sub is not being speshed because it has a wval in it that's from a foreign cu after inlining
+
+[11:54] <dogbert17> aha
+
+[12:14] <AlexDaniel> ♥
+
+[12:20] <timotimo> wow, fascinating
+
+[12:20] <timotimo> memory corruption or something related to spesh slots?
+
+[12:56] <timotimo> huh, how is this happening :D
+
+[12:56] <dogbert17> perhaps it's a bug :)
+
+[12:57] <timotimo> well, somehow we end up with num_spesh_slots being 11, but alloc_spesh_slots being 0
+
+[12:57] <dogbert17> does valgrind have anything to say?
+
+[12:59] <timotimo> yeah
+
+[13:00] <timotimo> i have a theory, but i'll verify before i explain
+
+[13:02] <timotimo> ah, yes
+
+[13:02] <timotimo> when inlining, we create a spesh graph directly from a SpeshCand
+
+[13:02] <timotimo> that code only sets the number of spesh slots and the spesh slot array
+
+[13:02] <timotimo> not how many were allocated
+
+[13:03] <timotimo> the new code i have was adding extra spesh slots to the inlinee, which is something that never happened before, and wasn't supposed to happen
+
+[13:03] <timotimo> i'll also need to copy the spesh slots array over, rather than keeping the original, otherwise things will go rather wrong
+
+[13:07] <dogbert17> is this an old problem?
+
+[13:07] <timotimo> no
+
+[13:07] <dogbert17> damn :)
+
+[13:09] <dogbert17> was hoping you'd found some old crusty bug relating to inlining
+
+[13:10] <dogbert17> brrt is looking for one I believe
+
+[13:14] <timotimo> 00013      sp_findmeth        loc_10_obj, loc_11_obj, '$!known', sslot(5)
+
+[13:14] <timotimo> this looks kind of wrong :D
+
+[13:14] <timotimo> but yeah, i have a clue what's wrong here
+
+[13:17] <timotimo> fixing up strings with "the new way" is NYI, that's what's wrong
+
+[13:20] <dogbert17> "the new way" ?
+
+[13:23] <timotimo> ah, allow me to explain
+
+[13:24] <timotimo> so, there's this op called "wval" that takes two integers and it looks up a serialization context based on the first integer and then an object based on the second, which is an index into that serialization context
+
+[13:24] <timotimo> now, these serialization contexts hang off of the CompUnit, because every comp unit has a list of SCs that it depends on
+
+[13:25] <timotimo> when we inline code, we may be taking code from one compunit and transplanting it into another, so the wval instruction will either not find an SC at the given index at all, or no object at the specified index (index too high), or simply the wrong index (whatever has the same index in that other SC)
+
+[13:25] <timotimo> so we have to fix this up
+
+[13:26] <timotimo> until now, we would grab the object from the SC and stash it away in a spesh slot, i.e. make it a constant with a different mechanism
+
+[13:26] <timotimo> but grabbing the object from the SC can cause deserialization, because we do that lazily, which allocates objects that are GC-managed
+
+[13:27] <timotimo> that also means if we happen to fill up the nursery at that point, or if another thread was waiting for us to join in on GC, we'd be running GC inside spesh
+
+[13:27] <timotimo> which spesh does not support, and making it support GC in the middle would be a major hassle
+
+[13:27] <timotimo> that's what caused the MVM panic in the past
+
+[13:28] <timotimo> so that's what we used to have
+
+[13:28] <timotimo> but at the GPW, jnthn came up with a simple solution to this problem
+
+[13:29] <dogbert17> that sounds interesting
+
+[13:29] <timotimo> we can just stash away the SC we need to look stuff up in into a spesh slot, and store the index for the object inside it
+
+[13:29] <timotimo> hence the sp_getwvalfrom op is born
+
+[13:30] <dogbert17> and you're implementing it now?
+
+[13:30] <timotimo> that one seems to already work
+
+[13:30] <timotimo> there's more, though
+
+[13:30] <timotimo> any op that has a constant string argument also needs fixing up
+
+[13:31] <timotimo> i've added a sp_getstrfrom op that can replace const_s, but there's a bunch of ops that have constant strings in their operands
+
+[13:31] <timotimo> some getattr ops, and some findmeth ops
+
+[13:31] <timotimo> i don't want to duplicate all of those
+
+[13:32] <dogbert17> so how will you fix them then?
+
+[13:33] <timotimo> the old string fixing way isn't problematic in the same way the wval one is
+
+[13:36] <timotimo> because we put strings we take from a compunit into the old generation, it won't cause GC
+
+[13:38] <timotimo> i also have a fixup for callsites, but that one was giving me trouble
+
+[13:39] <timotimo> i can also revert that back to the way it was and that seems to make things better
+
+[13:39] <timotimo> i'll do a full nqp/rakudo build/test with that
+
+[13:42] <dogbert17> so if your fix works the blocker will be resolved while at the same time getting a wval fix?
+
+[13:42] <timotimo> yes
+
+[13:43] <dogbert17> cool
+
+[13:43] <timotimo> looks like i'll only be adding a lazy wval fixup and a lazy const_s fixup, not callsites and also not coderefs
+
+[13:44] <timotimo> but fixing up coderefs causes a panic at the moment anyway
+
+[13:44] <timotimo> so i suppose that never happens
+
+[13:47] <timotimo> huh, wow, a rakudo build succeeds, but the test program fails
+
+[13:47] <timotimo> P6opaque: get_boxed_ref could not unbox for the representation 'P6bigint' of type Signature
+
+[13:47] <timotimo> ^- that's rather wrong
+
+[13:49] <dogbert17> uh oh
+
+[14:01] <timotimo> i've fixed the problem, but really only by masking the bug
+
+[14:02] <timotimo> time for a rest break for my RSI, though
+
+[14:12] <timotimo> spec tests are clean with this version :\
+
+[14:26] <timotimo> oh, haha, i think i have the problem
+
+[14:27] <timotimo> no, i don't
+
+[14:29] <dogbert17> rest well
+
+[14:32] <timotimo> too late!
+
+[14:37] <timotimo> it's a good idea to read 64bit integers into 64bit variables rather than into 16bit ones
+
+[14:38] <jnthn> You don't say! :)
+
+[14:38] * jnthn waves from a train taking home sorta towards home :)
+
+[14:39] <timotimo> it's taking home towards home?
+
+[14:39] <timotimo> :D
+
+[14:39] <jnthn> hah, s:1st/home/him/ :)
+
+[14:41] <jnthn> timotimo: You still working on the inline fixups stuff we talked about during GPW, or onto the next problem by now?
+
+[14:41] <timotimo> it's still that
+
+[14:41] <timotimo> though i haven't invested a whole lot of time since i came back
+
+[14:41] <jnthn> eek, "fun"
+
+[14:41] <jnthn> Ah, well, that's something at least :)
+
+[14:41] <timotimo> well, i'm staring at a looooong column of "ok"s now
+
+[14:42] <jnthn> That's nice :)
+
+[14:43] <timotimo> t/spec/S07-hyperrace/stress.t .....................................
+
+[14:43] <timotimo> does this usually take ages?
+
+[14:44] <timotimo> it seems to be only really using one single core
+
+[14:44] <timotimo> perhaps something's not quite right in that test
+
+[14:46] <timotimo> run in isolation it finishes quickly
+
+[14:46] <jnthn> Can't say I've noticed it doing so, but I've hardly run spectest at all in the last couple of weeks.
+
+[14:47] <timotimo> Test run interrupted!
+
+[14:47] <timotimo> All tests successful.
+
+[14:47] <timotimo> so i'd call this success
+
+[14:53] <timotimo> i'm not sure why prepargsfrom doesn't work, but it's not as important so i can postpone it, possibly forever :P
+
+[15:05] *** Kaiepi joined
+[15:22] <Geth> ¦ MoarVM/lazier_inline_fixups: 5cceda1caa | (Timo Paulssen)++ | 9 files
+
+[15:22] <Geth> ¦ MoarVM/lazier_inline_fixups: Fix fixing of wvals during inline
+
+[15:22] <Geth> ¦ MoarVM/lazier_inline_fixups: review: https://github.com/MoarVM/MoarVM/commit/5cceda1caa
+
+[15:22] <Geth> ¦ MoarVM/lazier_inline_fixups: 16c43c1751 | (Timo Paulssen)++ | 5 files
+
+[15:22] <Geth> ¦ MoarVM/lazier_inline_fixups: get rid of spesh retry mechanism
+
+[15:22] <Geth> ¦ MoarVM/lazier_inline_fixups: review: https://github.com/MoarVM/MoarVM/commit/16c43c1751
+
+[15:22] <timotimo> ah, i meant to write a long commit message before pushing
+
+[15:22] <timotimo> RSI rest break time again, though
+
+[16:09] <Geth> ¦ MoarVM/lazier_inline_fixups: 587e08d48d | (Timo Paulssen)++ | 9 files
+
+[16:09] <Geth> ¦ MoarVM/lazier_inline_fixups: Fix fixing of wvals during inline
+
+[16:09] <Geth> ¦ MoarVM/lazier_inline_fixups:
+
+[16:09] <Geth> ¦ MoarVM/lazier_inline_fixups: Whenever we inline a frame from one MVMCompUnit into a frame
+
+[16:09] <Geth> ¦ MoarVM/lazier_inline_fixups: from another MVMCompUnit we have to fix up several ops and operands
+
+[16:09] <Geth> ¦ MoarVM/lazier_inline_fixups: that are references based on "the current CU". One of those cases
+
+[16:09] <Geth> ¦ MoarVM/lazier_inline_fixups: was the wval operations.
+
+[16:09] <Geth> ¦ MoarVM/lazier_inline_fixups:
+
+[16:09] <Geth> ¦ MoarVM/lazier_inline_fixups: <…commit message has 21 more lines…>
+
+[16:09] <Geth> ¦ MoarVM/lazier_inline_fixups: review: https://github.com/MoarVM/MoarVM/commit/587e08d48d
+
+[16:09] <Geth> ¦ MoarVM/lazier_inline_fixups: 8a5615ead7 | (Timo Paulssen)++ | 5 files
+
+[16:09] <Geth> ¦ MoarVM/lazier_inline_fixups: get rid of spesh retry mechanism
+
+[16:09] <Geth> ¦ MoarVM/lazier_inline_fixups: review: https://github.com/MoarVM/MoarVM/commit/8a5615ead7
+
+[16:18] <Geth> ¦ MoarVM/lazier_inline_fixups: 9655e15488 | (Timo Paulssen)++ | src/spesh/inline.c
+
+[16:18] <Geth> ¦ MoarVM/lazier_inline_fixups: we can re-use these spesh slots.
+
+[16:18] <Geth> ¦ MoarVM/lazier_inline_fixups: review: https://github.com/MoarVM/MoarVM/commit/9655e15488
+
+[16:23] <Geth> ¦ MoarVM/master: 4 commits pushed by (Timo Paulssen)++
+
+[16:23] <Geth> ¦ MoarVM/master: 587e08d48d | Fix fixing of wvals during inline
+
+[16:23] <Geth> ¦ MoarVM/master: 8a5615ead7 | get rid of spesh retry mechanism
+
+[16:23] <Geth> ¦ MoarVM/master: 9655e15488 | we can re-use these spesh slots.
+
+[16:23] <Geth> ¦ MoarVM/master: fa0fc1832f | Merge branch 'lazier_inline_fixups'
+
+[16:23] <Geth> ¦ MoarVM/master: review: https://github.com/MoarVM/MoarVM/compare/4034d9def400...fa0fc1832ff0
+
+[16:42] *** Kaypie joined
+[18:50] *** zakharyas joined
+[19:02] *** Merfont joined
+[19:08] *** Merfont joined
+[19:44] *** Kaiepi joined
+[20:53] *** releasable6 joined
+[20:56] *** Kaiepi joined
+[21:10] *** Zoffix joined
+[21:11] <Zoffix> Reminder, release will be in 7 days and there are still 7 release blockers on the list. Please help fix: https://github.com/rakudo/rakudo/issues?q=is%3Aissue+is%3Aopen+label%3A%22%E2%9A%A0+blocker+%E2%9A%A0%22
+
+[21:12] <Zoffix> R#1709 is already partially golfed to some GC issue with `moar: src/gc/collect.c:218: process_worklist: Assertion `*item_ptr != item->sc_forward_u.forwarder' failed.`
+
+[21:12] <synopsebot> R#1709 [open]: https://github.com/rakudo/rakudo/issues/1709 [ASYNC][⚠ blocker ⚠] A race in HyperRace causing rare crash/hang
+
+[22:03] *** p6lert joined
+[22:05] *** Kaypie joined
+[23:31] *** bloatable6 joined
+[23:31] *** quotable6 joined
+[23:31] *** evalable6 joined
+[23:31] *** notable6 joined
+[23:31] *** undersightable6 joined
+[23:31] *** committable6 joined
+[23:31] *** coverable6 joined
+[23:31] *** nativecallable6 joined
+[23:31] *** benchable6 joined
+[23:31] *** releasable6 joined
+[23:31] *** unicodable6 joined
+[23:31] *** squashable6 joined
+[23:31] *** bisectable6 joined
+[23:31] *** shareable6 joined
+[23:31] *** statisfiable6 joined
+[23:32] *** greppable6 joined

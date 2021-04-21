@@ -1,0 +1,148 @@
+[01:09] *** vesper11 joined
+[01:24] *** MasterDuke left
+[01:30] *** Util left
+[01:33] *** lucasb left
+[03:37] *** leont left
+[04:37] *** squashable6 left
+[04:38] *** squashable6 joined
+[06:06] *** sena_kun joined
+[06:42] <nwc10> good *, #moarvm 
+
+[06:56] *** domidumont joined
+[08:12] *** frost-lab joined
+[08:44] *** MasterDuke joined
+[08:57] *** zakharyas joined
+[09:06] *** Altai-man joined
+[09:07] *** Geth left
+[09:09] *** sena_kun left
+[10:09] <jnthn> morning o/
+
+[10:11] <Altai-man> o/
+
+[10:14] <nwc10> \o
+
+[10:28] <moon-child> o\
+
+[10:35] <MasterDuke> ugh, this converting MVMArrayBody to a single chunk is annoying
+
+[10:35] <MasterDuke> so much casting and pointer (de)referencing to access the slots
+
+[10:38] <jnthn> Hm, I was expecting a `get_slots` inline function where you pass the body and get back a pointer to the slots
+
+[10:39] <MasterDuke> yeah, there are a couple new repeated things that might need to be turned into macros or functions
+
+[10:39] <MasterDuke> i was hoping to get things mostly working and then see where there was repetition
+
+[10:41] <MasterDuke> but i may need to do something like what you said first, so a single incorrect * or & doesn't block everything
+
+[10:45] <jnthn> Yeah, I think the screw-up potential is quite high without factoring at least that bit of pointer arith out :)
+
+[10:52] <timotimo> who is without pointer arithmetic sin may cast the first stone*
+
+[10:52] <timotimo> (MVMSTone*)
+
+[11:08] *** squashable6 left
+[11:11] *** squashable6 joined
+[11:16] <dogbert17> MasterDuke: if you're bored you could always run t/spec/integration/advent2012-day21.t. It seems as if one of your fixes causes this test to hang.
+
+[11:28] <MasterDuke> huh, i did run spectests...but yeah, at least when run by itself it seems to hang
+
+[11:29] *** Geth joined
+[11:31] <MasterDuke> a spectest just completed fine. oh, it only runs in a stresstest...
+
+[11:48] <dogbert17> yeah, I should have mentioned that, my bad
+
+[11:51] <dogbert17> I bisected it as far as be 260f015888c7
+
+[11:51] <linkable6> (2020-12-01) https://github.com/rakudo/rakudo/commit/260f015888 Merge pull request #4026 from MasterDuke17/gen_faster_code_for_some_given_when_cases
+
+[12:47] *** zakharyas left
+[12:53] *** vesper11 left
+[13:01] *** domidumont1 joined
+[13:03] *** domidumont left
+[13:07] *** sena_kun joined
+[13:09] *** Altai-man left
+[13:42] *** zakharyas joined
+[14:17] *** zakharyas1 joined
+[14:18] *** frost-lab left
+[14:20] *** zakharyas left
+[14:30] *** leont joined
+[15:24] <MasterDuke> oh, i see what's going on. it's `where 1 {}`, but getting the result of `2/2`, which is 1.0
+
+[15:25] <MasterDuke> so it gets into an infinite loop
+
+[15:26] <MasterDuke> should that match? or should the test have a `.Int` call added?
+
+[15:28] <jnthn> $ raku -e 'say 1.ACCEPTS(1.0)'
+
+[15:28] <jnthn> True
+
+[15:29] <jnthn> It's a smartmatch so it should be consistent with that
+
+[15:30] <MasterDuke> ugh. the genned code is going to get more complicated. maybe this is too much complexity
+
+[15:33] <MasterDuke> hm, it currently gens a call to `.Numeric`, would it work to just tack a `.Int` onto the end? 
+
+[15:44] <jnthn> I guess check what the candidate for another Numeric against Int does
+
+[15:57] <MasterDuke> heh, a stresstest now passes, but `given 3/2 { when 1 { say "matched" } }` say 'matched', which isn't good
+
+[15:59] <nwc10> m: say 1 << 54
+
+[15:59] <camelia> rakudo-moar 161325e08: OUTPUT: «5===SORRY!5=== Error while compiling <tmp>␤Unsupported use of << to do left shift.  In Raku please use: +< or ~<.␤at <tmp>:1␤------> 3say 1 <<7⏏5 54␤»
+
+[15:59] <nwc10> m: say 1 +< 54
+
+[15:59] <camelia> rakudo-moar 161325e08: OUTPUT: «18014398509481984␤»
+
+[16:00] <nwc10> actually, try something that isn't a power of two, but is larger than that
+
+[16:00] <nwc10> as in, also check that values that are beyond the ability of IEEE doubles to accurately represent, still get treated as integers
+
+[16:01] <nwc10> that would be the other possible trap of "just" saying .int
+
+[16:01] <MasterDuke> well, right now i modified it to do .Numeric.Int
+
+[16:02] <MasterDuke> but that's only if the 'when' is an int. if it's a Rat it just goes through the original/default .ACCEPTS route
+
+[16:11] <MasterDuke> so adding .Int is bad and i should feel bad. anybody have a better idea?
+
+[16:22] <MasterDuke> would it be terrible to also try the .ACCEPTS route if the fast path fails? i.e., it used to be everything was .ACCEPTS. now some cases are fast pathed, and the rest are .ACCEPTS. what if instead of completely bailing out if the fast path doesn't match, it then tries .ACCEPTS?
+
+[16:22] <nine> would it even still be fast?
+
+[16:23] <MasterDuke> i guess it'd be workload dependent. if things usually match, it would be faster than pre-my changes. if they usually don't, you have the extra cost of the fast path
+
+[16:24] *** patrickb joined
+[16:25] <nine> more code may push something over an inlining barrier
+
+[16:25] <nine> (generally speaking)
+
+[16:26] <MasterDuke> i had to keep making the fast path more and more complicated to fix edge cases. maybe i simplify it down so it's pretty cheap and let the .ACCEPTS handle all the edge cases
+
+[16:28] <MasterDuke> i.e., fast path is a only iseq_(i|s|n) on exactly what's given. if it succeeds good, if it fails then go through .ACCEPTS
+
+[17:06] *** Altai-man joined
+[17:09] *** sena_kun left
+[17:54] *** domidumont1 left
+[18:14] *** patrickb left
+[18:49] *** zakharyas1 left
+[19:12] *** domidumont joined
+[19:16] *** domidumont left
+[20:08] *** cognominal joined
+[20:15] *** vesper11 joined
+[20:19] *** vesper joined
+[20:19] *** vesper11 left
+[21:06] *** vesper left
+[21:08] *** sena_kun joined
+[21:08] *** Altai-man left
+[21:18] *** zakharyas joined
+[21:30] *** vesper11 joined
+[21:50] *** sena_kun left
+[22:06] *** sena_kun joined
+[22:22] *** sena_kun left
+[22:25] *** zakharyas left
+[23:28] *** vrurg left
+[23:29] *** vrurg joined
+[23:32] *** squashable6 left
+[23:33] *** squashable6 joined

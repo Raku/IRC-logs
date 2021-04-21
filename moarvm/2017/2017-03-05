@@ -1,0 +1,446 @@
+[00:20] <MasterDuke> it looks like 3rdparty/libtommath is just added to the moar repo, instead of pointing to a specific commit at https://github.com/libtom/libtommath. it also hasn't been updated to the 1.0.0 release
+
+[00:21] <timotimo> i think we also have at least one patch that upstream doesn't have
+
+[00:25] <MasterDuke> ah, i see 5 commits to that directory after the import
+
+[00:57] <MasterDuke> timotimo: any idea why this code would use a ton of ram? `my ($x,$y,$i) = (0,1,1); while ($i < 200000) {$y += $x ; $x = $y - $x ; $i += 1 } ; say $y;`
+
+[00:58] <MasterDuke> it does create a string that's 41799 chars long, but just doing `my $y = "y" x 41799` is much smaller
+
+[01:01] <MasterDuke> it does create a cstring, then MVM_string_ascii_decode()s it to an MVMString, and then boxes is to a Str. but /usr/bin/time is showing 1129028maxresident, compared to 67732maxresident
+
+[01:39] *** Ven joined
+[01:43] <timotimo> i'll compile a vmhealth-capable moar and check it out
+
+[01:43] <timotimo> but it'm in need of some sleeps
+
+[01:49] <timotimo> okay, so
+
+[01:49] <timotimo> it doesn't do a single gen2 collection
+
+[01:49] <timotimo> it thinks at the end that gc_bytes_promoted_since_full is 6389445
+
+[01:50] <timotimo> it does allocate 753 pages in the 4th slot of the gen2
+
+[01:51] <timotimo> oh, ok, if i reduce the limit by a whole lot, that stays the same
+
+[01:52] <MasterDuke> oh, so maybe if some other work is done also that triggers a gen2 collection the end number would go down?
+
+[01:52] <timotimo> maybe
+
+[01:52] <timotimo> it's not impossible that we don't count big ints into the total byte amount very well?
+
+[01:53] <timotimo> though actually those big ints should all die quickly
+
+[01:53] <timotimo> at first i thought we were outputting the result of the while loop
+
+[01:53] <timotimo> so i thought we had a big array of Int objects that could be the culprit
+
+[01:55] <MasterDuke> what would trigger a gen2 collection?
+
+[01:56] <timotimo> when the "bytes since last full" have exceeded a certain threshold
+
+[01:59] <MasterDuke> i just tried heaptrack, it says mp_grow ( https://github.com/MoarVM/MoarVM/blob/master/3rdparty/libtommath/bn_mp_grow.c#L19 ) allocated 1Gb
+
+[01:59] <timotimo> well, the unmanaged_size function just returns the bigint object's "alloc" entry
+
+[02:00] <timotimo> perhaps we have to multiply that by some factor, not sure how exactly mpint works for that field
+
+[02:01] <MasterDuke> oh, it actually allocated 3.6Gb total (if i'm reading this correctly), that 1Gb was just a peak
+
+[02:01] <timotimo> in short, all i can say is *shrug* until i look much further into this
+
+[02:02] <timotimo> right, "max"residentk
+
+[02:02] <timotimo> would probably be interesting when exactly it reaches the peak
+
+[02:04] <MasterDuke> thanks for the help, was checking that https://rt.perl.org/Ticket/Display.html?id=126450 is still valid
+
+[02:07] <timotimo> it allocated 1gb total, or is that the biggest allocation it has tried?
+
+[02:08] <timotimo> mp_grow i mean
+
+[02:08] <MasterDuke> 3.6G total allocated, 1G peak
+
+[02:09] <timotimo> does that mean "memory allocated here has peaked, in total, at 1 gigabyte"? or "the call to this that allocated the most so far allocated 1gb"?
+
+[02:09] <MasterDuke> don't know
+
+[02:10] <MasterDuke> http://i.imgur.com/EuGds7O.png
+
+[02:11] <MasterDuke> i ran with --full-cleanup
+
+[02:11] <timotimo> OK
+
+[02:11] <timotimo> so how much memory does it take to store that result value once?
+
+[02:12] <timotimo> m: say "{138847 / 8} bytes"
+
+[02:12] <camelia> rakudo-moar e114d5: OUTPUT: «17355.875 bytes␤»
+
+[02:12] <timotimo> so a single instance of these numbers would cost us ~17kb
+
+[02:14] <timotimo> 794396maxresident without the "say" at the very end
+
+[02:15] <MasterDuke> i profiled just creating the number that was printed directly and then say()ing it again. 1.5G total
+
+[02:15] <MasterDuke> according to heaptrack
+
+[02:16] *** Ven joined
+[02:16] <timotimo> how did you create that?
+
+[02:16] <timotimo> just put it into the source?
+
+[02:17] <MasterDuke> the command line. my terminal complained though
+
+[02:17] <timotimo> interesting. the number of "bytes promoted since last full" hits a constant very early on
+
+[02:17] <timotimo> what do the colors mean in the graph btw?
+
+[02:17] <MasterDuke> 66748maxresident according to /usr/bin/time
+
+[02:17] <timotimo> i bet the "sizes" tab is interesting, too
+
+[02:18] <MasterDuke> different functions
+
+[02:18] <MasterDuke> the orange is mp_grow. the next largest is mp_init_size
+
+[02:19] <MasterDuke> http://i.imgur.com/jF8hZ7K.png
+
+[02:19] <timotimo> a bit strange that it would skip buckets like that
+
+[02:19] <timotimo> though they are basically logarithmic
+
+[02:20] <timotimo> okay, i'm getting too tired to continue this
+
+[02:20] <timotimo> but it seems like we're doing rather well compared to when this took 6 gigs
+
+[02:20] <timotimo> on the other hand it can't have been tuning the threshold for doing a gen2 collection
+
+[02:20] <timotimo> because it never even does a gen2 collection and it comes out ahead
+
+[02:21] <timotimo> did we do something wrong in the code that makes it blow through the nursery faster?
+
+[02:21] <MasterDuke> well, i've been testing with 200000, the ticket was for 1000000
+
+[02:21] <timotimo> oh
+
+[02:22] <MasterDuke> i tried 1000000 and the OOM killer struck
+
+[02:22] <timotimo> it just reached 6 gigs resident memory for me
+
+[02:23] <timotimo> i do have 2 gigs of swap, though
+
+[02:23] <timotimo> (zram)
+
+[02:23] <MasterDuke> i have 8gb, but no swap
+
+[02:23] <timotimo> i have 16 gigs main ram
+
+[02:23] <timotimo> yeah, it peaks at 6228292maxresident
+
+[02:24] <timotimo> i suppose the problem is this:
+
+[02:24] <timotimo> we never collect before the nursery is full
+
+[02:25] <timotimo> i don't know the exact number but you can fit really many big ints into a nursery
+
+[02:25] <timotimo> this code does hardly anything but build lots and lots of big ints
+
+[02:27] <timotimo> 1885160maxresident
+
+[02:27] <timotimo> ^- this is what happens when i run 1_000_000 but do a nqp::force_gc every 10_000
+
+[02:27] <MasterDuke> oh interesting
+
+[02:28] <timotimo> 983480maxresident force_gc every 5_000
+
+[02:29] <MasterDuke> yeah, heaptrack looks very different with force_gc every 5_000
+
+[02:29] <timotimo> 261824maxresident force_gc every 1_000
+
+[02:31] *** Ven joined
+[02:32] <timotimo> 111332maxresident - every 500
+
+[02:33] <timotimo> running every 50 now
+
+[02:33] <timotimo> 83828maxresident - every 50, but also threw out the vmhealth printing code
+
+[02:34] <timotimo> maybe moar needs to gain another pressure value that gets upped when really really big objects like strings, arrays, bigints, get allocated
+
+[02:34] <timotimo> so we do minor collections more often, too
+
+[02:34] <timotimo> anyway, i think my hypothesis has gotten a lot of proof, and i'm willing to say that's what is the cause
+
+[02:34] <timotimo> i need sleep :|
+
+[02:34] <timotimo> have a good one!
+
+[02:35] <MasterDuke> thanks, and likewise
+
+[02:37] <MasterDuke> .tell samcv fyi, heaptrack says MVM_unicode_name_to_property_code is leaking with the code i was testing with: `my ($x,$y,$i) = (0,1,1); while ($i < 200000) {$y += $x ; $x = $y - $x ; $i += 1 } ; say $y;`
+
+[02:37] <yoleaux2> MasterDuke: I'll pass your message to samcv.
+
+[02:37] <samcv> thx for the heads up MasterDuke
+
+[02:37] <yoleaux2> 02:37Z <MasterDuke> samcv: fyi, heaptrack says MVM_unicode_name_to_property_code is leaking with the code i was testing with: `my ($x,$y,$i) = (0,1,1); while ($i < 200000) {$y += $x ; $x = $y - $x ; $i += 1 } ; say $y;`
+
+[02:38] <samcv> working on something atm but will look at it later today
+
+[02:38] <MasterDuke> np
+
+[02:48] *** ilbot3 joined
+[03:43] <samcv> MasterDuke, also interesting it's leaking with that code?
+
+[03:43] <samcv> you aren't checking the properties ricght?
+
+[03:44] <samcv> i guess it might still happen
+
+[03:44] <MasterDuke> right, wasn't doing anything unicode-y
+
+[03:44] <MasterDuke> i also tried reverting to before your most recent commit, but it was still the same
+
+[05:34] <samcv> my last commit has nothing to do with that one
+
+[06:18] *** geekosaur joined
+[06:20] *** geekosaur joined
+[06:22] *** geekosaur joined
+[07:02] *** zakharyas joined
+[07:52] <timotimo> it has always been leaking forever and ever
+
+[07:53] <timotimo> we just don't have refcounting or something for the unicode db
+
+[07:53] <timotimo> so even full_cleanup doesn't clean it up
+
+[07:53] <timotimo> or am i confusing this with something else ...
+
+[08:19] *** dalek joined
+[08:20] *** synopsebot6 joined
+[08:28] *** synopsebot6 joined
+[08:34] *** domidumont joined
+[08:40] *** domidumont joined
+[09:23] *** zakharyas joined
+[09:44] *** FROGGS joined
+[10:12] *** Ven joined
+[11:15] *** Ven joined
+[11:57] <MasterDuke> timotimo, samcv: i added a print statement in MVM_unicode_name_to_property_code and i see it called 6 times if i run the code above, alternately looking up 'No' and 'Nl'
+
+[12:00] <MasterDuke> ah, golfed it to`my ($, $) = 1`; for every element in the lhs list, there's a lookup of 'No' and 'Nl'
+
+[12:03] <MasterDuke> timotimo: about the memory usage of the code we were playing with, should i create a MoarVM issue? or is the RT sufficient
+
+[12:25] <IOninja> What happens when a function is only in the header file? For example, I'm trying to find what MVM_file_isreadable does, but `grep -R 'MVM_file_isreadable' .` gives me just src/io/fileops.h where it's declared and src/core/interp.c where it's used. How to get to code that gets executed when it's used?
+
+[12:27] <MasterDuke> maybe run in the debugger with a breakpoint on that function name?
+
+[12:28] <IOninja> no idea how to do that :}
+
+[12:29] <MasterDuke> i think just `break MVM_file_isreadable` in gdb. i'll give it a try, but i'm no debugger expert
+
+[12:30] <MasterDuke> src/io/fileops.c:321
+
+[12:31] <IOninja> oh a macro
+
+[12:31] <IOninja> MasterDuke++ thanks
+
+[12:31] <MasterDuke> looks like it calls `file_info`
+
+[12:32] <MasterDuke> np
+
+[13:27] *** gk_1wm_su joined
+[13:40] *** Ven joined
+[13:52] *** ZofBot_ joined
+[13:53] *** ZofBot joined
+[14:06] *** Ven joined
+[14:36] *** Util joined
+[17:40] *** dogbert17 joined
+[17:42] <dogbert17> m: react { Supply.interval(1).tap: -> { .say } } # RT 127098
+
+[17:42] <camelia> rakudo-moar bdd472: OUTPUT: «Unhandled exception in code scheduled on thread 4␤»
+
+[17:44] <dogbert17> my attempts to find useful info wrt the 'decoderstream' bug have failed spectacularly, amusing myself browsing old RT's instead
+
+[17:58] <jnthn> Useless use of react... The exception is because of the zero-arg closure
+
+[17:58] <jnthn> So the code is wrong
+
+[17:58] <jnthn> But it's LTA we aren't saying that the exception was
+
+[17:58] <jnthn> Oh, but
+
+[17:59] <jnthn> m: Supply.interval(1).tap: -> { .say }; sleep 1
+
+[17:59] <camelia> rakudo-moar bdd472: OUTPUT: «Unhandled exception in code scheduled on thread 4␤Too many positionals passed; expected 0 arguments but got 1␤  in block  at <tmp> line 1␤␤»
+
+[17:59] <jnthn> We *do*
+
+[17:59] <jnthn> But the main thread exits before we have chance to print the backtrace :)
+
+[18:00] <jnthn> So this code (a) wrongly used react by doing tap not whenever inside of it, (b) wrongly used tap too
+
+[18:02] <jnthn> I can't think of much practical we can actually do here
+
+[18:03] <jnthn> Short of trying to build some kind of "don't let the main thread exit if another is reporting an exception"
+
+[18:04] <MasterDuke> jnthn: different topic, but re bigints and nurseries and allocations, i assume you don't mean check whether every MVM_(m|re|c)alloc is above a certain size, and if so adjust the nursery?
+
+[18:09] <jnthn> No, that's be very costly :)
+
+[18:09] <jnthn> And won't actually help
+
+[18:10] <jnthn> Because iirc libtommath won't call MVM_malloc anyway
+
+[18:10] <MasterDuke> ha, i was pretty sure that wasn't what you meant
+
+[18:11] <jnthn> I think when we produce a new bigint (that's actually big), before we hand it back to the user, we take the number of digits and use that to influence the nursery size
+
+[18:11] <MasterDuke> no, looks like it calls a lot of realloc in mp_grow
+
+[18:12] <dogbert17> jnthn: thx for the explanation, I guess the that's the same problem which crops up when using Proc::Async to run a non existing command ...
+
+[18:12] <jnthn> So, in src/math/bigintops.c
+
+[18:12] <jnthn> dogbert17: I thought that was a panic?
+
+[18:12] <jnthn> Which is rather different
+
+[18:12] <jnthn> And if you're running a process with proc::async you should be awaiting it somewhere
+
+[18:14] <dogbert17> jnthn: I was thinking about stuff like this, https://gist.github.com/dogbert17/8b285d91d6d9754a5afd947ebe30452f
+
+[18:16] <dogbert17> one might think that the gisted code should print out some kind of error message but it does not
+
+[18:16] * dogbert17 but perhaps that is another problem entirely
+
+[18:16] <jnthn> That looks unreleated, yeah
+
+[18:16] <MasterDuke> jnthn: "we take the number of digits and use that to influence the nursery size", that's what we do now, or what we should do?
+
+[18:17] <dogbert17> should it print some kind of error msg, as it is now nothing is pronted out
+
+[18:17] <dogbert17> s/pronted/printed/
+
+[18:17] <jnthn> MasterDuke: That's what I'm suggesting we (carefully) do
+
+[18:18] <jnthn> dogbert17: Yes, the await should throw
+
+[18:18] <jnthn> Due to a broken Promise
+
+[18:18] <jnthn> Note that on Windows it behaves differently badly
+
+[18:18] * dogbert17 is on a  Linux VM
+
+[18:19] <jnthn> Yeah, I can replicate what you see on Linux too
+
+[18:19] <dogbert17> if run through gdb it breaks with a SIGPIPE
+
+[18:19] <jnthn> OK, jalfrezi is ready; bbl :)
+
+[18:19] <dogbert17> Indian food again :)
+
+[18:23] <dogbert17> jnthn: I updated the gist above with gdb output, there's indeed a broken Promise in there
+
+[18:58] <jnthn> Ohh...so we're missing the signal? Odd
+
+[19:00] <jnthn> Ah, right...seems it needs doing explicitly
+
+[19:06] <timotimo> we had pancakes <3
+
+[19:06] <dogbert17> jalfrezi sounds like the winner there :)
+
+[19:07] <dogbert17> jnthn, is it a difficult fix?
+
+[19:07] <jnthn> In theory,no
+
+[19:08] <dogbert17> is it a MoarVM problem or a rakudo one?
+
+[19:09] <jnthn> We could in theory fix it in Rakudo, but in practice it's likely better done in Moar
+
+[19:09] <dogbert17> I believe I have seen several RT's describing this or some very similar problem
+
+[19:10] <jnthn> In theory just doing `signal(SIGPIPE, SIG_IGN);` or so at MoarVM startup would do it
+
+[19:11] <dogbert17> the word theory crops up again :)
+
+[19:11] <jnthn> Well
+
+[19:12] <jnthn> I'm pretty confident that fixes it for us on, say, Linux, OSX, etc.
+
+[19:12] <jnthn> I'm not sure it'll work on Windows
+
+[19:13] <dogbert17> so the handling on Win is totally different
+
+[19:17] <dogbert17> should I report it as a MoarVM issue, referencing relevant RT's if I can find them?
+
+[19:18] <jnthn> Sure
+
+[19:19] <jnthn> I think we can add the thing I suggested in a #ifdef check to make sure we're not on Win32
+
+[19:19] <dogbert17> cool
+
+[19:20] <dogbert17> RT #125651 seem to be one of them
+
+[19:20] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=125651
+
+[19:22] <jnthn> Also there is a MoarVM issue already filed for what happens on Windows
+
+[19:26] <dogbert17> and this perhaps RT #128526
+
+[19:26] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=128526
+
+[19:36] *** Ven joined
+[21:50] *** lizmat joined
+[22:19] *** Ven joined
+[22:33] *** geekosaur joined
+[22:39] *** Ven joined
+[22:56] <MasterDuke> timotimo: i think https://github.com/MoarVM/MoarVM/commit/152337ab0c broke some tests. some things are now isbig_I that weren't before
+
+[22:57] <MasterDuke> t/spec/S05-transliteration/trans.t, t/spec/S32-list/combinations.t, t/spec/integration/advent2009-day08.t
+
+[22:57] <MasterDuke> with a couple dying here: https://github.com/rakudo/rakudo/blob/nom/src/core/Int.pm#L65
+
+[23:01] <timotimo> um. wat.
+
+[23:02] <timotimo> isbig_I is not for that purpose
+
+[23:02] <timotimo> at least i don't think so
+
+[23:03] <timotimo> the commit that added it didn't say anything interesting :\
+
+[23:05] <MasterDuke> i think the combinations.t failure was essentially combinations(3.5, 2) should equal combinations(3, 2)
+
+[23:05] <MasterDuke> but instead i got: First parameter out of range. Is: 3, should be in -Inf^..2147483647
+
+[23:07] <MasterDuke> that was here: https://github.com/rakudo/rakudo/blob/nom/src/core/Rakudo/Iterator.pm#L491
+
+[23:11] <timotimo> *sigh*, feel free to revert my revert, then.
+
+[23:13] <MasterDuke> your moar commit? i don't have a commit bit. or you mean make a PR to revert it?
+
+[23:31] <timotimo> i'll revert it
+
+[23:32] <Geth> ¦ MoarVM: 5dd8f04b1a | (Timo Paulssen)++ | src/math/bigintops.c
+
+[23:32] <Geth> ¦ MoarVM: Revert "throw out flawed parts of bigint_is_big"
+
+[23:32] <Geth> ¦ MoarVM:
+
+[23:32] <Geth> ¦ MoarVM: This reverts commit 152337ab0c17e242ff69b245c3cb7b5954fe42d0.
+
+[23:32] <Geth> ¦ MoarVM:
+
+[23:32] <Geth> ¦ MoarVM: Turns out some tests rely on this. I don't think nqp::isbig_I
+
+[23:32] <Geth> ¦ MoarVM: should be used in lieu of checking bounds, but what do I know.
+
+[23:32] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/5dd8f04b1a
+
+[23:42] <MasterDuke> should those rakudo bits really be changed to not use isbig_I?
+
+[23:43] <timotimo> jnthn will probably know better than me
+
+[23:56] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #546: Check result of repeat/concat fit in an MVMString
+
+[23:56] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/546

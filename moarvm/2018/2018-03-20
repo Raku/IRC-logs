@@ -1,0 +1,207 @@
+[00:40] *** reportable6 joined
+[01:08] *** AlexDaniel joined
+[02:56] *** ilbot3 joined
+[03:23] *** greppable6 joined
+[03:24] *** val0rdkermit joined
+[05:15] *** unicodable6 joined
+[06:33] *** domidumont joined
+[06:41] *** domidumont joined
+[06:54] *** brrt joined
+[07:02] *** domidumont joined
+[08:15] *** brrt joined
+[08:18] *** robertle joined
+[08:43] <Geth> ¦ MoarVM: 2bd691551b | (Stefan Seifert)++ | src/6model/reprs/VMArray.c
+
+[08:43] <Geth> ¦ MoarVM: Fix segfault on concurrent array access while resizing
+
+[08:43] <Geth> ¦ MoarVM:
+
+[08:43] <Geth> ¦ MoarVM: nqp::elems(@a) == 1 && @a[0] eq 'a' may have caused a segfault when another
+
+[08:43] <Geth> ¦ MoarVM: thread did an nqp::push(@a, 'a'); at the same time. That's because
+
+[08:43] <Geth> ¦ MoarVM: set_size_internal first set body->elems (causing the nqp::elems(@a) == 1 test
+
+[08:43] <Geth> ¦ MoarVM: and internal checks in at_pos to pass) before actually installing the new slots
+
+[08:43] <Geth> ¦ MoarVM: array. Fix by updating body->elems last in set_size_internal.
+
+[08:43] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/2bd691551b
+
+[08:48] <brrt> nine++
+
+[08:49] <brrt> although, there is one eeny meeny tiny worry that I have, which is that this is now going to break more rarely than before, while it is just wron gcode to do so
+
+[08:50] <brrt> the correct solution is probably to have an instrumentable mode for MoarVM to detect such cases though :-)
+
+[08:54] <nine> Well, jnthn says that even a misuse by concurrent code may not cause segfaults in MoarVM, so I fixed that. There's still a race condition in set_size_internal when we shift off empty slots from the beginning. And that one's not easy to fix.
+
+[08:55] <nine> We'd need to replace the memmove by creating a new slots array, memcpying over and thus replace the storage atomically. But then we'd still need to update body->start at the same time.
+
+[08:58] <nine> The only lock free way to achieve this would be to put most of VMArray's body including the slots array into a separate struct pointed to from the body. This way we could atomically replace the one pointer. But that gets very expensive quickly.
+
+[09:13] <brrt> either that or we get a lock
+
+[09:14] <nine> Which would tank our read performance
+
+[09:15] <brrt> 'don't do that then' :-P
+
+[09:15] <lizmat> brrt: that would have to be another repr, which would have its uses, but not in the general case
+
+[09:15] <brrt> yeah, I get it
+
+[09:15] <brrt> then I'm not sure if we want a consistent thing here
+
+[09:16] <brrt> well, i am
+
+[09:16] <brrt> we want safe concurrent lock-free racing access
+
+[09:16] <brrt> which my definition rules out a lot of possible implementations, including ones that would in 'normal cases' perform really well
+
+[09:33] *** robertle joined
+[10:12] <jnthn> I sometimes wonder if resizes are already rare/costly enough that an atomic op to install a newly resized array body would just be noise
+
+[10:12] <yoleaux> 07:46Z <nine> jnthn: do you concur with the reasoning? https://github.com/perl6/nqp/commit/68164ca223
+
+[10:13] <jnthn> In that, they aren't cheap, but realloc is even uncheaper
+
+[10:14] <jnthn> .tell nine yes
+
+[10:14] <yoleaux> jnthn: I'll pass your message to nine.
+
+[10:17] <nine> Ouch: ok 1 - Can create a new non-app-lifetime thread
+
+[10:17] <yoleaux> 10:14Z <jnthn> nine: yes
+
+[10:17] <nine> Failed 23/24 subtests
+
+[10:17] <brrt> depends, a small realloc isn't that expensive
+
+[10:17] <nine> Looks like that was a segfault in qp::threadrun($t); nqp::threadjoin($t);
+
+[11:25] <MasterDuke> wouldn't https://github.com/MoarVM/MoarVM/pull/689 (and then subsequent work to use the FSA for more VMArray things) help/prevent segv from concurrent access?
+
+[11:30] <nine> MasterDuke: I don't see how?
+
+[11:31] <jnthn> The FSA has a "free at safepoint" mechanism
+
+[11:32] <jnthn> Which in combination with an atomic compare and swap to install the newly resized storage would work
+
+[11:32] <jnthn> But
+
+[11:32] <jnthn> So that it's possibly to transactionally update the size and the storage of that size
+
+[11:33] <jnthn> The FSA's free at safepoint mechanism is indeed useful to ensure we avoid use-after-free (due to other threads still reading the memory) and ABA problems.
+
+[11:33] <jnthn> huh, one line I typed got lost?
+
+[11:34] <jnthn> The storage needs to also include the size too, and perhaps elems and start too
+
+[11:34] <jnthn> ^^ was meant to go after the "But" :)
+
+[11:34] <nwc10> "and a pony?" :-)
+
+[11:36] <jnthn> Well, a pointer-size pony would at least make the header bit before the storage a power of 2 :P
+
+[11:38] <nine> Ah, so that's essentially the "put the important bits into a struct and replace the pointer in the body" solution I described
+
+[11:40] <jnthn> Yeah, that + atomic op + FSA (or other means to avoid ABA and UAF)
+
+[11:41] <jnthn> I figure that the important info header can go on the start of the the memory region and the rest is storage
+
+[11:41] <jnthn> Though it throws allocation sizing off a little
+
+[11:41] <jnthn> Off page boundaries, I mean
+
+[11:48] <nine> I just managed to reproduce the segfault in nqp::threadrun($t); nqp::threadjoin($t); but again in a shell with disabled core dumps :/
+
+[11:49] <jnthn> Also, MVMHash needs similar treatement, though that will mean moving away from "uthash" (not that what we actually have is much like the original uthash any more anyway)
+
+[11:49] <jnthn> Since it does an allocation per value
+
+[11:49] <jnthn> And we'd need just a single memory blob
+
+[11:49] <jnthn> Note that we probably cut down on a huge number of our allocations thanks to this
+
+[11:51] <nwc10> I forget which hash implementation you had previously said looked interesting as a candidate to use/"steal" the design from
+
+[11:51] <jnthn> Me too :S
+
+[11:51] <jnthn> But there's a lot here at least
+
+[11:55] <jnthn> *a log, grr
+
+[11:58] <nwc10> ++ # https://probablydance.com/2017/02/26/i-wrote-the-fastest-hashtable/
+
+[12:00] <nwc10> https://www.gnu.org/licenses/license-list.en.html#boost
+
+[12:00] <nwc10> probably hard to actually do something seen as stealing from it. This is useful. :-)
+
+[12:01] <nwc10> jnthn: are your fingers distracted by a lack of lunch?
+
+[12:03] <jnthn> Ah, indeed
+
+[12:03] <jnthn> That's to the license...though yeah, it's indeed already lunch time
+
+[12:06] * jnthn bbiab
+
+[12:08] <lizmat> so, is nqp::splice(a,b,nqp::elems(a),0) smart enough to just replace a by b is a is empty ?
+
+[12:08] <lizmat> *if
+
+[13:41] *** FROGGS joined
+[13:42] *** AlexDaniel joined
+[14:40] *** FROGGS joined
+[16:25] *** brrt joined
+[16:26] *** brrt1 joined
+[16:53] *** domidumont joined
+[19:18] *** brrt joined
+[19:36] *** domidumont joined
+[19:49] *** brrt joined
+[19:56] <lizmat> is there a reason why we do have an nqp::splice, but no nqp::subbuf ?
+
+[19:57] <samcv> lizmat: subbuf would act like splice or does it just return a section of a buffer? but i believe that is something that should be added and we need
+
+[19:58] <lizmat> nqp::subbuf(buffer,pos,elems) basically
+
+[19:58] <lizmat> would give you an nqp::list with the elements of buffer from pos for elems elements
+
+[19:59] <lizmat> this could also simplify slicing like @a[10..20] significantly
+
+[19:59] <lizmat> if @a is fully reified  :-)
+
+[20:01] <lizmat> it would also help in a hyperbatcher on reified arrays / lists  :-)
+
+[20:51] <timotimo> i wanted a splice2 in the past
+
+[20:56] <lizmat> what would splice2 do ?
+
+[20:58] <timotimo> exactly what splice does, except takes one extra parameter for the start of the source (i think?)
+
+[20:58] <lizmat> that's already the 3rd parameter?
+
+[21:05] <timotimo> OK, then for the other one
+
+[21:17] <samcv> working on a Shift-JIS encoder right now. encoder seems to work. haven't integrated it in moarvm but going to implement the decoder and make sure it all works then move it into moarvm so i can test it more easily standalone
+
+[21:18] <samcv> there are a bunch of different shift-jis encodings. so i decided to implement the one specified by W3C
+
+[21:18] <lizmat> samcv++
+
+[22:36] <MasterDuke> jnthn: are https://github.com/MoarVM/MoarVM/pull/689 and https://github.com/MoarVM/MoarVM/pull/773 (use the FSA for VMArray and MVMString respectively) still something you think we'll want at some point?
+
+[22:46] <jnthn> MasterDuke: Not totally sure on MVMString still. For VMArray yes, and it's a step on the way to some concurrency fixes discussed here earlier today
+
+[22:55] <MasterDuke> jnthn: cool. should i work on expanding the FSA use with VMArray (since that PR only uses it for deserialized and cloned arrays)?
+
+[22:56] <jnthn> MasterDuke: Could do, also maybe sync up with nine++ in case he's also thinking about working on the concurrency changes I suggested earlier
+
+[22:59] <MasterDuke> cool. re the existing PR, is it mergeable as is? or wait and see what nine's thinking?
+
+[23:00] <jnthn> I'd have to look again, and I've already more to do that I've hours left today, alas.
+
+[23:02] <MasterDuke> no worries, it's not keeping me up at nights
+
+[23:03] <MasterDuke> just glad to know it's still relevant
+
+[23:44] *** MasterDuke joined

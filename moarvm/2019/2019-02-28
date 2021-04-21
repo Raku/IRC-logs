@@ -1,0 +1,352 @@
+[00:14] <MasterDuke> jnthn, timotimo: i'm looking at a perf report (of slurping a file with Compress::Zlib) where the top function at 45% (next at 7% is MVM_interp_run) is sim_stack_find
+
+[00:15] <MasterDuke> any idea what could be causing that?
+
+[00:16] *** Kaiepi joined
+[00:17] <jnthn> MasterDuke: No, though that doesn't sound good
+
+[00:17] <jnthn> Is the program somehow heavily recursive?
+
+[00:17] <jnthn> If not, that sounds especially suspect
+
+[00:18] <jnthn> Even if it is, it's still suspect at 45%
+
+[00:18] <jnthn> I mean, it's off on another thread, but that's still pretty bad.
+
+[00:19] <MasterDuke> not recursive at all i believe
+
+[00:20] <jnthn> Weird. Could you open a MoarVM issue?
+
+[00:20] <MasterDuke> it causes a noticeable slowdown too. runtime is ~9.2s usually, but ~14.5s when that happens
+
+[00:20] <jnthn> With repro instructions
+
+[00:20] <MasterDuke> sure
+
+[00:20] <jnthn> I'd like to investigate that. Probably won't get to this side of the German Perl Workshop, though.
+
+[00:21] <MasterDuke> any further information i could gather?
+
+[00:21] <jnthn> Well, spesh log is a bit big to post I guess
+
+[00:21] <jnthn> And might not give many hints anyway
+
+[00:22] <jnthn> And if there's repro info, it's easily product
+
+[00:22] <jnthn> *produced
+
+[00:22] <jnthn> Spesh "replays" the execution to model the call stack
+
+[00:22] <jnthn> Something seems to be going terribly wrong in that
+
+[00:22] <jnthn> How is memory use, BTW?
+
+[00:23] <jnthn> You might also run it under callgrind to see if that gives the same results
+
+[00:23] *** nebuchadnezzar left
+[00:23] <jnthn> Just in case there's anyone here who it applies to, https://twitter.com/jnthnwrthngtn/status/1100913444172324864
+
+[00:23] <MasterDuke> memory use is about the same in either condition
+
+[00:23] *** nebuchadnezzar joined
+[00:24] <jnthn> That's stranger still...I'd have thought it'd be building/searching a huge stack
+
+[00:24] <MasterDuke> 197412maxresident in fast case, 191928maxresident in slow case
+
+[00:25] *** Kaiepi left
+[00:28] *** patrickz joined
+[00:31] *** patrickb left
+[00:36] <MasterDuke> jnthn: https://github.com/MoarVM/MoarVM/issues/1060
+
+[00:40] <jnthn> Thanks
+
+[00:50] <MasterDuke> jnthn: on a different, but related, topic is gather/take as fast as it's going to be for the forseeable future?
+
+[00:53] <jnthn> Hm, interesting. The biggest win was making it not take the continuation in the eager case, which I think if you're asking for .elems should be the case. It may be worth checking that is really happening.
+
+[00:54] <jnthn> In the lazy case of course it has to do that
+
+[00:55] <jnthn> Taking/invoking that only got one notable speedup recently, which is that after dropping the ref-counting it didn't have to walk the frames during invoke
+
+[00:55] <jnthn> And that's recent as in, some years ago :)
+
+[00:56] <jnthn> There may be a possible optimization in caching exception handler lookups
+
+[00:57] <jnthn> I'm not quite sure how we'd factor that, but it'd maybe be worth something if we didn't have to scan the stack for a take handler if it's deep-ish
+
+[00:58] <jnthn> Might be a way to save something on the way we store the continuation tag (avoid a mallc or something)
+
+[00:58] <jnthn> Though that may not be worth much at all
+
+[00:58] <MasterDuke> jnthn: how would i check that it's not taking the continuation in the eager case?
+
+[00:59] <jnthn> Hmm...if the allocation profiler is accurate in this regard, look for continuation allocations in that
+
+[01:00] <jnthn> Though it maybe ain't. Hm.
+
+[01:00] <jnthn> Otherwise there's always sticking some instrumentation into continuation.c :)
+
+[01:00] <MasterDuke> 100,000 BOOTContinuation allocated
+
+[01:01] <MasterDuke> i can look into continuation.c also
+
+[01:02] <jnthn> Ah, cool, then it is logging them :)
+
+[01:02] <jnthn> And 100,000 sounds like a lot of it is happening
+
+[01:02] <MasterDuke> that's exactly the number of lines in the decompressed file
+
+[01:03] <MasterDuke> oh, also 100,006 BOOTException allocated
+
+[01:06] <jnthn> Interesting.
+
+[01:06] <jnthn> If you .eager.elems is it different?
+
+[01:06] <MasterDuke> and 100,001 Encoding::Encoder::Builtin. does one of those really have to be allocated for every line?
+
+[01:07] <jnthn> Um...I sure hope not!
+
+[01:07] <jnthn> But that sounds more likely something the module is doing, perhaps?
+
+[01:09] <MasterDuke> probably. it looks like it sets an encoding once, but i'll look into that also
+
+[01:09] <MasterDuke> .lines.eager.elems didn't make a difference
+
+[01:09] <MasterDuke> same runtime, same number of BOOTContinuations
+
+[01:12] <jnthn> OK, that's worth looking into
+
+[01:12] <jnthn> Bed time for me, 'night o/
+
+[01:12] <MasterDuke> thanks for the help, later...
+
+[01:49] *** MasterDuke left
+[01:49] *** MasterDuke joined
+[01:49] *** MasterDuke left
+[01:49] *** MasterDuke joined
+[01:52] <MasterDuke> timotimo: you around? it looks like every time Str.encode() is called it allocates a Encoding::Encoder::Builtin. does that have to be the case?
+
+[01:54] <timotimo> oh, i'd expect the encoding registry to give the same object every time if the encoding is the same?
+
+[01:54] <timotimo> but i don't know much about the encoding registry business
+
+[01:55] <MasterDuke> https://github.com/rakudo/rakudo/blob/master/src/core/Str.pm6#L2280
+
+[01:55] <MasterDuke> https://github.com/rakudo/rakudo/blob/master/src/core/Encoding/Registry.pm6#L64-L71
+
+[02:02] *** robertle left
+[02:02] *** robertle joined
+[02:14] *** patrickz left
+[02:24] *** Kaiepi joined
+[04:18] <MasterDuke> .ask jnthn every time Str.encode() is called it creates a new Encoding::Encoder::Builtin. does that have to be the case? https://github.com/rakudo/rakudo/blob/master/src/core/Str.pm6#L2281 and https://github.com/rakudo/rakudo/blob/master/src/core/Encoding/Builtin.pm6#L29
+
+[04:18] <yoleaux> MasterDuke: I'll pass your message to jnthn.
+
+[05:49] *** robertle left
+[07:31] *** domidumont joined
+[07:33] *** domidumont left
+[07:34] *** domidumont joined
+[07:37] *** domidumont left
+[07:38] *** domidumont joined
+[10:02] *** domidumont left
+[10:29] *** domidumont joined
+[14:27] *** lucasb joined
+[14:29] <timotimo> re-using an encoder object is An Optimization Technique i guess
+
+[14:31] <timotimo> imagine how bad it is on windows with $translate-nl turned on, it'll build twice as many objects
+
+[14:33] *** brrt joined
+[14:35] <jnthn> One could also address it in the module by using the encoding registry to get the encoder and then just re-using it each time
+
+[14:35] <yoleaux> 04:18Z <MasterDuke> jnthn: every time Str.encode() is called it creates a new Encoding::Encoder::Builtin. does that have to be the case? https://github.com/rakudo/rakudo/blob/master/src/core/Str.pm6#L2281 and https://github.com/rakudo/rakudo/blob/master/src/core/Encoding/Builtin.pm6#L29
+
+[14:35] <yoleaux> 09:54Z <patrickb> jnthn: Could you type together a project idea in the ideas repo for the dynamic optimizer idea you tweeted about? That should hopefully greatly increase the visibility of that idea for students. (https://github.com/perl-gsoc-2019/ideas/blob/master/mentors-guide.md#adding-ideas)
+
+[14:35] <yoleaux> 09:54Z <patrickb> jnthn: It's great you're willing to mentor!
+
+[14:35] <brrt> ohai
+
+[14:37] <dogbert21> hi brrt
+
+[14:38] <brrt> hi dogbert21
+
+[14:38] <dogbert21> timotimo: were you looking at the bug in t/04-nativecall/06-struct.t, i.e. a problem which seems related to arrays and inlining?
+
+[14:39] <dogbert21> brrt: how is your jit work progressing?
+
+[14:43] <dogbert21> timotimo, nine: this bug https://gist.github.com/dogbert17/0427f05e1df095965afb5f30878e7091
+
+[14:46] <timotimo> that's the kind i'm looking into, yeah
+
+[14:50] <dogbert21> cool, then I'll go back to sleep :)
+
+[14:51] <timotimo> at least now i've found the right spot to look at actually
+
+[14:52] <dogbert21> ++timotimo
+
+[14:54] <timotimo> MVM_nativecall_make_cstruct or _make_carray are called with nothing to signal whether they are inlined or not
+
+[14:54] <timotimo> so it just puts the pointer in and forgets about it
+
+[14:55] <timotimo> later on, the CArray or CStruct that's inside the other just blindly calls free on its pointer, which is, as asan says, not actually an address that came from malloc
+
+[15:25] <dogbert21> timotimo: do you have any ideas about how to fix it?
+
+[15:31] <timotimo> yup
+
+[15:31] <timotimo> i'm on it
+
+[15:32] <timotimo> i think we might want to have a way to annotate CStructs coming back from C being either "free when the p6 object gets destroyed, or don't free" at the signature level
+
+[15:32] <timotimo> kind of like explicitly_manage i guess
+
+[15:33] <timotimo> i was just about to put in code saying "if !inlined set owned to 1", but that's not quite the right wording, as the C land may have actual ownership
+
+[15:34] <timotimo> also, nativecast can really screw us up here; it'd probably always have to set "do not free this"
+
+[15:34] <timotimo> however
+
+[15:34] <timotimo> when you nativecast something from one struct to another, and you're not keeping the original object around, then you can actually end up in a situation where the actual memory of the struct gets freed (because the old version died) but you're still using it (via the "new" cstruct object)
+
+[15:35] <timotimo> OTOH, if you just nativecast to a different type to set one field and then continue using the other cstruct, that'll have the opposite effect; your old object has to stay responsible for the lifetime, and the new object will immediately become garbage and mustn't free the pointer
+
+[15:35] <timotimo> isn't all this very fun?!
+
+[15:37] <timotimo> requiring the user to always call free on CStructs or leak memory is also shite, but as it stands i believe we're just never freeing CStruct objects' data pointer ever?
+
+[15:38] <timotimo> unsurprisingly, the code with the commented-out MVM_free call says "for some reason this causes crashes at the moment"
+
+[15:38] <timotimo> so i guess whatever i do it'd be an improvement?
+
+[15:45] <brrt> dogbert21: slowly
+
+[15:46] <brrt> I've found a fairly interesting bug in the expression optimizer
+
+[15:52] <dogbert21> brrt: is that a bug which affects us today?
+
+[15:52] <dogbert21> timotimo: sounds quite messy
+
+[15:53] <timotimo> isn't it
+
+[15:53] <timotimo> maybe a little syntax brainstorming session could be useful here
+
+[15:53] <timotimo> like, i could imagine nativecast(MyOtherStruct, $value, :transfer-ownership) or something could be fine
+
+[15:54] <timotimo> i could also imagine having an extra object that defines the lifetime of an underlying c pointer and that would be stored in the CStruct or CArray or whatever objects
+
+[15:54] <timotimo> when that dies, MVM_free is called
+
+[15:54] <timotimo> if you first call .disown on it, MVM_free is never called, for example when you give ownership over to C
+
+[15:54] <timotimo> and maybe .reown could be A Thing
+
+[15:55] <timotimo> inlined structs and arrays would get a reference to the parent object's ownership object
+
+[16:08] <AlexDaniel> samcv: ETA, if possible? I wanna plan my time a little
+
+[16:13] *** brrt left
+[16:21] <dogbert21> hmm
+
+[16:29] <timotimo> so, i think there would have to be new ops for handling the ownership of strings
+
+[16:29] <timotimo> since the reprs we use dibt support attributes that are not part of the native memory
+
+[16:30] <timotimo> but on the p6 api side, the ownership management ops could totally live in the metaibject
+
+[16:33] *** domidumont left
+[16:46] <timotimo> $myobj.^disown
+
+[16:46] <timotimo> doesnt sound so bad
+
+[16:47] <timotimo> i had that already typed out but there was a hiccup in ssh due to mobile neteirks and weechat thoughz ibwas pasting
+
+[16:47] <timotimo> anyway, this new ownership concept could be the basis of a unified thing that also covers strings i guess?
+
+[16:48] <timotimo> though i wonderif it will be necessary for each object to remember if it was the "originator" of the thing or not on top of sharing ownership possibly
+
+[16:49] <timotimo> and if there should be an interface based on the ownership thing that can also kbow tze size of things for the cases where we actually kbow
+
+[16:49] <timotimo> it would allow writing to CStr objects i think
+
+[16:50] <timotimo> though ibwouldbhave to look at the CStr repr again
+
+[16:53] <timotimo> ok cstr does remember its original pointer already
+
+[17:00] <samcv> AlexDaniel, will take a little longer than I had expected
+
+[17:01] <samcv> so don't wait for me
+
+[17:09] *** domidumont joined
+[17:11] <AlexDaniel> 👍
+
+[17:29] *** patrickb joined
+[17:41] *** robertle joined
+[17:48] *** squashable6 left
+[17:54] *** reportable6 left
+[17:58] *** reportable6 joined
+[17:59] *** shareable6 left
+[17:59] *** nativecallable6 left
+[17:59] *** committable6 left
+[17:59] *** unicodable6 left
+[17:59] *** releasable6 left
+[17:59] *** greppable6 left
+[18:00] *** squashable6 joined
+[18:01] *** committable6 joined
+[18:03] *** shareable6 joined
+[18:16] <timotimo> on the road i was thinking maybe CStruct and CArray could be parameterized for "will be owned by C" or "will be owned by moar" so it could be put into signatures
+
+[18:16] <timotimo> but then i was thinking that'd mean type checking would have to be a bit more complicated, because they'd have to be considered the same type even when that parameterization differs
+
+[18:43] <timotimo> for instance, if you have the situation that i have right now with SDL2::Raw where there's a void **foo that'll take an initialized memory location to store a pointer to a buffer into, i'd offer a CArray that's owned by moarvm and inside there'd now be a CArray that's owned by C
+
+[18:49] *** brrt joined
+[18:49] <nine> I can't help but feel reminded of the musings I did on explicitly-owned strings and NativeCall
+
+[19:20] *** brrt left
+[19:26] *** nativecallable6 joined
+[19:30] *** domidumont left
+[19:46] *** robertle left
+[20:18] *** unicodable6 joined
+[21:11] <timotimo> nine: where can i find that? just in the irclog?
+
+[21:13] <nine> timotimo: maybe also some ticket, though I can't remember anything exactly
+
+[21:15] <nine> https://colabti.org/irclogger/irclogger_log/perl6-dev?date=2018-09-01#l38
+
+[21:17] <nine> Ha, I even noted that some of it would apply to other allocated types beside strings :)
+
+[21:17] <nine> Always fun to discover your own work: https://gist.github.com/niner/53c4da1355802e042139ee05a1d7895b
+
+[21:19] *** Kaiepi left
+[21:20] *** Kaiepi joined
+[21:23] <timotimo> now i'm wondering how my idea with ownership objects would relate to string constants
+
+[21:23] <timotimo> it wouldn't really be on Str, only on CString
+
+[21:25] <timotimo> i'm getting the feeling that the ownership idea fits very nicely with CStruct/CArray, but breaks down a bit when applied to CString
+
+[21:26] <timotimo> since with CString you often want to just put the literal string in places and have everything work out magically
+
+[21:30] <timotimo> and i don't think i have a way to handle when C land gives back a pointer that actually already has an ownership object somewhere else
+
+[21:31] <timotimo> and if C land gives back a pointer that is actually a pointer into a different object ...
+
+[22:18] *** sivoais_ left
+[22:19] *** sivoais joined
+[22:33] <MasterDuke> jnthn: but encode() doesn't take an encoder. the module would have to know how encode() is implemented and do that itself manually. which is obviously possible, but is that what they have to do if they want to be more efficient?
+
+[22:35] <MasterDuke> jnthn, timotimo: should we just create the encoders most likely to be used (e.g., utf8, strict/non-strict) at rakudo compile time?
+
+[22:50] *** releasable6 joined
+[23:03] <jnthn> MasterDuke: Yes, the intention was that the Encoding API would actually be used for such cases
+
+[23:04] <jnthn> I'm a little wary about caching in that encodings may be configurable with different replacements and so forth
+
+[23:05] <jnthn> I guess it's even feasible that an encoding could be stateful
+
+[23:14] *** patrickb left
+[23:41] *** greppable6 joined
+[23:54] <MasterDuke> jnthn: i was thinking a very small cache. or maybe not even caching "new" encoders, but just pre-creating a common couple ones
+
+[23:57] <MasterDuke> hm, Encoding::(De|En)coder aren't documented
+

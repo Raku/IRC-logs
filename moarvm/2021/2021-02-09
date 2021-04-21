@@ -1,0 +1,200 @@
+[00:13] *** MasterDuke left
+[00:13] *** MasterDuke joined
+[03:26] *** MasterDuke left
+[03:27] *** kawaii left
+[03:30] *** kawaii joined
+[08:10] *** domidumont joined
+[08:28] *** MasterDuke joined
+[08:35] *** patrickb joined
+[08:59] *** zakharyas joined
+[09:33] <nwc10> good *, #moarvm 
+
+[10:08] <jnthn> o/
+
+[10:09] <nwc10> \o
+
+[11:11] *** kawaii left
+[11:11] *** kawaii joined
+[11:15] *** MasterDuke left
+[11:17] *** MasterDuke joined
+[12:09] *** kawaii left
+[12:10] *** kawaii joined
+[12:21] *** zakharyas left
+[12:43] *** sena_kun joined
+[13:28] *** zakharyas joined
+[14:38] *** patrickb left
+[14:40] *** patrickb joined
+[14:46] *** patrickb left
+[14:54] *** domidumont left
+[15:18] *** patrickb joined
+[15:48] *** MasterDuke left
+[15:49] *** MasterDuke joined
+[17:16] *** domidumont joined
+[17:17] *** patrickb left
+[19:00] *** domidumont left
+[19:07] *** zakharyas left
+[19:14] *** patrickb joined
+[19:21] *** MasterDuke left
+[19:39] *** domidumont joined
+[19:44] *** domidumont left
+[19:57] *** MasterDuke joined
+[20:23] <nine> quiet day it seems
+
+[20:26] <MasterDuke> i've been distracted from debugging remove_spesh_candidate by --profile-compiling the rakudo build
+
+[20:27] <MasterDuke> don't think there's anything particularly new or exciting though in the output though
+
+[20:28] <nine> so at least no negative surprise
+
+[20:29] <MasterDuke> don't think so
+
+[20:35] <MasterDuke> lots of complaints in a spesh log about missing templates for (bind|get)attrs?_(i|n|s|o) https://github.com/MoarVM/MoarVM/blob/master/src/core/interp.c#L1985-L2172 any reason they couldn't be templated?
+
+[20:35] * jnthn has a sore arm (trapped nerve, happens now and then), so hasn't had the most productive of days...
+
+[20:35] <nine> jnthn: ouch
+
+[20:35] <jnthn> Though it's less bad now than it was in the morning, so hopefully it clears up soon.
+
+[20:36] <nwc10> this is good. And my (sorry rather) flippant comment is "But with the new coffee machine, as it's push button, you don't even have to pump your beverage"
+
+[20:36] <nine> MasterDuke: the reason we don't do that is because those ought to be optimized to spesh variants (which then are JITed)
+
+[20:36] <nine> MasterDuke: so for the best result we should figure out why they aren't
+
+[20:37] <jnthn> nwc10: It's certainly lower effort than what it replaced, yes
+
+[20:37] <jnthn> It eats the ground coffee rather faster, however. On the upside, that means I'll be feeding it beans soon...
+
+[20:38] <MasterDuke> i see a bunch of `JIT: not devirtualized (type unknown)` near bindattr_os in the spesh log
+
+[20:38] <jnthn> And then it's even less effort (the ground type has to be put in per cup, the beans it can probably hold enough for a week or more)
+
+[20:42] <MasterDuke> that message is the `else` of this `if` https://github.com/MoarVM/MoarVM/blob/master/src/jit/graph.c#L886-L887
+
+[20:43] <jnthn> MasterDuke: What are the facts on the invocant?
+
+[20:44] <MasterDuke> jnthn: is the invocant the first r123(4) thing right after the op name in the log?
+
+[20:45] <jnthn> Yes
+
+[20:45] <jnthn> For bindattr, anyway
+
+[20:46] <jnthn> For getattr the second thing
+
+[20:46] <jnthn> ('cus the first is the result register)
+
+[20:46] <MasterDuke> `r127(2): usages=1, flags=0`
+
+[20:48] <jnthn> Oh. So it knows nothing about its type
+
+[20:48] <MasterDuke> `getattr_o        r129(2),  r127(2),  r128(2), lits($!dispatch_cache), liti16(13)  # [261] JIT: not devirtualized (type unknown)` is the gettattr_o i was just looking at. i see `$!dispatch_cache` in there, is this going to change with new-disp?
+
+[20:48] <jnthn> Ye
+
+[20:48] <jnthn> *yes
+
+[20:48] <MasterDuke> oh, nm, i see lots of other things referenced too
+
+[20:48] <jnthn> But "type unknown" is the case there too
+
+[20:49] <jnthn> The $!dispatch_cache attr will go away
+
+[20:50] <MasterDuke> lots of $bstack, $cstack, @!named_names, $!type, @!post_constraints, etc
+
+[20:51] <jnthn> Hm, the first two are a bit annoying, since they could be quite hot in the regex engine
+
+[20:51] <MasterDuke> `r51(11): usages=1, deopt=71, flags=0` for one of the $bstack ones
+
+[20:52] <MasterDuke> `r9(12): usages=1, deopt=22, flags=0` for a $cstack
+
+[20:53] <jnthn> Yeah, means it knows pretty much nothing about them
+
+[20:53] <jnthn> There's many potential reasons, including being in a branch that was never taken, so there's no type stats recorded
+
+[20:54] <jnthn> Though if that's the case then it's also not a very important miss
+
+[20:54] <MasterDuke> any way to find important misses?
+
+[20:55] <jnthn> Hm, not sure. I mean, one can try and match up the instructions to the HLL code and see if it looks reasonable that it'd not be executed much
+
+[20:56] <jnthn> Can also see if you can trace back where that value comes from 
+
+[20:56] <jnthn> That is, which instruction writes the register
+
+[20:58] <MasterDuke> https://github.com/Raku/nqp/blob/master/src/QRegex/Cursor.nqp#L422-L447
+
+[21:03] <MasterDuke> $!shared, $!braid, $!regexsub, $!restart, $!from, $!pos, $!to, $!cstack, $!bstack all get some `JIT: not devirtualized (type unknown)` for bindattr_o, bindattr_i, getattr_o, etc
+
+[21:04] *** zakharyas joined
+[21:04] <jnthn> Can you find the instruction that goes with:
+
+[21:04] <jnthn> my $new := nqp::create(self);
+
+[21:04] <MasterDuke> !cursor_start is called 397,825 times, but it is 99.9% jit according to moarperf
+
+[21:04] <jnthn> What are the facts on both the result and the type?
+
+[21:05] <MasterDuke> `create            r1(2),   r3(2)`
+
+[21:05] <jnthn> I think the message didn't say JIT failed, so much as expr JIT failed?
+
+[21:05] <MasterDuke> `r1(2): usages=14, deopt=37,36,35,34,33,32,31,29,28,27,25,24,22,21,20,19,18,17,16,14,13,12,10,11,6,5,4,3,1, flags=8     Concr`
+
+[21:06] <MasterDuke> `r3(2): usages=1, deopt=0, flags=0`
+
+[21:06] <jnthn> Hmmm, so it doesn't know the type of self. Does it say if it's a certain specialization or an observed type specialization?
+
+[21:06] <jnthn> I guess it may have specialized it in a bunch of ways and then decided there were too many and gone for a generic one
+
+[21:07] <MasterDuke> Certain specialization of '!cursor_start' (cuid: 82, file: gen/moar/stage2/QRegex.nqp:1485)
+
+[21:07] <MasterDuke> The specialization is for the callsite:
+
+[21:07] <jnthn> Aha, that explains it
+
+[21:07] <MasterDuke> Callsite 0x7f3afd04a840 (1 args, 1 pos)
+
+[21:07] <MasterDuke> Positional flags: obj
+
+[21:07] <MasterDuke> It was planned due to the callsite receiving 572 hits.
+
+[21:07] <MasterDuke> The maximum stack depth is 102.
+
+[21:08] <jnthn> Hm, can you trace back to the stats before it? Did it think it was too morphic?
+
+[21:08] <jnthn> (Stats it used should be just before the plan)
+
+[21:08] <jnthn> well, the list of plans
+
+[21:09] <jnthn> I guess the other thing to look back and check is if it did other specializations in the past
+
+[21:09] <jnthn> I guess there can be quite a few types of cursor (main language, regex language, various quote languages)
+
+[21:10] <MasterDuke> i don't see the word morphic
+
+[21:10] <MasterDuke> there are 4 type tuples
+
+[21:11] <jnthn> oh, it won't appear; I mean are there lots of type tuples that are about balanced in appearance, or one that dominates, or?
+
+[21:12] <MasterDuke> Hits: 227, Hits: 15, Hits: 91, Hits: 172, Hits: 69
+
+[21:12] <MasterDuke> oh, 0-based counting. there are 5 type tuples
+
+[21:12] <jnthn> Hm, yeah, quite distributed
+
+[21:12] <jnthn> There's a percentage threshold somewhere (I think it's 25%) that controls if it considers something worth a specialization
+
+[21:13] <jnthn> gotta afk a bit
+
+[21:15] <MasterDuke> hm, so if spesh is legitimately not able to do anything with these, does that make creating templates worthwhile?
+
+[21:16] *** patrickb left
+[21:47] *** zakharyas left
+[23:03] *** MasterDuke left
+[23:29] <jnthn> Well, it's the same trade-off either way: do we want to use more memory for more speed?
+
+[23:30] <jnthn> We can pick a lower percentage for "worthwhile". We could also make it conditional on absolute number of hits.
+
+[23:30] <jnthn> Although in this case we aren't seeing them be much over the baseline threshold, iirc
+

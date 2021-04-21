@@ -1,0 +1,635 @@
+[23:00] <jnthn> On my box, even a Java say hello world is > 10 MB...
+
+[23:00] <timotimo> for memory usage, at least.
+
+[23:00] <timotimo> as in: how little can you possibly pay
+
+[23:01] <jnthn> I'm sure we can slim it down a bunch from how it is now.
+
+[23:01] <jnthn> But not sure we'll get it *that* far down.
+
+[23:01] <timotimo> right. 50 megabytes seems reachable
+
+[23:01] <timotimo> since we're already at ~98
+
+[23:05] <timotimo> maybe i should really make that heap analyser before diving into the littlebigint stuff again.
+
+[01:25] *** jnap joined
+[02:23] *** colomon joined
+[02:25] *** jnap joined
+[03:26] *** jnap joined
+[03:38] *** cognominal joined
+[04:27] *** jnap joined
+[05:28] *** jnap joined
+[07:06] *** FROGGS joined
+[07:08] <FROGGS> o/
+
+[07:24] <diakopter> o!
+
+[07:25] *** tokuhirom joined
+[07:29] *** jnap joined
+[08:09] *** tgt joined
+[08:37] *** odc joined
+[08:42] <nwc10> jnthn: trying this http://paste.scsys.co.uk/296660 to stop wrongly chasing "REPR" on STables, and I get this http://paste.scsys.co.uk/296661 which makes me think that it was concealing another garbage collection bug... :-(
+
+[08:42] <nwc10> not sure if I will have time to torture *that* one out
+
+[08:48] <FROGGS> nwc10: I did pretty much the same about 20 minutes ago :o)
+
+[08:48] <FROGGS> that is, applied the STable check, and let my rakudo build explode
+
+[08:49] <FROGGS> and then I thought: I am not supposed to do that :o)
+
+[08:52] <FROGGS> hoelzro: you need to take care of MVMObject *env when you allocate things in here: https://github.com/hoelzro/MoarVM/commit/5c7a44032a9d47d017ced35cfb54041503ab5e15#diff-8cb9d62eae3a641a6647908c1c5dae81R1058
+
+[08:52] <hoelzro> I have to free it after I'm done?
+
+[08:53] <FROGGS> no, not that
+
+[08:53] <FROGGS> when you allocate (or encode a string), you trigger a gc run
+
+[08:53] <FROGGS> and then your pointers are likely to move
+
+[08:53] <hoelzro> oh, I see
+
+[08:53] <FROGGS> and if you don't temp_root or MVMROOT them, you're looking at outdated pointers
+
+[08:54] <FROGGS> the rule is: is a pointer retrieved before, and used after an allocation, root it
+
+[08:55] <hoelzro> does that just apply to objects, or any Moar data (such as strings)?
+
+[08:55] <hoelzro> I was kinda just doing by example
+
+[08:57] <FROGGS> only MVMObjects as I see it
+
+[08:57] <FROGGS> nwc10: correct?
+
+[08:58] <FROGGS> because a MVMString has no MVMCollectible header
+
+[08:59] <nwc10> I don't know the answer to that one
+
+[09:21] <hoelzro> I'll look for other examples of MVMObject
+
+[09:21] <hoelzro> thanks, FROGGS!
+
+[09:23] <FROGGS> hoelzro: either MVMROOT(tc, env, { <code here> });
+
+[09:23] <FROGGS> MVM_gc_root_temp_push(tc, (MVMCollectable **)&env);
+
+[09:24] <FROGGS> and a pop later
+
+[09:26] <hoelzro> alright
+
+[09:27] <FROGGS> hoelzro: you can also do a pop_n, if you intend to pop several
+
+[09:31] *** jnap joined
+[10:10] <jnthn> And MVMString is actually an MVMObject too. Also, MVMSTable would need rooting, though you rarely hold those.
+
+[10:19] <nwc10> bother. Yaks stacked - 2
+
+[10:20] <nwc10> -2) figure out why the torture goes SEGV as of rebasing a week or more ago
+
+[10:20] <nwc10> -1) use torture to figure out this bug
+
+[10:20] <nwc10> actually maybe I have an off-by one
+
+[10:20] <nwc10> -0) fix this bug
+
+[10:20] <nwc10> and *then* maybe a few more before I can do the thing I actualyl want to do
+
+[10:23] *** ggoebel1113 joined
+[10:31] *** jnap joined
+[10:34] <FROGGS> nwc10: what is the thing you want to do, ooc?
+
+[10:36] <nwc10> reduce the object header by 1 pointer
+
+[10:55] <hoelzro> I don't know if I ever got an answer to this -- is nqp::close($pipe) supposed to silently fail?
+
+[10:56] <hoelzro> the JVM openpipe test closes a handle twice, and doesn't seem to expect complaints
+
+[10:59] <FROGGS> hoelzro: dunno
+
+[11:01] <jnthn> Does Perl count double-close as an error, in general?
+
+[11:01] <FROGGS> jnthn: you mean Peril? the old one?
+
+[11:03] <nwc10> $ perl -e 'close STDIN or warn $!;' -e 'close STDIN or warn $!;'
+
+[11:03] <nwc10> Bad file descriptor at -e line 2.
+
+[11:03] <nwc10> can camelia do that?
+
+[11:03] <moritz> no, camelia only does 6
+
+[11:03] <moritz> it's not onion or camel, after all :-)
+
+[11:03] <FROGGS> perl -E 'use strict; use warnings; open(FH, ">hurz"); print(FH "hello"); close(FH) or warn 1; close(FH) or warn 2;'
+
+[11:03] <FROGGS> 2 at -e line 1.
+
+[11:04] <FROGGS> yeah
+
+[11:07] <hoelzro> I think I found a bug in close, actually
+
+[11:08] <hoelzro> after closing, the old value of fd is still in the handle
+
+[11:08] <hoelzro> so if that fd is re-distributed to the program by the OS, a double close could accidentally close an unrelated file
+
+[11:08] <hoelzro> small chance, but it's possible
+
+[11:08] <hoelzro> especially in a long running program
+
+[11:11] <FROGGS> hoelzro++
+
+[11:11] <hoelzro> I'll fix that tonight
+
+[11:12] <jnthn> yes, that wants fixing
+
+[11:12] <jnthn> hoelzro++
+
+[11:12] <hoelzro> \o/
+
+[11:12] <hoelzro> I'm helping!
+
+[11:12] <FROGGS> of course you are
+
+[11:12] <FROGGS> brb
+
+[11:19] *** tgt joined
+[11:21] *** woolfy1 joined
+[11:24] *** lizmat joined
+[11:29] *** tgt joined
+[12:03] <hoelzro> can I configure it so that libuv is built with debugging symbols?
+
+[12:09] <FROGGS> hack the makefile and make clean && make install ?
+
+[12:11] <hoelzro> ok, so get my hands dirty =)
+
+[12:12] <jnthn> nqp: say(nqp::can(nqp::null(), 'dugong'))
+
+[12:12] <camelia> nqp-parrot: OUTPUT«Null PMC access in find_method('dugong')␤current instr.: '' pc 42 ((file unknown):69510504) (/tmp/tmpfile:1)␤»
+
+[12:12] <camelia> ..nqp-moarvm: OUTPUT«(signal SEGV)»
+
+[12:12] <camelia> ..nqp-jvm: OUTPUT«Can not call method 'dugong' on a null object␤  in  (/tmp/tmpfile:1)␤  in  (gen/jvm/stage2/NQPHLL.nqp:1099)␤  in eval (gen/jvm/stage2/NQPHLL.nqp:1085)␤  in evalfiles (gen/jvm/stage2/NQPHLL.nqp:1291)␤  in command_eval (gen/jvm/stage2/NQPHLL.nqp:1195)␤  in …»
+
+[12:16] <FROGGS> jnthn: do you have any pointers (haha!) about my v5 STable problem?
+
+[12:17] <jnthn> FROGGS: Well, mostly just working out where the STable is repossessed, and why...
+
+[12:17] <FROGGS> hmmm
+
+[12:23] <dalek> MoarVM: 4080274 | jnthn++ | src/6model/6model.c:
+
+[12:23] <dalek> MoarVM: Make nqp::can have null check like nqp::findmethod
+
+[12:23] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/4080274bdf
+
+[12:23] <dalek> MoarVM: 57206b0 | jnthn++ | src/core/ (2 files):
+
+[12:23] <dalek> MoarVM: Bring lookup semantics in line with other backends
+
+[12:23] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/57206b0bb1
+
+[12:32] <FROGGS> hmmm, it calls Perl5::Grammar.add_categorical for pre-/infixes that are in Perl5::Terms.pm which is v6 code
+
+[12:33] *** jnap joined
+[12:34] <jnthn> That should mix in rather than modify the existing thing...
+
+[12:35] <FROGGS> true
+
+[12:35] <jnthn> I did fix one thing that made it not do so, though
+
+[12:35] <jnthn> Which is that the cache flushing would touch it
+
+[12:36] <jnthn> I added scwbdisable and scwbenagle around that
+
+[12:36] <jnthn> FROGGS: https://github.com/perl6/nqp/commit/080ce0bf204afeb85d024498bc63efa05d83a5d9
+
+[12:41] *** tgt joined
+[12:51] <FROGGS> I think the problem is that v5 loads Perl5::Terms as a v6 module, but it does it itself, when it should tell rakudo to do it
+
+[12:53] <FROGGS> wait no, I mean sort of...
+
+[12:53] <FROGGS> kinda
+
+[12:53] <FROGGS> hmmm
+
+[12:54] <FROGGS> the question is: why does it use the Perl6::Grammar for parsing but then calls my add_categorical?
+
+[12:55] <moritz> .oO( it's a kind of magic )
+
+[12:56] <FROGGS> .oO( Merlin's Pants! )
+
+[13:05] <FROGGS> Perl6::Grammar calls add_categorical on $/.CURSOR, I'll change that to self for testing
+
+[13:34] *** jnap joined
+[13:42] *** dalek joined
+[14:07] <moritz> somehow I have MANIFEST files in my 3rdparty submodules
+
+[14:07] <moritz> is that an artifact of something I did? or do others have that too?
+
+[14:08] <jnthn> moritz: I see that it thinks there's untracked stuff in 2 of my 3rdparty submodules...
+
+[14:09] <dalek> MoarVM: 52fc525 | moritz++ | .gitignore:
+
+[14:09] <dalek> MoarVM: .gitignore release tarballs
+
+[14:09] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/52fc5256db
+
+[14:23] *** jnthn joined
+[14:35] *** jnap joined
+[14:42] *** jnap joined
+[14:50] * timotimo is digging around in the python api docs for gdb
+
+[14:50] <FROGGS> I am switching back to $/.CURSOR.add_categorical now, but do a rebless of the cursor when switching grammars
+
+[14:50] <timotimo> and now i'll have to dig deeper into the moarvm code so that i can write the automated garbage collector analyzer
+
+[14:51] <timotimo> does run_gc seem like a good entry point?
+
+[14:52] <diakopter> what do you want to analyze
+
+[14:53] <timotimo> everas much a spossible
+
+[14:54] <timotimo> like what kinds of objects are how common on the heap
+
+[14:54] <timotimo> how many of each type get thrown out, how many get kept, how many get promoted to gen2
+
+[14:54] <timotimo> how many things get kicked out of the gen2
+
+[14:54] <timotimo> that sort of thing
+
+[14:54] <timotimo> since the gc already runs over all that data anyway, it'd be a good place to look, IMO.
+
+[14:55] <diakopter> hm
+
+[14:55] <timotimo> hm?
+
+[14:55] <dalek> MoarVM: 96dc4ea | diakopter++ | / (6 files):
+
+[14:55] <dalek> MoarVM: skeleton parts for call profiling
+
+[14:55] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/96dc4ea332
+
+[14:55] <timotimo> i think run_gc is a very good place to look
+
+[14:56] <diakopter> hm - to summarize all of that, you could count how many gc runs each object lives
+
+[14:57] <diakopter> then when it's destroyed, write the data to a log in memory or something
+
+[14:57] <diakopter> of the reprname, typename (if available)
+
+[14:59] <timotimo> i'm working on a gdb plugin
+
+[14:59] <timotimo> i can just have a python-level dict collect all that data
+
+[14:59] <timotimo> in as much detail as i'd like
+
+[15:00] <timotimo> the good thing is you don't have to compile the support into the moarvm binary, all you need is gdb
+
+[15:00] <FROGGS> Incompatible MROs in P6opaque rebless :o( # though, it feels a bit saner now
+
+[15:01] <timotimo> and you can put the stats gathering into it only for select runs/frames/threads/...
+
+[15:01] <timotimo> really, you can have an arbitrary watchpoint trigger the analysis
+
+[15:01] <timotimo> that's pretty neat
+
+[15:06] <timotimo> one thing that'll be a bit harder is to identify the classes properly
+
+[15:06] <timotimo> since getting the name of an object's class requires me to do some runloop trickery :\
+
+[15:06] <timotimo> so i'll probably end up counting lots and lots of P6opaque objects
+
+[15:06] <timotimo> okay, need to get off this train soon
+
+[15:13] *** tgt joined
+[15:16] *** ggoebel1113 joined
+[15:59] *** tgt joined
+[16:17] <timotimo> i can't add breakpoints with commands to gdb from python, except by using the eval facility of gdb
+
+[16:17] <timotimo> so i'll probably have to use "step to" and friends from python
+
+[16:43] <jnthn> Rakudo Moar builds CORE.setting a little faster than Rakudo JVM on my box these days.
+
+[16:45] <jnthn> Not quite a fair comparison, mind, since Moar doesn't have to build hundreds of lines of concurrency stuff
+
+[16:51] <[Coke]> all is fair.
+
+[16:59] <TimToady> All for fair, and fair for all!  --the Fair Musketeers
+
+[17:10] <timotimo> gdb apparently won't let me do things the way i had hoped to :(
+
+[17:11] <timotimo> so i'll have to spit out data from moarvm - into a file perhaps - and then postprocess that
+
+[17:11] <timotimo> because i don't want to do the data analysis in C :|
+
+[17:20] *** benabik joined
+[17:23] *** FROGGS joined
+[17:38] <FROGGS> jnthn: I think I have worked around that STable problem
+
+[17:39] <jnthn> FROGGS: yay
+
+[17:40] <FROGGS> it is like $/.CURSOR is still the v5 one when switching back and forth and then try to mixin an infix in a v6 block
+
+[17:41] <FROGGS> and since I don't need these as proper infixes, I can just declare them as ::('infix:<P5+>'), and can still call them as subs
+
+[17:42] <FROGGS> so I don't even have to touch Perl5::Actions
+
+[17:43] <timotimo> sounds good
+
+[17:43] <timotimo> how far do you get after that? :)
+
+[17:43] <FROGGS> still failing like 80% of what v5-p passed
+
+[17:44] <FROGGS> openpipe is one of the big things there
+
+[17:44] <FROGGS> because the test suite needs it
+
+[17:47] <timotimo> good point.
+
+[17:47] <timotimo> since you've worked around the problem yourself, does that mean you won't do openpipe on moar now? :(
+
+[17:47] <timotimo> well, at least for windows
+
+[17:47] <FROGGS> I still do it of course
+
+[17:47] <FROGGS> I am not a git :o)
+
+[17:48] <timotimo> :)
+
+[18:57] *** japhb_ joined
+[19:00] *** jnap joined
+[19:38] <FROGGS> ll lib/Perl5/Config.*
+
+[19:38] <FROGGS> -rw-r--r-- 1 froggs froggs   580313 Jan 28 18:02 lib/Perl5/Config.jar
+
+[19:38] <FROGGS> -rw-r--r-- 1 froggs froggs 33240641 Jan 30 20:34 lib/Perl5/Config.moarvm
+
+[19:38] <FROGGS> -rw-r--r-- 1 froggs froggs    53899 Jan 26 20:16 lib/Perl5/Config.pm
+
+[19:38] <FROGGS> Project Euler
+
+[19:39] <FROGGS> err
+
+[19:39] <FROGGS> LOL!!
+
+[19:39] <FROGGS> jnthn: --------------^
+
+[19:40] <timotimo> wat.
+
+[19:40] <FROGGS> that explains why it takes like ten minutes to compile
+
+[19:41] <FROGGS> it has to pull all these bytes of its sleeves
+
+[19:41] <timotimo> what is all that data? >_>
+
+[19:42] <FROGGS> I guess it is a result of the heavy "sub ::('foo')(...) {...}" usage
+
+[19:42] <FROGGS> v5 seems to be a nice test case for moar :o)
+
+[19:43] <FROGGS> maybe because of the absurdities its author does
+
+[19:48] *** jnap joined
+[19:59] <FROGGS> perl6-m -I/home/froggs/dev/v5/lib --stagestats --target=mbc --output=lib/Perl5/Config.moarvm lib/Perl5/Config.pm
+
+[19:59] <FROGGS> Stage start      :   0.000
+
+[19:59] <FROGGS> Stage parse      : 965.384
+
+[20:07] <jnthn> I'll bet it's deriving shitloads of languages and then keeping the NFAs somehow...
+
+[20:09] <FROGGS> jnthn: either that, or the 1k lines hash it contains is expensive
+
+[20:09] <FROGGS> because other modules like English.pm depend on Terms.pm too, but are only 3meg in size
+
+[20:10] <FROGGS> damn
+
+[20:10] <FROGGS> declaring subs like ::('infix:<P5+>') call add_categorical too :o(
+
+[20:10] <FROGGS> so I got my STable problem back
+
+[20:10] <FROGGS> damn
+
+[20:32] *** eternaleye joined
+[20:32] <timotimo> ;(
+
+[20:34] <FROGGS> I just put a return in my add_categorical which is called accidently :/
+
+[20:34] <timotimo> :<
+
+[20:40] <masak> add... catgegorical?
+
+[20:40] * masak perks up
+
+[20:40] <masak> did somebody say category theory? :)
+
+[20:40] <FROGGS> no, not at all :o)
+
+[20:40] * FROGGS hides
+
+[20:43] * jnthn shoots a terminal arrow at masak
+
+[20:44] <masak> hehe, it's objects that are terminal, not arrows... :)
+
+[20:45] <jnthn> bah
+
+[20:47] <masak> maybe I should hold a category theory session on IRC... :>
+
+[20:47] * masak .oO( #perl6-cat-theory )
+
+[20:47] <FROGGS> hmmm, if I would declare my subs like ::('infix<P5+>') it would not be recognized as a categorical
+
+[20:48] <jnthn> FROGGS: Uh, you're using a syntax explicitly intended to defer lookups at runtime to try and mutate the grammar at compile time? :)
+
+[20:48] <jnthn> Unless you're using that to set up an export hash...
+
+[20:48] <jnthn> stash
+
+[20:48] <jnthn> In which case you want the & on there and a : after infix.
+
+[20:49] <FROGGS> I don't want to mutate the grammar at all
+
+[20:49] <FROGGS> because no one will actually use infix P5+
+
+[20:50] <FROGGS> they will type + which results in a call to sub infix:<P5+>
+
+[20:50] <jnthn> ah
+
+[20:51] <FROGGS> so I don't need that extra rubbish :o)
+
+[20:51] <FROGGS> and I got rid of the monkey typing today too fwiw
+
+[20:52] * jnthn hopes his wrist is fully better soon so he can stop monkey typing...
+
+[20:52] *** jnap joined
+[20:53] <FROGGS> my hands are fine atm, even when I hack like 14 hours a day
+
+[20:53] <timotimo> wow
+
+[20:54] <timotimo> do yourself a favor and start using workrave
+
+[20:54] <jnthn> Well, the wrist is more thanks to landing on it when I slipped on some ice a few days back...
+
+[20:54] <timotimo> :(
+
+[21:03] <masak> :(
+
+[21:03] *** benabik joined
+[21:21] <FROGGS> jnthn: it took ages again because my custom postcircumfix tried to match everywhere again
+
+[21:23] <FROGGS> jnthn: here, look yourself :o)  https://gist.github.com/FROGGS/f2784975d7553ca15d5b
+
+[21:24] <FROGGS> takes 10s as it is, an 0.5s when the hash's content is commented
+
+[21:24] <FROGGS> and takes 0.2s when only the postcircumfix is commented
+
+[21:26] <FROGGS> the resulting file size is 1_758_864, but only 435_232 when the hash's content is commented, and only 12_598 without the postcircumfix
+
+[21:27] <diakopter> FROGGS: lolololololol
+
+[21:27] <FROGGS> :o)
+
+[21:27] <jnthn> What on earth is in the hash... :)
+
+[21:27] <FROGGS> as I said, v5 is weird enough to highlight such strange things :o)
+
+[21:27] <FROGGS> TEXT!!
+
+[21:27] <FROGGS> bloody text
+
+[21:27] <jnthn> Nearly nothing...wtf...
+
+[21:28] <FROGGS> *g*
+
+[21:28] * FROGGS .oO( A design flaw in the VM? How much has to be rewritten? Are there already blog posts about the end of MoarVM? )
+
+[21:28] <FROGGS> :P
+
+[21:31] <FROGGS> jnthn: I can provide a bigger hash if you want to see it compiling for >900s :o)
+
+[21:31] <FROGGS> but I guess 10s is nice enough
+
+[21:31] <diakopter> well
+
+[21:31] <diakopter> the dumper doesn't dump the serialized stuff
+
+[21:31] <jnthn> FROGGS: If you remove the postcircumfix, does it make a difference?
+
+[21:32] <FROGGS> jnthn: yes, 0.2s compile time and a tinsy file
+
+[21:32] <diakopter> only thing I can think of is inadvertent duplication of data by the serializer
+
+[21:32] <jnthn> OK, so it's nothing to do with the hash
+
+[21:33] <FROGGS> jnthn: no, I think random code will behave the same
+
+[21:33] <jnthn> FROGGS: If you just have a file of general bits of code and that postcircumfix at the top, does it do the same?
+
+[21:33] <FROGGS> I'll check
+
+[21:33] <jnthn> OK. How high is memory use with/without the postcircumfix? Notably different also?
+
+[21:34] <jnthn> diakopter: I'm suspecting it's not the serializer itself; I think it may just be Doing Its Job
+
+[21:34] <jnthn> diakopter: And it's the stuff it's being asked to do that's the problem.
+
+[21:34] <FROGGS> yes, fifty lines of "1 + 2 + 3 + 4;" and that postcircumfix take >20s to compile
+
+[21:35] <FROGGS> 42s to be exact
+
+[21:36] <FROGGS> with: 27.68user 0.05system 0:27.75elapsed 99%CPU (0avgtext+0avgdata 232820maxresident)k
+
+[21:36] <FROGGS> 0inputs+23160outputs (0major+62425minor)pagefaults 0swaps
+
+[21:36] <FROGGS> without 0.35user 0.04system 0:00.40elapsed 99%CPU (0avgtext+0avgdata 102448maxresident)k
+
+[21:36] <FROGGS> 0inputs+24outputs (0major+26689minor)pagefaults 0swaps
+
+[21:37] <jnthn> Whee
+
+[21:37] <jnthn> OK, I don't *know* what it is, but that gives me some clues. Thanks.
+
+[21:37] <jnthn> I really should work on my slides right now...
+
+[21:38] <jnthn> But will see if I can get at it tomorrow or the weekend.
+
+[21:38] <FROGGS> maybe here is something obviously wrong, dunno: https://github.com/rakudo/rakudo/commit/6aa19499c9e937648bd40e63e652a986daa57e75
+
+[21:38] <FROGGS> no hurry, nobody is using that atm :o)
+
+[21:38] <diakopter> it's not a sev 1? ;)
+
+[21:39] <FROGGS> no, certainly not :o)
+
+[21:39] <jnthn> .oO( SIGSEV1 )
+
+[21:40] <FROGGS> no problem, I got one atm :/
+
+[21:41] <FROGGS> I wonder... src/core/interp.c:252
+
+[21:41] <FROGGS> bindlex_no
+
+[21:41] <FROGGS> hmmm
+
+[21:53] <dalek> MoarVM: d44d015 | (Tobias Leich)++ | src/core/interp.c:
+
+[21:53] <dalek> MoarVM: find_lex_by_name can return NULL, check for it
+
+[21:53] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d44d0158c4
+
+[21:53] *** jnap joined
+[21:53] <diakopter> I suppose that's one approach
+
+[21:54] <diakopter> (adding null checks)
+
+[21:54] <FROGGS> and the other?
+
+[21:54] <diakopter> well someday we wanted to make the pmcnull thingy
+
+[21:54] <diakopter> <- teasing jnthn by calling it pmc ;)
+
+[21:55] <FROGGS> hehe
+
+[21:56] <FROGGS> well, for me atm I prefer to get the following rather a SIGSEGV:
+
+[21:56] <FROGGS> Cannot bind to not existing lexical 'self'
+
+[21:56] <FROGGS> in sub P5unpack at lib/Perl5/Terms.pm:1216
+
+[21:56] <diakopter> :)
+
+[21:56] <jnthn> Aye, this one isn't even the case that the null strawberry unicorn would handle anyway...
+
+[21:57] <FROGGS> spot the error: multi P5unpack(Str:D: \SELF) is export { SELF.P5unpack( CALLER::DYNAMIC::<$_> ) }
+
+[21:57] <diakopter> $*CALLER
+
+[21:57] <FROGGS> no
+
+[21:57] <FROGGS> it is about a lexical 'self'
+
+[21:57] <FROGGS> *g*
+
+[21:58] <jnthn> uh, yeah...why the : in a sub :P
+
+[21:58] <FROGGS> :P
+
+[21:58] <FROGGS> yeah
+
+[21:58] <jnthn> Wrong failure mode, though...should never even compile
+
+[21:58] <FROGGS> this is the definition of WAT
+
+[21:58] <diakopter> std: multi P5unpack(Str:D: \SELF) is export { SELF.P5unpack( CALLER::DYNAMIC::<$_> ) }
+
+[21:58] <camelia> std 09dda5b: OUTPUT«ok 00:01 128m␤»
+
+[21:58] <FROGGS> std is lying
+
+[21:59] <FROGGS> this is really annoying when you turn methods into subs or subs into methods
+
+[22:12] *** tgt joined
+[22:50] *** arnsholt joined
+[22:53] *** jnap joined

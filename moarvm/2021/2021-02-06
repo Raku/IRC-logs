@@ -1,0 +1,122 @@
+[00:08] *** MasterDuke left
+[00:15] <jnthn> .tell MasterDuke I believe we do platform probing to find out what we can/can't get away with regarding alignment, but ubsan can't know that...I do wonder if we have a configure option for "assume the worst" to check we're not cheating anywhere accidentally
+
+[00:15] <tellable6> jnthn, I'll pass your message to MasterDuke
+
+[00:18] *** patrickb left
+[00:30] *** Altai-man_ left
+[00:36] *** sena_kun joined
+[01:54] *** cog_ joined
+[01:57] *** cog__ left
+[08:35] *** vesper11 joined
+[09:51] *** vesper11 left
+[10:23] *** MasterDuke joined
+[10:40] *** ggoebel__ left
+[12:38] *** ggoebel__ joined
+[12:57] *** MasterDuke left
+[13:56] *** MasterDuke joined
+[14:19] *** lucasb joined
+[15:06] <jnthn> nwc10: A fix for http://paste.scsys.co.uk/594534 should be among the flurry of fixes I pushed recently-ish
+
+[15:08] <nwc10> ah OK. no geth, so I didn't realise
+
+[15:09] <jnthn> Yes, thus the mention.
+
+[15:09] <jnthn> Hope geth is enjoying its vacation...
+
+[15:47] <nwc10> jnthn: it seems to have fixed it (at least, the first time I ran it it passed. Not sure if it has been a flapper)
+
+[15:47] <nwc10> ./rakudo-m -Ilib t/04-nativecall/18-routine-sig-sanity.t
+
+[15:47] <nwc10> MoarVM panic: Zeroed owner in item added to GC worklist
+
+[15:47] <nwc10> Aborted
+
+[16:03] <nine> Darn... getting back to fixing NativeCall's memory management, I hit a bit of a snag with my evil master plan to create CStrs to wrap any Str attributes in CStructs. The generated nqp::setmanaged(nqp::getattr($cstruct, $cstruct.WHAT, $attrname)) will call setmanaged on the original Str which knows nothing of the CStr its contained in
+
+[16:05] <nine> (a CStr is a simple object holding a reference to a HLL string object, the encoded char * and a managed flag)
+
+[16:29] <nine> I kinda see 2 ways out: * add a setattrmanaged op which can work on the CStruct which knows about the CStr or * have getattr return the CStr instead of the original string (i.e. lose some of the transparency)
+
+[16:34] <nine> Frankly, I like neither of them. Most of all because this is not just about CStructs, but also about CUnion, CPPStruct and CArray.
+
+[16:38] <nine> What would work and not have any of the warts? Simply removing any of the special handling strings get and require the user to use CStr directly instead of pretending that you can put an HLL string into a CArray
+
+[16:40] <nine> That would have the benefit of being somewhat more explicit about strings needing some encoding to be usable in c
+
+[16:57] *** MasterDuke left
+[17:09] *** MasterDuke joined
+[17:10] <MasterDuke> should result_type be MVMROOTed here? https://github.com/MoarVM/MoarVM/blob/master/src/strings/utf8_c8.c#L402
+
+[17:10] <tellable6> hey MasterDuke, you have a message: https://gist.github.com/064a8d70eb13ffdf991374dca29d6800
+
+[17:26] <nine> MasterDuke: don't think so. It's not used after the allocate
+
+[17:36] <MasterDuke> oh right. was prompted to ask by this tsan output https://gist.github.com/MasterDuke17/132c7e246dc4425b699b5d88490a91f8
+
+[17:38] <MasterDuke> oh wow, tsan goes crazy during a normal nqp build
+
+[18:52] <jnthn> nwc10: Glad at least something got fixed. Will try and repro the other one sometime
+
+[19:01] <jnthn> nwc10: So far I can't with just GC_DEBUG=1 or a smaller nursery; what other options do you have?
+
+[19:02] <nwc10> +#define MVM_ARRAY_CONC_DEBUG 1
+
+[19:02] <nwc10> +#define FSA_SIZE_DEBUG 1
+
+[19:02] <nwc10> +#define MVM_GC_DEBUG 1
+
+[19:03] <nwc10> +#define MVM_SPESH_CHECK_DU 1
+
+[19:03] <nwc10> export MVM_SPESH_NODELAY=1 MVM_SPESH_BLOCKING=1 MVM_SPESH_CHECK_DU=1 ROAST_TIMING_SCALE=8
+
+[19:03] <nwc10> oh
+
+[19:03] <nwc10> +#undef NDEBUG
+
+[19:03] <nwc10> also a couple of exit(...) patched to be abort() and some chack for MVM_proc_getpid
+
+[19:04] <nwc10> hack
+
+[19:16] <nine> Ah, that second data race in MasterDuke++'s tsan report is because one writer acquires tc->instance->mutex_gc_orchestrate while the other acquires tc->instance->mutex_threads
+
+[19:17] <nine> So both hold locks, just not the same one, thus can race
+
+[19:25] <jnthn> nwc10: Thanks. Will tinker some more, but not before dinner :)
+
+[19:43] <MasterDuke> nine: easy fix?
+
+[19:44] <nine> MasterDuke: we haven't yet established that it's an actual problem
+
+[19:45] <MasterDuke> ah
+
+[19:45] <MasterDuke> well, if we want any more to look at i can post the output of doing an entire nqp build. many more
+
+[19:46] <nine> See eg. the comment in src/gc/orchestrate.c:283
+
+[19:47] <MasterDuke> hm
+
+[19:47] <MasterDuke> afk for a while
+
+[19:53] <nine> Yeah, I'm pretty sure, in_gc is secure. There's only 2 writers and it's protected by a combination of gc_start and gc_ack and atomic operations.
+
+[20:12] *** patrickb joined
+[20:43] *** MasterDuke left
+[21:00] <dogbert2> nine: is this leak something something to worry about? https://gist.github.com/dogbert17/12744f868b274b2d17fa8d9f1d2eff0d
+
+[21:32] <jnthn> dogbert2: Probably is a legit leak
+
+[21:34] *** MasterDuke joined
+[21:34] <nine> worth having a look at
+
+[21:38] <MasterDuke> isn't it freed here https://github.com/MoarVM/MoarVM/blob/master/src/6model/reprs/P6opaque.c#L193 ?
+
+[21:39] <nine> Yes - most of the time apparently. But maybe not all the time. Could be that in a place where we allocate it, something is already there.
+
+[21:39] <nine> It's an indirect leak, meaning that there are still pointers to that memory area. So we're leaking it because (probably) we leak the name_to_index_mapping that holds it.
+
+[21:45] <dogbert2> perhaps I should have posted the entire report
+
+[21:56] <MasterDuke> tsan complains a lot about MVM_spesh_candidate_add, the calls to MVM_spesh_facts_discover, MVM_spesh_optimize, and MVM_spesh_arg_guard_regenerate. but those are sort of explicitly ok to be in races, right? either a thread get the original unoptimized code or the speshed/optimized version, but either way it's ok?
+
+[23:48] *** patrickb left

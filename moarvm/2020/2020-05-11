@@ -1,0 +1,201 @@
+[00:00] *** raku-bridge left
+[00:01] *** raku-bridge1 is now known as raku-bridge
+
+[00:20] *** konvertex left
+[00:58] *** pamplemousse joined
+[03:08] *** farcas1982regreg joined
+[06:09] *** pamplemousse left
+[06:50] <nine> MasterDuke: you need to check if hash is actually an MVMHash (in theory it could be something else).
+
+[06:50] <nine> MasterDuke: doing the same for gethllsym is a good idea. It's always called with a static HLL name.
+
+[07:38] *** zakharyas joined
+[07:42] <MasterDuke> oh right, that hash check is easy. gethllsym seems like it should be easy also, any preference on creating a new sp_gethllsym or doubling up on the meaning of sp_getcurhllsym (and if so, should it get renamed)?
+
+[07:46] <nine> I think one spesh op suffices as they will look exactly the same. I'd go with sp_gethllsym
+
+[07:47] <nine> Or.... sp_gethashentryvalue as that's exactly what it does with no regards for how we actually got that hash entry
+
+[07:47] <nine> But naming is hard
+
+[07:50] <MasterDuke> i'm liking the idea of renaming
+
+[07:51] <MasterDuke> btw, think that template looks right?
+
+[07:53] <nine> template?
+
+[07:54] <MasterDuke> `(template: sp_getcurhllsym (^getf (copy $1) MVMHashEntry value))`
+
+[07:55] <nine> Looks so simple....probably because it just is :)
+
+[07:56] <nine> Is the copy necessary?
+
+[07:57] <MasterDuke> i based it on https://github.com/MoarVM/MoarVM/blob/master/src/jit/core_templates.expr#L16
+
+[07:58] *** Altai-man_ joined
+[08:16] *** camelia joined
+[08:17] *** sena_kun joined
+[08:18] <nine> It's documented as =COPY=    | =(copy reg)=                     | =reg=    | Copy this value (opaque to tiling)
+
+[08:18] *** Altai-man_ left
+[08:18] <nine> I don't see why we'd have to copy something. For the const ops we want to copy the literal to some register.
+
+[08:20] <MasterDuke> i can try just using $1 directly. my test has a bail immediately before the sp_getcurhllsym, so the template wasn't being created, but maybe i can come up with something that'll exercise it
+
+[08:22] <nine> Btw. what (^getf (copy $1) MVMHashEntry value) does is really "take the constant value and add another constant value and access the resulting memory location". We could actually do the adding in optimize_hllbool already: ins->operands[1].lit_i64 = &entry->value;
+
+[08:22] <nine> .oO(Is there now end to how far we can optimize this thing?)
+
+[08:22] <nine> s/now/no/
+
+[08:25] <MasterDuke> so taking out one more pointer follow?
+
+[08:27] <nine> No, just the addition. Which is probably about 1 CPU cycle...
+
+[08:30] <MasterDuke> there's no way to delete an operand is there? i'd have to create a new MVMSpeshIns with fewer operands, populate it, and then replace the old ins, right?
+
+[08:38] <MasterDuke> oh, looks like i can just put in new operands?
+
+[08:45] <MasterDuke> heh, something's wrong. `MoarVM oops: Malformed DU chain: reading sp_gethashentryvalue of 7(4) not in graph`
+
+[08:55] <MasterDuke> ok, everything builds and passes tests
+
+[09:08] <MasterDuke> and i see "specialized from" both gethllsym and getcurhllsym
+
+[09:30] *** konvertex joined
+[09:52] *** farcas1982regreg left
+[10:16] *** Altai-man_ joined
+[10:18] <nine> Sounds quite excellent :) I wonder what other cases this speeds up
+
+[10:19] *** sena_kun left
+[10:20] <nine> MasterDuke: I guess it's time for a PR?
+
+[10:41] <MasterDuke> anybody have a preference for a new PR vs force pushing these changes over https://github.com/MoarVM/MoarVM/pull/1281 ?
+
+[10:48] <MasterDuke> and are there any other hash lookups that could be turned into an sp_gethashentryvalue?
+
+[11:52] <nine> A force push will keep the PR's conversation intact, i.e. keep the reasoning
+
+[11:53] <nine> Btw. feel free to use whatever you find useful in my comment for a good explanatory commit message :)
+
+[12:17] *** sena_kun joined
+[12:18] *** Altai-man_ left
+[12:43] <MasterDuke> determined the template is getting called. now to see if just $1 works
+
+[12:48] <timotimo> .o( a coverage measurement tool for the jit )
+
+[12:53] <MasterDuke> be nice if there was an easy way. i just stuck a call to MVM_dump_backtrace in
+
+[12:54] <timotimo> "easy" :)
+
+[12:54] <timotimo> probably easy to add a dumb way that's #ifdef'd in
+
+[12:57] *** pamplemousse joined
+[13:00] <timotimo> brrt, it could be interesting to see if the lines not covered in https://moarvm.github.io/coverage/libmoar/coverage/home/travis/build/MoarVM/MoarVM/src/jit/expr.c.html are not reached by the tests for some good reason, or just because
+
+[13:01] <timotimo> er
+
+[13:01] <timotimo> for a good reason, or because they are dead, or unused, or maybe not correct
+
+[13:02] *** farcas1982regreg joined
+[13:05] <timotimo> actually, i think we only profile nqp and its test suite for moarvm's coverage
+
+[13:05] <MasterDuke> yeah. i ran a coverage of a spectest a while ago, but didn't get around to processing the raw files (and then deleted them because they were out of date)
+
+[13:06] <MasterDuke> but it's something i'd like to have automated
+
+[13:08] <timotimo> i wonder if the nqp-profile script wants to be updated now that our launchers are actually binaries rather than scripts
+
+[13:08] <timotimo> the nqp-profile utility executes the moar binary directly with all the --libpath flags and such
+
+[13:09] <timotimo> if the stuff in samcv/moarvm-cover can be easily applied to rakudo builds, that could get an extra task to do spec test coverage
+
+[13:12] <timotimo> i wonder how much extra coverage you get from rakudo's "make test" and how much the next step up, "make spectest" will add
+
+[13:18] <MasterDuke> https://github.com/MoarVM/MoarVM/pull/1281 was just updated with a force push of the new implementation
+
+[13:32] <MasterDuke> timotimo: any thoughts on https://github.com/MoarVM/MoarVM/pull/1277 ?
+
+[13:44] <timotimo> the bigger we make the pages, the higher the "waste" will be at most / on average
+
+[13:45] <timotimo> so the 1024 one may be a bit much
+
+[13:46] <timotimo> page 15 being about 130 kilobytes is kind of rough :D
+
+[13:46] <MasterDuke> yeah, but i wanted something extreme enough to show that it did in fact make a difference
+
+[13:46] <timotimo> ah
+
+[13:48] <MasterDuke> i guess i'm trying to figure out is there some simple thing we can do e.g., increase the page size (maybe by a lot), or if something more complicated is needed, e.g., dynamically increase the page size if a lot are being allocated
+
+[13:48] <MasterDuke> and i'd be happy for suggestions at either end of the spectrum
+
+[13:49] <timotimo> mhm
+
+[13:49] <timotimo> well, here's a wild suggestion
+
+[13:49] <timotimo> virtual memory, right?
+
+[13:50] <timotimo> if we pre-register 64 megabytes for every size bin, but end up never writing to it
+
+[13:50] <timotimo> then the kernel does all the decisions for us
+
+[13:53] <lizmat> .oO( a kernel of wisdom )
+
+[13:54] <timotimo> if we get "transparent huge pages", though, it could be that each of these pre-registrations could be served by multiples of like x megabytes rather than like 4k chunks or whatever
+
+[13:55] <timotimo> we want to be really silly? encode the size of the allocation in the address by mmapping gigantic pieces of the address space
+
+[13:56] <nine> That idea is not as silly as it may sound. Processors already use a couple bits of the 64 for book keeping purposes
+
+[14:00] <timotimo> mhm
+
+[14:01] <timotimo> mmap with MAP_FIXED_NOREPLACE and goooooooooooo!
+
+[14:02] <timotimo> also, put something in nursery addresses
+
+[14:05] <timotimo> using size in fsa addresses will not actually win us anything
+
+[14:06] <timotimo> but differentiating nurseries by to vs from (probably with three colors rather than just two) could be intereiting
+
+[14:07] <timotimo> or "already marked or not"
+
+[14:16] *** Altai-man_ joined
+[14:19] *** sena_kun left
+[14:52] <MasterDuke> are the rest of the hashes of things hanging off of tc->instance good candidates for turning access of them into the new sp_gethashentryvalue?
+
+[15:36] <lizmat> yet another Rakudo Weekly News hits the Net: https://rakudoweekly.blog/2020/05/11/2020-19-release-release/
+
+[15:48] <nine> MasterDuke: if they are access with constant keys and we know that those hashes will never get replaced once in place
+
+[16:02] *** farcas1982regreg left
+[16:04] *** farcas1982regreg joined
+[16:15] <MasterDuke> they kind of seem like they're unlikely be replaced. not sure about the constant keys. also not sure which ones are accessed as via ops
+
+[16:16] *** patrickb joined
+[16:17] *** sena_kun joined
+[16:18] *** Altai-man_ left
+[17:04] *** patrickz joined
+[17:05] *** patrickb left
+[17:10] *** farcas1982regreg left
+[17:21] *** farcas1982regreg joined
+[17:28] *** zakharyas left
+[18:16] *** Altai-man_ joined
+[18:18] *** sena_kun left
+[18:37] *** robertle left
+[18:38] *** robertle joined
+[18:52] *** patrickz left
+[20:06] *** konvertex left
+[20:11] *** konvertex joined
+[20:17] *** sena_kun joined
+[20:18] *** Altai-man_ left
+[20:40] *** farcas1982regreg left
+[22:16] *** Altai-man_ joined
+[22:19] *** sena_kun left
+[22:33] *** Kaiepi left
+[22:34] *** Kaiepi joined
+[22:35] *** Kaiepi left
+[22:35] *** Kaiepi joined
+[22:48] *** Altai-man_ left
+[23:11] *** MasterDuke left
+[23:40] *** farcas1982regreg joined

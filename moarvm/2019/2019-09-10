@@ -1,0 +1,422 @@
+[00:29] *** reportable6 joined
+[01:31] *** MasterDuke left
+[02:19] <mtj> hi folks..
+
+[02:20] <mtj> timotimo, i just noticed the disabled appveyor build for moarvm, seems to be succeeding now :)
+
+[02:20] <mtj> https://ci.appveyor.com/project/timo/moarvm-5bpx6
+
+[02:20] <mtj> 'Failed a year ago in 4 min 39 sec'
+
+[02:21] <mtj> ...if you force a build now, it should succeed
+
+[03:20] *** Kaypie left
+[03:22] *** Kaiepi joined
+[03:26] <mtj> https://github.com/KohaAloha/MoarVM
+
+[03:26] <mtj> ^.. thats an example of a passing build
+
+[04:48] *** Kaiepi left
+[05:23] *** squashable6 left
+[05:28] *** squashable6 joined
+[06:12] *** sena_kun joined
+[06:18] *** domidumont joined
+[07:04] *** robertle_ joined
+[07:23] *** anatofuz joined
+[07:50] *** zakharyas joined
+[09:37] *** domidumont left
+[10:06] <jnthn> https://people.eecs.berkeley.edu/~rohanpadhye/files/failfast-vmil19.pdf
+
+[10:15] <lizmat> is that interesting for the MoarVM case?   raiph seemed to say it wasn't in the end ?
+
+[10:16] <jnthn> Oh, I didn't know it'd been discussed anywhere already :)
+
+[10:16] <lizmat> https://www.reddit.com/r/perl6/comments/d1ppd6/efficient_failfast_dynamic_subtype_checking_paper/
+
+[10:16] <lizmat> I didn't mention it in the P6W because raiph in the end felt it was just noise
+
+[10:16] <lizmat> (from him)
+
+[10:18] <jnthn> I didn't read it carefully enough yet, *but* I think the `given $foo { when T1 { } when T2 { } ... }` style things could benefit from it.
+
+[10:18] <jnthn> otoh, those have a buttload of overhead besides the type check right now...
+
+[10:19] <lizmat> but shouldn't have that overhead in light of future opts, no ?
+
+[10:22] <jnthn> Correct, which'd presumably make the `istype` the bottleneck
+
+[10:59] *** robertle_ left
+[11:01] *** robertle_ joined
+[11:18] <Guest15407> jnthn: could this be something something? https://programming-journal.org/2020/4/1/ Reference Capabilities for Safe Parallel Array Programming
+
+[11:18] <Guest15407> only one 'something' is enough :)
+
+[11:21] *** domidumont joined
+[11:24] *** sena_kun left
+[11:41] *** zakharyas left
+[12:16] *** domidumont left
+[12:35] *** anatofuz left
+[12:55] *** lucasb joined
+[13:08] *** anatofuz joined
+[13:11] *** domidumont joined
+[13:26] *** zakharyas joined
+[13:30] <timotimo> if the heapsnapshot pass were to take place before stuff from the marking phase gets cleaned, we'd have essentially a bit of extra space in every object that would let us store the object's collectable index right there, while we follow the forwarder to call the gc_mark or explain_refs functions
+
+[13:31] *** anatofuz left
+[13:32] <timotimo> that should let us completely get rid of "saw" and "seen"
+
+[13:33] <timotimo> but maybe first i'll check what a cache for object address to type/collectable index would do
+
+[13:34] <Guest15407> timotimo: do you think it's time to upgrade to libuv 1.32?
+
+[13:37] <timotimo> i didn't check the changelog, but it's probably a good idea in any case
+
+[13:39] <Guest15407> Do you think we can do what we did before, i.e. check out the new version and then 'git add' the libuv dir?
+
+[13:40] <timotimo> probably
+
+[13:40] <Guest15407> If so I can whip up a PR unless someone beats me to it :)
+
+[13:48] *** lizmat left
+[13:51] <timotimo> a simple cache simulation says with an 8 slot cache for STABLEs (address to index) there'd be a 92% hit rate in my case here
+
+[13:52] <timotimo> not sure why, but for type objects it's only 80%
+
+[13:55] <timotimo> for objects the hit rate is just 41% :(
+
+[14:00] *** Kaiepi joined
+[14:03] <jnthn> timotimo: Hmm...I wonder if that'd give us a difference in the inter-gen set...
+
+[14:03] <jnthn> timotimo: As in, it'd tell us what's in in pre-cleanup?
+
+[14:05] <timotimo> we'd still be doing a proper mark pass though, wouldn't we?
+
+[14:05] <timotimo> oh, though all the roots and such will also already have been updated at a much earlier point
+
+[14:07] <timotimo> how much faster do you reckon will a cache with 64 slots and simple rotating insert position be compared to looking through the "seen" hash?
+
+[14:08] <jnthn> Dunno. Is this thing bloomable?
+
+[14:08] <jnthn> Maybe seen hash already does that though
+
+[14:09] <timotimo> i don't think uthash has something like a bloom filter
+
+[14:16] <timotimo> and even if the bloom filter says "it's not there", the value still has to be put into the hash in the right spot
+
+[14:23] <timotimo> https://gist.github.com/timo/c94bd42f15e297493f811566134cf914 - here's the hit rates for caches of different sizes for the different kinds of collectables that the heap snapshot profiler has
+
+[14:26] <timotimo> i wonder what happens if the objects are further divided by whether they're in the nursery or in gen2
+
+[14:30] <timotimo> huh, there's only about 500 lookups for gen2 objects in here anyway
+
+[14:32] *** sena_kun joined
+[14:40] <Guest15407> nine: interested in a distraction?
+
+[14:48] <timotimo> for completeness sake, i'll run a cache simulation with one cache for everything
+
+[15:09] <timotimo> ooooh, the heap snapshot profiler could actually write out the heap snapshot in a separate worker thread and continue running the user program at the same time
+
+[15:09] <timotimo> though depending on how it's managed, it'll either still cause pauses or potentially infinitely grow in memory usage
+
+[15:10] <timotimo> i.e. either it'll have a cap on how many heap snapshots are queued, then it'll pause the main program
+
+[15:10] <timotimo> or it'll just happily queue up more and more and more work on the worker thread
+
+[15:19] *** robertle_ left
+[15:21] <nine> Guest15407: you've got a good one?
+
+[15:21] <timotimo> seen is still at 10% in perf's report o_O
+
+[15:23] *** zakharyas left
+[15:25] *** zakharyas joined
+[15:26] <timotimo> oh, nice, writing out the heap snapshot is actually faster than taking the snapshot
+
+[15:26] <timotimo> so it wouldn't actually get backed up if this case generalizes
+
+[15:27] <timotimo> that also means that the time that the program is paused while taking a heap snapshot will not be less than half
+
+[15:28] *** anatofuz joined
+[15:38] *** domidumont left
+[15:56] <timotimo> what the heck, the performance of the caches is abysmal in actual use
+
+[16:01] <dogbert17> nine: https://gist.github.com/dogbert17/f396ed9afcea140cf24ca27f26227232
+
+[16:03] *** anatofuz left
+[16:03] <dogbert17> nine: the file is t/04-nativecall/13-union.t and the nursery size 768
+
+[16:09] <timotimo> ha! now the cache is doing its job
+
+[16:12] *** lizmat joined
+[16:13] <Geth> ¦ MoarVM: dogbert17++ created pull request #1173: Update libuv to version 1.32.0
+
+[16:13] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1173
+
+[16:13] <dogbert17> tada
+
+[16:20] <timotimo> how in the heck does this program end up with not-string-objects in one CU's strings list >:(
+
+[16:21] <robertle> dogbert17: have you seen any weirdnesses with this, or perhaps with earlier versions of libuv? we are seeing problems in debian, where we use the OS-version, 1.31.1 currently. and that version seems to have problems when used teh way moar does, something around it's choice of statx calls and other variants, leading to it not correctly recognmizing whether a path exists or not...
+
+[16:21] <tellable6> 2019-09-09T15:09:07Z #perl6-dev <AlexDaniel> robertle please let me know if what we have with stage0 is ok for debian or not. I created this ticket https://github.com/perl6/problem-solving/issues/100
+
+[16:21] <tellable6> 2019-09-09T15:09:14Z #perl6-dev <AlexDaniel> robertle Basically, the upstream guide talks about compiling for other architectures, but we don't have this problem. The only problem is purity of the build itself (“Reflections on Trusting Trust” stuff)
+
+[16:21] <robertle> haven'tt got more details yet, hope to do more digging later today
+
+[16:21] <robertle> but would be interested if you have encountered anything
+
+[16:22] <robertle> also spotted M#1172 in the process :)
+
+[16:22] <synopsebot> M#1172 [open]: https://github.com/MoarVM/MoarVM/issues/1172 possible uid/gid confusion
+
+[16:22] <timotimo> aaaand it's the core setting
+
+[17:18] <timotimo> i can't reproduce the bug with spesh being disabled
+
+[17:20] *** MasterDuke joined
+[17:20] <nine> dogbert17: as distractions go, this was only of mediocre value ;)
+
+[17:20] <Geth> ¦ MoarVM: d76ebbe49a | (Stefan Seifert)++ | src/6model/reprs/CUnion.c
+
+[17:20] <Geth> ¦ MoarVM: Fix possible memory corruption in CUnion's get_attribute
+
+[17:20] <Geth> ¦ MoarVM:
+
+[17:20] <Geth> ¦ MoarVM: An untimely GC run may move *root before we get to assign the newly created
+
+[17:20] <Geth> ¦ MoarVM: object into the child_objs slot. This could cause us to over write unrelated
+
+[17:20] <Geth> ¦ MoarVM: memory. Fix by MVMROOTing root.
+
+[17:20] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d76ebbe49a
+
+[17:21] <nine> Well actually it took exactly the time I had... off to get some exercise now
+
+[17:38] *** travis-ci joined
+[17:38] <travis-ci> MoarVM build errored. Stefan Seifert 'Fix possible memory corruption in CUnion's get_attribute
+
+[17:38] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/583279347 https://github.com/MoarVM/MoarVM/compare/289e9dfcec05...d76ebbe49ada
+
+[17:38] *** travis-ci left
+[17:42] *** zakharyas left
+[17:58] *** anatofuz joined
+[18:32] *** anatofuz left
+[18:45] <dogbert17> nine: damn, I thought that would be a tricky problem :)
+
+[18:55] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #1174: Silence some clang warnings
+
+[18:55] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1174
+
+[19:00] *** Kaypie joined
+[19:00] *** Kaiepi left
+[19:02] *** anatofuz joined
+[19:09] *** Kaypie is now known as Kaiepi
+
+[19:10] *** AlexDaniel left
+[19:11] *** AlexDaniel joined
+[19:11] *** AlexDaniel left
+[19:11] *** AlexDaniel joined
+[19:16] *** anatofuz left
+[19:30] *** Ven`` joined
+[19:37] <dogbert17> heh, a SEGV
+
+[19:41] <dogbert17> timotimo: what do you make of this? https://gist.github.com/dogbert17/bd5a41e0025809b5a19ad7d8a1536915
+
+[19:41] *** AlexDaniel left
+[19:41] *** AlexDaniel joined
+[19:41] *** AlexDaniel left
+[19:41] *** AlexDaniel joined
+[19:43] <timotimo> that's nully
+
+[19:44] <dogbert17> yeah
+
+[19:44] <timotimo> i'd say rr it %)
+
+[19:44] <dogbert17> 32k nursery this time so not too small
+
+[19:44] <dogbert17> hahaha
+
+[19:44] <timotimo> rrawr
+
+[19:45] <timotimo> "RR And Wait for Results"
+
+[19:45] <MasterDuke> any reason not to merge https://github.com/MoarVM/MoarVM/pull/1174 ?
+
+[19:45] <dogbert17> you know anyone with an Intel CPU :)
+
+[19:53] <timotimo> another bug has been kicking my ass today
+
+[19:54] <dogbert17> another SEGV?
+
+[19:54] <timotimo> more than just one
+
+[19:55] <dogbert17> oops
+
+[19:55] <timotimo> well, it could be just one, but i see distinct symptoms
+
+[19:55] <dogbert17> and the SEGV itself don't give you any ideas?
+
+[19:56] <timotimo> one is that a decidedly not-a-string object gets into the strings list of a compunit
+
+[19:56] <dogbert17> corruption
+
+[19:57] <dogbert17> have you tried the GC debug flag?
+
+[19:57] <MasterDuke> timotimo: that seems like a perfect rr use case, right?
+
+[19:57] *** lizmat left
+[19:57] <timotimo> yup
+
+[19:57] <timotimo> the object itself, the string, ends up on the gen2 freelist
+
+[19:58] <timotimo> that's not easy to figure out with rr because watchpoints require a lot of manual shuffling around of addresses to figure out when that happens, but it's usually just "when gc has finished"
+
+[19:59] <dogbert17> now here's a cool error message which I have nevere seen before
+
+[19:59] <dogbert17> moar: tpp.c:87: __pthread_tpp_change_priority: Assertion `previous_prio == -1 || (previous_prio >= fifo_min_prio && previous_prio <= fifo_max_prio)' failed.
+
+[19:59] *** lizmat joined
+[19:59] *** lizmat left
+[20:05] <dogbert17> timotimo: can you backtrack your latest changes?
+
+[20:05] <timotimo> "backtrack"?
+
+[20:06] <dogbert17> go back in the commit history I mean
+
+[20:06] <timotimo> oh, right
+
+[20:15] <timotimo> aha
+
+[20:16] <timotimo> * ee18678e9 - (HEAD) Update "Features" part of readme (10 days ago) <Timo Paulssen>
+
+[20:16] <timotimo> crashes here already
+
+[20:19] <dogbert17> sounds like progress
+
+[20:19] <timotimo> it's the same problem, too.
+
+[20:19] <timotimo> string number 15 in this CU is actually a MAST::Lexical
+
+[20:19] <timotimo> i'm tired of this bug for now
+
+[20:20] <dogbert17> it can probably rest for a bit
+
+[20:20] <timotimo> do you have an interesting workload that changes how it uses memory over time so i can get actually interesting graphs out of the heap snapshot analyzer?
+
+[20:20] <dogbert17> hmm
+
+[20:20] <timotimo> all the ones i have are basically flat
+
+[20:20] <nwc10> timotimo: *this* time my beer fridge was obstructed by a shopping bag of shower gel or similar, which is meant to get onto the shelves near it. I hope your beer fridge (or equivalent) is in better shape
+
+[20:21] <timotimo> https://cdn.discordapp.com/attachments/614415704443191301/620675506169184275/unknown.png
+
+[20:21] <dogbert17> not as exciting as it could be :)
+
+[20:23] <dogbert17> timotimo: perhaps this one - https://github.com/rakudo/rakudo/issues/3114
+
+[20:28] <timotimo> how many gc runs does that do ...
+
+[20:29] <timotimo> how often does it say "evaluating"?
+
+[20:29] <timotimo> like on average?
+
+[20:29] *** sena_kun left
+[20:30] <dogbert17> it's a bit random, I have seen evaluating go as low as two and up to 30-40
+
+[20:30] <timotimo> 32022969 484M -rw-r--r--. 1 timo timo 484M Sep 10 22:30 /tmp/shmup.mvmheap
+
+[20:31] <timotimo> not terribly exciting
+
+[20:32] <dogbert17> oh no
+
+[20:32] <timotimo> 187 snaps
+
+[20:40] <timotimo> https://cdn.discordapp.com/attachments/614415704443191301/621082513380474891/unknown.png
+
+[21:11] <timotimo> don't want to know how often the gc runs during core setting compilation :) :)
+
+[21:12] *** anatofuz joined
+[21:17] <MasterDuke> learn anything useful from it?
+
+[21:17] <timotimo> from what?
+
+[21:18] <MasterDuke> the graph. i assume you were taking heap snapshots during core compilation?
+
+[21:19] <timotimo> ah, no, that picture was from the rakudo ticket dogbert17 linked to
+
+[21:19] <timotimo> i'm just taking snapshots of core setting stage parse, i'm at 580 megs so far
+
+[21:23] <MasterDuke> how much does that slow it down?
+
+[21:24] <timotimo> quite a bit
+
+[21:24] <timotimo> it looks like immediately after a heap snapshot finished writing it starts taking the next one
+
+[21:25] <timotimo> https://cdn.discordapp.com/attachments/538407879980482562/621093979106181140/unknown.png
+
+[21:25] <timotimo> i ctrl-c'd the heap snapshot taking
+
+[21:26] <timotimo> amusingly i hit 198 snapshots without looking
+
+[21:27] <MasterDuke> that looks a little more interesting
+
+[21:27] <timotimo> i was wishing for something where bars go up *and* down ;)
+
+[21:31] <timotimo> i told my grant manager yesterday that i'd have something on my blog "today or more probably tomorrow"
+
+[21:31] <timotimo> that "tomorrow" is almost over and all i've been doing is hunt that disgust bug
+
+[21:31] <MasterDuke> doh
+
+[21:33] <timotimo> the only thing the heap snapshot profiler inside moarperf could do until a few days ago was give you a list of the snapshots in a file and letting you cause them to be parsed (by way of one button per snapshot)
+
+[21:33] <timotimo> before i did another little refactoring it now even showed parsing progress
+
+[21:35] <MasterDuke> nice
+
+[21:36] <timotimo> you can't get any data out of it yet except these graphs
+
+[21:36] <timotimo> they'll of course get labels, too
+
+[22:06] *** lizmat joined
+[22:08] *** Ven`` left
+[22:22] <AlexDaniel> MasterDuke: “some clang warnings” there are more?
+
+[22:23] <MasterDuke> AlexDaniel: yeah, i think all `warning: control may reach end of non-void function [-Wreturn-type]`
+
+[22:25] <AlexDaniel> MasterDuke: might as well fix these too? :)
+
+[22:27] <MasterDuke> those might be more complicated and might require more invasive changes. i think the existing PR is pretty much a no-brainer
+
+[22:28] <Geth> ¦ MoarVM: 8e7e121035 | (Daniel Green)++ | 5 files
+
+[22:28] <Geth> ¦ MoarVM: Silence some clang warnings
+
+[22:28] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/8e7e121035
+
+[22:28] <Geth> ¦ MoarVM: 15a8725e33 | (Aleks-Daniel Jakimenko-Aleksejev)++ (committed using GitHub Web editor) | 5 files
+
+[22:28] <Geth> ¦ MoarVM: Merge pull request #1174 from MasterDuke17/silence_some_clang_warnings
+
+[22:28] <Geth> ¦ MoarVM:
+
+[22:28] <Geth> ¦ MoarVM: Silence some clang warnings
+
+[22:28] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/15a8725e33
+
+[22:29] <AlexDaniel> well, I hope so, last time we did something like this I recall issues with %ld or something when using some compiler
+
+[22:29] <AlexDaniel> was it windows something something? I don't remember :)
+
+[22:29] <timotimo> there's constants that give you "the right" thing
+
+[22:30] <timotimo> PRiu64 or something like that
+
+[22:30] <timotimo> it's used in many spots already
+
+[22:30] <timotimo> but it's so much more to type ;)
+
+[22:33] *** anatofuz left
+[23:05] *** lucasb left
+[23:08] *** anatofuz joined

@@ -1,0 +1,250 @@
+[00:24] *** sena_kun left
+[00:34] *** leont left
+[00:47] *** leont joined
+[00:56] *** squashable6 left
+[00:57] *** squashable6 joined
+[02:59] *** leont left
+[08:38] *** zakharyas joined
+[09:19] *** zakharyas left
+[09:20] *** zakharyas joined
+[10:27] *** sena_kun joined
+[10:49] *** Guest1277 joined
+[11:34] *** Altai-man_ joined
+[11:36] *** sena_kun left
+[11:45] *** leont joined
+[11:48] <Geth> ¦ MoarVM/derived-specializations: 19 commits pushed by (Jonathan Worthington)++
+
+[11:48] <Geth> ¦ MoarVM/derived-specializations: review: https://github.com/MoarVM/MoarVM/compare/d9e38edb811e...d1a856b9aba8
+
+[11:49] <jnthn> Just a rebase
+
+[12:10] *** zakharyas left
+[12:21] *** hankache joined
+[12:51] *** squashable6 left
+[12:52] *** squashable6 joined
+[12:56] <Guest1277> jnthn: are you gonna try and squish the remaining bug(s)?
+
+[12:57] <jnthn> Yeah, will try at least.
+
+[12:57] <jnthn> Just running the spectest with nodelay/blocking now
+
+[12:57] <jnthn> To see the current state
+
+[13:03] *** MasterDuke left
+[13:35] *** sena_kun joined
+[13:37] *** Altai-man_ left
+[13:39] *** hankache_ joined
+[13:43] *** hankache left
+[13:50] <jnthn> Been investigating the hang of the S17-procasync test. Almost certainly an existing bug uncovered. Don't know the details yet, but the problem is inlining into rethrow of...whatever could be inlined into rethrow. It's not a very big method, so...
+
+[13:55] *** zakharyas joined
+[13:58] *** tadzik left
+[14:06] *** hankache joined
+[14:09] *** hankache_ left
+[14:26] *** hankache left
+[14:50] <jnthn> This is really odd. It's the inlining of maybe-set-control that does it, apparently, but that all looks really simple...e.g. it's a no-op for this case
+
+[15:05] <Guest1277> the plot thickens
+
+[15:34] *** Altai-man_ joined
+[15:36] *** sena_kun left
+[15:38] <jnthn> Yeah, at some point it just finds completely the wrong exception handler
+
+[15:39] <lizmat> .oO( perhaps its clutching at straws )
+
+[15:39] <lizmat> *it's
+
+[15:40] <nwc10> jnthn: what do valgrind/ASAN/coffee/beer/step-away-and-cook-curry think of this?
+
+[15:41] <nwc10> (sorry, can't offer much more help than moral support here. And beer next week (hopefully))
+
+[15:49] <jnthn> With further dumping of the exception handler search, it does all fit: it wrongly finds a handler in rethrow. Question now is: what on earth?
+
+[16:42] *** leont left
+[16:43] *** rypervenche left
+[16:47] *** rypervenche joined
+[16:49] <jnthn> In one case we had a specialized frame on the stack and in the other not...which led me to look again more closely at what deopts happen...and indeed there is a failure to deopt the rethrow frame with that inlining done :S
+
+[16:50] <lizmat> so the plot thickened ?
+
+[16:51] <jnthn> It's now about as thick as I feel :P
+
+[17:06] *** hankache joined
+[17:09] *** Guest1277 left
+[17:09] <jnthn> As always with these things, there's a chance one line of code will fix this :P
+
+[17:18] <japhb> .oO( Bug fix bill: 1000 credits.  Itemization: one line of code -- 1 credit; knowing which line of code -- 999 credits.)
+
+[17:22] <jnthn> When we throw an exception, we didn't set anything in the return address of the handler. When we do inlines, we update that address less regularly. The inline led to a more lagged address showing up when the exception handler search took place.
+
+[17:22] <jnthn> And that led to a bogus handler being found
+
+[17:23] <jnthn> The most immediate fix is just the null out that address, though that doesn't truly fix deopt
+
+[17:23] <jnthn> But it fixes the test in question :)
+
+[17:24] <japhb> Heh
+
+[17:24] <jnthn> It prevents bogus handler finds, at least
+
+[17:25] <jnthn> I guess an even better fix is to set it to the throw address
+
+[17:26] <jnthn> I guess we kinda missed this one 'cus throwing exceptions while handling exceptions isn't quite so common...
+
+[17:28] *** MasterDuke joined
+[17:29] <japhb> jnthn: Actually, I'm surprised it doesn't come up in supply handling code more often, what with people making mistakes in QUIT handlers and such.
+
+[17:30] <jnthn> Well, that code also had to be hot...
+
+[17:30] <japhb> (I'm presuming that an error exception thrown during a control exception would count)
+
+[17:31] <japhb> Ah, true -- but then in Cro websocket code, every body stream is a supply, so that code would probably get hot after ~100 frames
+
+[17:33] <jnthn> While looking through the bytecode dumps today while debugging I spotted no less than 3 small/easy optimizations to do...
+
+[17:35] *** sena_kun joined
+[17:37] *** Altai-man_ left
+[17:41] <timotimo> that sounds super interesting :)
+
+[17:43] <jnthn> Well, if you want to nab the in theory LHF, then:
+
+[17:43] <jnthn> * Supplier uses shift on an empty array which makes a Failure which is costly
+
+[17:43] <jnthn> * Assignment into $! from a `try` is not doing good code-gen (should be able to assume it's a Scalar and use optimized assign, it's doing the whole iscont dance)
+
+[17:44] <jnthn> * The facts/opt for `null` does not set the TYPEOBJ fact, so an isconcrete on a known null doesn't get constant folded in spesh
+
+[17:45] <jnthn> Hm, so NULLing that thing breaks stuff.
+
+[17:45] <jnthn> (And fixes stuff)
+
+[17:51] <japhb> .oO( Waterbed theory of bugs )
+
+[17:53] <jnthn> Well, I suspected just NULLing it was not going to really do
+
+[17:53] <jnthn> I was surprised how little it broke
+
+[17:54] <jnthn> Setting it to an up to date address is far more sensible, and seems to both keep the bugs fixed *and* fix the stuff I regressed by NULLing it
+
+[17:54] <jnthn> If anything, I've improved the state of spectest with spesh stressing...
+
+[18:02] *** zakharyas left
+[18:08] *** MasterDuke left
+[18:14] <japhb> Seems like a win by itself ...
+
+[18:19] <jnthn> Well, it should also mean merging the derived-specializations branch is unblocked.
+
+[18:22] <Geth> ¦ MoarVM/derived-specializations: f89ffd54cd | (Jonathan Worthington)++ | src/core/exceptions.c
+
+[18:22] <Geth> ¦ MoarVM/derived-specializations: Ensure return address is up to date when throwing
+
+[18:22] <Geth> ¦ MoarVM/derived-specializations:
+
+[18:22] <Geth> ¦ MoarVM/derived-specializations: Previously we relied on this being reasonably up to date thanks to the
+
+[18:22] <Geth> ¦ MoarVM/derived-specializations: last call having been made recently enough. We mostly got away with it,
+
+[18:22] <Geth> ¦ MoarVM/derived-specializations: but inlining actually broke this (already bad) assumption. Apparently
+
+[18:22] <Geth> ¦ MoarVM/derived-specializations: the derived specialization work has given some further opportunities for
+
+[18:22] <Geth> ¦ MoarVM/derived-specializations: inlining (perhaps thanks to some guard tree fix along the way), and the
+
+[18:22] <Geth> ¦ MoarVM/derived-specializations: <…commit message has 5 more lines…>
+
+[18:22] <Geth> ¦ MoarVM/derived-specializations: review: https://github.com/MoarVM/MoarVM/commit/f89ffd54cd
+
+[18:28] <Geth> ¦ MoarVM/master: 21 commits pushed by (Jonathan Worthington)++
+
+[18:28] <Geth> ¦ MoarVM/master: review: https://github.com/MoarVM/MoarVM/compare/fee45b9b42d5...69951892a022
+
+[18:29] <jnthn> There we go, derived specializations are merged
+
+[18:29] <nwc10> and now beer?
+
+[18:29] <jnthn> Along with assorted fixes for things they showed up
+
+[18:29] <jnthn> Walk home, make dinner, then beer, yes :)
+
+[18:29] <timotimo> i'm doing the supplier one right now
+
+[18:30] *** MasterDuke joined
+[18:35] <timotimo> huh, neither S17-supply/syntax.t nor the /supplier-preserving.t cause that method to go into the spesh log; the static optimizer doesn't inline private methods, does it? but not even "replay" as a string shows up, even though the lexical should be accessed
+
+[18:36] <jnthn> Dunno, I noticed it when looking at bytecode output from spesh stressing :)
+
+[18:38] <timotimo> right
+
+[18:38] <timotimo> though i already have a change in there that might even have broken it in some very specific way so who knows
+
+[18:38] <timotimo> c: my $sp = Supplier::Preserving.new; $sp.emit($_ + 1) for ^1000; supply whenever $sp.Supply { print "." }; say "done";
+
+[18:38] <committable6> timotimo, ¦my: «Cannot find this revision (did you mean “all”?)»
+
+[18:38] <timotimo> c: HEAD my $sp = Supplier::Preserving.new; $sp.emit($_ + 1) for ^1000; supply whenever $sp.Supply { print "." }; say "done";
+
+[18:38] <committable6> timotimo, ¦HEAD(8b70bfb): «done␤»
+
+[18:39] <timotimo> need to grab the .Supply first maybe
+
+[18:39] <timotimo> c: HEAD my $sp = Supplier::Preserving.new; my $p = $sp.Supply; $sp.emit($_ + 1) for ^1000; supply whenever $p { print "." }; say "done";
+
+[18:39] <committable6> timotimo, ¦HEAD(8b70bfb): «done␤»
+
+[18:39] <timotimo> is my brain rotting?
+
+[18:42] <timotimo> quotable6: Supplier::Preserving
+
+[18:42] <quotable6> timotimo, OK, working on it! This may take up to three minutes (4582161 messages to process)
+
+[18:42] <quotable6> timotimo, ===SORRY!=== Error while compiling /tmp/xO9Eehnqxj␤:: not yet implemented␤at /tmp/xO9Eehnqxj:2␤------> m⦑ Supplier::⏏Preserving ⦒;␤ «exit code = 1»
+
+[18:42] <timotimo> haha oops
+
+[18:42] <timotimo> quotable6: "Supplier::Preserving"
+
+[18:42] <quotable6> timotimo, OK, working on it! This may take up to three minutes (4582161 messages to process)
+
+[18:42] <quotable6> timotimo, 55 messages (2015-11-26⌁2018-03-30): https://gist.github.com/51c9cfb34de008f55940b03129eae558
+
+[18:43] <timotimo> m: my $s := Supplier::Preserving.new; $s.emit: 42; my $ss = $s.Supply; react whenever $ss {say "here"; done}; $s.emit: 70; react whenever $ss { say "init" }
+
+[18:44] <evalable6> timotimo, rakudo-moar 8b70bfb84: OUTPUT: «(signal SIGHUP) here␤«timed out after 10 seconds»»
+
+[18:46] <jnthn> Home time, bbl o/
+
+[19:34] *** Altai-man_ joined
+[19:37] *** sena_kun left
+[20:19] *** lucasb joined
+[20:23] *** zakharyas joined
+[20:26] <MasterDuke> jnthn: i get two new warnings in src/spesh/arg_guard.c. `In function ‘add_nodes_for_typed_argument’`, `217:20: warning: ‘first_added’ may be used uninitialized in this function` and `271:21: warning: ‘update_node’ may be used uninitialized in this function`
+
+[20:26] *** hankache left
+[20:30] <jnthn> Yeah. I get less warnings now than when I started out with it, though. :)
+
+[20:32] <nwc10> fewer!
+
+[20:32] <nwc10> (I'm going to get into trouble for that)
+
+[20:35] <Altai-man_> (ooc) do derived specializations result in generated code simplification or rather set a foundation for working on that?
+
+[20:57] *** zakharyas left
+[21:09] *** squashable6 left
+[21:11] *** squashable6 joined
+[21:35] *** sena_kun joined
+[21:36] *** Altai-man_ left
+[21:58] <timotimo> mostly causes needing fewer candidates to handle more cases, so potentially more "interesting" candidates for any given routine?
+
+[22:04] <jnthn> They let us do a better job of things like Array.push, where the type of the first argument is pretty consistently the same, but the second tends to vary a lot in more realistic program
+
+[22:04] <jnthn> *programs
+
+[22:04] <jnthn> Before now, you'd make lots of specializations and then hit the limit, and beyond the limit was just the certain specialization, which knew nothing much
+
+[22:05] <jnthn> Now we can identify the situation and make a specialization that specializes on some arguments, but not all
+
+[22:06] <timotimo> so a "partially-certain specialization" essentially
+
+[22:08] *** leont joined
+[23:34] *** Altai-man_ joined
+[23:36] *** sena_kun left

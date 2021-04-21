@@ -1,0 +1,205 @@
+[00:09] *** Peter_R joined
+[01:56] *** colomon joined
+[02:12] *** colomon joined
+[02:17] *** colomon joined
+[02:19] *** ggoebel joined
+[04:45] *** raiph left
+[06:43] *** FROGGS joined
+[08:20] <dalek> MoarVM/even-moar-jit: e2d77b3 | brrt++ | src/jit/ (4 files):
+
+[08:20] <dalek> MoarVM/even-moar-jit: Implement remaining declared tiles.
+
+[08:20] <dalek> MoarVM/even-moar-jit:
+
+[08:20] <dalek> MoarVM/even-moar-jit: Some of these are not very well implemented as tiles, sinces
+
+[08:20] <dalek> MoarVM/even-moar-jit: tiles run in postorder mode by necessity.
+
+[08:20] <dalek> MoarVM/even-moar-jit: review: https://github.com/MoarVM/MoarVM/commit/e2d77b37bc
+
+[08:20] *** brrt joined
+[08:28] <brrt> good morning
+
+[09:31] *** rurban_ joined
+[12:07] *** brrt joined
+[12:12] <dalek> MoarVM/even-moar-jit: 9384c42 | brrt++ | / (9 files):
+
+[12:12] <dalek> MoarVM/even-moar-jit: Add stub register allocator
+
+[12:12] <dalek> MoarVM/even-moar-jit:
+
+[12:12] <dalek> MoarVM/even-moar-jit: Also add internal header to jit Makefile dependencies
+
+[12:12] <dalek> MoarVM/even-moar-jit: review: https://github.com/MoarVM/MoarVM/commit/9384c4291d
+
+[12:14] <jnthn> Sounds like we're getting closer to spitting out shiny machine code... :)
+
+[12:17] <brrt> yes, inching slowly closer :-)
+
+[12:17] <brrt> hmm
+
+[12:17] <brrt> i have something of an issue
+
+[12:17] <brrt> or rather
+
+[12:17] <brrt> i'm annoyed by something
+
+[12:18] <brrt> basically, multiple parents refering to the same node might want different tiles for each
+
+[12:21] <jnthn> But since we have to come up with one tiling for the graph, we can't make two different choices?
+
+[12:23] <brrt> kind of
+
+[12:23] <brrt> yes
+
+[12:23] <brrt> actually, we can make two different choices
+
+[12:24] <brrt> just have a buffer of tiles exactly as large as num_use
+
+[12:24] <brrt> preferably allocated from one block
+
+[12:25] <brrt> i'm not 100% sure if that's the right solution, though
+
+[12:28] <brrt> i guess i'm saying, we can't make two different choices very easily, and it's not preferable either
+
+[12:30] <jnthn> Just make one that works for now, and defer worrying about making the optimal one?
+
+[12:30] <jnthn> Or is there a correctness issue too?
+
+[12:34] <brrt> correctness
+
+[12:34] <brrt> let me give an example
+
+[12:35] <brrt> hmm
+
+[12:36] <brrt> ok, suppose i have something like (add $1 $2) and i tile that to (addl reg (load mem)); then i have another thing that does (sub $2 $3) and tile that to (sub reg (load mem))
+
+[12:36] <brrt> the (load mem) is implicit in the first tile
+
+[12:36] <brrt> so no register is ever allocated for $2
+
+[12:37] <brrt> but in the case of  (sub reg (load mem)); i do need that value into a register
+
+[12:37] <brrt> so i have to evaluate $2 twice; once as the memory address, and once as a value loaded into the register
+
+[12:39] <brrt> indeed, given that, it'd be better to evaluate $2 to a register in the first place
+
+[12:40] <brrt> but the tiler doesn't have enough info to make that decision (ironically)
+
+[12:42] <brrt> because that information was lost when it was encoded into the ruleset... :-(
+
+[12:43] <brrt> i'll be back a bit later :-)
+
+[12:43] <jnthn> OK. :)
+
+[12:43] <jnthn> And yeah, tricky problem :S
+
+[12:44] <brrt> i'' figure somthing out, i'm sure
+
+[13:00] <timotimo> oh
+
+[13:00] <timotimo> sounds like a little tripping stone
+
+[15:07] *** colomon joined
+[17:22] *** brrt joined
+[17:25] <brrt> ok, i have a potential solution
+
+[17:26] <brrt> but it's not terribly pretty
+
+[17:26] <brrt> and there is a separate problem
+
+[17:28] <brrt> the solution, i htink, is a): to detect tile conflicht an b): in case of a conflict, generate a new node (with the same children), and apply the new tile to that node
+
+[17:28] <brrt> and then link the 'second parent' to the new node
+
+[17:29] <brrt> considering we do that bottom-up, we csn only end up with conflictless nodes
+
+[17:29] <brrt> the problem, if anything, is that it's quite nonobvious to detect when we're conflicting tiles and when we're overruling a tile from a parent tile
+
+[17:35] <jnthn> We don't tag nodes that have been involved in a tile as we go?
+
+[17:38] <brrt> euh, it's more complicated than that, i think
+
+[17:38] <brrt> or, my thoughts about it are more complicated
+
+[17:39] <brrt> but tagging is probably part of the solution
+
+[17:39] <brrt> hmmm
+
+[17:40] <brrt> ok, i can explan; currently, the 'best rule' is downward-propagated from the parent rule
+
+[17:40] <brrt> that's .. probably subtly wrong, but anyway
+
+[17:43] <brrt> suppose i visit a node twice. suppose according to that node, which wants to evaluate to a register, i need to implement rule 5. suppose my first parent node wants to evaluate me to a label (it's possible). suppose then my second parent node wants to evaluate me to a register, again.
+
+[17:43] <brrt> if i'm looking at my own node, then i'm altered register to label to register
+
+[17:44] <brrt> but looking from the parents, i'm altering just twice... hmm
+
+[17:44] <brrt> and from the perspective of the parent, i can see that the child has been revisited
+
+[17:44] <brrt> so that i know i have a genuine tile conflict
+
+[17:44] <brrt> ok, cool
+
+[17:45] <brrt> fixed it ^^
+
+[17:45] <jnthn> :)
+
+[17:45] <brrt> phew, that was a pickle
+
+[17:46] <japhb> Talking to the duck wins again, sounds like
+
+[17:46] <brrt> yes :-)
+
+[17:47] * jnthn is happy to be brrt++'s duck :P
+
+[17:48] * brrt is happy to have jnthn++ as a duck
+
+[17:48] <brrt> or in other roles, really
+
+[17:50] <brrt> my suspicion is that any performance improvement we're going to see this year in rakudo are going to come from glr :-)
+
+[17:52] <japhb> If you increase the hackability of the JIT and bring it to a more modern design footing, that vastly increases the chance of the JIT also considerably improving this year.
+
+[17:59] <brrt> hmm, yeah, i guess :-)
+
+[18:00] <brrt> but it's probably going to take a while before it can really deliver
+
+[18:02] <brrt> i mean, before we have a significant optimizer
+
+[18:02] <brrt> and a properly large tile library
+
+[18:11] <brrt> i'm actually quite curuious what kind of nice optimizations we'll find
+
+[18:26] *** zakharyas joined
+[19:31] <timotimo> so am i
+
+[19:37] <timotimo> let me loose :P
+
+[19:39] <brrt> :-) soon
+
+[19:44] <timotimo> I'm still not happy about how slow I am progressing with the parsing script
+
+[19:44] <timotimo> I will be on the road for another three hours at least
+
+[19:45] <timotimo> then, tents must be unpacked, air mattresses inflated, ...
+
+[19:48] <jnthn> The script that makes the pkgconfig/moar.pc can apparently explode and break people's Moar builds: https://rt.perl.org/Ticket/Display.html?id=125771
+
+[19:56] * jnthn hopes timotimo will be a happy camper :)
+
+[19:56] <jnthn> 'night, folks
+
+[20:24] <dalek> MoarVM/even-moar-jit: 4a83a08 | brrt++ | docs/jit (3 files):
+
+[20:24] <dalek> MoarVM/even-moar-jit: Starting on JIT documentation
+
+[20:24] <dalek> MoarVM/even-moar-jit: review: https://github.com/MoarVM/MoarVM/commit/4a83a086fc
+
+[20:24] <brrt> have fun timotimo
+
+[20:43] <timotimo> 2.5h left on the drive
+
+[20:48] *** TEttinger joined
+[21:06] *** nwc10 left

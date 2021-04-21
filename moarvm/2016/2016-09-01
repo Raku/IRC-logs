@@ -1,0 +1,126 @@
+[01:48] *** ilbot3 joined
+[04:40] *** zostay joined
+[04:48] *** JimmyZ joined
+[06:29] *** brrt joined
+[06:29] <brrt> good *
+
+[06:30] <brrt> turns out a one-hour commute is just a bit too short for work
+
+[06:39] *** domidumont joined
+[06:45] *** domidumont joined
+[06:50] *** nine joined
+[06:56] <brrt> o/ nine
+
+[06:57] *** domidumont joined
+[06:59] <nine> Good morning!
+
+[06:59] <nine> Seems like I fat fingered ctrl+d last night and instead suspended irssi so it lost all connections over night
+
+[07:08] <moritz> \o nine. Yes, d and s are right next to each other :/
+
+[07:10] <nine> Good thing we have irclog.perlgeek.de :) Thanks for that!
+
+[07:36] *** zakharyas joined
+[08:25] <jnthn> timotimo: A bounds check there seems sane...I'm surprised we didn't already ahve one
+
+[08:25] <jnthn> *have
+
+[08:25] <jnthn> timotimo: Especially since spesh can safely turn getattr into pointer derefs too
+
+[08:29] *** brrt joined
+[08:34] *** vendethiel joined
+[09:03] *** nine joined
+[09:03] *** mtj_ joined
+[09:03] *** nwc10 joined
+[09:27] *** domidumont joined
+[09:47] *** brrt joined
+[10:43] <timotimo> jnthn: but what if the wrong hint had actually been in bounds?
+
+[10:55] <jnthn> timotimo: Then we'd hand back a bogus attribute :)
+
+[10:55] <jnthn> timotimo: That's not a MoarVM problem though, that's an NQP code-gen problem
+
+[10:56] <jnthn> The MoarVM bug is that we don't bounds check
+
+[10:56] <timotimo> m: class Test { has $!foo = 100; has $!bar = "whoa"; method burp { return Proxy.new(STORE => method omg(*@) { say $!foo; say $!bar }, FETCH => method omg2(*@) { say $!foo; say $!bar } }; Test.new().burp() = 10
+
+[10:56] <camelia> rakudo-moar f0e6ae: OUTPUT«===SORRY!=== Error while compiling <tmp>␤Unable to parse expression in argument list; couldn't find final ')' ␤at <tmp>:1␤------> ethod omg2(*@) { say $!foo; say $!bar } ⏏}; Test.new().burp() = 10␤    expecting any of:␤        post…»
+
+[10:56] <timotimo> m: class Test { has $!foo = 100; has $!bar = "whoa"; method burp { return Proxy.new(STORE => method omg(*@) { say $!foo; say $!bar }, FETCH => method omg2(*@) { say $!foo; say $!bar }) }; Test.new().burp() = 10
+
+[10:56] <camelia> rakudo-moar f0e6ae: OUTPUT«===SORRY!=== Error while compiling <tmp>␤Missing block␤at <tmp>:1␤------> ; say $!bar }) }; Test.new().burp() = 10⏏<EOL>␤    expecting any of:␤        statement end␤        statement modifier␤        statement modifier loop␤»
+
+[10:57] <timotimo> m: class Test { has $!foo = 100; has $!bar = "whoa"; method burp { return Proxy.new(STORE => method omg(*@) { say $!foo; say $!bar }, FETCH => method omg2(*@) { say $!foo; say $!bar }) } }; Test.new().burp() = 10
+
+[10:57] <timotimo> in that case i can just commit the bounds check
+
+[10:57] <camelia> rakudo-moar f0e6ae: OUTPUT«Memory allocation failed; could not allocate 7931504 bytes␤»
+
+[10:59] <timotimo> huh, did i infinitely recurse here?
+
+[11:03] <timotimo> ah, yes
+
+[11:04] <timotimo> terminal doesn't hold enough lines for me to scroll up :)
+
+[11:09] <timotimo> m: class Test { has $!foo = 100; has $!bar = "whoa"; method burp { return Proxy.new(STORE => method omg(*@) { say $!foo; say $!bar }, FETCH => method omg2(*@) { say "oh well"; }) } }; Test.new().burp() = 10
+
+[11:09] <timotimo> *shrug*
+
+[11:10] <camelia> rakudo-moar f0e6ae: OUTPUT«Memory allocation failed; could not allocate 7932312 bytes␤»
+
+[11:13] <timotimo> jnthn: attr_inited doesn't use the hint parameter that's passed in; is that just an oversight? i'd make the code to get the slot the same as in getattr and bindattr otherwise
+
+[11:18] <dalek> MoarVM: bcce4a7 | timotimo++ | src/6model/reprs/P6opaque.c:
+
+[11:18] <dalek> MoarVM: bounds check for hints in get_attribute and bind_attribute
+
+[11:18] <dalek> MoarVM:
+
+[11:18] <dalek> MoarVM: running a method against a class that wasn't expected that then goes
+
+[11:18] <dalek> MoarVM: and uses private attributes could crash us here (see #398).
+
+[11:18] <dalek> MoarVM:
+
+[11:18] <dalek> MoarVM: Now we "just" return a bogus attribute instead.
+
+[11:18] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/bcce4a792d
+
+[11:21] <timotimo> there's also no check for (!repr_data) in the attr_inited function, even though try_get_slot will immediately go ahead and dereference it
+
+[11:21] <timotimo> m: use nqp; class Test { has $!foo; say nqp::attrinited(self, Test, '$!foo') };
+
+[11:21] <camelia> rakudo-moar f0e6ae: OUTPUT«===SORRY!=== Error while compiling <tmp>␤'self' used where no object is available␤at <tmp>:1␤------> s Test { has $!foo; say nqp::attrinited(⏏self, Test, '$!foo') };␤    expecting any of:␤        argument list␤        term␤»
+
+[11:21] <timotimo> m: use nqp; class Test { has $!foo; say nqp::attrinited(Test, Test, '$!foo') };
+
+[11:21] <camelia> rakudo-moar f0e6ae: OUTPUT«Cannot look up attributes in a type object␤  in block <unit> at <tmp> line 1␤␤»
+
+[11:22] <timotimo> not sure how to actually get a concrete value of an uncomposed class, though
+
+[11:29] <dalek> MoarVM: 344f379 | timotimo++ | src/6model/reprs/P6opaque.c:
+
+[11:29] <dalek> MoarVM: use hints for is_attribute_initialized, null check repr_data
+
+[11:29] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/344f379b1a
+
+[11:55] *** vendethiel joined
+[12:02] <timotimo> maybe i should revert the use hints thing because all over the codebase we just pass NO_HINT.
+
+[12:05] *** domidumont joined
+[12:12] *** domidumont joined
+[12:15] <dalek> MoarVM: 5108035 | timotimo++ | src/6model/reprs/P6opaque.c:
+
+[12:15] <dalek> MoarVM: we only ever pass NO_HINT here, so remove "dead" code for now
+
+[12:15] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/5108035179
+
+[15:37] *** pyrimidine joined
+[17:03] *** domidumont joined
+[17:39] *** vendethiel joined
+[17:47] *** domidumont joined
+[17:50] *** Ven joined
+[17:58] *** harrow joined
+[18:24] *** domidumont joined
+[19:09] *** TheLemonMan joined
+[20:22] *** zakharyas joined

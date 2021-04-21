@@ -1,0 +1,225 @@
+[03:42] *** vendethiel- joined
+[06:40] <nine> japhb: I have used fprintf(stderr, ...) so far and never had a problem with it
+
+[07:08] *** lizmat joined
+[07:12] *** lizmat_ joined
+[07:15] *** lizmat joined
+[07:17] *** lizmat__ joined
+[07:19] *** lizmat_ joined
+[07:37] *** zakharyas joined
+[07:39] *** domidumont joined
+[07:44] *** domidumont joined
+[08:31] *** TheLemonMan joined
+[09:41] *** zakharyas joined
+[10:00] *** zakharyas joined
+[11:16] *** domidumont joined
+[13:03] *** domidumont1 joined
+[14:36] <japhb> nine: Yeah, after I logged off for the night, I realized I hadn't just tried the obvious; I was so used to MoarVM redefining basic things like malloc, that it hadn't at first occurred to me that would work unchanged.  :-)
+
+[16:06] *** Util joined
+[16:16] *** lizmat joined
+[16:17] *** zakharyas joined
+[16:29] <dalek> MoarVM: e22afbe | LemonBoy++ | src/6model/serialization.c:
+
+[16:29] <dalek> MoarVM: Do not crash when the container config can't be read.
+
+[16:29] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/e22afbeba2
+
+[16:29] <dalek> MoarVM: ff6b62b | jnthn++ | src/6model/serialization.c:
+
+[16:29] <dalek> MoarVM: Merge pull request #394 from LemonBoy/dont-crash
+
+[16:29] <dalek> MoarVM:
+
+[16:29] <dalek> MoarVM: Do not crash when the container config can't be read.
+
+[16:29] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ff6b62b2a3
+
+[16:33] <TheLemonMan> jnthn, I think you've accidentally broken the codegen for functions with a slurpy parameter that has a default value (in https://github.com/perl6/nqp/commit/b4363405)
+
+[16:34] <jnthn> ...slurpy parameter with a default?
+
+[16:34] <jnthn> If that's ever been supported it's by accident
+
+[16:34] <TheLemonMan> m: sub bar (|args = \(1,2,3)) {...}
+
+[16:34] <camelia> rakudo-moar 668dc5: OUTPUT«===SORRY!===␤At Frame 2, Instruction 4, op 'param_sp' has invalid number (3) of operands; needs 2.␤»
+
+[16:34] <TheLemonMan> j: sub bar (|args = \(1,2,3)) {...}
+
+[16:34] <jnthn> m: sub foo(*@a = 1) { }
+
+[16:34] <camelia> rakudo-jvm cd19db: ( no output )
+
+[16:34] <camelia> rakudo-moar 668dc5: OUTPUT«===SORRY!=== Error while compiling <tmp>␤Cannot put default on slurpy parameter @a␤at <tmp>:1␤------> sub foo(*@a = 1⏏) { }␤    expecting any of:␤        constraint␤»
+
+[16:35] <jnthn> It should give an error like that
+
+[16:35] <jnthn> (e.g. should be caught at Rakudo level as invalid)
+
+[16:35] <TheLemonMan> cool, let me write a quick patch then
+
+[16:35] <jnthn> :)
+
+[16:47] *** domidumont joined
+[17:19] <TheLemonMan> done!
+
+[17:31] * [Coke] is happy to see another moarvm hacker!
+
+[17:49] *** ilbot3 joined
+[18:41] <TheLemonMan> jnthn, I think there's something wrong here (https://github.com/MoarVM/MoarVM/blob/master/src/core/frame.c#L270 https://github.com/MoarVM/MoarVM/blob/master/src/core/frame.c#L290), frame->args is always bound to point right after the end of the malloc'd memory causing all sort of silent heap corruption
+
+[18:42] <TheLemonMan> WRT RT#128705, I managed to pin-point it after disabling the jit and compiling with --debug --no-optimize
+
+[18:42] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=128705
+
+[18:43] <TheLemonMan> I tried making the workspace bigger and observed no more problems in the valgrind output
+
+[18:45] <timotimo> btw github lets you highlight ranges of code with #l123-l999 syntax in urls
+
+[18:46] <timotimo> im using my phone right now, makes it hard to read that code
+
+[18:46] <jnthn> TheLemonMan: work_size is meant to factor in argument buffer space, mind...
+
+[18:46] <jnthn> https://github.com/MoarVM/MoarVM/blob/master/src/core/frame.c#L31
+
+[18:46] <jnthn> It does it there, for example
+
+[18:47] <jnthn> I wonder if it somehow misses it in spesh'd frames...
+
+[18:48] <timotimo> ill either look at rejecting frames that would segv by accessing past the params buffer or intto making the inlined bbs in spesh be properly checked
+
+[18:48] <timotimo> today that is
+
+[18:49] <jnthn> TheLemonMan: Hmm, that doesn't seem to be it: https://github.com/MoarVM/MoarVM/blob/master/src/spesh/candidate.c#L5
+
+[18:49] <jnthn> TheLemonMan: Though I'm curious, does the problem go away with MVM_SPESH_INLINE_DISABLE=1 too?
+
+[18:49] <timotimo> the former will make a crapton of crashes afl-fuzz found "harmless"
+
+[18:49] <TheLemonMan> disabling the spesh makes the problem go away (I always forget about the spesh :\)
+
+[18:50] <jnthn> What about inline specifically though?
+
+[18:50] <TheLemonMan> let me try
+
+[18:50] <timotimo> the latter is an important step towards preventing a bit of boxing +unboxing
+
+[18:50] <TheLemonMan> yeah, no problem
+
+[18:50] <jnthn> I'm wondering if the failure mode is that we inline something from a comp unit with a bigger max callsite size
+
+[18:51] <timotimo> that sounds like an interesting failure mode
+
+[18:51] <jnthn> For example, if the current compilation unit only ever uses 4 slots, but we inline a callee, which in turn makes a non-inlined call to something that uses 6 slots, we'd be in bother.
+
+[18:52] <jnthn> I *think* the best way to fix it would be in https://github.com/MoarVM/MoarVM/blob/master/src/spesh/candidate.c#L5
+
+[18:52] <jnthn> Iterate over the inlines array, looking at the static_frame->body.comp_unit or so, which in turn has a max_callsite size
+
+[18:52] <jnthn> And pick the max of the maxes
+
+[18:52] <timotimo> the extreme!
+
+[18:53] <jnthn> Transitive inlines should still be fine that way because we embed the inlinee's inlines table in ours too.
+
+[18:53] <jnthn> Nice find, btw :)
+
+[18:57] <timotimo> im pretty glad to see a new conztibitor around here :-)
+
+[18:57] <jnthn> Me too :)
+
+[19:03] <TheLemonMan> yeah, that was it, it's either the correct solution or just a nice way to stop that from crashing heh
+
+[19:12] <jnthn> Well, it's at least necessary. Sufficient is harder. :)
+
+[19:13] <jnthn> dinner &
+
+[19:14] <TheLemonMan> PR sent :)
+
+[19:14] *** zakharyas joined
+[19:19] *** Ven joined
+[19:50] <TheLemonMan> anyway, if anyone manages to find out what's needed to run the output of perl6 --output=mbc with moarvm please let me know, I can repay you with patches :)
+
+[19:50] * TheLemonMan &|
+
+[20:02] <dalek> MoarVM: a23c536 | LemonBoy++ | src/spesh/candidate.c:
+
+[20:02] <dalek> MoarVM: Correctly calculate the work_size when the inlining is enabled.
+
+[20:02] <dalek> MoarVM:
+
+[20:02] <dalek> MoarVM: Thanks to @jnthn for pinpointing the problem.
+
+[20:02] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/a23c5360b3
+
+[20:02] <dalek> MoarVM: a3c00d5 | jnthn++ | src/spesh/candidate.c:
+
+[20:02] <dalek> MoarVM: Merge pull request #395 from LemonBoy/spesh-inline-callsize
+
+[20:02] <dalek> MoarVM:
+
+[20:02] <dalek> MoarVM: Correctly calculate the work_size when the inlining is enabled.
+
+[20:02] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/a3c00d5cce
+
+[20:11] *** brrt joined
+[20:24] <timotimo> oooh
+
+[20:24] * timotimo has a pear cider
+
+[20:28] <timotimo> my food is ready to be eated
+
+[20:45] *** Ven joined
+[20:46] *** sivoais joined
+[21:28] * timotimo is spec testing a first attempt at the checkarity thing for the bytecode validator
+
+[21:31] <timotimo> it doesn't seem to asplode any spec tests at least
+
+[21:41] <dalek> MoarVM: bca85b2 | timotimo++ | src/core/ (3 files):
+
+[21:41] <dalek> MoarVM: validate indices of param_ ops
+
+[21:41] <dalek> MoarVM:
+
+[21:41] <dalek> MoarVM: we can already identify b0rked frames in the bytecode
+
+[21:41] <dalek> MoarVM: validation phase in this aspect. afl-fuzzy was able to
+
+[21:41] <dalek> MoarVM: create a crapton of crashing cases based on the access
+
+[21:41] <dalek> MoarVM: to param buffers not being bounds-checked at all. Now
+
+[21:41] <dalek> MoarVM: instead of paying a little bit for a bounds check on
+
+[21:41] <dalek> MoarVM: every single param access, we make validation a bit
+
+[21:41] <dalek> MoarVM: smarter up-front.
+
+[21:41] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/bca85b242e
+
+[21:59] <jnthn> Nice
+
+[21:59] <jnthn> Note that we should perhaps also handle the case wehre we have param ops but didn't see a checkarity yet
+
+[21:59] <jnthn> Which would also be illegal
+
+[22:01] <timotimo> ah, good point
+
+[22:01] <timotimo> i think at this point it'll read an uninitialized value
+
+[22:13] <dalek> MoarVM: 4fc41d5 | timotimo++ | src/core/validation.c:
+
+[22:13] <dalek> MoarVM: init new field and require checkarity before param_*
+
+[22:13] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/4fc41d5890
+
+[22:13] <dalek> MoarVM: 4906666 | timotimo++ | src/core/validation.c:
+
+[22:13] <dalek> MoarVM: uncuddle an else
+
+[22:13] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/4906666383
+
+[22:34] <timotimo> afl-fuzzy finds crashes pretty much immediately again :)
+
+[22:42] <timotimo> a bunch of crashy things in autoclose

@@ -1,0 +1,599 @@
+[00:16] <Kaiepi> what needs to be done here? https://github.com/MoarVM/MoarVM/blob/master/src/6model/reprs/CStr.c#L22
+
+[01:01] *** MasterDuke joined
+[01:01] *** MasterDuke left
+[01:01] *** MasterDuke joined
+[02:12] <MasterDuke> hm, an MVMnum64 can just be cast directly (and sensibly) to an MVMint64?
+
+[02:31] <timotimo> those are typedefs to the regular C types
+
+[02:32] <timotimo> like double and int64_t
+
+[02:33] <MasterDuke> cool
+
+[02:34] <MasterDuke> another question then. how come a coerce_smart_intify wasn't created initially?
+
+[02:35] <timotimo> because nqp doesn't have a use for that :)
+
+[02:35] <MasterDuke> coerce_simple_intify is only using here https://github.com/MoarVM/MoarVM/blob/master/src/6model/reprs/NFA.c#L410 (a couple in that source file)
+
+[02:35] <MasterDuke> *used
+
+[02:36] <MasterDuke> but then why the *smart_numify?
+
+[02:36] <timotimo> for when we use an object in maths
+
+[02:36] <MasterDuke> makes sense i guess
+
+[02:37] <MasterDuke> my new coerce_smart_intify does get called in my nqp branch (not surprisingly i guess), any reason not to just get rid of the simple version?
+
+[02:38] <timotimo> i'm not sure what simple_intify is. maybe it's to be used when we already know that we're looking at a boxed integer object
+
+[02:39] <MasterDuke> https://github.com/MoarVM/MoarVM/blob/master/src/core/coerce.c#L383-L405
+
+[02:40] <MasterDuke> i essentially just added an int version of https://github.com/MoarVM/MoarVM/blob/master/src/core/coerce.c#L383-L405
+
+[02:41] <timotimo> that's both the same lines :)
+
+[02:41] <MasterDuke> whoops. https://github.com/MoarVM/MoarVM/blob/master/src/core/coerce.c#L336-L360
+
+[02:42] <timotimo> simple_intify is adapted from smart_numify?
+
+[02:43] <MasterDuke> i don't know. my new smart_intify is that first part of smart_numify (adapted to int) plus simple_intify (which is pretty much the same as the end of smart_numify)
+
+[02:44] <MasterDuke> however, there's a difference between *_numify (and my new *_intify) and *_strify
+
+[02:45] <MasterDuke> strify pulls https://github.com/MoarVM/MoarVM/blob/master/src/core/coerce.c#L288-L293 out before the method cache check
+
+[02:46] <timotimo> that "just" means that for string boxes it won't ever look for a Str method
+
+[02:46] <MasterDuke> should that be different than for int and num boxes?
+
+[02:47] <timotimo> do we even ever have the case that the Str, Int, or Num methods of anything are called?
+
+[02:47] <MasterDuke> hm, not sure. guess i can add some fprintfs and find out
+
+[02:48] <timotimo> it'd be interesting
+
+[02:48] <timotimo> FWIW, spesh has an optimization for smart strify and numify iirc
+
+[02:49] <timotimo> i'm not sure if it actually emits a method call if it sees fit, or if it bails out when it perceives the presence of such a method
+
+[02:49] <MasterDuke> yeah, i've been trying to add an intify implementation
+
+[02:50] <MasterDuke> that's what causes that `Unable to allocate an array of 4607182418800017409 elements    at gen/moar/stage2/QAST.nqp:1387  (QAST.moarvm:rxjump)` error during the nqp build i mentioned a day or two ago
+
+[02:50] <timotimo> oh, really? it's spesh related?
+
+[02:51] <MasterDuke> well yeah, i now can build nqp and pass its test and same with rakudo and roast on my branches without that spesh piece i'm working on
+
+[02:53] <timotimo> damn, if you had told me it was caused by spesh
+
+[02:53] <timotimo> the problem could very well be not marking a type fact as "used"
+
+[02:53] <MasterDuke> heh, Str method is called a bunch right away when building nqp
+
+[02:53] <timotimo> so an inappropriate access could be generated for a type that's not guaranteed
+
+[02:53] <MasterDuke> here's what i have so far (the spesh optimization) https://gist.github.com/MasterDuke17/a618b3e46db4f7ea9fac78d984af2d3e
+
+[02:53] <timotimo> thus giving you memory that represents something else
+
+[02:54] <timotimo> hmm
+
+[02:55] <timotimo> say, doesn't the smrt_numify generate a int-to-num right after replacing the op with an elems op?
+
+[02:56] <timotimo> it totally does
+
+[02:57] <timotimo> it mustn't do that when smrt_intify is requested, otherwise it writes a num into an int register
+
+[02:57] <timotimo> that's where the high bits come from!
+
+[02:57] <timotimo> leave it to 4am to cause sudden explosive insights
+
+[02:57] <MasterDuke> timotimo++
+
+[02:58] <MasterDuke> btw. the nqp build has 589560 .Str calls and 32 .Num calls, but 0 .Int calls
+
+[02:58] <timotimo> can you output the debug_name of the things that get .Str called on them?
+
+[02:59] <timotimo> this could be an interesting target for optimization
+
+[02:59] <timotimo> maybe also with a call stack, though that'd obviously be an incredible amount of dumpage :)
+
+[03:01] <MasterDuke> all are BOOTCode
+
+[03:01] <timotimo> oh?
+
+[03:01] <timotimo> well, that's interesting
+
+[03:01] <timotimo> are they stringified to get their name or something?
+
+[03:02] *** Kaiepi left
+[03:02] <MasterDuke> i just did MVM_6model_get_debug_name(tc, code), using https://github.com/MoarVM/MoarVM/blob/master/src/core/coerce.c#L304
+
+[03:03] <MasterDuke> oh, i probably should have used obj?
+
+[03:03] <timotimo> indeed
+
+[03:03] *** Kaiepi joined
+[03:04] <timotimo> might also be interesting to have an output for that in spesh, though there'd not be a backtrace in that case
+
+[03:04] <MasterDuke>    1167 .Str method called on 'NQPHashIter'    7450 .Str method called on 'NQP::Regex'  464899 .Str method called on 'NQP::Grammar'
+
+[03:05] <timotimo> huh. but why?
+
+[03:05] <MasterDuke> why is an NQPHashIter getting stringified?
+
+[03:05] <timotimo> surely an oversight
+
+[03:05] <timotimo> what does it result in, OOC?
+
+[03:06] <MasterDuke> npq: my %h := nqp::hash("k", "v", "foo", "bar"); say(~nqp::iterator(%h))
+
+[03:07] <MasterDuke> nqp: my %h := nqp::hash("k", "v", "foo", "bar"); say(~nqp::iterator(%h))
+
+[03:07] <timotimo> m: use nqp; my $h := nqp::hash("k", "v", "foo", "bar"); say(~nqp::iterator($h))
+
+[03:07] <camelia> nqp-moarvm: OUTPUT: «You have not advanced to the first item of the hash iterator, or have gone past the end␤   at gen/moar/stage2/NQPCORE.setting:623  (/home/camelia/rakudo-m-inst-2/share/nqp/lib/NQPCORE.setting.moarvm:Str)␤ from <tmp>:1  (<ephemeral file>:<mainline>)␤ from g…»
+
+[03:07] <camelia> rakudo-moar 5b231e099: OUTPUT: «Type check failed in binding to parameter '<anon>'; expected Any but got BOOTIter (?)␤  in block <unit> at <tmp> line 1␤␤»
+
+[03:07] <timotimo> ooooh
+
+[03:08] <timotimo> is that how you get the current key?
+
+[03:08] <timotimo> you know what, try putting BOOTIter into the list of exceptions in the spesh function
+
+[03:08] <MasterDuke> btw, bunch more different things when building rakudo
+
+[03:11] <timotimo> actually, how does it stringify the hash iterator?
+
+[03:11] <MasterDuke> what do you mean how?
+
+[03:11] <timotimo> it definitely goes via nqp::iterkey_s, but does it do it via an actual method Str?
+
+[03:12] <timotimo> src/core/NQPMu.nqp
+
+[03:12] <timotimo> 113:    method key() { nqp::iterkey_s(self) }
+
+[03:12] <timotimo> 115:    method Str() { nqp::iterkey_s(self) }
+
+[03:12] <timotimo> there it is
+
+[03:14] <timotimo> in this case we may actually want to finally implement emitting method calls in that last branch in that spesh function
+
+[03:16] <timotimo> or put an explicit nqp::iterkey_s($foo) where performance may be of interest
+
+[03:59] <MasterDuke> sorry, was afk for a while
+
+[04:03] <MasterDuke> some metrics from the nqp and rakudo builds https://gist.github.com/MasterDuke17/531c0665f2dbe777dc4f662c8609f8b9
+
+[04:03] <MasterDuke> (on my branches)
+
+[04:13] <MasterDuke> timotimo: so getting back to the speshing of intify, in that elems else if branch, if we're doing an intify instead of a numify, only the `ins->info = MVM_op_get_op(MVM_OP_elems);` and `optimize_repr_op(tc, g, bb, ins, 1);` lines are needed?
+
+[04:46] *** KDr2 joined
+[07:07] *** domidumont joined
+[07:47] *** AlexDaniel left
+[07:47] *** AlexDaniel joined
+[08:00] *** patrickb joined
+[08:39] *** zakharyas joined
+[08:53] <nwc10> good *, #moarvm
+
+[11:10] *** domidumont left
+[11:24] *** MasterDuke left
+[11:55] *** brrt joined
+[11:57] <brrt> good * #moarvm
+
+[12:21] *** zakharyas left
+[12:26] *** lizmat left
+[12:36] *** lizmat joined
+[12:48] *** patrickb left
+[12:58] <brrt> urgh, I can't quite get the right frame to debug the register allocator
+
+[13:10] *** brrt left
+[14:01] *** zakharyas joined
+[14:27] *** brrt joined
+[14:30] *** patrickb joined
+[14:36] <brrt> I'm thinking of a tester tool that directly builds a JIT graph from a frame directly
+
+[15:29] *** brrt left
+[15:31] *** brrt joined
+[15:51] *** brrt left
+[16:09] *** brrt joined
+[16:12] <patrickb> The "get the Perls into GSoC" project has started in earnest now. We are in need of project ideas and mentors. Getting up a place to collect stuff is in progress.
+
+[16:12] <patrickb> So now is a good time to think about whether to be a mentor and what might be a good project.
+
+[16:12] <patrickb> brrt^
+
+[16:14] <jnthn> Hmm :)
+
+[16:18] *** brrt` joined
+[16:19] *** brrt left
+[16:36] <samcv> i just signed up to GSoc
+
+[16:37] <samcv> jnthn, brrt i can add you also as administrators to the group if you email with a google account details
+
+[16:37] <samcv> you are required to have at least 2 admins added
+
+[16:38] *** brrt` is now known as brrt
+
+[16:39] <brrt> samcv: do we have a project page?
+
+[16:40] <brrt> there's like, a ton of stuff that needs doing
+
+[16:41] <samcv> no we don't
+
+[16:42] <brrt> is this for moarvm, or for perl6 in general?
+
+[16:44] <patrickb> samcv: What sign up did you do exactly?
+
+[16:45] <samcv> well. it's not submitted. but the account is opened. and invite sent to brrt to be another administrator
+
+[16:45] <samcv> so we can start making proposals
+
+[16:45] <patrickb> wait
+
+[16:45] <patrickb> I think now stuff is happening that shouldn't
+
+[16:46] <patrickb> You did apply as an organization?
+
+[16:46] <brrt> what should or should not happen?
+
+[16:46] <samcv> well. you first create an account with GSoC and then you have to edit the profile. and add proposals. and then feb whatever they decide which ones get in
+
+[16:46] <samcv> yes as an org
+
+[16:46] <samcv> i mean i didn't APPLY i uh
+
+[16:46] <samcv> registered. but the full application is not complete
+
+[16:46] <patrickb> Not good...
+
+[16:47] <samcv> what's not good
+
+[16:47] <patrickb> JJ is into the application process since a few hours.
+
+[16:47] <samcv> anyway. org admins can now edit the profile on GSoC website
+
+[16:47] <samcv> ah
+
+[16:47] <samcv> for what? rakudo?
+
+[16:47] <samcv> or moarvm
+
+[16:47] <patrickb> The Perl Foundation
+
+[16:47] <patrickb> That should cover about everything.
+
+[16:47] <brrt> hmm
+
+[16:48] <samcv> well they are separate orgs sorta. idk.
+
+[16:49] <patrickb> I'd say let's wait till JJ shows up and we can clear up how we want to handle this.
+
+[16:51] <brrt> The parrot foundation was a really separate org from the perl foundation
+
+[16:51] <brrt> as far as I know, the perl foundation has been supporting MoarVM development
+
+[16:51] <brrt> uhm, yeah, those are just facts
+
+[16:51] *** lucasb joined
+[16:51] <brrt> I don't really know what my point is with that
+
+[16:51] <samcv> heh
+
+[16:52] *** ufobat_ joined
+[16:52] * samcv reads eligabitiy rules
+
+[16:53] <samcv> To participate: run an active and viable open source software project;
+
+[16:54] <samcv> so by how it states it that would be fine
+
+[16:54] <samcv> since they are separate projects
+
+[16:55] <patrickb> What org did you apply for?
+
+[16:55] <samcv> MoarVM
+
+[16:56] <patrickb> ok
+
+[17:01] <samcv> https://google.github.io/gsocguides/mentor/org-application#a-note-on-umbrella-orgs
+
+[17:02] <samcv> is the number of students that can be assigned to one org limited or not?
+
+[17:02] *** domidumont joined
+[17:02] <samcv> if so then we probably want to do it as perl foundation
+
+[17:03] <patrickb> Student slots are requested with both a min and max by the org. Google then assigns the slots.
+
+[17:04] <samcv> ok
+
+[17:04] <patrickb> But unused slots and unsuccessful projects result in a "mallus" the following year.
+
+[17:04] <patrickb> Thus "the more slots the better" is not really true.
+
+[17:04] <samcv> yeah
+
+[17:06] <patrickb> In any case I think we should really talk about how we want to handle this. Maybe having a separate application for each moarvm, rakudo, perl5 and TPF is a good thing, but better be sure everyone agrees on an approach.
+
+[17:07] <patrickb> I've invited jmerelo to drop by.
+
+[17:08] * patrickb relocates
+
+[17:08] *** patrickb left
+[17:16] *** patrickb joined
+[17:36] *** jmerelo joined
+[17:36] <patrickb> o/
+
+[17:37] <jmerelo> Hi!
+
+[17:37] <patrickb> Basic question to answer: What organisations do we want to apply?
+
+[17:37] <patrickb> Candidates: TPF, Perl 5, Rakudo, MoarVM.
+
+[17:37] <jmerelo> patrickb: In principle, I would say it's better to apply as The Perl Foundation
+
+[17:38] <patrickb> https://google.github.io/gsocguides/mentor/org-application#a-note-on-umbrella-orgs
+
+[17:38] <jmerelo> I think we increase our chances if those are "projects" within the application
+
+[17:38] <jmerelo> patrickb: those you mention are not, per se, organizations, just individual projects within the Perl Foundation.
+
+[17:39] <patrickb> True. But gsoc is not necessarily about official organizations. That's why I'm unsure of what the right approach is.
+
+[17:40] <jmerelo> patrickb: at the end of the day, it's a free world.
+
+[17:40] <patrickb> I'm ok with either approach. I'd just like we all agree on the same. ;-)
+
+[17:40] <jmerelo> patrickb: I think it's much better, and we're most likely to achieve a critical mass of mentors and ideas, if we go together
+
+[17:40] <patrickb> OK.
+
+[17:40] <patrickb> samcv: What do you think?
+
+[17:41] <jmerelo> patrickb: that might imply that some particular projects might not be chosen by students (if the org is chosen), but it increases the likelihood of the whole organization being chosen, I think.
+
+[17:41] <jmerelo> Hi, samcv!
+
+[17:42] <patrickb> Given we agree on this, can we get some info from "official" channels? I think that would help getting this going and reduce confusion.
+
+[17:42] <jmerelo> patrickb: we'll have to ping Makoto, I guess. He's in the loop.
+
+[17:43] <patrickb> jmerelo: The "likelihood of the whole organization being chosen" might be somewhat more important this year as TPF failed for several years now to participate...
+
+[17:43] <jmerelo> patrickb: I would say so.
+
+[17:44] <patrickb> We are kind of invading this channel...
+
+[17:44] <samcv> hi
+
+[17:44] <samcv> so i think we should all be one org
+
+[17:44] <samcv> based on the guide
+
+[17:44] <patrickb> OK. Then one org it is?
+
+[17:45] <samcv> yes
+
+[17:45] <patrickb> \o/
+
+[17:45] <jmerelo> :+1:
+
+[17:45] <jmerelo> I created this orga (and GitHub just told me it's off the freezer) https://github.com/perl-gsoc-2019/
+
+[17:45] <jmerelo> I can add you as part of the team
+
+[17:45] <jmerelo> I send invitations, feel free to accept them.
+
+[17:46] <samcv> ok :D
+
+[17:46] <samcv> uh you may want to change the license
+
+[17:47] <samcv> since GPL isn't designed for text?
+
+[17:47] <jmerelo> samcv: I just chose the first one that seemed reasonable. I don't think CC is by default. I can change it if you want.
+
+[17:47] <samcv> I would just make it CC0 or something. given it's just ideas
+
+[17:47] <jmerelo> OK
+
+[17:48] <patrickb> jmerelo: Can you ping Makoto about the "official" post? I can write up some text if that helps...
+
+[17:48] <jmerelo> patrickb: sure
+
+[17:49] <samcv> jmerelo, can i be added as an admin to the GSoC profile page?
+
+[17:49] <jmerelo> samcv: sure
+
+[17:51] <samcv> i gotta go out and buy some food for dinner. be back in a bit
+
+[17:54] <jmerelo> Bye!
+
+[17:56] <patrickb> Project ideas should have a potential mentor with them, right?
+
+[17:56] <patrickb> Should we set a deadline?
+
+[17:56] <patrickb> ... I guess we should.
+
+[18:00] *** brrt left
+[18:01] *** jmerelo left
+[18:19] <samcv> yeah
+
+[18:19] <samcv> and yeah
+
+[18:20] <timotimo> how do you feel about a project for an online tutorial based on rakudo.js?
+
+[18:20] <timotimo> kind of like the go tour or what it's called?
+
+[18:20] * patrickb is a bit flabbergasted that perl-gsoc seems to actually happen again..
+
+[18:21] <samcv> patrickb, when is the last time a proposal was made?
+
+[18:22] <timotimo> like 3 years ago?
+
+[18:23] <samcv> perl is back!
+
+[18:23] <patrickb> I think 2014
+
+[18:23] <timotimo> how about a project for getting perl6 to work with godot via GDNative?
+
+[18:23] <samcv> hmm. uh what's godot
+
+[18:24] <timotimo> a free-and-opensource game engine
+
+[18:24] <timotimo> good for 2d and 3d alike
+
+[18:24] <timotimo> it has its own scripting language that's python-like, gdscript, and since like half a year you can also use Mono with it
+
+[18:24] <timotimo> (and mix-and-match)
+
+[18:25] <samcv> well as long as we have a mentor then that's fine with me
+
+[18:26] <timotimo> i should be able to mentor for that, but who would be the fallback mentor?
+
+[18:26] <patrickb> Libraries can also be good candidates. E.g. A qt binding generator.
+
+[18:27] <samcv> ooo. qt bindings
+
+[18:27] <timotimo> Qt is a humongous task ...
+
+[18:27] <samcv> uhm. yeah
+
+[18:27] <samcv> and we'd have to find a mentor for it as well
+
+[18:27] <timotimo> there used to be this SMOKE thing, but that disappeared long ago
+
+[18:27] <patrickb> Getting a p6 metacpan up and running. For that a metacpan dev should be mentor...
+
+[18:28] <timotimo> and there's the stuff that makes PySide, which no clue how easily that translates to p6
+
+[18:29] <timotimo> i'm not sure i could mentor for the "playground" idea
+
+[18:45] <ufobat_> as i wrote on FB, i would like to have a feature complete openssl binding. including that modules like cro would be able to use them and dont implement parts of it on its own.
+
+[18:47] * timotimo doesn't have an FB
+
+[19:06] <timotimo> .tell MasterDuke i'm now working on making the smart coerce optimization in spesh generate a method call in that place so that it could inline these functions
+
+[19:06] <yoleaux> timotimo: I'll pass your message to MasterDuke.
+
+[19:07] *** zakharyas left
+[19:13] *** AlexDaniel left
+[19:17] *** AlexDaniel joined
+[19:49] *** domidumont left
+[19:50] <timotimo> OK, spesh is now emitting invoke operations
+
+[20:12] <timotimo> ah damn, there is no deopt annotation on the smart coerce op
+
+[20:12] <timotimo> i wonder if it's kosher to set it to "can deopt" so i will just get one for free
+
+[20:16] <timotimo> oh, it's already :maycausedeopt
+
+[20:17] <timotimo> now i added :deoptonepoint
+
+[20:23] <timotimo> hum. optimize_call isn't doing it
+
+[20:25] <timotimo> forgot to add the known value fact %)
+
+[20:28] <timotimo> getting spesh to oops, but need to go AFK for groceries
+
+[20:42] *** brrt joined
+[20:43] <brrt> ohai. I have a GSoC mentoring idea
+
+[20:43] <brrt> linking perl6 into moarvm
+
+[20:44] <brrt> well, rakudo
+
+[20:44] <brrt> and potentially nqp
+
+[20:45] *** zakharyas joined
+[20:45] <brrt> I'd like to go a little further than fakeexecutables, but I'd accept that
+
+[20:46] <brrt> I'd want a self-contained binary 'perl6' that contains both MoarVM and the rakudo compiler; bonus points for CORE.setting; even more bonus point for an option that says 'perl6 --compile' and generates an executable
+
+[20:46] <brrt> I'm fairly sure this is all possible
+
+[20:49] <patrickb> afaik "containing moar" is blocked on missing static linking
+
+[20:49] <patrickb> other than that: Pretty much awesome.
+
+[20:50] <brrt> well, that's something we can do
+
+[20:50] <brrt> and even prepare for
+
+[20:51] *** lucasb left
+[20:51] <brrt> I'd personally start by trying to emit MBC as ELF, and link that
+
+[20:51] <brrt> which is really not all that hard, ELF is a fairly straightforward format
+
+[20:57] *** AlexDani` joined
+[20:58] *** brrt left
+[21:01] *** AlexDaniel left
+[21:02] *** brrt joined
+[21:04] *** MasterDuke joined
+[21:04] *** MasterDuke left
+[21:04] *** MasterDuke joined
+[21:06] *** AlexDani` is now known as AlexDaniel
+
+[21:06] <MasterDuke> timotimo: cool. i got distracted and wasn't able to finish what i was working on yet
+
+[21:06] <yoleaux> 16:31Z <samcv> MasterDuke: you can just un todo those tests. that is fine
+
+[21:06] <yoleaux> 19:06Z <timotimo> MasterDuke: i'm now working on making the smart coerce optimization in spesh generate a method call in that place so that it could inline these functions
+
+[21:07] <timotimo> i wonder what can make return_deopt_idx fail
+
+[21:08] <timotimo> oh, it needs a deopt all annotation, too, huh?
+
+[21:09] <brrt> hey, 2-operand form conversion works...
+
+[21:10] <timotimo> sweet!
+
+[21:15] <MasterDuke> timotimo: i added a branch for intify and changed the current branch to be explicity for numify (instead of just not strify), but it's actually dieing (with the unable to allocate array error) in the numify branch
+
+[21:20] <MasterDuke> well, not in the branch, but that's the one it goes through before it does eventually die
+
+[21:21] <MasterDuke> .tell samcv the code is a bit complicated, not entirely sure how to un-todo it
+
+[21:21] <yoleaux> MasterDuke: I'll pass your message to samcv.
+
+[21:36] <Geth> ¦ MoarVM/jit-2op-form: 7f9f3e99a0 | (Bart Wiegmans)++ | 6 files
+
+[21:36] <Geth> ¦ MoarVM/jit-2op-form: [JIT] Minor debugging / structure improvements
+
+[21:36] <Geth> ¦ MoarVM/jit-2op-form:
+
+[21:36] <Geth> ¦ MoarVM/jit-2op-form: We'd process the tile of the live range definition before the live
+
+[21:36] <Geth> ¦ MoarVM/jit-2op-form: range itself, meaning that the output value wasn't set yet.
+
+[21:36] <Geth> ¦ MoarVM/jit-2op-form: review: https://github.com/MoarVM/MoarVM/commit/7f9f3e99a0
+
+[21:36] <Geth> ¦ MoarVM/jit-2op-form: 3d2a035764 | (Bart Wiegmans)++ | 3 files
+
+[21:36] <Geth> ¦ MoarVM/jit-2op-form: [JIT] Enforce output-operand form in register allocator
+
+[21:37] <Geth> ¦ MoarVM/jit-2op-form:
+
+[21:37] <Geth> ¦ MoarVM/jit-2op-form: We move this from the responsibility of the individual tiles to the
+
+[21:37] <Geth> ¦ MoarVM/jit-2op-form: register allcoator, which can hopefully do a little better.
+
+[21:37] <Geth> ¦ MoarVM/jit-2op-form:
+
+[21:37] <Geth> ¦ MoarVM/jit-2op-form: This requires a final loop over the tile list, because during the
+
+[21:37] <Geth> ¦ MoarVM/jit-2op-form: 'linear_scan' loop, registers may be reassigned by the spilling
+
+[21:37] <Geth> ¦ MoarVM/jit-2op-form: process.
+
+[21:37] <Geth> ¦ MoarVM/jit-2op-form: review: https://github.com/MoarVM/MoarVM/commit/3d2a035764
+
+[21:44] *** patrickb left
+[21:59] *** zakharyas left
+[22:02] *** brrt left
+[22:49] <timotimo> MasterDuke: i'm confused. didn't we fix that by making intify no longer write a num to an int register?
+

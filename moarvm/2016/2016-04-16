@@ -1,0 +1,217 @@
+[00:23] *** vendethiel joined
+[00:41] <timotimo> in my particles benchmark, the "put VMNull everywhere" thing is quite hot, and allocate_frame is at 4.84% Self time :\
+
+[00:43] <timotimo> hm, i've gotta check if it's compiled with optimizations at all
+
+[00:44] <timotimo> nope, --optimize=0
+
+[00:44] <timotimo> that explains a little bit, i s'pose
+
+[00:48] <timotimo> oh, did i never merge the "avoid atomic ops when no threads are involved" thing?
+
+[00:48] <timotimo> actually, i'm not sure acquire_ref and friends are still interesting for frames when they become collectables on the heap
+
+[00:52] <timotimo> damn, of course the function that is hottest is the one i didn't write an optimized version for
+
+[00:57] <timotimo> huh, looks like the fence instructions (yes, two of them in a row for some reason) that get inlined from (what i guess to be) gc_worklist_add_frame are quite hot indeed for MVMCode's gc_mark
+
+[00:57] <timotimo> in the gc_mark function that itself makes up 4.5% Self time
+
+[00:57] <diakopter> which profiler are you using
+
+[01:00] <timotimo> that's "perf"
+
+[01:00] <diakopter> I guess that's a linux thing?
+
+[01:00] <timotimo> yeah, a probabilistic instruction-level profiler
+
+[01:01] <diakopter> those CPU-interrupt-based samplers don't work in VMs, usualy :(
+
+[01:02] <diakopter> except in the flagship ones (VMWare, HyperV), I think, if you pay a lot
+
+[01:02] <diakopter> I mention that only because I have linux in a VM
+
+[01:03] <timotimo> right, i feared as much
+
+[01:04] <timotimo> the inner loop for my particle system has 93.12% inclusive time, and 50.11% self-time
+
+[01:08] <timotimo> %)
+
+[01:09] <timotimo> decont the thing, check concreteness, assert parameter check based on the result, decont the original thing again to use it
+
+[01:09] <timotimo> classic moar bytecode
+
+[01:10] <diakopter> uh huh
+
+[01:10] <diakopter> how much time did you spend with parrot instructions
+
+[01:11] <diakopter> PIR, I guess I mean
+
+[01:13] <diakopter> (my memory sadly fails me)
+
+[01:15] <timotimo> not terribly much, i'm afraid
+
+[01:16] <timotimo> why?
+
+[01:16] <diakopter> well just about all our codegen .. wasn't great
+
+[01:18] <timotimo> :)
+
+[01:20] <timotimo> the code gen is still at that quality level in a few isolated places, i'm guessing
+
+[01:21] <timotimo> in my particle system i've made extra sure to write the code so it'd do the least amount of indirect stuff possible ... and it's now inlining two subs that aren't jitted
+
+[01:21] <diakopter> quite a few places, I'm sure
+
+[01:21] <timotimo> actually, a few more subs are only jitted for a tiny percentage
+
+[01:21] <timotimo> but also not entered often at all
+
+[01:22] <timotimo> i wonder how to interpret this correctly
+
+[01:22] <timotimo> one of them is floor(Num:D:), the other is ASSIGN-POS
+
+[01:22] <timotimo> floor_n is still unimplemented :R
+
+[01:22] <timotimo> :)
+
+[01:23] <diakopter> heh
+
+[01:24] <timotimo> huh
+
+[01:24] <timotimo> apparently calling .Int on a num (native num?) gives an error
+
+[01:24] <timotimo> it's not supposed to coerce, then?
+
+[01:24] <timotimo> no, looked at the wrong thing
+
+[01:26] <timotimo> cool, got it to jit by using .Int instead of .floor
+
+[01:26] <timotimo> but .Int isn't inlined any more
+
+[01:28] <diakopter> m: say 9.9e101.Int
+
+[01:28] <camelia> rakudo-moar a45224: OUTPUT«989999999999999971062477677470550235220096190889648004812994130017827049653182301025734968880029237248␤»
+
+[01:29] <diakopter> m: say 9.9e101.Rat
+
+[01:29] <camelia> rakudo-moar a45224: OUTPUT«989999999999999971062477677470550235220096190889648004812994130017827049653182301025734968880029237248␤»
+
+[01:29] <diakopter> I thought for sure Rat would do something smarter
+
+[01:30] <timotimo> m: say 9.9e101.Rat.nude
+
+[01:30] <camelia> rakudo-moar a45224: OUTPUT«(989999999999999971062477677470550235220096190889648004812994130017827049653182301025734968880029237248 1)␤»
+
+[01:30] <timotimo> like what?
+
+[01:30] <timotimo> have a denominator of 0.00000001 perhaps :D
+
+[01:31] <diakopter> well it could get the raw significant digits from the num
+
+[01:31] <timotimo> mhm
+
+[01:31] <timotimo> i suppose at that point the value already underwent num semantics
+
+[01:31] <timotimo> m: say (9.9 * 10 ** 101).nude
+
+[01:31] <camelia> rakudo-moar a45224: OUTPUT«(990000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000 1)␤»
+
+[01:31] <timotimo> i mean: floating point semantics
+
+[01:32] <timotimo> using the e in the middle is how you ask for a floating point value, after all
+
+[01:32] <diakopter> right, but it's still stored as something that displays 9.9
+
+[01:33] <timotimo> m: say 9.9e101
+
+[01:33] <camelia> rakudo-moar a45224: OUTPUT«9.9e+101␤»
+
+[01:33] <timotimo> hm.
+
+[01:34] <diakopter> there's a few bits for the value, a few bits for where the decimal point is in the value, a few bits for the exponent
+
+[01:35] <diakopter> probably a bit for the sign, probably a bit for Inf/NaN
+
+[01:35] <diakopter> a bit or two, I mean
+
+[01:35] <timotimo> nah, Inf and NaN are stored in otherwise redundant cases
+
+[01:35] <diakopter> oh
+
+[01:37] <timotimo> the wikipedia article about IEEE floating point doesn't actually say anything specific about how they look at the bit level
+
+[01:37] <timotimo> which is really strange to me
+
+[01:38] <timotimo> "sign in or purchase"
+
+[01:38] <timotimo> fuck you, ieee. i'm poor.
+
+[01:39] <timotimo> m: use NativeCall; my $foo = Pointer[num64].new(NaN); say $foo; say nativecast(Pointer[int64], $foo).perl
+
+[01:39] <camelia> rakudo-moar a45224: OUTPUT«Default constructor for 'NativeCall::Types::Pointer[num64]' only takes named arguments␤  in block <unit> at /tmp/RNolUHRsRE line 1␤␤»
+
+[01:39] <timotimo> oh, whoops :)
+
+[01:40] <timotimo> m: use NativeCall; my $foo = CArray[num64].new(NaN); say $foo; say nativecast(CArray[int64], $foo)[0].perl
+
+[01:40] <camelia> rakudo-moar a45224: OUTPUT«NativeCall::Types::CArray[num64].new␤9221120237041090560␤»
+
+[01:40] <timotimo> m: use NativeCall; my $foo = CArray[num64].new(NaN); say $foo; say nativecast(CArray[int64], $foo)[0].fmt("%b")
+
+[01:40] <camelia> rakudo-moar a45224: OUTPUT«NativeCall::Types::CArray[num64].new␤111111111111000000000000000000000000000000000000000000000000000␤»
+
+[01:40] <timotimo> m: use NativeCall; sub bits_of_float($f)  { my $foo = CArray[num64].new($f); say $foo; say nativecast(CArray[int64], $foo)[0].fmt("%b") }; bits_of_float(Inf); bits_of_float(NaN); bits_of_float(-Inf)
+
+[01:40] <camelia> rakudo-moar a45224: OUTPUT«NativeCall::Types::CArray[num64].new␤111111111110000000000000000000000000000000000000000000000000000␤NativeCall::Types::CArray[num64].new␤111111111111000000000000000000000000000000000000000000000000000␤NativeCall::Types::CArray[num64].new␤-100000…»
+
+[01:41] <timotimo> m: use NativeCall; sub bits_of_float($f)  { my $foo = CArray[num64].new($f); say nativecast(CArray[int64], $foo)[0].fmt("%b") }; bits_of_float(Inf); bits_of_float(NaN); bits_of_float(-Inf)
+
+[01:41] <camelia> rakudo-moar a45224: OUTPUT«111111111110000000000000000000000000000000000000000000000000000␤111111111111000000000000000000000000000000000000000000000000000␤-10000000000000000000000000000000000000000000000000000␤»
+
+[01:41] <timotimo> oh, sweet, it has the minus sign there as well!
+
+[01:41] <timotimo> m: use NativeCall; sub bits_of_float($f)  { my $foo = CArray[num64].new($f); say nativecast(CArray[int64], $foo)[0].fmt("%x") }; bits_of_float(Inf); bits_of_float(NaN); bits_of_float(-Inf)
+
+[01:41] <camelia> rakudo-moar a45224: OUTPUT«7ff0000000000000␤7ff8000000000000␤-10000000000000␤»
+
+[01:42] <timotimo> i don't know by heart where exactly the signature and mantissa live, but i suspect the "11111111111" part is the signature
+
+[02:01] <timotimo> i find it quite surprising to see gc_root_add_frame_roots_to_worklist to be at 4.11% Self time
+
+[02:24] *** vendethiel joined
+[06:08] *** cognominal_ joined
+[06:31] *** cognominal joined
+[07:26] *** vendethiel joined
+[07:31] *** Ven joined
+[08:28] <masak> 'signature' == 'exponent'?
+
+[09:44] *** lizmat joined
+[09:56] *** vendethiel joined
+[10:00] *** Ven joined
+[10:40] *** Ven joined
+[10:51] *** vendethiel joined
+[12:31] *** Ven joined
+[13:48] *** Ven joined
+[14:14] *** colomon joined
+[14:59] *** colomon joined
+[16:07] *** synopsebot6 joined
+[16:43] *** colomon joined
+[17:03] *** zakharyas joined
+[17:21] *** Ven joined
+[17:58] *** domidumont joined
+[18:11] *** Ven joined
+[18:16] *** colomon joined
+[18:18] *** domidumont1 joined
+[19:02] <timotimo> if we had a pre-made work blob for every frame that we could just memcpy, that'd probably be neat
+
+[19:07] *** Ven joined
+[19:29] *** colomon joined
+[19:39] *** Ven joined
+[19:51] <[Coke]> If I had a pre-made work blob for every time someone asked me that...
+
+[19:59] *** TimToady joined
+[20:04] *** colomon joined
+[21:45] *** leont joined
+[22:24] *** zakharyas joined
+[23:33] *** colomon joined

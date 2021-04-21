@@ -1,0 +1,394 @@
+[00:27] *** dumarchie left
+[02:05] *** lucasb left
+[02:23] *** moon-chilled is now known as moon-child
+
+[03:36] *** rypervenche left
+[03:40] *** rypervenche joined
+[04:02] *** leont left
+[06:20] *** frost-lab joined
+[08:08] *** sena_kun joined
+[08:17] *** domidumont joined
+[08:19] <nwc10> good *, #moarvm
+
+[08:26] <timotimo> good good
+
+[08:55] <MasterDuke> i rebased my gmp branch up to master, taking into account nwc10++'s recent MVM_bigint_div_num work
+
+[09:06] <MasterDuke> is it expected that the time to insert large integer ranges will be non-linear as the range grows? e.g., `my Int %h; %h{$_}++ for ^1_000_000; say now - INIT now; say %h.elems;` takes 2.5s, but doing 10m takes 83s. fwiw, most of the cpu time is spent in MVMHash_gc_mark
+
+[09:07] <MasterDuke> nwc10: ^^^
+
+[09:07] <nwc10> er, I don't know offhand, and I'm currently in the middle of $ork
+
+[09:08] <MasterDuke> heh, i don't think very many lives are threatened, it can probably wait
+
+[09:08] *** Altai-man joined
+[09:11] *** frost-lab left
+[09:11] *** sena_kun left
+[09:20] *** zakharyas joined
+[09:40] <nine> MasterDuke: I don't think it's surprising that GC time goes up with the number of living objects
+
+[09:41] <MasterDuke> i'm not surprised that it goes up, just by the apparent shape of the curve
+
+[09:45] <MasterDuke> just assigning 1 instead of ++ is much much faster, but gc takes up a larger proportion. ~65% instead of ~40%
+
+[09:51] <timotimo> if only we could re-use an existing Int object for the 1 ... some kind of "int cache" maybe? ;)
+
+[09:54] <MasterDuke> well, assigning $_ is still faster than ++. for 4m entries, i get 2.5s for 1, 3.2s for $_, and 5.7s for ++
+
+[09:55] <nine> Well MVMHash_gc_mark is definitely a candidate for an unsafe but fast hash iterator
+
+[09:56] <timotimo> last i looked at that, i think our safe hash iterators are already fastest we can go?
+
+[09:57] <nine> Indeed. Must have confused it with something else
+
+[10:00] <MasterDuke> MVMHash_gc_mark uses pretty much only *_nocheck functions in the loop
+
+[10:18] <jnthn> Generational GC is rather less helpful when you just have one enormous object that you're constantly mutating, I guess
+
+[10:19] <jnthn> The hash can't be broken up across generations - it's one object - so we're forced to mark all of it every time
+
+[10:22] <nwc10> if one really wanted to go crazy and break encapsulation...
+
+[10:23] <nine> Don't you dare go there!
+
+[10:23] <nwc10> the underlying hash storage is now a linear array of key, value pointer pairs
+
+[10:23] <nwc10> MVMString *; MVMObject *;
+
+[10:23] <nwc10> currnetly it doesn't NULL them out when moving things around
+
+[10:23] <jnthn> Can we trust them to be either NULL or junk?
+
+[10:23] <nwc10> but if it did, one could hack the GC to just take the entire array
+
+[10:24] <nwc10> no, not currently. I think it doesn't memset() them on allocation
+
+[10:24] <jnthn> ok
+
+[10:24] <nwc10> but one knows the count of items in the hash. If it's greater than some fraction
+
+[10:24] <jnthn> Maybe worth an experiment. Also would probably impact ont he concurrency thing
+
+[10:24] <nwc10> then the entire array *might* be faster
+
+[10:25] <jnthn> e.g. if there's no dangling pointers
+
+[10:25] <nwc10> I think that NULL might be needed for the concurrency thing
+
+[10:25] <nwc10> but also what would help there
+
+[10:25] <jnthn> Yeah. Though I guess you need it at a safepoint
+
+[10:25] <nwc10> is there's enough space in the hash header to put a flag byte in for "this is now stale"
+
+[10:25] <jnthn> byte or bit?
+
+[10:26] <nine> Even going through a sparse array is very cache friendly and certainly faster than copying those values into a worklist first
+
+[10:26] <nwc10> zero that on allocation. set it non-zero in the (future) code that puts the current block onto the free-at-safebpoint
+
+[10:26] <nwc10> BYTE
+
+[10:26] <jnthn> Aha
+
+[10:26] <nwc10> and then check it "where it matters" (this part still currently an excercise for the reader)
+
+[10:26] <jnthn> Ah, it's about the cache block as a whole, not each entry
+
+[10:27] <nwc10> yes. it's industrial scale
+
+[10:27] <nwc10> (If I can count, there are 2 bytes free in the control structure)
+
+[10:30] <nine> jnthn: this might interest you: getting rid of the huge wrapper frames with lexical symbols in dynamic compilation cuts off about 10 % of setting compilation time. Maybe even more with a good implementation.
+
+[10:32] <MasterDuke> nice
+
+[10:33] <nine> Unfortunately working on this led me to discover Nine's first lemma: "for every Raku problem there's a 99 % solution". Seems to be the theme for this year
+
+[10:36] <jnthn> nine: How did you deal with the lookup of symbols?
+
+[10:37] <jnthn> Scan for which are needed?
+
+[10:43] *** MasterDuke left
+[10:44] <nine> exactly
+
+[10:44] <nine> Which is much faster than expected (or the huge frame is even slower than I thought possible) and works so well. Except for BEGIN EVAL and symbolic lookups...
+
+[10:45] <jnthn> Yup 
+
+[10:46] <jnthn> This and many other things are why I wanted some kind of way to write a lexical lookup fallback handler in HLL code
+
+[10:46] <nine> So my new plan is to switch compilation mode of the dynamically compiled frame and every nested compilation so instead of the usual lexical lookup ops it generates ones that support a fallback with a resolver object (which can cache the results)
+
+[10:47] <jnthn> I guess it can generate the standard op for ones that it resolves as not external?
+
+[10:47] <jnthn> .oO( This would be easier with RakuAST... )
+
+[10:49] <nine> Yes it can. And it shouldn't be hard, since we resolve the lexicals in QASTCompilerMAST anyway and only need to create the fallback op if we fail to resolve
+
+[10:54] <nine> But even the failed first attempt showed some interesting things: e.g. that we're running those frames without an outer context at all, not even a setting
+
+[10:55] <jnthn> Yes, no setting needed as all setting symbols were shoved into the fake pad
+
+[10:57] <jnthn> This is one of the wins I was planning on getting as part of RakuAST, but if master beats me to it, well, folks get it sooner )
+
+[10:57] <jnthn> The other win I'm aiming at in this space is interpreting role bodies rather than compiling them
+
+[10:58] <jnthn> Which'd save every role an entire pass through the compilation pipeline (they get two at the moment)
+
+[10:58] <jnthn> Uh, every role that doesn't do weird enough stuff in its body :)
+
+[10:58] <jnthn> Which must be 99%+ of them
+
+[10:58] <nine> The frame has interesting side effects:
+
+[10:59] <nine> m: BEGIN my $certainly-not-core = 1; CORE::<$certainly-not-core>.say
+
+[10:59] <camelia> rakudo-moar 1639c7877: OUTPUT: «Nil␤»
+
+[10:59] <nine> m: BEGIN my $certainly-not-core = 1; BEGIN CORE::<$certainly-not-core>.say
+
+[10:59] <camelia> rakudo-moar 1639c7877: OUTPUT: «1␤»
+
+[11:00] <nine> The largest dynamically compiled frame I came across was some 20K QAST nodes. My guess it's the Blob role
+
+[11:03] *** MasterDuke joined
+[11:05] <nine> jnthn: yesterday I poked a bit at those "Corrupt multi dispatch cache" errors. Does this make sense to you? https://github.com/MoarVM/MoarVM/commit/f19e0e9f676f353826b79111ac5dac556e2a8a38
+
+[11:05] <MasterDuke> ooo!!! think i have moar build and linking against our libgmp.a!
+
+[11:05] <nine> It doesn't solve the reported issue but the error message does change so I figure we actually have 2 bugs there
+
+[11:05] <nine> MasterDuke: oh, exciting!
+
+[11:11] <jnthn> nine: Hm, is the problem that the content of a Scalar container can change between the two checks?
+
+[11:12] <jnthn> And this is trying to avoid that?
+
+[11:12] <nine> That's my working hypothesis now
+
+[11:12] <jnthn> Yeah, that sounds like something that could happen
+
+[11:13] <jnthn> And could explain why cas is vulnerable
+
+[11:13] <jnthn> Well, more likely to trigger it, at least
+
+[11:13] <nine> My commit just changes the search logic in multi_cache_add to match that of multi_cache_find. The cur_node != 0, re-check == 0 made me belive that multi_cache_add was considering candidates that multi_cache_find threw out
+
+[11:14] <nine> The second issue is probably the changing containers (probably from undefined to defined). But I haven't been able to trigger the bug at all so far.
+
+[11:14] <jnthn> Maybe the fix is to deref all container arguments before we start
+
+[11:14] <nine> Not even by adding a uv_sleep to multi_cache_add after taking the lock
+
+[11:15] <jnthn> .oO( Another bug in code I'm trying to get rid of... :) )
+
+[11:16] <nine> Yeah, I don't know why those are the ones that pique my interest :)
+
+[11:16] <jnthn> Because you know what a long haul the stuff I'm doing is :)
+
+[11:17] <nine> Could be. And for that kind of work it's just better if there's no immediate pressure
+
+[11:19] <MasterDuke> ugh. i can get it to build by doing a standard build and then when the linking fails edit some flags and building gmp and linking works. but if i make realclean and build with the new settings i now get these relocation errors elsewhere
+
+[11:22] <MasterDuke> ah ha! spoke too soon, looking good now
+
+[11:37] <jnthn> MasterDuke++
+
+[11:37] <jnthn> nine: Yeah, that's certainly welcome
+
+[11:40] <MasterDuke> ok, one or two of the intermediate commits might still need some polishing, but if people wouldn't mind taking a look...https://github.com/MoarVM/MoarVM/compare/master...MasterDuke17:taboege-configure-gmp
+
+[11:41] <MasterDuke> that builds everything ok and passes all tests (except for the one that doesn't die because gmp supports creating bigger numbers than tommath)
+
+[12:18] <Altai-man> releasable6, status
+
+[12:18] <releasable6> Altai-man, Next release in ≈4 days and ≈6 hours. 2 blockers. 0 out of 136 commits logged
+
+[12:18] <releasable6> Altai-man, Details: https://gist.github.com/1b20e9e8f1c2be1b9bc47fe28b778307
+
+[12:27] *** zakharyas left
+[12:30] <dogbert11> nine: would temporarily reverting d18d6e9a3580 help your multicache investigation?
+
+[12:30] <linkable6> (2020-02-20) https://github.com/rakudo/rakudo/commit/d18d6e9a35 Change cas to nqp::cas in Lock::Async.lock
+
+[12:30] <nine> I already did that locally, but still cannot reproduce anything
+
+[12:31] <dogbert11> I seem to remember that it failed quite often before that fix
+
+[12:31] * dogbert11 tries
+
+[12:33] <lizmat> to join the fun, ash is reporting issues with the generation of the covid.observer site
+
+[12:34] <lizmat> the symptom: CREATE_RATIONAL_FROM_INTS not getting enough positional params from DIVIDE_NUMBERS
+
+[12:34] <lizmat> adding debug code makes the problem go away at many levels
+
+[12:34] <lizmat> *adding the debug code
+
+[12:35] <lizmat> if you look at the code, there is *no* way that DVIDE_NUMBERS can pass not enough params to CREATE_RATIONAL_FROM_INTS
+
+[12:36] <lizmat> unless it didn't get enough positionals itself: but when didn't it bomb then ?
+
+[12:46] <dogbert11> hmm, now I get 'No such method 'keep' for invocant of type 'Mu'' instead of the panic
+
+[12:47] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #1402: Switch from tommath to gmp
+
+[12:47] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1402
+
+[12:47] <nine> I can reproduce!
+
+[12:47] <MasterDuke> oh?
+
+[12:47] <nine> The uv_sleep(50) has the desired effect on t/spec/S17-promise/lock-async-stress2.t
+
+[12:48] <dogbert11> yay
+
+[12:48] <nine> uv_sleep(50); in src/6model/reprs/MVMMultiCache.c:212 right after the goto DONE;
+
+[12:53] <MasterDuke> is this on your try_fix_multi_cache_add branch?
+
+[12:54] <nine> yes
+
+[12:58] <nine> Gotcha! now in rr
+
+[13:09] *** sena_kun joined
+[13:11] *** Altai-man left
+[13:19] *** leont joined
+[13:20] *** squashable6 left
+[13:21] *** squashable6 joined
+[13:55] <nine> jnthn: regarding multi_cache_add I wonder if a solution for the changing arguments could be as simple as not MVM_panicing when we discover a matching entry during the search for the tree node to extend but instead goto DONE like with the previous MVM_multi_cache_find.
+
+[13:56] <nine> In fact in that case we could skip the MVM_multi_cache_find altogether as our own search is exactly the same with just a very few more variables getting set, so practically no additional cost.
+
+[13:56] <jnthn> nine: Maybe, yes; of course it will hide bugs
+
+[13:56] <jnthn> But iirc it's a sanity check
+
+[13:56] <nine> It's a sanity check, but in this case it doesn't actually discover cache corruption
+
+[13:56] <jnthn> Yes
+
+[13:57] <nine> Instead the facts changed on us during the search and there is now an eligible entry which we may as well use
+
+[13:57] <jnthn> I believe it hasn't uncovered any real corruption for years now
+
+[13:57] <nine> That leaves the case where the facts change in a way that an entry no longer matches after we added it. But that's as much of a problem now
+
+[13:58] <jnthn> And the code is a dead end, so it's not like the sanity check is going to help us in the future
+
+[14:25] *** zakharyas joined
+[14:53] <MasterDuke> tobs: do you know anything about building moarvm for windows? https://github.com/MoarVM/MoarVM/pull/1402 is nearly good to go, but i don't know how to get gmp to build on windows
+
+[14:54] <[Coke]> I can *test* things on windows but probably not create build steps for windows
+
+[15:10] <Geth> ¦ MoarVM/try_fix_multi_cache_add: 8f4f53f813 | (Stefan Seifert)++ | src/6model/reprs/MVMMultiCache.c
+
+[15:10] <Geth> ¦ MoarVM/try_fix_multi_cache_add: Fix bogus "Corrupt multi dispatch cache" panic when arguments change
+
+[15:10] <Geth> ¦ MoarVM/try_fix_multi_cache_add: 
+
+[15:10] <Geth> ¦ MoarVM/try_fix_multi_cache_add: Before we can add a candidate to the multi dispatch cache, we need to find the
+
+[15:10] <Geth> ¦ MoarVM/try_fix_multi_cache_add: right node of the tree to extend. During this it could happen that we discover
+
+[15:10] <Geth> ¦ MoarVM/try_fix_multi_cache_add: a perfectly matching candidate, despite not finding one previously. This may be
+
+[15:10] <Geth> ¦ MoarVM/try_fix_multi_cache_add: because an argument is a container and the container's value gets changed by
+
+[15:10] <Geth> ¦ MoarVM/try_fix_multi_cache_add: another thread. In this case, we may as well take the existing entry and call
+
+[15:10] <Geth> ¦ MoarVM/try_fix_multi_cache_add: <…commit message has 9 more lines…>
+
+[15:10] <Geth> ¦ MoarVM/try_fix_multi_cache_add: review: https://github.com/MoarVM/MoarVM/commit/8f4f53f813
+
+[15:10] <Geth> ¦ MoarVM/try_fix_multi_cache_add: 92a4c537de | (Stefan Seifert)++ | src/6model/reprs/MVMMultiCache.c
+
+[15:10] <Geth> ¦ MoarVM/try_fix_multi_cache_add: Fix a compiler warning regarding wrong integer size in debug message
+
+[15:10] <Geth> ¦ MoarVM/try_fix_multi_cache_add: review: https://github.com/MoarVM/MoarVM/commit/92a4c537de
+
+[15:11] <Geth> ¦ MoarVM: niner++ created pull request #1403: Fix "Corrupt multi dispatch cache" panic in concurrent code
+
+[15:11] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1403
+
+[15:12] <nine> jnthn: that's what we discussed ^^^
+
+[15:57] *** patrickb joined
+[16:49] *** patrickb left
+[17:05] *** lizmat_ joined
+[17:09] *** Altai-man joined
+[17:09] *** lizmat left
+[17:11] *** sena_kun left
+[17:11] *** lizmat_ is now known as lizmat
+
+[17:49] *** zakharyas1 joined
+[17:52] *** zakharyas left
+[18:21] <lizmat> could someone explain what one needs to do to get https://github.com/MoarVM/MoarVM/blob/master/src/core/args.c#L232 to fire ?
+
+[18:46] *** domidumont left
+[18:56] *** MasterDuke left
+[19:16] *** zakharyas1 left
+[19:58] *** MasterDuke joined
+[20:09] <nwc10> because I ran out of linux systems:
+
+[20:09] <nwc10> nick@gcc119:[/home/nick/Perl/MoarVM]./moar --version
+
+[20:09] <nwc10> This is MoarVM version 2020.11-85-g82a34e2
+
+[20:09] <nwc10> nick@gcc119:[/home/nick/Perl/MoarVM]uname -a
+
+[20:09] <nwc10> AIX power8-aix 2 7 00F9C1964C00
+
+[20:09] <nwc10> that took less time than ccache
+
+[20:12] *** MasterDuke left
+[20:17] <nwc10> oh well, doesn't work once it's installed. I don't feel like trying to figure out AIX dyamic linking (or search paths) so let's try a static build.
+
+[20:24] <leont> Dynamic linking on AIX is special
+
+[20:24] <leont> Tux is the expert, if you need one
+
+[20:25] <nwc10> I've dealt with building the export map files at times, and the Perl 5 bootstrap order, but I forget the details
+
+[20:25] <nwc10> and it seems that samcv was on AIX before me, as there is AIX code in Configure.pl
+
+[20:25] <leont> Yeah, the export map files are annoying
+
+[20:25] <nwc10> but it might be assuming xlc
+
+[20:26] <leont> Good chance that gcc can do something more sensible, much like how it can on Windows
+
+[20:26] <nwc10> I decided that I'd fight AIX only first (ie gcc) then see what xlc made of it
+
+[20:27] <leont> Much like AIX xlc is as IBM as it gets: sure it satisfies the standards to the details, but it does something surprising whenever the standard allows for it -_-
+
+[20:29] <nwc10> indeed. Fotango found this (before I even joined) - IIRC it choses different behaviour from *everything* else when encountering redefined macros 
+
+[20:30] *** squashable6 left
+[20:30] *** squashable6 joined
+[20:34] <nwc10> pants. libmoar.a doesn't actually have any of libuv etc.
+
+[20:34] <nwc10> so either I have to fix the static build (generally)
+
+[20:35] <nwc10> or fix dynamic linking on AIX
+
+[20:35] <nwc10> or I give up and hide in bed
+
+[20:38] <[Coke]> One of my first unixy systems was AIX (and xenix)
+
+[20:38] <[Coke]> Was nifty at the time. Do not miss.
+
+[20:44] <[Coke]> (back in the perl 4 days)
+
+[20:48] *** Altai-man left
+[20:50] *** zakharyas joined
+[21:00] *** MasterDuke joined
+[21:02] *** squashable6 left
+[21:04] *** squashable6 joined
+[22:01] *** rypervenche left
+[22:05] *** rypervenche joined
+[22:15] *** zakharyas left
+[22:57] *** squashable6 left
+[22:58] *** squashable6 joined

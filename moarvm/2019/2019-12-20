@@ -1,0 +1,222 @@
+[00:26] *** colomon left
+[00:55] *** sena_kun left
+[02:28] *** ZzZombo joined
+[02:47] *** ZzZombo_ joined
+[02:50] *** ZzZombo left
+[02:50] *** ZzZombo_ is now known as ZzZombo
+
+[03:02] *** MasterDuke left
+[03:56] *** ZzZombo_ joined
+[04:00] *** ZzZombo left
+[04:00] *** ZzZombo_ is now known as ZzZombo
+
+[05:04] *** ZzZombo_ joined
+[05:07] *** ZzZombo left
+[05:07] *** ZzZombo_ is now known as ZzZombo
+
+[06:43] *** domidumont joined
+[07:24] *** domidumont left
+[07:25] *** domidumont joined
+[07:52] *** domidumont left
+[08:56] *** zakharyas joined
+[09:44] *** zakharyas left
+[09:46] *** zakharyas joined
+[10:04] *** zakharyas left
+[10:05] *** zakharyas joined
+[10:37] *** sena_kun joined
+[10:40] *** sena_kun left
+[10:40] *** sena_kun joined
+[10:45] *** zakharyas left
+[10:49] *** sena_kun left
+[10:53] *** zakharyas joined
+[11:09] *** Guest38485 joined
+[11:13] <Kaeipi> can someone review https://github.com/MoarVM/MoarVM/pull/1222 ?
+
+[11:13] <Kaeipi> nine?
+
+[11:30] *** zakharyas left
+[12:06] <Guest38485> nine: I believe your nativecall fix from yesterday solved the GC related problems I had
+
+[12:33] <Guest38485> is jnthn lurking around by any chance?
+
+[12:39] <Guest38485> is there an easy way, for experimental reasons, to disable the MultiCache?
+
+[13:11] <lizmat> you mean, to do something like this?  https://modules.raku.org/dist/InterceptAllMethods:cpan:ELIZABETH
+
+[13:11] <lizmat> afk&
+
+[13:12] <Guest38485> let me investigate
+
+[13:14] <jnthn> You could probably just turn the add to multi cache function into a no-op by making it return immediately
+
+[13:14] <jnthn> I don't think there's any #define to disable it
+
+[13:22] *** zakharyas joined
+[13:24] <Guest38485> jnthn: I assume you mean MVM_multi_cache_add ?
+
+[13:25] <jnthn> Yeah
+
+[13:31] *** lucasb joined
+[14:10] <Guest38485> jnthn: thx for the help
+
+[14:13] <Guest38485> excellent
+
+[14:38] *** sena_kun joined
+[14:43] <Guest38485> turning off the MultiCache seems to solve the problem nine is hunting
+
+[14:44] <nine> Guest38485: wait, what?
+
+[14:44] <Guest38485> i.e. this: Native call expected return type with CPointer representation, but got a P6opaque (Scalar)
+
+[14:44] <nine> How did you get on this track?
+
+[14:45] <Guest38485> good question
+
+[14:46] <Guest38485> I know there's a bug in there somewhere
+
+[14:46] <Guest38485> try this
+
+[14:46] <Guest38485> @@ -162,6 +162,7 @@ MVMObject * MVM_multi_cache_add(MVMThreadContext *tc, MVMObject *cache_obj, MVMO
+
+[14:46] <Guest38485>              cache_obj = MVM_repr_alloc_init(tc, tc->instance->boot_types.BOOTMultiCache);
+
+[14:46] <Guest38485>          });
+
+[14:46] <Guest38485>      }
+
+[14:46] <Guest38485> +    return cache_obj;
+
+[14:46] <Guest38485>      cache = &((MVMMultiCache *)cache_obj)->body;
+
+[14:47] <Guest38485> in src/6model/reprs/MVMMultiCache.c
+
+[14:52] <nine> Guest38485: good timing! My gc_torture run with the 2 fixes just completed successfully
+
+[14:52] <Guest38485> cool, one fix was the 'pop' in NativeCall.c but what was the other one?
+
+[14:52] <nine> MVMROOTing sc
+
+[14:52] <Guest38485> ah
+
+[14:54] <Guest38485> about MVMROOTing sc, there are three functions in serialization.c doing similar stuff
+
+[14:55] <Guest38485> MVM_serialization_demand_object, MVM_serialization_demand_stable and MVM_serialization_demand_code
+
+[14:55] <Guest38485> does sc need protecting in all three?
+
+[14:56] <nine> Probably not. MVM_serialization_demand_object only needs it because NativeCall's deserialize disables the gen2_default flag for running the callback. Thereby GC can happen where it previously could not
+
+[14:58] <Guest38485> phew
+
+[15:21] <nine> Guest38485: I still see rare segfaults even with all our fixes together. This one even more mysterious: (gdb) bt
+
+[15:21] <nine> #0  0x000000030000fe01 in ?? ()
+
+[15:21] <nine> #1  0x0000000000000000 in ?? ()
+
+[15:21] <nine> even though I compiled moar with debug info
+
+[15:21] <Guest38485> that looks bizarre, what are you running?
+
+[15:22] <jnthn> Maybe JIT, maybe in a nativecall generated thunk thing?
+
+[15:22] <Guest38485> I have been running csv-ip5xs.pl
+
+[15:22] <nine> csv-ip5xs.pl
+
+[15:22] <Guest38485> :)
+
+[15:23] <nine> Who'd have thought that running callbacks during deserialization could cause so many issues?
+
+[15:23] <jnthn> Callbacks? During...deserialization?
+
+[15:24] <jnthn> Callbacks to...what?
+
+[15:25] <nine> jnthn: figured that would catch your attention :) https://github.com/MoarVM/MoarVM/commit/c799de42188a1b8f2a369c509f9301762f75d34e
+
+[15:27] <jnthn> omg
+
+[15:27] <nine> yes, indeed
+
+[15:27] <jnthn> Yeah, that pretty much violates the entire "we'll never GC during this" assumption the deserialization code was written with :)
+
+[15:27] <nine> I did try everything else I could come up with before doing that, but everything failed :/
+
+[15:27] <nine> I'd still be happy to rip this out again and implement another solution
+
+[15:28] <jnthn> Did you consider something a bit like the mechanism used for conflict resolutions?
+
+[15:28] <nine> I don't think I'm aware of that
+
+[15:28] <jnthn> The deserialization process returns the things that are in conflict, so HLL code can sort them out
+
+[15:28] <jnthn> That's how stash merging gets sorted out
+
+[15:29] <jnthn> Let me remember what it's called...
+
+[15:29] <jnthn> But you could maybe do similar for things needing additional fixup work after deserialization
+
+[15:29] <jnthn> Which avoids the nested runloop problem
+
+[15:30] <jnthn> If you grep for repo_conflict_resolver in NQP/Rakudo you probably end up finding something useful
+
+[15:30] <jnthn> (repo in this case short for repossession)
+
+[15:32] <nine> Guest38485: I just got this even with the multi cache disabled as you pasted: Cannot iterate object with P6opaque representation (Scalar) in sub no-args at /home/nine/.perl6/precomp/0C84318D4D23C3D09B2963B1A856093E6F04953B/DB/DB8C95655A124A12F21C201495BF931C3B18E184 line 1
+
+[15:34] <Guest38485> I got it as well
+
+[15:37] <nine> jnthn: so for a more sane implementation of my current solution, I'd have to have make NativeCall objects always cause conflicts, so they get on the list and then extend CompUnit::RepositoryRegistry.resolve_repossession_conflicts to run code that will determine the library's location and run nativecallbuild
+
+[15:39] <jnthn> nine: Umm...I was more thinking that there's a way to flag a type as "needs fixup" or some such
+
+[15:40] <jnthn> Well, I guess you can still put those on the same list and use null to signal it's a fixup case
+
+[15:40] <jnthn> But probably some types need to be told they're always in need of fixup, so whenever we deserialize one, put it onto the list
+
+[15:40] <jnthn> Or some list :)
+
+[15:43] <nine> This could open up interesting possibilities. Right now Inline::Perl5 supports precompilation by exporting an INIT phaser to its user. This phaser then restores the Perl 5 interpreter, loads Perl 5 modules and hooks up the wrappers again. All work that could be seen as part of deserialization.
+
+[15:49] <nine> I guess I should just let the bizarre issues be and move on to implement a proper solution right away. 4th time is the charm? :D
+
+[15:50] <jnthn> :D
+
+[15:52] *** Guest38485 left
+[16:19] *** Kaeipi left
+[16:19] *** Kaeipi joined
+[16:38] *** sena_kun left
+[16:38] *** zakharyas1 joined
+[16:40] *** zakharyas left
+[16:53] *** sena_kun joined
+[16:58] *** domidumont joined
+[17:23] *** zakharyas1 left
+[18:16] *** zakharyas joined
+[18:34] *** AlexDaniel left
+[18:38] *** sena_kun left
+[18:52] *** sena_kun joined
+[19:08] *** zakharyas left
+[20:11] <nine> Lazy deserialization makes everything a bit more complicated...
+
+[20:12] <lizmat> perhaps it would help if not everything were lazy ?
+
+[20:15] <nine> Nah...remember, we usually want everything!
+
+[20:16] <nine> Cake, eating, coffee, clean kitchen, ...
+
+[20:21] <lizmat> .oO( let the torture continue! )
+
+[20:30] <sena_kun> can we wrap a moarvm release tomorrow?
+
+[20:39] *** sena_kun left
+[20:53] *** sena_kun joined
+[21:32] *** zakharyas joined
+[21:39] *** domidumont left
+[22:07] *** Kaeipi left
+[22:08] *** Kaiepi joined
+[22:09] *** zakharyas left
+[22:34] *** AlexDaniel joined
+[22:34] *** AlexDaniel left
+[22:34] *** AlexDaniel joined
+[22:39] *** sena_kun left
+[22:53] *** sena_kun joined

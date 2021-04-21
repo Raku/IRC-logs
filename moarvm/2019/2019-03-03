@@ -1,0 +1,435 @@
+[00:11] *** Kaiepi joined
+[00:45] *** patrickz joined
+[00:48] *** patrickb left
+[00:53] *** lucasb left
+[01:02] <MasterDuke> huh. running rindolph's example with 2018.12 gives 5,262,372 calls to `identity`, but HEAD gives 6,473,672. the profiles are relatively similar otherwise
+
+[01:51] *** patrickz left
+[02:40] *** Kaiepi left
+[02:41] *** Kaiepi joined
+[04:45] *** AlexDani` joined
+[04:50] *** AlexDaniel left
+[04:51] *** AlexDani` is now known as AlexDaniel
+
+[05:26] <AlexDaniel> samcv: what about now? Any ETA? BTW we should probably call it 2018.03 :)
+
+[09:01] <samcv> AlexDaniel, should  be pretty soon
+
+[09:01] <samcv> we can call it 2018.03 if you want
+
+[09:02] <samcv> working on the changelog now
+
+[09:03] *** MasterDuke left
+[09:32] *** Kaiepi left
+[10:17] *** brrt joined
+[10:28] *** brrt left
+[11:42] *** Kaiepi joined
+[11:50] *** brrt joined
+[12:02] <samcv> jnthn, how do you want me to explain the PEA and new bytecode format
+
+[12:02] <samcv> otherwise i have the changelog mostly ready to go
+
+[12:05] <brrt> do we have a new bytecode format?
+
+[12:06] <samcv> well. for this release-
+
+[12:06] <samcv> idk version 6
+
+[12:06] <samcv> idk if it's activated yet though
+
+[12:06] <timotimo> i believe it's there so that lexicals that have been lowered to locals retain their names
+
+[12:15] <brrt> aha
+
+[12:30] *** brrt left
+[13:11] *** patrickb joined
+[13:20] *** lucasb joined
+[15:09] <timotimo> samcv: maybe for PEA try something like "new partial escape analysis allows objects to be replaced by registers if they only escape sometimes"? that's not worded very well and probably doesn't fit the style of the changelog?
+
+[16:05] *** Kaiepi left
+[17:02] <AlexDaniel> samcv: yeah 2018.03 is probably the right name for it… I'm not going to do another one this month anyway
+
+[17:14] *** brrt joined
+[17:19] *** MasterDuke joined
+[17:20] *** MasterDuke left
+[17:20] *** MasterDuke joined
+[17:50] <MasterDuke> timotimo: do you know anything about src/core/continuation.c ?
+
+[17:58] <timotimo> barely
+
+[17:59] <MasterDuke> did you see when i was asking jnthn about gather/take and he mentioned an optimization might have been lost?
+
+[18:00] <MasterDuke> he said something about adding some instrumentation to continuation.c to diagnose, but i'm looking at it and nothing is jumping out at me
+
+[18:00] <MasterDuke> m: my $s = now; my $a = gather for ^500_000 { take $_ }; say now - $s; $s = now; say $a.elems; say now - $s
+
+[18:01] <camelia> rakudo-moar a8cd286a4: OUTPUT: «0.0014672␤500000␤2.532751␤»
+
+[18:01] <MasterDuke> m: my $s = now; my $a = gather for ^500_000 { take $_ }; say now - $s; $s = now; say $a.eager.elems; say now - $s
+
+[18:01] <camelia> rakudo-moar a8cd286a4: OUTPUT: «0.00143321␤500000␤2.8058064␤»
+
+[18:01] *** Kaiepi joined
+[18:01] <MasterDuke> if i understood him correctly, the second should have been faster
+
+[18:05] <timotimo> mhm
+
+[18:05] <timotimo> yeah, if we eagerly exhaust the gather operator, it'll just run the code with an implementation of "take" that just pushes into the resulting list and never does continuationy stuff at all
+
+[18:05] <timotimo> at least that's what i think it does
+
+[18:06] <timotimo> the instrumentation he mentioned might just be fprints to see how often the continuation ops are called?
+
+[18:08] <MasterDuke> m: my $s = now; my $a = gather for ^500_000 { take $_ }; say now - $s; my int $b; $s = now; $b = $b + 1 for $a.list; say $b; say now - $s
+
+[18:08] <camelia> rakudo-moar a8cd286a4: OUTPUT: «0.001417␤500000␤3.1743836␤»
+
+[18:09] <MasterDuke> hm, that's a little longer than just the .elems call, but might just be the math
+
+[18:10] <timotimo> do i want to investigate why my own implementation of readInt64 outperforms @thebuf.read-int64 + splice-ing off the first 8 bytes?
+
+[18:14] <nine> I'd like you to :)
+
+[18:14] <timotimo> nnnnoooooooooooo
+
+[18:14] <timotimo> :P
+
+[18:15] <timotimo> could just be that my own implementation is directly with nqp ops
+
+[18:15] <timotimo> and .read-int64 is a method call that might not be inlined or something
+
+[18:16] <MasterDuke> huh, a profile of all three versions shows that push-all (src/core/Any-iterable-methods.pm6:405) isn't getting jitted. but a spesh log only has one "bailed completely" and that's in `SET_BLOCK_OUTER_CTX`
+
+[18:16] <timotimo> OK, first of all the read-int64 method isn't jitted at all because it stumbles over param_op_o
+
+[18:19] *** domidumont joined
+[18:19] <timotimo> and the splice method isn't inlined because it has a :noinline op (which may or may not be the getlexref it has)
+
+[18:20] <timotimo> so in conclusion, my own implementation has no method calls left inside it and is pretty much perfectly jitted
+
+[18:20] <timotimo> whereas the other implementation has not only the read-uint64 (or read-int64) with "just" fastinvoke, but also the splice method call
+
+[18:22] <MasterDuke> weird, push-all has 500001 entries in the profile, but is only mentioned once in the spesh log: `Latest statistics for 'push-all' (cuid: 1796, file: SETTING::src/core/Any-iterable-methods.pm6:405)  Total hits: 1 OSR hits: 2`
+
+[18:22] <MasterDuke> never shows up againt
+
+[18:23] <brrt> what bugs me about gather/take is that it isn't a compile-time transformation
+
+[18:23] <MasterDuke> brrt: into an Iterator?
+
+[18:24] <brrt> for example
+
+[18:29] <timotimo> you mean turning the code into continuation-passing style broken up everywhere there is a "take"?
+
+[18:30] *** bartolin left
+[18:30] *** bartolin joined
+[18:30] <brrt> for another example, yes
+
+[18:30] <brrt> :-)
+
+[18:30] <timotimo> how would it be in the other case?
+
+[18:31] <timotimo> it already takes the block and stashes it into an iterator object as far as i know?
+
+[18:31] <brrt> well, why does that have to be a reified object?
+
+[18:32] <timotimo> because state?
+
+[18:33] <brrt> that can be compiled into (unnamed) local variables
+
+[18:33] <brrt> maybe there's something about perl6 that makes this impossible though
+
+[18:34] <timotimo> it'll have to be state variables bound to some block, right?
+
+[18:34] <MasterDuke> brrt: any idea why this particular example isn't jitting?
+
+[18:34] <brrt> I think so timotimo
+
+[18:34] <brrt> what example MasterDuke
+
+[18:35] <MasterDuke> m: my $s = now; my $a = gather for ^500_000 { take $_ }; say now - $s; $s = now; say $a.elems; say now - $s
+
+[18:35] <brrt> (and the general answer is 'no, but the spesh log should)
+
+[18:35] <camelia> rakudo-moar a8cd286a4: OUTPUT: «0.0014138␤500000␤2.4203322␤»
+
+[18:35] <MasterDuke> m: my $s = now; my $a = gather for ^500_000 { take $_ }; say now - $s; $s = now; say $a.eager.elems; say now - $s
+
+[18:35] <camelia> rakudo-moar a8cd286a4: OUTPUT: «0.00151292␤500000␤2.52303345␤»
+
+[18:35] <MasterDuke> m: my $s = now; my $a = gather for ^500_000 { take $_ }; say now - $s; my int $b; $s = now; $b = $b + 1 for $a.list; say $b; say now - $s
+
+[18:35] <camelia> rakudo-moar a8cd286a4: OUTPUT: «0.0013835␤500000␤4.1368095␤»
+
+[18:36] <MasterDuke> brrt: the spesh log only shows one "bailed completely", and that's in `SET_BLOCK_OUTER_CTX`
+
+[18:36] <brrt> and... it doesn't say why?
+
+[18:36] <brrt> or what instruction?
+
+[18:36] <brrt> it ought to annotate that to a specific instruction usually
+
+[18:36] <MasterDuke> # JIT: bailed completely because of <ctxouter>
+
+[18:36] <brrt> well, there you go
+
+[18:37] <brrt> I don't recall the exact reason, but there was a reason ctxouter didn't work.
+
+[18:37] <MasterDuke> but why is push-all (what the profile shows isn't getting jitted), only mentioned in the spesh log once?
+
+[18:37] <brrt> although, I also recall that jnthn wrote an interface to make it work
+
+[18:37] <timotimo> look closer, brrt; that bail is in what should be an unrelated function
+
+[18:38] <brrt> but, I don't know which of those should be associated and which should not
+
+[18:39] <brrt> if it's not actually speshed, then it surely won't be JITted either
+
+[18:40] <MasterDuke> but why wouldn't it be speshed? the profile says 500k entries for it
+
+[18:40] <brrt> idk
+
+[18:41] <timotimo> i hope the profiler instrumentation doesn't confuse it
+
+[18:42] <MasterDuke> but i made the spesh log when not profiling
+
+[18:43] <MasterDuke> timotimo: or are you saying it was in fact only called once (like the spesh log shows), not 500k times like the profile shows?
+
+[18:45] <timotimo> maybe when profiling the decisions it made regarding jitting or inlining changed?
+
+[18:46] <MasterDuke> timotimo: this seems like a good place to try the remote debugger support in comma
+
+[18:47] <timotimo> that doesn't know anything about the inner workings of the jit, though?
+
+[18:47] <timotimo> at some point i hope the remote debugger will allow spesh to be introspected somewhat, but that point is not there yet
+
+[18:48] <MasterDuke> but i can at least confirm that that push-all is being called more than once without recompiling rakudo, right?
+
+[18:49] <timotimo> oh
+
+[18:49] <timotimo> yeah, that's true
+
+[18:49] <timotimo> i'm not sure if Comma offers the "count but don't suspend" behavior for breakpoints
+
+[18:50] <MasterDuke> hm, not sure how to run a script
+
+[18:52] <MasterDuke> ok, got it running. how do i set a breakpoint inside rakudo?
+
+[18:52] <timotimo> probably possible to just have a run configuration in any unrelated project and point it to the script file
+
+[18:52] <timotimo> oh, huh, actually that's a very good question
+
+[18:56] <timotimo> yeah, i'm not sure if there is a way unless you have the file in the right spot inside your program
+
+[18:56] <timotimo> probably relative to the script's working directory path?
+
+[18:57] <timotimo> personally, i always have to turn on debugspam to get the filenames, but later on there really ought to be a matching API
+
+[18:57] <timotimo> whether it be "moar sends filenames as they become known and the client can decide whether to react to them or not" or some kind of globbing implemented in moar itself
+
+[18:59] <MasterDuke> not sure what you mean by "have the file in the right spot inside your program"? you mean set a breakpoint on "../../rakudo/src/core/<foo>.pm6" for example?
+
+[19:02] <MasterDuke> also, i started suspended, but the run/resume button is greyed out
+
+[19:07] <timotimo> you will need a folder named "SETTING::src" where things live so that the path matches between what the debugserver has and what comma offers
+
+[19:09] <MasterDuke> ah, guess i'll just make that a symlink to my rakudo sources
+
+[19:09] <timotimo> i hope that works :)
+
+[19:09] <timotimo> try setting the MDS_PROTOCOL env var in the run configuration
+
+[19:09] <timotimo> that ought to let you know what file names/paths are being used by both sides
+
+[19:12] <MasterDuke> ok, i see more output. but all the debug command (e.g., step over) are greyed out
+
+[19:12] <timotimo> that's weird
+
+[19:13] <MasterDuke> this is what i see in the console https://gist.github.com/MasterDuke17/6f59bd1471defcd40ec9a9144fb99e67
+
+[19:19] <timotimo> right. now why wouldn't comma be able to debug stuff? it already successfully connected so it can't be that
+
+[19:25] <MasterDuke> things seem to work if i don't start suspended
+
+[19:30] <timotimo> i hope it doesn't try to use a full path for the SETTING:: stuff
+
+[19:31] <MasterDuke> i tried adding SETTING::src symlink in the project directory, i can open up files, but a breakpoint i added isn't getting hit
+
+[19:32] <MasterDuke> created new file entry at 0 for /home/dan/CommaProjects/gt/SETTING::src/core/Any-iterable-methods.pm6
+
+[19:36] <brrt> question: do I convert all conditional forms to a single 'cond' construct. or, do I not
+
+[19:36] <brrt> the pro: a single 'cond' is easy to analyze
+
+[19:36] <brrt> well, somewhat easy
+
+[19:37] *** brrt left
+[19:39] <timotimo> MasterDuke: damn. then you'll have to use the commandline debugger for now :(
+
+[19:40] <MasterDuke> ah well, hopefully a feature to be added eventually
+
+[19:40] *** brrt joined
+[19:41] <timotimo> will have to think of a UI for it that makes sense, though perhaps it'll actually just allow you to open core setting source files if your "SDK" comes with sources
+
+[19:41] <brrt> the con: I need to be clever in the emitting of the conditional targets, if they are duplicated
+
+[19:41] <timotimo> and offer to pull the sources from github if it doesn't
+
+[19:42] <MasterDuke> huh! recompiled rakudo with a print at the top of that print-all. only prints once
+
+[19:43] <timotimo> well, that's ominous
+
+[19:45] <MasterDuke> and still only prints once when being profiled, but the profile says 500k entries
+
+[19:47] <timotimo> can you breakpoint it in gdb?
+
+[19:47] <timotimo> like, using sin() or something like that?
+
+[19:47] <timotimo> hm. though the next step would be to dump its bytecode, i'm not sure if that'll actually hlep
+
+[19:49] *** domidumont left
+[19:50] *** brrt left
+[19:52] *** greppable6 left
+[19:52] *** releasable6 left
+[19:52] *** unicodable6 left
+[19:52] *** nativecallable6 left
+[19:52] *** shareable6 left
+[19:52] *** committable6 left
+[19:52] *** squashable6 left
+[19:52] *** reportable6 left
+[19:53] *** evalable6 left
+[19:53] *** evalable6 joined
+[19:53] *** domidumont joined
+[19:59] *** domidumont left
+[20:13] <MasterDuke> timotimo: MVM_dump_bytecode(tc) in push-all?
+
+[20:16] <MasterDuke> https://gist.github.com/MasterDuke17/4ebde5d21d5121f3e436ec17dfd3b3d6
+
+[20:35] <timotimo> no prof ops at all, huh?
+
+[20:36] <MasterDuke> oh, that wasn't while profiling. i can run again with
+
+[20:36] <timotimo> might also be interesting to compare the two
+
+[20:36] <timotimo> i see it does osr. does it also deopt a lot according to the profile?
+
+[20:37] <MasterDuke> gist updated
+
+[20:38] <MasterDuke> pull-one SETTING::src/core/Rakudo/Iterator.pm6:1765 	 498271                           pull-one SETTING::src/core/Rakudo/Iterator.pm6:1881 	 1
+
+[20:38] <timotimo> that's deopts?
+
+[20:38] <MasterDuke> yeah
+
+[20:39] <timotimo> and OSRs?
+
+[20:39] <MasterDuke> push-all SETTING::src/core/Iterator.pm6:55 	 498195
+
+[20:40] <timotimo> OK, maybe it counts OSRing as entries
+
+[20:40] <timotimo> there's something to log deopts, it could help figure out how far it gets in the bytecode before it hits the deopt
+
+[20:40] <timotimo> i.e. if it only does like five ops before it's deopted again
+
+[20:41] <MasterDuke> src/spesh/deopt.c:7:#define MVM_LOG_DEOPTS 0
+
+[20:42] <timotimo> that should be the one
+
+[20:44] <MasterDuke> gist updated
+
+[20:45] <timotimo> was it push-all that we thought wasn't being jitted or was it pull-one?
+
+[20:45] <MasterDuke> push-all
+
+[20:46] <MasterDuke> push-all is the one that also shows 500k entries in the profile, but is actually only being called once
+
+[20:46] <timotimo> so it does jit push-all, it just doesn't count it
+
+[20:47] <timotimo> the spesh log would have info about the deopt index 396 that it's complaining about, but i don't know under what circumstances that message would appear
+
+[20:49] <MasterDuke> reran with a spesh log, so the number changed. `Latest statistics for 'add-option' (cuid: 186, file: gen/moar/stage2/NQPHLL.nqp:2382)`
+
+[20:49] *** reportable6 joined
+[20:49] *** committable6 joined
+[20:49] <timotimo> that was grepping for 186?
+
+[20:50] *** greppable6 joined
+[20:50] <MasterDuke> there are other hits, looking for anything in particular?
+
+[20:50] *** shareable6 joined
+[20:50] *** unicodable6 joined
+[20:51] *** nativecallable6 joined
+[20:51] *** releasable6 joined
+[20:52] *** squashable6 joined
+[20:53] <timotimo> for the deopts of pull-one and push-all we would have to find an annotation in pull-one's or push-all's bytecode
+
+[20:53] <MasterDuke> with that id?
+
+[20:54] <timotimo> should be 1396 and 886
+
+[20:54] <timotimo> the cuuids or cuids
+
+[20:54] <timotimo> i think we're not using one or the other uniformly
+
+[20:55] <MasterDuke> i think cuuid is just in some method names
+
+[20:55] <MasterDuke> `Latest statistics for 'cuuid-idx' (cuid: 94, file: /home/dan/Source/perl6/install/bin/../share/nqp/lib/MAST/Nodes.nqp:1059)`
+
+[20:55] <timotimo> OK
+
+[20:56] <MasterDuke> huh. the deopt log is different when i also was creating the spesh log
+
+[20:56] <MasterDuke> doesn't have this line: ` 498161     Recreated frame 'pull-one' (cuid '1396')`
+
+[20:57] <timotimo> spesh log printing slows down the spesh thread, but it shouldn't be that much
+
+[21:01] <MasterDuke> man, a whole lot of things had `Latest statistics for ...` 450-457 times
+
+[21:02] <MasterDuke> of which 1396 was one
+
+[21:02] <MasterDuke> `    451 Latest statistics for 'pull-one' (cuid: 1396, file: SETTING::src/core/Rakudo/Iterator.pm6:1765)`
+
+[21:02] <timotimo> but no before/after?
+
+[21:03] <MasterDuke> there is a before/after
+
+[21:04] <timotimo> with a capital letter, though i guess you tried that
+
+[21:05] <MasterDuke> they're not too big, want to see them?
+
+[21:05] <timotimo> OK why not
+
+[21:07] <MasterDuke> gist updated
+
+[21:10] <timotimo> i think we may have been talking of different things, haha
+
+[21:10] <MasterDuke> btw, should we create templates for those prof_* ops? looks like they do have lego jit implementations
+
+[21:10] <MasterDuke> ??
+
+[21:10] <timotimo> oh, yeah why not, they are probably trivial
+
+[21:12] <timotimo> can you also get the push-all one?
+
+[21:12] <MasterDuke> the before/after?
+
+[21:13] <timotimo> yeah
+
+[21:13] <timotimo> it should also have "inlining graph pull-one"
+
+[21:13] <MasterDuke> there's only one, and it's a different push-all
+
+[21:13] <timotimo> oh
+
+[21:14] <timotimo> i think i'm too headachy to get behind this
+
+[21:14] <MasterDuke> SETTING::src/core/Iterator.pm6:55, not SETTING::src/core/Any-iterable-methods.pm6:405
+
+[21:15] <MasterDuke> but it wouldn't get spesh because it's only called once, right?
+
+[21:15] <MasterDuke> *speshed
+
+[21:15] <timotimo> if it has an osrpoint that gets hit often, it would get speshed/jitted
+
+[21:32] <MasterDuke> i feel like i should create a moarvm issue for this
+

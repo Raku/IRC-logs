@@ -1,0 +1,350 @@
+[00:33] *** vendethiel joined
+[01:45] *** vendethiel joined
+[02:29] *** vendethiel joined
+[05:04] *** flaviusb joined
+[05:37] <nwc10> OK, 6d3560d84d48f045a3b8f9ae58dd050841aac43b breaks Power64 (which is big endian)
+
+[05:37] <nwc10> why
+
+[05:37] <nwc10> +        ins->operands[2].lit_i16 = MVM_spesh_add_spesh_slot(tc, g, (MVMCollecta
+
+[05:37] <nwc10> but
+
+[05:37] <nwc10> +        ins->operands[2]         = value;
+
+[05:37] <nwc10> +        ins->operands[2]         = category;
+
+[05:37] <nwc10> ie, inconsistent use of lit_i16
+
+[05:38] <nwc10> have to go soon, so don't have time to try to brute force figure this out
+
+[05:58] *** FROGGS joined
+[06:21] <dalek> Heuristic branch merge: pushed 23 commits to MoarVM/restricted by FROGGS
+
+[06:34] *** vendethiel joined
+[06:53] *** Ven joined
+[07:07] *** Ven joined
+[08:48] *** Ven joined
+[09:05] *** flaviusb joined
+[09:07] *** Ven joined
+[09:44] * jnthn ended up with a more correct and simpler fix for the lazy deserialization races, it seems.
+
+[09:44] <jnthn> Need to test it some more, but seems promising.
+
+[09:50] *** vendethiel joined
+[09:54] <nwc10> good stuff
+
+[09:54] <nwc10> I'm very keen to learn if that explains the really weird change of what's called when I play around with the serialisation blob format
+
+[09:55] <nwc10> meanwhile, the stupid, it burns
+
+[09:55] <nwc10> I've tracked down the cause of a very silly bug in the work code
+
+[09:55] <nwc10> content generation code that has side effects
+
+[09:55] <nwc10> in some cases
+
+[09:55] <nwc10> and caching
+
+[09:55] <nwc10> wrong wrong wrong. must die.
+
+[09:56] <jnthn> urgh
+
+[09:56] <jnthn> fire it with kill
+
+[09:59] <dalek> MoarVM: 049759b | jnthn++ | src/ (2 files):
+
+[09:59] <dalek> MoarVM: Eliminate 100% core use for async things.
+
+[09:59] <dalek> MoarVM:
+
+[09:59] <dalek> MoarVM: Use async wake-ups instead of an idle handler. For this to work out we
+
+[09:59] <dalek> MoarVM: also need a semaphore to avoid a race in sending the first task to the
+
+[09:59] <dalek> MoarVM: event loop. GC is also far better handled, using prepare/check handles
+
+[09:59] <dalek> MoarVM: so another thread can work-steal the event loop thread for GC purposes
+
+[09:59] <dalek> MoarVM: when it is sleeping awaiting an I/O notification etc.
+
+[09:59] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/049759bd78
+
+[09:59] <dalek> MoarVM: ffb2574 | jnthn++ | src/6model/serialization.c:
+
+[09:59] <dalek> MoarVM: Make demand_[object|stable|code] race-safe.
+
+[09:59] <dalek> MoarVM:
+
+[09:59] <dalek> MoarVM: They now check they didn't lose a race to deserialize, meaning that it
+
+[09:59] <dalek> MoarVM: is OK for multiple threads to attempt to call them.
+
+[09:59] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ffb2574203
+
+[09:59] <dalek> MoarVM: 6ae0ed4 | jnthn++ | src/6model/sc.c:
+
+[09:59] <dalek> MoarVM: Prevent reads of partially deserialized objects.
+
+[09:59] <dalek> MoarVM:
+
+[09:59] <dalek> MoarVM: With lazy deserialization we deserialize objects and STables when they
+
+[09:59] <dalek> MoarVM: are first needed. This worked fine in the single-threaded case, but in
+
+[09:59] <dalek> MoarVM: a multi-threaded case the mechanism could expose objects and STables
+
+[09:59] <dalek> MoarVM: that were only partially deserialized, leading to all manner of odd
+
+[10:00] <dalek> MoarVM: behavior and crashes. This patch fixes the problem by making threads
+
+[10:00] <dalek> MoarVM: wait if another thread is doing deserialization work on the SC in
+
+[10:00] <dalek> MoarVM: question.
+
+[10:00] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/6ae0ed47d6
+
+[10:06] <jnthn> That seems to get us the win of not nomming a whole core for the async loop combined with being less crashy :)
+
+[10:10] <nwc10> and a pony?
+
+[10:15] <jnthn> No pony yet; we still have various concurrency bugs left.
+
+[10:16] <jnthn> nwc10: If you have a build with ASAN handy, any chance you could run https://rt.perl.org/Ticket/Display.html?id=125248 for me under it?
+
+[10:17] <nwc10> I'm having a rebuild currently for your recent change
+
+[10:17] <jnthn> ah, k
+
+[10:21] <jnthn> Annoyingly it fails to SEGV under the debugger here
+
+[10:22] <jnthn> Ah, but with _NO_DEBUG_HEAP it explodes. Yay.
+
+[10:28] <jnthn> Crashes in some arbitrary free, alas.
+
+[10:39] <jnthn> Ah, found it
+
+[10:41] <dalek> MoarVM: 2bc39a6 | jnthn++ | src/strings/normalize.c:
+
+[10:41] <dalek> MoarVM: Grow normalization output buffer sufficiently.
+
+[10:41] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/2bc39a6b58
+
+[10:44] <nwc10> jnthn: unfortuantely 3 tests are deadlocked
+
+[10:44] <nwc10> this was the first http://paste.scsys.co.uk/486554
+
+[10:44] <nwc10> killing it revealed it to be t/spec/S17-procasync/basic.rakudo.moar
+
+[10:45] <nwc10> second looks very similar http://paste.scsys.co.uk/486555
+
+[10:47] <nwc10> third t/spec/S17-promise/in.t
+
+[10:49] <nwc10> jnthn: ASAN barfage added as a reply on that ticket.
+
+[10:52] <jnthn> nwc10: Great, that ASAN barfage matches what I fixed in 2bc39a6.
+
+[10:53] <nwc10> oh, my hangs are with local patches.
+
+[10:53] <nwc10> I'll go back to origin/master
+
+[11:07] <jnthn> nwc10: If it still hangs, please could you try this patch? https://gist.githubusercontent.com/jnthn/16de7fa4d58704a09212/raw/b94f40dba30ea9a532a0b4537d48796aaf669ccb/gistfile1.txt
+
+[11:08] <nwc10> OK. Still in the setting for the rebuild
+
+[11:08] <jnthn> OK :)
+
+[11:08] <jnthn> shopping/lunch here; bbiab &
+
+[11:42] <nwc10> jnthn: fewer test failures (I think), t/spec/S17-procasync/basic.rakudo.moar and t/spec/S17-procasync/print.rakudo.moar still hang, in what seesm to be the same way
+
+[11:42] <nwc10> had not said, some spectests were failing already
+
+[11:55] <jnthn> Very odd
+
+[11:57] <jnthn> nwc10: It's confusing in that I don't see how it can get into the state we're seeing
+
+[11:57] <jnthn> nwc10: If you've time, you could try https://gist.github.com/jnthn/4c539e454f5345171120 and paste me the debug output it produces
+
+[12:01] <nwc10> jnthn: http://paste.scsys.co.uk/486569
+
+[12:06] <jnthn> That's very suspect.
+
+[12:06] <nwc10> it's very happening :-)
+
+[12:06] <nwc10> shall I try valgrind?
+
+[12:07] <jnthn> Sure. But it means something is very busted, 'cus you should never enter from interupt if soemthing didn't actually try to interrupt...
+
+[12:07] <jnthn> You can...I guess there's always a chance we're seeing bogus state
+
+[12:07] <jnthn> Meanwhile, pasta ready. bbiab
+
+[12:08] <nwc10> non-ASAN build takes a while
+
+[12:08] <nwc10> bbiab
+
+[12:30] *** Ven joined
+[12:53] *** zakharyas joined
+[12:56] <nwc10> valgrind says nothing interesting
+
+[13:17] <jnthn> nwc10: Was that output you pasted me incluidng the patch I sent?
+
+[13:18] <nwc10> with this:
+
+[13:18] <nwc10> -    if (tc->gc_status) { \
+
+[13:18] <nwc10> +    if (tc->gc_status == MVMGCStatus_INTERRUPT) { \
+
+[13:18] <jnthn> Wow
+
+[13:21] <jnthn> ooooh
+
+[13:25] <jnthn> Damn, seems I misunderstood something about libuv's check/prepare handlers
+
+[13:25] <jnthn> Turns out that it *can* run other handlers between them
+
+[13:26] <jnthn> OK, fair enough. Deleting code that I thought would help may well fix the thing then :)
+
+[13:37] <dalek> MoarVM: ae9f21b | jnthn++ | src/ (2 files):
+
+[13:37] <dalek> MoarVM: Another approach to eventloop/GC integration.
+
+[13:37] <dalek> MoarVM:
+
+[13:37] <dalek> MoarVM: Turns out there *can* be event handlers run between prepare/check, so
+
+[13:37] <dalek> MoarVM: the previously taken approach will not work out. Instead, involve the
+
+[13:37] <dalek> MoarVM: event loop thread in GC by sending it an async wake-up. Hopefully this
+
+[13:37] <dalek> MoarVM: will fix various hangs.
+
+[13:37] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ae9f21b5b7
+
+[13:37] <jnthn> nwc10: Hopefully this one nails it
+
+[13:40] <nwc10> rebuilding
+
+[14:04] <nwc10> only t/spec/S17-scheduler/at.rakudo.moar is hanging
+
+[14:05] <nwc10> http://paste.scsys.co.uk/486593
+
+[14:07] <jnthn> Darn, on Windows too, it seems
+
+[14:16] <jnthn> aha
+
+[14:16] <jnthn> Right idea, wrong place.
+
+[14:17] <dalek> MoarVM: 07fbd62 | jnthn++ | src/gc/orchestrate.c:
+
+[14:17] <dalek> MoarVM: Do wake-up of async event loop inside signal loop.
+
+[14:17] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/07fbd62fb9
+
+[14:17] <jnthn> That unhangs that test here
+
+[14:18] <timotimo> <3
+
+[14:18] * timotimo builds
+
+[14:36] <jnthn> Seems I've a "relax in the nice weather and have a pint" invite :)
+
+[14:37] <jnthn> File hang/no-hang reports here, and if we're looking good I'll bump MOAR_REVISION etc. when I'm back
+
+[14:41] <nwc10> t/spec/integration/advent2013-day14.t                       (Wstat: 256 Tests: 6 Failed: 0) Non-zero exit status: 1 Parse errors: Bad plan.  You planned 10 tests but ran 6.
+
+[14:41] <nwc10> jnthn++
+
+[14:41] <nwc10> no hangs, just that one, which is a known flapper
+
+[14:42] <timotimo> t/spec/S17-lowlevel/lock.rakudo.moar                        (Wstat: 139 Tests: 7 Failed: 1)
+
+[14:42] <timotimo> Failed test:  7
+
+[14:42] <timotimo> all else works fine
+
+[14:43] <timotimo> running it on its own works just fine
+
+[15:48] <japhb> Ooooh ...
+
+[15:49] * japhb is REALLY looking forward to some concurrency-hardened Moar goodness
+
+[16:01] <timotimo> hopefully it also affects the other stuff like process async
+
+[17:41] <jnthn> timotimo: I think the serialization fix has hopefully nailed much of the remaining instability in the TimToady++ example, at least
+
+[17:44] <jnthn> Meanwhile, pint turned into dinner, which was...gulash! :D
+
+[17:51] <nwc10> jnthn: this makes Power64 happy again, but I don't know why: http://paste.scsys.co.uk/486642
+
+[17:52] <nwc10> tests still fail, but pretty much the same spectests as with MVM_SPESH_DISABLE
+
+[17:52] <nwc10> and some async tests that flap
+
+[17:52] <jnthn> nwc10: I can easily imagine why
+
+[17:53] <nwc10> OK, so is the whole .lit_i16 a trap?
+
+[17:53] <nwc10> or are there times when using the sized members of union isn't correct?
+
+[17:54] <jnthn> nwc10: In this csae I think the lit_i16 is the right thing
+
+[17:54] <jnthn> If oplist defines it as taking int16 then lit_i16 should be used when setting up or looking at the operands in the spesh graph
+
+[17:55] <jnthn> So I think the patch is legit
+
+[17:56] <nwc10> OK. it was more a question of "is it better to have to manually remember that when writing code" vs "could the thing that writes bytes to memory do the necessary truncation and endian fixing"?
+
+[18:00] <jnthn> You should use the correct union member for the opcode you're setting operands for.
+
+[18:00] <jnthn> We get away with a bit too much on little endian there.
+
+[18:25] <timotimo> jnthn: got a good idea why METAOP_ASSIGN might not be inlined by the optimizer?
+
+[18:25] <timotimo> running METAOP_ASSIGN every single time you do a += is a bit wasteful :)
+
+[18:25] <jnthn> timotimo: I suspect it's too complex
+
+[18:25] <jnthn> Produces a closure, and all that
+
+[18:26] <jnthn> Uh, yes, it is...but we should proably just code-gen those better in the first place
+
+[18:26] <jnthn> A bit like we do for .^
+
+[18:26] <jnthn> (as a desugar)
+
+[18:27] <timotimo> (which is why i put that optimization in some time ago and now enhanced it to also work with $foo.bar
+
+[18:29] <jnthn> It shouldn't matter whatn's on the LHS and RHS, the trick is to be sure to assign the evaluation of the LHS to a temporary so as to only do it once
+
+[18:30] <timotimo> right, mouq wrote a patch to fix my latest thingie
+
+[18:30] <timotimo> the LHS doesn't matter? would it be all right to just assign anything at all?
+
+[18:30] <timotimo> because right now i'm making sure the QAST is somewhat restricted
+
+[18:31] <jnthn> If it's not assignable and you transform it, it's still not assignable... :)
+
+[18:31] <timotimo> that's fair i suppose :)
+
+[18:32] <timotimo> i shall simplify in that case
+
+[18:32] <timotimo> right now it's just past food time and i'm lightly socialising
+
+[18:32] <jnthn> Of cours,e run spectest to be sure
+
+[18:32] <jnthn> *nod* :0
+
+[18:32] <jnthn> *:)
+
+[18:33] <timotimo> spec tests didn't complain about my previous code
+
+[18:33] <timotimo> there was no code to make sure the lhs is only evaluated once :)
+
+[19:00] *** FROGGS joined
+[21:37] *** lizmat joined
+[22:09] *** FROGGS joined
+[22:36] *** FROGGS joined
+[22:47] *** vendethiel joined
+[23:51] *** nebuchadnezzar joined

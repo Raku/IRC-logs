@@ -1,0 +1,197 @@
+[00:29] *** lucasb left
+[00:32] *** cinch joined
+[01:28] *** ggoebel left
+[03:02] *** evalable6 left
+[03:07] *** evalable6 joined
+[04:10] *** cinch_ joined
+[04:12] *** cinch left
+[05:20] *** robertle left
+[05:38] *** sena_kun joined
+[05:38] *** domidumont joined
+[06:02] *** domidumont left
+[06:20] *** domidumont joined
+[06:36] *** Kaiepi left
+[06:54] *** domidumont left
+[06:58] *** domidumont joined
+[07:03] <nine> timotimo: 2 observations about MVM_profile_instrumented_mark_data: * it will never use slot 0 in nodelist.items * start can never become > 0, so the code for handling that will never be used
+
+[07:52] *** zakharyas joined
+[07:58] *** sena_kun left
+[07:59] *** sena_kun joined
+[08:10] *** brrt joined
+[09:17] *** zakharyas left
+[09:19] *** zakharyas joined
+[09:45] *** brrt left
+[10:08] *** anatofuz joined
+[10:09] *** domidumont left
+[10:20] *** ggoebel joined
+[10:57] *** anatofuz left
+[10:57] *** anatofuz joined
+[11:01] *** anatofuz_ joined
+[11:04] *** Kaiepi joined
+[11:04] *** anatofuz left
+[11:15] *** Kaiepi left
+[11:19] *** Kaiepi joined
+[11:36] *** domidumont joined
+[11:37] *** zakharyas left
+[12:06] *** lizmat left
+[12:08] *** domidumont left
+[12:08] *** domidumont joined
+[12:14] *** squashable6 left
+[12:14] *** squashable6 joined
+[12:14] *** squashable6 left
+[12:16] *** squashable6 joined
+[12:16] *** mtj_ left
+[12:22] *** anatofuz_ left
+[12:31] *** domidumont left
+[13:04] *** anatofuz joined
+[13:05] *** domidumont joined
+[13:08] *** zakharyas joined
+[13:22] *** anatofuz left
+[13:40] *** anatofuz joined
+[13:50] *** anatofuz left
+[13:52] *** anatofuz joined
+[13:56] *** anatofuz left
+[13:57] *** lucasb joined
+[14:03] *** zakharyas left
+[14:04] <Guest23744> where is everyone?
+
+[14:05] *** zakharyas joined
+[14:09] <nine> here!
+
+[14:12] <timotimo> right, the "start" thing was probably a premature optimization
+
+[14:21] *** brrt joined
+[14:21] <brrt> \o
+
+[14:25] *** Kaiepi left
+[14:28] *** Kaiepi joined
+[14:39] <Guest23744> oh, suddenly everyone is here :)
+
+[14:39] <Guest23744> timotimo: I though premature optimization was the root of all evil :)
+
+[14:39] <Guest23744> *thought
+
+[14:49] *** squashable6 left
+[14:53] <MasterDuke> while everybody is here, any objections to merging https://github.com/MoarVM/MoarVM/pull/1185 ?
+
+[14:53] *** squashable6 joined
+[14:55] <brrt> idk, timotimo should judge that I think
+
+[15:03] *** MasterDuke left
+[15:05] *** brrt left
+[15:09] *** MasterDuke joined
+[15:25] <nine> Preliminary report: we definitely end up with a fromspace object in node->alloc[i].type. The only place that sets this is log_one_allocation which explicitly checks the value with MVM_ASSERT_NOT_FROMSPACE. So it's safe to assume that the object gets moved after the pointer is assigned.
+
+[15:25] <nine> However, the node in question is part of the profile thread data and AFAICT this gets marked just fine by MVM_profile_instrumented_mark_data as part of every GC run
+
+[15:26] <nine> Indeed, the stack trace I get with GC torture turned on is from adding this broken object to the worklist
+
+[15:28] <MasterDuke> i don't really understand all the details, but it sounds like you're saying it's impossible
+
+[15:29] <nine> Well, I'm saying that I'm missing something :) Reading the source has not yet revealed any obvious error to me
+
+[15:32] <jnthn> nine: I spent a little time looking into it and couldn't see anything obvious either, alas
+
+[15:34] <Guest23744> a real mystery then
+
+[15:40] <MasterDuke> is this something rr would help with?
+
+[15:51] <nine> yes
+
+[16:06] *** brrt joined
+[16:08] <nine> Wait a minute...the object has a valid forwarder
+
+[16:09] <timotimo> oh? so things get double-marked?
+
+[16:09] <timotimo> or is the flags section not properly changed?
+
+[16:09] <timotimo> or something completely different and there's one & too few?
+
+[16:09] <nine> p node->alloc[i].type.header.flags & MVM_CF_FORWARDER_VALID
+
+[16:09] <nine> $9 = 128
+
+[16:10] <nine> The fowarder looks legit
+
+[16:10] <timotimo> forgot to put a ( ) around an & ?
+
+[16:10] <nine> And this is in mark_call_graph_node (tc=0x48ef00, node=0x6471420, nodelist=0x7ffca2938810, worklist=0x6b127f0) at src/profiler/instrument.c:830
+
+[16:11] <timotimo> i mean, a valid forwarder just means gc_mark should update the pointer to the forwarder immediately?
+
+[16:12] *** domidumont left
+[16:14] <nine> How is this supposed to work exactly? process_worklist would just update the item pointer. But with GC_DEBUG on MVM_gc_worklist_add doesn't check if there's a forwarder. It will simply complain about the item being in the past fromspace
+
+[16:15] <timotimo> how exactly did you check if the forwarder is valid?
+
+[16:15] <timotimo> because if the object is in a past fromspace, then it could be that the forwarder points at fromspace, not tospace
+
+[16:16] *** lizmat joined
+[16:17] *** scovit_ left
+[16:17] <nine> p node->alloc[i].type.header.sc_forward_u.forwarder->flags & MVM_CF_SECOND_GEN
+
+[16:17] <nine> $23 = 16
+
+[16:18] <nine> (rr) p node->alloc[i].type.header.sc_forward_u.forwarder
+
+[16:18] <nine> $24 = (MVMCollectable *) 0x2e0b4b0
+
+[16:18] <nine> (rr) p tc->nursery_fromspace
+
+[16:18] <nine> $25 = (void *) 0x7f23d6658010
+
+[16:18] <nine> (rr) p tc->nursery_tospace
+
+[16:18] <nine> $26 = (void *) 0x7f23d9178010
+
+[16:18] <nine> The forwarder's st is correct, too
+
+[16:20] <timotimo> huh
+
+[16:26] <nine> Ah, I think this is just a red herring. The assertion fails for good reason. We're marking an object that's in the memory we move stuff to. So either the pointer already got updated during this GC run or it didn't get updated during a previous one.
+
+[16:27] <nine> Could we encounter a node multiple times when traversing the call graph?!
+
+[16:28] <timotimo> that would be very strange
+
+[16:28] <timotimo> but possible of course
+
+[16:29] <nine> OTOH if the item has a valid forwarder, the address in nursery_alloc is actually no longer correct either. If the pointer was already updated during this GC run, it would point to gen2
+
+[16:29] <timotimo> just printf every node's address when going through them
+
+[16:30] <nine> And according to rr the pointer only got written once - in the initial assignment
+
+[16:32] * nine is afk for a couple hours
+
+[16:52] <Kaiepi> is jnthn around?
+
+[17:28] *** Ven`` joined
+[17:32] *** domidumont joined
+[17:45] *** zakharyas left
+[18:30] *** brrt left
+[18:44] *** domidumont left
+[18:45] *** domidumont joined
+[18:49] *** domidumont left
+[19:45] *** zakharyas joined
+[19:49] *** lizmat left
+[19:52] *** lizmat joined
+[19:59] *** lizmat left
+[20:49] *** zakharyas left
+[20:58] *** sena_kun left
+[21:22] *** squashable6 left
+[21:24] *** squashable6 joined
+[21:53] *** Kaiepi left
+[21:54] *** Kaiepi joined
+[22:30] *** anatofuz joined
+[22:31] *** Ven`` left
+[22:32] *** Ven`` joined
+[22:32] *** Ven`` left
+[22:33] *** lizmat joined
+[22:35] *** anatofuz left
+[22:36] *** lucasb left
+[22:40] *** anatofuz joined
+[22:42] *** anatofuz left
+[23:17] *** anatofuz joined
+[23:40] *** anatofuz left

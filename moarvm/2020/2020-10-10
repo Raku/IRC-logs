@@ -1,0 +1,159 @@
+[01:33] *** Kaeipi left
+[01:33] *** Kaeipi joined
+[01:47] *** leont left
+[01:50] *** Kaeipi left
+[01:50] *** Kaiepi joined
+[05:35] *** sena_kun joined
+[05:41] *** Altai-man joined
+[05:44] *** sena_kun left
+[08:15] <MasterDuke> hm. i've been experimenting with setting custom memory functions for gmp
+
+[08:16] <MasterDuke> https://gist.github.com/MasterDuke17/68ca861b7311704d1eccac23d7680713 is my current diff
+
+[08:17] <MasterDuke> they do get called (i added some fprintfs and breaks on them in gdb to confirm)
+
+[08:18] <MasterDuke> however, `say 2⁴⁵⁵³⁵³⁵³⁴⁵³⁶⁴⁵³⁵³⁴⁵` dies (backtraced added to above gist)
+
+[08:21] <MasterDuke> i haven't been able to trace through all the macros yet. i thought maybe it was because it was trying to alloca, but the documentation says that the alloca codepath uses the regular (or custom if set) memory management functions if the value is too big
+
+[08:22] <MasterDuke> i also rebuilt it with `--enable-alloca=debug`, which is supposed to use the regular mem functions in all cases, no change
+
+[08:26] <MasterDuke> anyone have an idea why the memory functions i added aren't being called when this dies? oh, and i confirmed that they are in fact being called before the pow is evaluated
+
+[08:29] <nwc10> I have read this but I have no idea. I'll have to repeat 
+
+[08:29] <nwc10> repeat [Coke]'s excellent observation "I am at least not you, but that's all I have here." in relpy to "anyone who is not me and feels competant"
+
+[08:30] <nwc10> and I have limited time sadly need to get other stuff done
+
+[08:38] <MasterDuke> no worries
+
+[08:41] <MasterDuke> hm. might it be a problem that the memory functions are beng set twice?
+
+[08:44] <MasterDuke> should `mp_set_memory_functions(&MVM_gmp_malloc, &MVM_gmp_realloc, &MVM_gmp_free);` only happen once, but `gmp_tc = tc;` happen for each thread?
+
+[08:46] <nwc10> that seems like a good guess, but that's all I can say
+
+[08:46] <MasterDuke> well, no change in behavior...
+
+[08:48] <MasterDuke> too bad, hoped that was it
+
+[08:48] <nwc10> me too - it sounded plausible
+
+[08:53] <MasterDuke> what's interesting is that if i set a breakpoint on my MVM_gmp_realloc, the backtrace shows the immediately preceding frame is in  __gmpz_realloc, realloc.c:67
+
+[08:55] <MasterDuke> oh. that line is after the error checking that aborts!
+
+[08:57] <MasterDuke> so even setting custom mem functions doesn't bypass the abort? that sucks
+
+[09:05] <MasterDuke> ok peeps, what do we want to do now? seems like we could patch gmp, but then we can't use `--has-gmp` (or just say that you may get aborts instead of exceptions if doing so?)? come up with some heuristics about values that could potentially cause the aborts and then catch them in moarvm (e.g., not allowing an exponent over X for nqp::pow_I, even if
+
+[09:05] <MasterDuke> it might be ok for some bases)?
+
+[09:05] <MasterDuke> afk for a bit
+
+[09:12] *** synopsebot joined
+[09:12] *** synopsebot left
+[09:16] *** brrt joined
+[09:42] *** sena_kun joined
+[09:43] *** Altai-man left
+[10:16] *** brrt left
+[11:12] *** patrickb joined
+[11:39] *** leont joined
+[11:59] <timotimo> m: say 4553535345364533345 / 1024 / 1024 / 1024 / 1024
+
+[11:59] <camelia> rakudo-moar 85847d2f1: OUTPUT: «4141416.27094480404139␤»
+
+[11:59] <timotimo> do i understand correctly that that pow would get us a number that's a few thousand petabyte big?
+
+[12:00] <timotimo> perhaps we can replicate the error check that gmp does and put it before our call to gmp_pow
+
+[12:01] <timotimo> and say "sorry folks, if you have a machine with many petabytes, you won't be able to use it all for big integer math"
+
+[12:07] *** patrickb left
+[12:09] *** patrickb joined
+[12:10] <timotimo> on intel chips, x86_64 physical addresses are limited to 52 bits, and virtual addresses to 48 bit, so trying to support something with an exponent that high would be futile anyway
+
+[12:11] <timotimo> and in order to do sensible math on such big numbers we'll need two times to four times more memory anyway, for intermediate results and such
+
+[12:13] *** patrickb left
+[12:53] *** vesper11 left
+[13:41] *** Altai-man joined
+[13:43] *** sena_kun left
+[15:03] *** brrt joined
+[15:48] *** brrt left
+[16:51] *** zakharyas joined
+[17:42] *** sena_kun joined
+[17:44] *** Altai-man left
+[20:14] <MasterDuke> m: say 71148989771320869 / 1024 / 1024 / 1024 / 1024
+
+[20:14] <camelia> rakudo-moar 85847d2f1: OUTPUT: «64709.62923351259542␤»
+
+[20:15] <MasterDuke> 71148989771320869 is the new_alloc parameter to realloc
+
+[20:15] <MasterDuke> but yeah, still big
+
+[20:18] <MasterDuke> but the error check gmp does is just `new_alloc > INT_MAX`. it isn't in gmp_pow, it's in realloc
+
+[20:19] <MasterDuke> so to replicate it exactly, we'd have to figure out what values of base and exponent lead to such a large allocation. and then that might be different for gmp_mul, etc
+
+[20:47] <nine> Sounds tedious and error prone... also may still be totally worth it
+
+[20:50] <nine> I guess catching the SIGABRT wouldn't work?
+
+[20:59] <MasterDuke> according to SO (https://stackoverflow.com/questions/33566228/abort-function-in-c), abort() can't be caught. the signal can, but the function detects that and tries again/overrides
+
+[20:59] <MasterDuke> (though i haven't tried yet, guess i should...)
+
+[21:01] <MasterDuke> oh, maybe it can work if we longjmp back, not return from our handler
+
+[21:09] <moon-child> timotimo: newer intel has 57-bit virt space, so it should be ... possible
+
+[21:11] <moon-child> (for some definition of possible.  You probably want a specialised library that prioritizes memory use over speed, though)
+
+[21:15] *** zakharyas left
+[21:15] *** sena_kun left
+[21:20] *** sena_kun joined
+[21:25] <MasterDuke> it also depends on the mathematical operation you're doing. e.g., there's some algorithm for expmod that can do some sort of running calculation, it doesn't require calculating the full exponentiation first. so we might be able to expmod with a larger exponent than we can pow
+
+[21:29] <timotimo> right
+
+[21:40] *** sena_kun left
+[21:44] <MasterDuke> mostly works https://gist.github.com/MasterDuke17/734c8fde3fa9f200e9a7735f495d70c7
+
+[21:45] <MasterDuke> does cause a new warning though: src/math/bigintops.c: In function ‘MVM_bigint_pow’:src/math/bigintops.c:121:16: warning: variable ‘i’ might be clobbered by ‘longjmp’ or ‘vfork’ [-Wclobbered]  121 |         mpz_t *i = tc->temp_bigints[idx];
+
+[21:50] <timotimo> cursed
+
+[21:50] *** patrickb joined
+[21:51] <timotimo> is signal handling not process wide?
+
+[21:51] <lizmat> should be, no?
+
+[21:52] <timotimo> that would be bad :)
+
+[21:55] <lizmat> not process wide you mean?
+
+[21:56] *** patrickb left
+[21:57] <timotimo> well, if one thread is doing integer math with gmp and another aborts, for example from a malloc error or whatever, then the handler for int math would run
+
+[22:00] <MasterDuke> does it help to make that jmp_buf also __thread?
+
+[22:04] <MasterDuke> also, is there a way to suppress those `gmp: overflow in mpz type` messages? catch stderr while the signal handler is active?
+
+[22:04] <timotimo> i imagine the handler would run then, and just find the jmp_buf to be nulled out?
+
+[22:04] <timotimo> i think futzing with stdout and such would be an even worse idea :) :)
+
+[22:17] <MasterDuke> i guess if you're going to catch the exception in raku-land what's a little stderr output to deal with also
+
+[22:18] <MasterDuke> hm. what happens if you `longjmp(NULL)`?
+
+[22:19] <MasterDuke> is this information useful? "If, and only if, the savesigs argument provided to sigsetjmp() is nonzero, the process's current signal mask is saved in env and will be restored if a siglongjmp() is later performed with this env."
+
+[22:40] <MasterDuke> well, i'm to bed. if anyone has suggestions for how to make this robust, let me know and i'll probably be able to do some experimenting in the next couple days
+
+[23:18] <timotimo> without actual cooperation from gmp we will also have a hard time doing cleanup for whatever gmp may have done before triggering the abort
+
+[23:19] <timotimo> since it is written so that the program just shuts down when it aborts
+

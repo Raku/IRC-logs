@@ -1,0 +1,167 @@
+[01:34] *** frost-lab joined
+[01:49] *** lucasb left
+[02:41] *** leont left
+[05:20] *** SmokeMachine left
+[05:20] *** SmokeMachine joined
+[06:17] *** Altai-man joined
+[09:10] *** sena_kun joined
+[09:12] *** Altai-man left
+[09:12] *** frost-lab left
+[09:45] <nwc10> good *, #moarvm
+
+[10:19] *** frost-lab joined
+[10:22] *** frost-lab left
+[10:34] *** frost-lab joined
+[11:42] *** leont joined
+[11:57] <nine> nwc10, timotimo: since you seem to be here. Any idea how this patch could cost us ~20 % performance in stage parse? https://gist.github.com/niner/4e9b4be7f22cc7a07323312aca046faa
+
+[11:58] <nine> In short it's just moving the cur_op += 6; before a function call for some ops. This necessitates adding some local variables for holding the GET_* data. Which I assume the compiler will optimize away immediately.
+
+[12:00] <timotimo> i wonder if this sometimes jumps us out of the range where a lexical is defined?
+
+[12:00] <nine> ?
+
+[12:01] <timotimo> frame walker and co rely on cur_op to find stuff, right?
+
+[12:04] <nine> That would be a good explanation if it weren't for the fact that MVM_frame_find_lexical_by_name doesn't use the frame walker (and is marked :noinline)
+
+[12:09] <nine> If it's the C compiler not being able to optimize this as well for some reason, other ops using the same structure might be affected too
+
+[12:16] <nwc10> nothing obvious from looking at the code. I assume that the thing to do next is to exploit your nice new fast machine, and brute force try changing each op in turn, to see which one (or ones) causes the 20%
+
+[12:17] <nwc10> and then look at the C code that changes
+
+[12:29] <MasterDuke> nine: same thing with a different compiler (e.g., clang vs gcc)?
+
+[12:30] <nine> MasterDuke: good question
+
+[12:38] *** frost-lab left
+[12:39] <jnthn> nine: You've probably broken spesh logging by changing getlex_no, meaning the optimizer has a lot less data to go on about lexical types, so can't do a bunch of optimizations.
+
+[12:39] <jnthn> nine: It logs against the bytecode position
+
+[12:39] <nine> Aaah...that must be it!
+
+[12:42] <jnthn> getstaticlex also, though that will likely have much more impact on Raku code
+
+[12:42] <jnthn> Rather than setting compilation
+
+[12:43] <nine> Incidentally, I just managed to get the first spec test clean version without those giant wrapper frames!
+
+[12:43] <jnthn> ah, nice :)
+
+[12:43] <nine> But boy, this was a lot more involved than expected.
+
+[12:43] <jnthn> I'm not entirely surprised :)
+
+[12:44] <MasterDuke> nine: and that'll primarily help parsing (once the spesh logging is fixed)?
+
+[12:44] <nine> But I think that even if it will be obsoleted by RakuAST, some parts will survive. At least a lot of lessons about places where we need to access symbols that aren't fully compiled yet
+
+[12:44] <nine> The spesh log thing is not really an issue. Everything works fine without that change.
+
+[12:45] <jnthn> You've added hooks for us to do some kind of fallback on failed lexical lookups?
+
+[12:46] <nine> I added fallback-versions of the getlex_n*, bindlex_n*, getlexouter, getlexperinvtype_o and sp_getlex_n ops, so normal code will not be affected
+
+[12:47] <nine> And _fallback versions of MVM_frame_find_lexical_by_name and MVM_frame_find_lexical_by_name_outer and MVM_frame_getdynlex
+
+[12:47] <jnthn> OK
+
+[12:47] <jnthn> Those will be useful :)
+
+[12:48] <nine> Initially I thought I could get by without new ops at all, since the fallback code will only run when we normally would throw an exception already. But the call to the HLL resolver necessitates the ops to be marked invokish and maycausedeopt, so we'd lose some optimizations in normal code
+
+[12:49] <jnthn> I guess the main remaining missing piece I'll want in RakuAST will be a way to have contexts possible to refer to even before we really compile them.
+
+[12:49] <jnthn> Well, and to create
+
+[12:49] <jnthn> So I can interpret role bodies and the closure taking in the common case
+
+[12:50] <MasterDuke> while everybody's here, does https://gist.github.com/MasterDuke17/50f78cf18ea95d5ff689345fb0c5d387 look suspicious? or is that barking up the wrong tree? (this is on the make speshcandidate a repr branch)
+
+[12:52] <nine> Oh, btw. I stash the HLL resolver as an attribute of the MVMCompUnit. That makes accessing it quite cheap and its available to the running code independently of the call stack
+
+[12:52] <jnthn> MasterDuke: Hmmm
+
+[12:52] <jnthn> 189                 MVM_ASSIGN_REF(tc, &(spesh->common.header),
+
+[12:53] <jnthn> What is the full statement?
+
+[12:54] <jnthn> I think the problem may be that when candidates weren't GC-able, the referencing GC object was the frame spesh object as a whole, but now it should probably be the candidate
+
+[12:54] <Geth> ¦ MoarVM/getlex_fallback: 12 commits pushed by (Stefan Seifert)++
+
+[12:54] <Geth> ¦ MoarVM/getlex_fallback: review: https://github.com/MoarVM/MoarVM/compare/d3a441e3be30^...bdb931cc68ca
+
+[12:56] <nine> jnthn: I pushed the 3 branches in case you're curious about which places need adaptions to running without the wrapper frames
+
+[13:02] <jnthn> nine: I'm a little surprised MVM_frame_get_lexical_resolver goes looking down the dynamic scope
+
+[13:02] <jnthn> (Well, that it needs to go scope hunting at all)
+
+[13:03] <nine> That's needed purely for looking up dynamics. I don't think it ever goes up for normal lexicals. Code started out in a somewhat desparate attempt and came in quite handy for dynamics
+
+[13:04] <nine> I'll probably split it into two versions to make that more clear
+
+[13:04] <jnthn> OK; I worry about false positives and weird issues to debug 
+
+[13:04] <jnthn> "Why did it find that resolver", etc.
+
+[13:09] *** Altai-man joined
+[13:10] <jnthn> MasterDuke: https://github.com/MoarVM/MoarVM/blob/8d7a80d55791ed851dd000e02c2939737fe0075b/src/6model/6model.c#L185 and line 189 likely want &(tc->cur_frame->spesh_cand->common.header) instead of &(spesh->common.header)
+
+[13:12] *** sena_kun left
+[13:47] <MasterDuke> jnthn: stage parse hasn't immediately died...
+
+[13:48] <MasterDuke> oh! rakudo built (and with GC_DEBUG = 1)
+
+[13:49] <MasterDuke> now will run a spectest with it set back to 0
+
+[13:53] <jnthn> yay :)
+
+[13:53] <jnthn> Guess my dropping by here today was at least somewhat useful :)
+
+[13:55] <MasterDuke> of course this was just in preparation to enable us to undo optimizations if there are too many deopts
+
+[13:55] <MasterDuke> and a spectest just passed! jnthn++
+
+[13:56] <jnthn> yay
+
+[13:57] <jnthn> MasterDuke++ 
+
+[14:00] <MasterDuke> likely gonna be afk for a while, but any high-level suggestions for what undoing should look like?
+
+[14:36] *** linkable6 left
+[14:36] *** evalable6 left
+[14:37] *** evalable6 joined
+[14:38] *** linkable6 joined
+[17:10] *** sena_kun joined
+[17:11] *** Altai-man left
+[17:45] *** lucasb joined
+[18:54] *** lizmat_ joined
+[18:58] *** lizmat left
+[19:05] *** lizmat_ left
+[19:06] *** lizmat joined
+[19:19] *** lizmat_ joined
+[19:21] *** lizmat left
+[19:32] *** lizmat_ is now known as lizmat
+
+[20:04] *** zakharyas joined
+[20:33] <MasterDuke> hm, if i'm reading the code correctly, we (currently) only count the number of times a deopt happened when profiling, and even then it's just a global count, not per-(de)opt
+
+[21:09] *** Altai-man joined
+[21:11] *** sena_kun left
+[21:35] <MasterDuke> looks like just marking the candidate as discarded isn't enough to stop it being used (and then deopted) in the future
+
+[21:45] *** zakharyas left
+[21:57] *** Altai-man left
+[23:10] *** lizmat_ joined
+[23:13] *** lizmat left
+[23:15] *** lizmat_ is now known as lizmat
+
+[23:23] <MasterDuke> calling MVM_spesh_arg_guard_discard after doesn't help either
+
+[23:29] <MasterDuke> but i guess that isn't completely unexpected, since that could have been done before MVMSpeshCandidate was made GC-able
+
+[23:47] *** Kaiepi left

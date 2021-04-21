@@ -1,0 +1,692 @@
+[03:53] *** lizmat joined
+[06:12] *** vendethiel joined
+[06:33] *** FROGGS joined
+[06:41] *** vendethiel joined
+[06:58] *** Ven joined
+[07:24] *** Ven joined
+[07:41] *** Ven joined
+[07:45] *** vendethiel joined
+[08:30] *** Ven joined
+[08:37] *** dalek joined
+[09:12] *** Ven joined
+[09:17] *** zakharyas joined
+[10:05] *** vendethiel joined
+[10:15] *** Ven joined
+[10:29] <jnthn> What on earth. A golf of the bug yesterday fails without inlining turned on at all...
+
+[10:29] <nwc10> by which you mean "still buggy behaviour, but smaller test case"
+
+[10:29] <nwc10> implying that there's a second bug here, that's unrelated to inlining?
+
+[10:30] <jnthn> Seems so
+
+[10:32] <jnthn> Yup, I've got it failing with inline and OSR disabled
+
+[10:32] <jnthn> But it's been heisen-y enough that I'm somewhat suspecting I'm going to find a memory corruption issue
+
+[10:32] <nwc10> what's the testcase?
+
+[10:33] <nwc10> ASAN barfs all over (some) naughty code
+
+[10:34] <jnthn> perl6-m --ll-exception -Ilib -e "use Test; for ^2000 { throws-like q[ sub foo(Str) { }; foo 42; ], X::TypeCheck::Argument; }"
+
+[10:34] <jnthn> oh heck
+
+[10:34] <jnthn> //optimize_exception_ops(tc, g, bb, ins);
+
+[10:34] <jnthn> Commenting those opts out makes it pass
+
+[10:38] <nwc10> ASAN didn't barf
+
+[10:38] <jnthn> And makes the failure I had in spectest go away
+
+[10:38] <jnthn> Darn
+
+[10:40] <jnthn> oh, and the non-JIT SEGV comes back when I start enabling some of the opts again
+
+[10:42] <jnthn> Well no bloody wonder...
+
+[10:42] <jnthn> MVM_ASSIGN_REF(tc, &(o->header), *((MVMObject **)(o + GET_UI16(cur_op, 2))), value);
+
+[10:42] <jnthn> Where o is an MVMObject *.
+
+[10:43] <jnthn> So of course you overwrite some bit of memory far far away.
+
+[10:43] <jnthn> :/
+
+[10:47] <nwc10> oh, random bug
+
+[10:51] <nwc10> unclear me
+
+[10:51] <nwc10> oh, bug with really random symptoms
+
+[10:51] <nwc10> and the culprit will be flogged?
+
+[10:51] <nwc10> or, more importantly - did the same mistake get made anywhere else?
+
+[10:52] <jnthn> The whole lot of work is sloppy
+
+[10:52] <nwc10> oh, sigh :-(
+
+[10:52] <jnthn> The optimization doesn't even seem to check that we *know* it's a proper Exception object
+
+[11:03] <dalek> MoarVM: 0a8cc32 | jnthn++ | src/spesh/codegen.c:
+
+[11:03] <dalek> MoarVM: Correct code-gen fixup validation.
+
+[11:03] <dalek> MoarVM:
+
+[11:03] <dalek> MoarVM: Should cover handlers added due to inlining too.
+
+[11:03] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/0a8cc327f9
+
+[11:03] <dalek> MoarVM: 4fc8c02 | jnthn++ | src/core/interp.c:
+
+[11:03] <dalek> MoarVM: Cast to (char *) before adding a number of bytes.
+
+[11:03] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/4fc8c0265b
+
+[11:03] <dalek> MoarVM: e0f52cb | jnthn++ | src/spesh/optimize.c:
+
+[11:03] <dalek> MoarVM: Disable most of the exception optimizations.
+
+[11:03] <dalek> MoarVM:
+
+[11:03] <dalek> MoarVM: This work was fucking sloppy. Not only were the changes to interp.c
+
+[11:03] <dalek> MoarVM: bogus, causing random memory overwrites if we ran code in the non-JIT
+
+[11:03] <dalek> MoarVM: case, not to mention the memory trashing because category is not a
+
+[11:03] <dalek> MoarVM: 64-bit number, but the optimizations fail to even check that we know
+
+[11:03] <dalek> MoarVM: we're really digging into something with VMException REPR before
+
+[11:03] <dalek> MoarVM: rewriting the ops into unchecked memory accesses. All of which led to
+
+[11:03] <dalek> MoarVM: SEGVs and crashes of all manner.
+
+[11:03] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/e0f52cb7b2
+
+[11:19] <jnthn> aha, and the frame I triangulated yesterday before getting tripped over by the other exception opt faults was in fact the one the JIT seems to be making a meal over
+
+[11:30] <jnthn> Hm, and it's nothing very obviously wrong.
+
+[11:31] <jnthn> brrt++ # the JIT code is good
+
+[11:44] *** Ven joined
+[11:48] <jnthn> Looks like I can fix it with a 1-line adition to the JIT.
+
+[11:48] <jnthn> Not the most optimal patch, but I suspect brrt++ might be able to suggest a better one :)
+
+[11:54] *** Ven joined
+[11:59] *** zakharyas joined
+[12:07] <dalek> MoarVM: f97fd0e | jnthn++ | src/core/exceptions.c:
+
+[12:07] <dalek> MoarVM: Scan all handlers when a frame is spesh'd.
+
+[12:07] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/f97fd0ec2c
+
+[12:07] <dalek> MoarVM: 6be8957 | jnthn++ | src/jit/graph.c:
+
+[12:07] <dalek> MoarVM: Fix JIT exception handler resolution bug.
+
+[12:07] <dalek> MoarVM:
+
+[12:07] <dalek> MoarVM: After leaving an inline, the "where are we" label could get out of
+
+[12:07] <dalek> MoarVM: sync, and so we'd fail to find a handler.
+
+[12:07] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/6be8957cdc
+
+[12:07] <dalek> MoarVM: 087314d | jnthn++ | src/spesh/inline.c:
+
+[12:07] <dalek> MoarVM: Factor out resizing of handlers table.
+
+[12:07] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/087314dfb6
+
+[12:07] <dalek> MoarVM: e7a473c | jnthn++ | src/spesh/ (2 files):
+
+[12:07] <dalek> MoarVM: Account for inliner's handlers when inlining.
+
+[12:07] <dalek> MoarVM:
+
+[12:07] <dalek> MoarVM: We do this by adding extra entries to the hnadlers table that cover an
+
+[12:07] <dalek> MoarVM: entire inlinee and go to the handler in the inliner. This means we can
+
+[12:07] <dalek> MoarVM: still find applicable handlers through a linear scan, so the handler
+
+[12:07] <dalek> MoarVM: lookup code needs no changes and need not become more complex.
+
+[12:07] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/e7a473cffe
+
+[13:21] <timotimo> oh, wow, i botched that branch quite a bit, didn't i
+
+[13:22] <timotimo> yes, i really should have asked for a more thorough review
+
+[13:26] <jnthn> I wonder if we need a MVM_SPESH_NODELAY that pulls all the thresholds really low
+
+[13:26] <timotimo> i've considered something like that, and am +1
+
+[13:26] <jnthn> So we can builds and spectest spesh changes and have them all apply
+
+[13:27] <jnthn> Without having to have things that hit the thresholds
+
+[13:27] <timotimo> yes
+
+[13:27] <timotimo> we must not change the logging thresholds, though?
+
+[13:30] <jnthn> True
+
+[13:31] <timotimo> how would i handle the "deprecation cycle" of an sp_ op rename? AFAIK the only places that mention them are inside moarvm itself, so if i rename the sp_bind_i to sp_bind_i64 consistently in moarvm, it'll all work out fine, right?
+
+[13:32] <jnthn> They are completley internal
+
+[13:32] <timotimo> excellent
+
+[13:32] <jnthn> So yeah, make everything consistent in the VM and you're good
+
+[13:32] <jnthn> Unless of course extops with spesh functions refer to them
+
+[13:33] <timotimo> since they weren't implemented at all until very recently, i don't think so
+
+[13:33] <jnthn> *nod*
+
+[13:33] <timotimo> and i'll put in sp_bind_i* candidates for different integer sizes
+
+[13:34] <timotimo> but i prefer the naming with numbers over the naming for "quadword", "doubleword", "word"
+
+[13:35] * FROGGS .oO( Microsoft 16 )
+
+[13:36] *** JimmyZ_ joined
+[13:39] <timotimo> at some point i really have to start grokking MVM_ASSIGN_REF instead of copy-pasting it every time i need it ...
+
+[13:40] <jnthn> Yes, we use the numbers consistently elsewhere
+
+[13:44] <dalek> MoarVM: 47667f8 | timotimo++ | / (8 files):
+
+[13:44] <dalek> MoarVM: introduce sp_bind_i(64|32|16|8) to interp.c
+
+[13:44] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/47667f8435
+
+[13:44] <dalek> MoarVM: 4f5d0bb | timotimo++ | src/core/interp.c:
+
+[13:44] <dalek> MoarVM: fix copy-pasto in sp_bind_n
+
+[13:44] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/4f5d0bbbd3
+
+[13:44] <timotimo> i suspect this'll do it
+
+[13:46] *** Ven joined
+[13:58] * timotimo added repr id checks into the exception optimizations
+
+[14:06] *** Ven joined
+[14:13] <timotimo> i may implement the MVM_SPESH_NODELAY thing right now
+
+[14:13] <jnthn> +1
+
+[14:14] <nwc10> yes, please don't delay
+
+[14:14] <jnthn> Meanwhile I found a code-gen bug for given/when/default that is the source of some of our thread mess-ups
+
+[14:14] <timotimo> oh, huh
+
+[14:14] <timotimo> was there a simple test case that showed the problems with the exception optimizations?
+
+[14:15] <timotimo> otherwise i'll put in NODELAY and just spec test
+
+[14:15] <jnthn> timotimo: S32-exceptions/misc.t did
+
+[14:15] <jnthn> And I extracted one of the failing tests and just ran it in a loop
+
+[14:16] <jnthn> Remember to run with JIT off also
+
+[14:17] <timotimo> i haven't put in jitting for the sp_bind_i{ * < 64 } and sp_get_i{* < 64 }
+
+[14:17] <timotimo> so these frames wouldn't get jitted yet
+
+[14:19] <timotimo> it's probably a good idea to cache the result of MVM_SPESH_NODELAY somewhere
+
+[14:19] <timotimo> i'm leaning towards hanging it off the instance
+
+[14:20] <jnthn> *nod*
+
+[14:20] <timotimo> it has the spesh log FILE* already, so it's almost topically close by
+
+[14:20] <jnthn> And then check it in the function that computes the thresholds
+
+[14:21] <timotimo> yup
+
+[14:21] <timotimo> already have that up in a window :)
+
+[14:21] <timotimo> there's also the osr/inline/jit on/off switches
+
+[14:23] *** vendethiel joined
+[14:30] <timotimo> NODELAY makes segfaults appear everywhere :o
+
+[14:32] <jnthn> o.O
+
+[14:32] <timotimo> well, not *that* bad
+
+[14:32] <jnthn> Then I guess we've some spesh bugs to fix.
+
+[14:32] <timotimo> gimme a minute
+
+[14:33] <timotimo> Program received signal SIGSEGV, Segmentation fault.
+
+[14:33] <timotimo> MVM_sc_get_object (tc=0x603730, sc=0x0, idx=0) at src/6model/sc.c:160
+
+[14:33] <timotimo> 160     MVMObject **roots = sc->body->root_objects;
+
+[14:33] <timotimo> i wonder how this happens
+
+[14:35] <timotimo> at <unknown>:1  (././CORE.setting.moarvm:EXCEPTION:4294967295)
+
+[14:35] <timotimo> from <unknown>:1  (././CORE.setting.moarvm::20)
+
+[14:35] <timotimo> from src/gen/m-CORE.setting:14831  (././CORE.setting.moarvm:throw:0)
+
+[14:35] <timotimo> could be my mistake in this case :)
+
+[14:36] <jnthn> yeah, I'd check what happens with NODELAY without your patches
+
+[14:36] <timotimo> just about to
+
+[14:38] <timotimo> of course that fixes it :)
+
+[14:48] *** vendethiel joined
+[14:53] *** mtj_ joined
+[14:57] <jnthn> m: (given 42 { when 42 { say state $a++ } }) xx 10
+
+[14:57] <camelia> rakudo-moar 2aad0b: OUTPUT«0␤0␤0␤0␤0␤0␤0␤0␤0␤0␤»
+
+[14:57] <dalek> MoarVM: 52550f8 | timotimo++ | src/spesh/optimize.c:
+
+[14:57] <dalek> MoarVM: properly check repr id in exception optimizations
+
+[14:57] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/52550f8572
+
+[14:57] <dalek> MoarVM: 6707601 | timotimo++ | / (8 files):
+
+[14:57] <dalek> MoarVM: introduce sp_get_i(64|32|16|8)
+
+[14:57] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/6707601f60
+
+[14:57] <dalek> MoarVM: 282d7fa | timotimo++ | src/spesh/optimize.c:
+
+[14:57] <dalek> MoarVM: optimize_exception_ops is fragile. comment it out
+
+[14:57] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/282d7fa925
+
+[14:57] <dalek> MoarVM: bea5d3e | timotimo++ | src/spesh/optimize.c:
+
+[14:57] <dalek> MoarVM: ... but in theory this is how we'd spesh (get|bind)excategory
+
+[14:57] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/bea5d3e992
+
+[14:58] <timotimo> with NODELAY, t/spec/S03-metaops/hyper.rakudo.moar gets This type does not support associative operations
+
+[14:58] <timotimo> at src/Perl6/Grammar.nqp:3658  (blib/Perl6/Grammar.moarvm:can_meta:0)
+
+[14:58] <timotimo> from src/Perl6/Grammar.nqp:3701  (blib/Perl6/Grammar.moarvm:infix_circumfix_meta_operator:sym<« »>:0)
+
+[14:59] <jnthn> OK, that's probably aspesh bug
+
+[14:59] <jnthn> m: (given 42 { say state $a++ }) xx 10
+
+[14:59] <camelia> rakudo-moar 2aad0b: OUTPUT«0␤1␤2␤3␤4␤5␤6␤7␤8␤9␤»
+
+[14:59] <timotimo> yes, we do have some bugs left to fix
+
+[14:59] <timotimo> env MVM_SPESH_NODELAY=1 perl6 t/spec/S09-typed-arrays/native-num.rakudo.moar
+
+[14:59] <timotimo> MVMArray: bindpos expected num register
+
+[14:59] <timotimo> in block <unit> at t/spec/S09-typed-arrays/native-num.rakudo.moar:71
+
+[15:00] <jnthn> m: (if 42 { say state $a++ }) xx 10
+
+[15:00] <camelia> rakudo-moar 2aad0b: OUTPUT«0␤0␤0␤0␤0␤0␤0␤0␤0␤0␤»
+
+[15:00] <jnthn> m: (say state $a++) xx 10
+
+[15:00] <camelia> rakudo-moar 2aad0b: OUTPUT«0␤1␤2␤3␤4␤5␤6␤7␤8␤9␤»
+
+[15:03] <JimmyZ_> good catch...
+
+[15:04] <jnthn> I'm not even sure what the right answers are :P
+
+[15:04] <jnthn> But something is weird
+
+[15:09] <timotimo> is setting the threshold to "5" when NODELAY is set a sensible thing? or should i just set it to 0 or 1?
+
+[15:11] <jnthn> May as well go with 1
+
+[15:11] <timotimo> got it
+
+[15:12] *** lizmat joined
+[15:12] <dalek> MoarVM: 181e25b | timotimo++ | src/spesh/threshold.c:
+
+[15:12] <dalek> MoarVM: make NODELAY maximum aggressive.
+
+[15:12] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/181e25b54b
+
+[15:15] <timotimo> there's even a test in "make test" of rakudo that blows up
+
+[15:15] <timotimo> number 99
+
+[15:17] <timotimo> oooh
+
+[15:17] <timotimo> fish: Job 1, “env MVM_SPESH_NODELAY=1 nqp-m t/moar/01-continuations.t” terminated by signal SIGSEGV (Address boundary error)
+
+[15:17] *** oetiker_ joined
+[15:18] *** oetiker joined
+[15:18] <timotimo> "Unimplemented handler action"
+
+[15:18] <timotimo> now i have the segfault in gdb
+
+[15:19] <jnthn> Is that with or without your patches?
+
+[15:19] <jnthn> Uh, your exception ones I mean
+
+[15:19] <timotimo> my patches now throw out the exception optimizations (except turning newexception into fastcreate)
+
+[15:19] <timotimo> all of those are pushed, too
+
+[15:19] <jnthn> OK. Need a break; bbiab
+
+[15:19] <timotimo> the stack looks completely blown up
+
+[15:20] <timotimo> i can imagine :S
+
+[15:20] *** lizmat joined
+[15:21] <timotimo> without jit, the explosion is actually debuggable
+
+[15:23] <timotimo> the argument to decont seems to point at a bogus memory address: https://gist.github.com/timo/c8f851719105916f70d7
+
+[15:28] <timotimo> turning inlining off gives us "Unimplemented handler action" every time instead of segfaulting most of the time and sometimes running to completion
+
+[15:37] <timotimo> t/01-sanity/99-test-basic.t segfaults because it tries to call nqp::graphs on a string register that's null'd
+
+[15:38] <timotimo> at <unknown>:1  (/home/timo/perl6/install/share/perl6/runtime/./CORE.setting.moarvm:ends-with:4294967295)
+
+[15:38] <timotimo> from lib/Test.pm:508  (/home/timo/perl6/install/share/perl6/lib/Test.pm.moarvm::42)
+
+[15:38] <timotimo> from lib/Test.pm:518  (/home/timo/perl6/install/share/perl6/lib/Test.pm.moarvm:proclaim:424)
+
+[15:38] <timotimo> from lib/Test.pm:395  (/home/timo/perl6/install/share/perl6/lib/Test.pm.moarvm:eval-lives-ok:74)
+
+[15:46] <timotimo> the spesh log for that test file is 111 megabytes big with NODELAY
+
+[15:46] <timotimo> without NODELAY set,  it's only 18 megabytes %)
+
+[15:54] <timotimo> the final spesh result of the ends-with sub is SO bad
+
+[15:55] <timotimo> bind "" to these lexicals, then bind the argument to the lexicals, get the value of the lexical ...
+
+[15:55] <timotimo> and then somehow the value ends up being 0x0 ?!?
+
+[16:07] *** vendethiel joined
+[16:20] <nwc10> timotimo++
+
+[16:20] <nwc10> ASAN NQP barfage
+
+[16:20] <nwc10> http://paste.scsys.co.uk/487594
+
+[16:33] <nwc10> spectest seems to be barfing, but the output is swallowed by the harness
+
+[16:36] <timotimo> oh, huh
+
+[16:36] <timotimo> that's certainly strange
+
+[16:37] <timotimo> thanks, i'll investigate further
+
+[16:38] <timotimo> that is with NODELAY?
+
+[16:43] <arnsholt> jnthn: Would you object to a patch letting the HashAttrStore REPR understand part of the compose protocol, namely box targets and positional/associative delegation?
+
+[16:43] <arnsholt> Optionally, of course
+
+[16:43] <timotimo> so we're return_o-ing into a frame that doesn't point to the right address any more?
+
+[16:46] <JimmyZ_> or gc moves off by one?
+
+[16:46] <timotimo> ?
+
+[16:46] <timotimo> that would be very weird :D
+
+[16:47] <timotimo> ah, the free happens practically immediately before the return is done
+
+[16:48] <timotimo> MVM_interp_run at :293 causes the candidate_specialize, that frees, then MVM_interp_run:295 stumbles over it
+
+[16:48] <timotimo> (hopefully that's correct?)
+
+[16:50] <timotimo> i don't really know much about the lifecycle of a spesh candidate
+
+[16:55] <nwc10> timotimo: yes, and 4 more local patches, including disabling the FSA
+
+[16:55] <timotimo> mhm
+
+[16:56] <nwc10> I'm going to try again wiht just
+
+[16:56] <nwc10> just this one: http://paste.scsys.co.uk/487597
+
+[16:58] *** vendethiel joined
+[17:02] <timotimo> with just a small #ifndef, we could make MVM_FSA_BINS and the other debug things be passed via CFLAGS= for Configure.pl
+
+[17:02] <nwc10> if that's clean and easy and non-invasive, that seems like a good thing
+
+[17:06] <timotimo> it'd look like #ifndef MVM_FSA_BINS #define MVM_FSA_BINS 64 #endif
+
+[17:31] <nwc10> lots of spectest fail. No easy way to summarise this
+
+[17:31] <nwc10> not sure that it's useful to try. Other than to report "this approach seems to be exposing a lot of bugs"
+
+[17:32] <nwc10> because, I suspect the right thing to do is for whoever-is-going-to-investigate-them to do is to
+
+[17:32] <nwc10> 1) pick off one
+
+[17:32] <nwc10> 2) fix it
+
+[17:32] <nwc10> 3) retest
+
+[17:32] <nwc10> and see how many remaining failing tests there are
+
+[17:32] *** JimmyZ_ joined
+[17:32] <nwc10> and likely the best one to start with is in the NQP testsuite
+
+[17:48] *** FROGGS joined
+[17:50] <timotimo> it could very well be that the code has an assumption inside it that gets blown up by immediately speshing a frame that we've necountered for the very first time?
+
+[17:51] <timotimo> though there's the logging in between
+
+[17:56] <timotimo> nwc10: can you try again with the latest commit to MoarVM (that touches threshold.c) reverted?
+
+[17:58] <nwc10> revert 181e25b54bf043715ca207267792d2ae5d3aa126
+
+[17:59] <nwc10> ...
+
+[18:07] <nwc10> t/moar/01-continuations.t still bargs
+
+[18:14] *** mtj_ joined
+[18:29] *** Peter_R joined
+[18:36] <jnthn> arnsholt: I think such a patch would be fine
+
+[18:37] <jnthn> arnsholt: Just be aware that REPR functions can never lead to running user-level code
+
+[19:18] *** brrt joined
+[19:20] <brrt> \o
+
+[19:20] <brrt> mea culpa for merging the jit-throw-ops branch before it was ready
+
+[19:21] <brrt> i clearly should've reviewed that better
+
+[19:23] <brrt> also, gee, spesh is hard
+
+[19:24] <jnthn> Optimizaiton in general is. :-)
+
+[19:24] <jnthn> Especially for langauges that need "sufficiently smart compiler"... :)
+
+[19:24] <brrt> waitaminute
+
+[19:26] <brrt> call me overeager to correct my earlier dumbness, but why do sp_get_* look like *(type*)((char*)&GET_REG(cur_op, 2) + GET_U16(cur_op, 4))
+
+[19:27] <brrt> that reads some bytes from the address of GET_REG(cur_op, 2)
+
+[19:27] <brrt> not from the pointer in GET_REG(cur_op,2)
+
+[19:27] <brrt> or
+
+[19:27] <brrt> why is that & there
+
+[19:27] *** lizmat joined
+[19:28] <jnthn> brrt: That looks...odd. Especially as it probably wants to (char *) an access to a .o
+
+[19:30] <brrt> i think i'm find with casting to (char*) to get the address. but not with getting the address relative to the register
+
+[19:30] <jnthn> Right, the register should contain an address
+
+[19:30] <jnthn> Maybe that's why stuff was still busted
+
+[19:31] <brrt> let's change it
+
+[19:36] <dalek> MoarVM: 94fdbca | brrt++ | src/core/interp.c:
+
+[19:36] <dalek> MoarVM: sp_get_* must take address relative to object
+
+[19:36] <dalek> MoarVM:
+
+[19:36] <dalek> MoarVM: rather than relative to register
+
+[19:36] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/94fdbca3b4
+
+[19:39] <brrt> ok, i'll be off now
+
+[19:39] <jnthn> o/
+
+[19:39] <brrt> see you :-)
+
+[19:40] *** travis-ci joined
+[19:40] <travis-ci> MoarVM build failed. Bart Wiegmans 'sp_get_* must take address relative to object
+
+[19:40] <travis-ci> http://travis-ci.org/MoarVM/MoarVM/builds/66104438 https://github.com/MoarVM/MoarVM/compare/181e25b54bf0...94fdbca3b44a
+
+[19:40] *** travis-ci left
+[19:43] <jnthn> https://rt.perl.org/Ticket/Update.html?id=125331 is a bizzare one; turns out it gives a differrent error while we're recording a spesh log, and then goes back to the correct error afterwards o.O
+
+[19:45] <nwc10> oh gnoes. it's now sufficiently un-C that even gcc doesn't like it.
+
+[19:45] <jnthn> uh yes, that probably wanted a .o on the end
+
+[19:46] <nwc10> a language not entirely unlike C
+
+[19:46] <jnthn> Which is accepted by...some compiler :)
+
+[19:47] <nwc10> nutrimatiC
+
+[19:53] <jnthn> OK, this bug is nuts. wtf.
+
+[19:53] <nwc10> go eat?
+
+[19:54] <jnthn> :P
+
+[19:55] * jnthn already cooked/ate a huge plate of pasta with saussage earlier :)
+
+[19:56] <nwc10> beer?
+
+[19:56] <nwc10> sleep?
+
+[19:59] <jnthn> ah...I bet it's that we get bytecode annotations messed up in the backtrac
+
+[19:59] <jnthn> *backtrace
+
+[20:08] <jnthn> Well, that's a tricky enough problem that I ain't going to come up with a good solution tonight. At least I understand I'd better solve it )
+
+[20:08] <jnthn> *:)
+
+[20:08] <nwc10> are you able to fix brrt's barf?
+
+[20:09] <jnthn> .oO( brrf )
+
+[20:09] <jnthn> yes, looking now
+
+[20:09] <nwc10> cool, thanks
+
+[20:09] <jnthn> Geez, the thing clang will accept as C :P
+
+[20:10] <nwc10> it took the "sloppy is better" approach of gcc, and doubled up?
+
+[20:10] <jnthn> MSVC rules with an iron C89
+
+[20:11] <nwc10> big iron vendor Unix C compilers are usually pretty good at catching sloppy stuff
+
+[20:11] <nwc10> or "unforgiving"
+
+[20:13] <dalek> MoarVM: 81cfb4d | jnthn++ | src/core/interp.c:
+
+[20:13] <dalek> MoarVM: Fix the build for grown-up C compilers.
+
+[20:13] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/81cfb4deaa
+
+[20:13] <jnthn> "You clang kids can get off my lawn!" :P
+
+[20:13] <nwc10> pass
+
+[20:13] <jnthn> yay
+
+[20:13] <nwc10> how long will travis take
+
+[20:14] <jnthn> O(minutes) I guess
+
+[20:23] *** travis-ci joined
+[20:23] <travis-ci> MoarVM build passed. Jonathan Worthington 'Fix the build for grown-up C compilers.'
+
+[20:23] <travis-ci> http://travis-ci.org/MoarVM/MoarVM/builds/66110162 https://github.com/MoarVM/MoarVM/compare/94fdbca3b44a...81cfb4deaadc
+
+[20:23] *** travis-ci left
+[20:29] <nwc10> O(yes)
+
+[20:39] <arnsholt> jnthn: Yeah, running user-level code wasn't my intention
+
+[20:39] <arnsholt> Basically something like the P6opaque REPR, where an attribute is designated to handle something
+
+[20:39] <timotimo> wow, i made more mistakes than i'd've thought
+
+[20:40] <timotimo> (sp_get_*)
+
+[20:40] <arnsholt> Which would make my life a little easier when implementing lists and hashes for Snake: the objects can be HashAttrStore (although I may move some things to P6opaque at some point), but still be able to handle nqp::atpos and friends
+
+[20:46] <timotimo> fish: Job 1, “env MVM_SPESH_NODELAY=1 ./nqp-m t/moar/01-continuations.t” terminated by signal SIGILL (Illegal instruction)
+
+[20:46] <timotimo> wow.
+
+[20:47] <timotimo> fish: Job 1, “env MVM_SPESH_NODELAY=1 ./nqp-m t/moar/01-continuations.t” terminated by signal SIGBUS (Misaligned address error)
+
+[20:47] <timotimo> all the cool errors
+
+[20:47] <timotimo> well, it comes from jumping into free'd memory with the instruction pointer
+
+[20:49] <timotimo> just by increasing the threshold to 2 instead of 1, we get "unimplemented handler action" nistead of brokenness
+
+[20:49] <timotimo> so maybe that's the proper fix here?
+
+[21:09] <timotimo> hum. it doesn't fix the seg fault in NativeCall.pm
+
+[21:10] <jnthn> timotimo: I doubt that's a proper fix, I suspect it just changes the failure mode
+
+[21:12] <timotimo> mhm
+
+[21:12] <jnthn> 'night o/
+
+[21:13] <timotimo> in NativeCall's compilation it tries to fetch from a container spec whose fetch is fetch = 0x48002800000001,
+
+[21:13] <timotimo> kind of weird to have a 1 at the end there
+
+[21:13] <timotimo> gnite jnthn
+
+[21:16] <timotimo> maybe we're doing decont on something that can decont_i or so?
+
+[21:35] *** vendethiel- joined
+[21:45] *** lizmat joined
+[22:37] *** vendethiel joined

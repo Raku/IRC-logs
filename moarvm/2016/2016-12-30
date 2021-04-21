@@ -1,0 +1,870 @@
+[00:02] <jnthn> I ended up reviewing it anyway
+
+[00:02] <jnthn> Left a couple of small comments but don't see anything serious.
+
+[00:04] <samcv> ok cool :)
+
+[00:04] <samcv> thanks!
+
+[00:06] <samcv> i find my spelling decreases the deeper i get into unicode land
+
+[00:13] <samcv> jnthn, does it load the hash table of unicode properties everytime moar starts, even before them being used?
+
+[00:14] <jnthn> It builds the hashes the first time we need them
+
+[00:14] <samcv> kk
+
+[00:14] <jnthn> But I think even the most basic Rakudo invocation ends up using them somewhere
+
+[00:14] <samcv> 1st time property called that we don't have a case for?
+
+[00:15] <jnthn> iirc there's just a static variable that is NULL
+
+[00:15] <jnthn> I don't actually like this much because we can't clean them up
+
+[00:15] <samcv> i know we short circuit some cases
+
+[00:15] <jnthn> Not to mention concurrency control
+
+[00:15] <jnthn> I'd rather they were hung off MVMInstance
+
+[00:15] <samcv> what would be the best way?
+
+[00:15] <samcv> instead of its ops thingy?
+
+[00:16] <samcv> oh yeah i saw that comment there
+
+[00:16] <jnthn> To be clear - the data ucd2c spits out being static is fine
+
+[00:16] <jnthn> But we iterate it at some point to make hashes
+
+[00:16] <jnthn> And then we never free them on a --full-cleanup, and I don't think we acquire any kind of lock around their setup
+
+[00:16] <samcv> we only iterate over the keys and key values hashes right?
+
+[00:16] <samcv> ah
+
+[00:16] <jnthn> Those are the only two I can think of
+
+[00:17] <samcv> i mean would not having a hash be better?
+
+[00:17] <samcv> i mean they are only used to look up propcodes
+
+[00:18] <jnthn> That can happen relatively often though
+
+[00:18] <jnthn> I think in some of the code-gen the regex engine does it relies on that being cheap
+
+[00:18] <jnthn> otoh we also constant fold them in spesh, iirc
+
+[00:18] <samcv> well rakudo at least caches property values
+
+[00:18] <jnthn> In uniprop?
+
+[00:18] <samcv> in most places
+
+[00:18] <samcv> there and some other spots, not sure about nqp
+
+[00:19] * samcv wonders if we maybe should in nqp
+
+[00:19] <jnthn> Yeah, I thinking about the code we generate for /<:Foo>/ and similar.
+
+[00:19] <samcv> nqp has state right?
+
+[00:19] <jnthn> state?
+
+[00:19] <samcv> state $var;
+
+[00:19] <jnthn> No
+
+[00:19] <samcv> vs my
+
+[00:19] <samcv> how to retain state? or is it not possible
+
+[00:19] <jnthn> Also, state doesn't enforce any kind of locking scheme also.
+
+[00:19] <samcv> ah
+
+[00:19] <jnthn> Though that only matters in some cases
+
+[00:20] <samcv> what would be better to use?
+
+[00:20] <jnthn> Well, the classic state emulation trick is just a lexical in the outer scope
+
+[00:20] <samcv> (in either nqp or rakudo)
+
+[00:20] <jnthn> The hashes themselves are fine by me, though
+
+[00:20] <samcv> is it faster to access it from nqp or rakudo or query moarvm each time for the propcode?
+
+[00:20] <samcv> i guess i could bench it
+
+[00:20] <jnthn> Yeah
+
+[00:21] <jnthn> I mean, we'd only need a lock acquisition if the thing isn't already set up
+
+[00:21] <jnthn> Provided we're careful
+
+[00:21] <jnthn> It's not that much work to fix the lookup hash init/teardown up to be robust, so that's the path of least resistance at least.
+
+[00:22] <jnthn> (Also note this has never actually caused a demonstrable problem for somebody.)
+
+[00:22] <samcv> very true
+
+[00:22] <jnthn> (The worst it does is a bit of clutter in valgrind leak check output.)
+
+[00:23] <jnthn> I do wonder a tad why even a simple perl6 -e '' needs the prop hahses built
+
+[00:23] <samcv> well Rakudo::Internals.PROPCODE is 8.8x slower
+
+[00:23] <jnthn> If you don't have the hash?
+
+[00:23] <samcv> testing it 10000000 times
+
+[00:23] <samcv> no i mean nqp vs rakudo op
+
+[00:23] <samcv> both run from rakudo
+
+[00:24] <jnthn> Ah
+
+[00:24] <samcv> that was for misses. guessing it will be similar for non-miss
+
+[00:24] <samcv> i mean misses i would think would have a bigger improment but
+
+[00:24] <jnthn> *nod*
+
+[00:25] <jnthn> OK, sleep time for me...
+
+[00:25] <samcv> night !
+
+[00:25] <jnthn> 'night o/
+
+[00:25] <notviki> jnthn: seems Actions uses nqp::unipropcode in mainline to cashe it for parsing franctional nbumber: https://github.com/rakudo/rakudo/blob/nom/src/Perl6/Actions.nqp#L7230
+
+[00:27] <samcv> notviki, that can be optimized for sure. unless unboxing it is super slow
+
+[00:27] <samcv> or whatever
+
+[00:27] <samcv> er wait
+
+[00:27] <samcv> no that just caches propcodes not properties
+
+[00:28] <samcv> also  my int $nu := +nqp::getuniprop_str($code, $nuprop);
+
+[00:29] <samcv> why do we call uniprop_str
+
+[00:29] <samcv> m: say '1.uniprop('Numeric_Value_Numerator')
+
+[00:29] <camelia> rakudo-moar 9fc616: OUTPUT«===SORRY!=== Error while compiling <tmp>␤Two terms in a row␤at <tmp>:1␤------> say '1.uniprop('⏏Numeric_Value_Numerator')␤    expecting any of:␤        infix␤        infix stopper␤        postfix␤        statement end␤     …»
+
+[00:29] <samcv> m: say '1'.uniprop('Numeric_Value_Numerator')
+
+[00:29] <camelia> rakudo-moar 9fc616: OUTPUT«1␤»
+
+[00:29] <samcv> m: say '1'.uniprop-int('Numeric_Value_Numerator')
+
+[00:29] <camelia> rakudo-moar 9fc616: OUTPUT«3␤»
+
+[00:29] <samcv> what
+
+[00:29] <samcv> oh it's an enum... well
+
+[00:29] <samcv> guess what
+
+[00:30] <samcv> i added integer properties!! :)
+
+[00:30] <samcv> so that can be optimized
+
+[00:34] <samcv> notviki, actually it's pretty ironic
+
+[00:35] <samcv> we are looking up the numerical value of a codepoint. and to look up its numerical value we have to get a string back
+
+[00:35] <samcv> which we then have to find its numerical value
+
+[00:35] <samcv> to get the final one
+
+[00:37] <samcv> hmm on second thought we will have to store a lot more bits if we do it as integer. should have an enum of ints instead of an enum of strings
+
+[00:37] <samcv> ack
+
+[00:41] <samcv> at least will be easier since I already have an int type
+
+[02:20] <TimToady> for the record, I'm fine with changing cmp to some kind of standard collation semantics if the overhead is only 1%
+
+[02:21] <samcv> yeah
+
+[02:21] <samcv> i think leg we should keep the same
+
+[02:21] <samcv> but cmp mostly just 'does what i mean' in my opinion
+
+[02:21] <TimToady> well, arguably, leg is more closely related to strings than cmp is
+
+[02:21] <samcv> exactly
+
+[02:22] <samcv> less equal greater sounds more like numerical codepoint less equal greater etc
+
+[02:22] <samcv> cmp just seems like compare
+
+[02:22] <TimToady> well, it can be argued the other way 'round too
+
+[02:22] <samcv> i suppose so
+
+[02:22] <TimToady> cmp is more generic, leg is Str-specific
+
+[02:23] <TimToady> in fact, we've gone around before on the exact semantics of cmp, and realized there's no one solution that preserves every expected consistency
+
+[02:23] <samcv> yeah
+
+[02:24] <TimToady> so I'd be more interested in making leg purely unicodical, whilc cmp just needs some kind of consistent ordering as a guarantee, so sort never fails
+
+[02:24] <TimToady> just speaking off the cuff...
+
+[02:24] <samcv> sort never fails for this new stuff either
+
+[02:25] <samcv> unless the two graphemes are equal it won't return equal
+
+[02:25] <TimToady> if the Str vs Str subset of cmp happens to match leg, that's a plus
+
+[02:25] <samcv> cmp doesn't call leg though. but they may have both the same nqp op i don't remember.
+
+[02:26] <TimToady> well, leg is coerceive, so they could only share some of the impl
+
+[02:26] <TimToady> *cive
+
+[02:27] <samcv> when do you think cmp should compare two strings by human sorting order versus by codepoint? also i have to add
+
+[02:27] <samcv> comparing two strings, when they have synthetic codepoints is not going to work with the old cmp/leg
+
+[02:27] <samcv> it won't collate properly
+
+[02:27] <TimToady> I've sort of been paying half an ear to all this while doing family stuff, but by and large I do like what I'm seeing scroll by
+
+[02:28] <samcv> cool
+
+[02:28] <TimToady> but natural sorting is not going to be consistent, any way you implement cmp
+
+[02:28] <samcv> what do you mean by not consistent
+
+[02:28] <samcv> consistent to what?
+
+[02:29] <TimToady> unicode collation is a good default for when you know two things are strings, but there are many conflicting ideas about a decent generic comparison
+
+[02:29] <samcv> oh yeah i only mean when they _are_ both strings
+
+[02:29] <samcv> if they aren't we shouldn't sort that way even if we *could*
+
+[02:30] <TimToady> but there's a certain degree of slop; you'd like things that are vaguely numeric to sort primarily as Real, while things that are vaguely stringy to sort more like leg
+
+[02:30] <TimToady> but how much slop you allow there is negotiable
+
+[02:30] <samcv> but when you want to compare two strings, usually you either want to know if they're equal or not, or which is greater or less than the other, and i think the user should be able to ignore that codepoints exist most of the time
+
+[02:31] <TimToady> so the approaches that say first sort on typename, then withing the type, are a bit too rigid for what people expect
+
+[02:31] <samcv> if there's some like new-unicode standard with totally different codepoints i'd like cmp to still sort the same
+
+[02:31] <samcv> than being totally random (at least for strings)
+
+[02:32] <TimToady> to the extent that we can lump all stringy things together and treat them consistently, AS IF they had been tranformed to NFG or NFD, I'm fine with having kind of a three part cmp
+
+[02:32] <TimToady> numeric things, stringy things, and things that fall into neigher category
+
+[02:33] <samcv> well i just mean plain Str objects
+
+[02:33] <samcv> the unicode collation refers to NFC not NFD luckily or it would suck to do
+
+[02:33] <TimToady> which is another way of saying, first things that sort under <=>, then things that sort under leg, then other stuff
+
+[02:34] <TimToady> well, most of NFG is just NFC, till we hit synthetics, so that's good
+
+[02:35] <samcv> if it's an NFD to NFD comparison i think that is a case where the programmer IS caring about actual codepoints
+
+[02:35] * TimToady never really got much into the collation end of things except to make sure we designed so we could do what they want somehow eventually :)
+
+[02:35] <samcv> heh
+
+[02:36] * TimToady appreciates you're digging into it, for that reason
+
+[02:36] <samcv> glad to be here :)
+
+[02:37] <TimToady> my fallback position was that we might need to have a different operator for official collation, but if we can sneak it into leg with relatively little pain, I'm all for keeping things simpler
+
+[02:38] <samcv> TimToady, passes all the spectests on 6.c-errata
+
+[02:38] <samcv> and the only master ones it fails, are tests which uh
+
+[02:38] <TimToady> and we do have ways of saying: $a leg $b :foo($bar) to sneak other parameters into the comparison at need
+
+[02:38] <samcv> test stringified versions of unsorted hashes and things…
+
+[02:38] <samcv> which made me a little sad reading the tests, but oh well
+
+[02:39] <TimToady> though I suspect that typical users of non-typical legs will simply define their own operator
+
+[02:39] <samcv> you saw the moarvm pull description? i go into pretty good detail about the mvmop
+
+[02:39] <samcv> though theer's one thing i forgot about
+
+[02:39] <TimToady> haven't actually read it, just seen the discussion go by, but if jnthn++ is happy with it, so am I :)
+
+[02:40] <samcv> tiebreakers. so we have a bitshift where 1 is test primary level (alphabetic/symbol sort), 2 is diacritic type things and 3 is case and 4 is basically implementation defined
+
+[02:40] <samcv> but if the person doesn't want us to tiebreak in case unicode defines collation for those characters, there should be a way
+
+[02:41] <samcv> could just make it 8 though. that's not too hard i guess
+
+[02:41] <samcv> since it _is_ tetriary. so. i guess i'm fine.
+
+[02:41] <TimToady> my &infix:<myleg> = &infix:<leg>.assuming(:foo($bar)) should handle most of this
+
+[02:41] <samcv> i think i maybe thought of this yesterday but i've been awake a while
+
+[02:42] <TimToady> so we should just pick a reasonable default
+
+[02:46] <samcv> https://github.com/MoarVM/MoarVM/pull/474 you might find this enlightening
+
+[02:46] <samcv> i pretty well summarize most all the things
+
+[02:46] <samcv> and where it could go in the future. so i am hoping that this op will be future portable. and eventually we can implement language specific sorting (someday…)
+
+[02:46] <samcv> but yeah please read that, and i think you will understand collation better
+
+[02:46] <TimToady> hmm, I wonder if it should be called 'unileg' instead, since it's string specific
+
+[02:46] <TimToady> and calling it 'cmp' kinda fights our generic ideas about cmp
+
+[02:46] <TimToady> I'll try and read it after dinner if I get a chance, but we're visiting family currently, for some reason... :)
+
+[02:46] <samcv> ok :)
+
+[02:48] *** ilbot3 joined
+[02:54] <samcv> TimToady, it should be noted that on the jvm, their string compare does primary and tertiary levels at least
+
+[02:55] <samcv> so cmp already behaved differently on the two backends
+
+[02:55] <samcv> their string compare function is literally Compare, and Compare is used for many different types of objects
+
+[03:02] <samcv> well it seems to actually on jvm perform differently if it is a string versus like a character. which is pretty odd
+
+[03:08] <samcv> java actually says they sort 'lexically' and are super vague about it. probably for the reason that they aren't guaranteeing it won't change by leaving it intentionally vague
+
+[05:09] *** pyrimidi_ joined
+[07:33] *** pyrimidine joined
+[09:04] *** domidumont joined
+[09:06] *** FROGGS joined
+[09:11] *** domidumont joined
+[10:20] <samcv> .tell jnthn have a question about synthetic codepoints. How are they generated, deterministically? we will need to have synthetic graphemes for things like Emoji and such, can be like 5 or 6 codepoints for one grapheme
+
+[10:20] <yoleaux2> samcv: I'll pass your message to jnthn.
+
+[10:21] <samcv> hopefully we can do something like this?
+
+[11:01] <timotimo> they are not created deterministically
+
+[11:02] <timotimo> samcv, synthetics are assigned in the order of first use
+
+[12:14] <jnthn> samcv: So, going to look at your patch
+
+[12:14] <yoleaux2> 10:20Z <samcv> jnthn: have a question about synthetic codepoints. How are they generated, deterministically? we will need to have synthetic graphemes for things like Emoji and such, can be like 5 or 6 codepoints for one grapheme
+
+[12:15] <samcv> ok cool
+
+[12:15] <jnthn> samcv: About GraphemeIter, actually if collation is defined on NFC then I'd just use CodepointIter
+
+[12:15] <jnthn> Which will give you codepoints
+
+[12:15] <jnthn> So you don't have to care about synthetics at all
+
+[12:15] <samcv> so this patch is 'perfect' (i guess) i have more changes staged but they trigger the <:space> bug. but
+
+[12:15] <samcv> ah k
+
+[12:15] <jnthn> And yeah, you'd have an iter for each string
+
+[12:15] <samcv> cool, will look into that
+
+[12:16] <jnthn> Basically, GraphemeIter and CodepointIter let you work through the units in a string
+
+[12:16] <jnthn> At grapheme or (NFC) codepoint level
+
+[12:16] <samcv> ah k
+
+[12:16] <jnthn> And they take care of the fact that the string may be represented in memory in a few different ways
+
+[12:16] <samcv> oh and i have bidi matching brackets imlemented in a branch of nqp which is super neat
+
+[12:16] <jnthn> Including traversing strands
+
+[12:16] <samcv> for matching delimiters
+
+[12:16] <jnthn> ooh :)
+
+[12:17] <samcv> yeah :)
+
+[12:17] <samcv> jnthn, pretty sweet https://github.com/perl6/nqp/commit/7b68aa5b984bac7b97e04f07a3c985d5e60ba853
+
+[12:18] *** FROGGS joined
+[12:18] <samcv> no longer will we have to search through a pretty long string of all delimiters + search and find the other bracket (inside the text we're parsing)
+
+[12:19] <jnthn> \o/
+
+[12:19] <samcv> and we can also improve the error message like if you do Q<? > where the ? is a combining char
+
+[12:20] <samcv> because we can see the delimiter by property, and see it has no match(when it should if it's a normal thing)
+
+[12:20] <samcv> then say oh hey
+
+[12:20] <samcv> looks like you have a combining character directy after
+
+[12:21] <samcv> instead of trying to match it as a grapheme for how we allow arbitrary delimiters
+
+[12:21] <jnthn> Just to make sure: if I merge PR #474 we won't be busting spectests?
+
+[12:21] <samcv> yep!
+
+[12:21] <samcv> heh
+
+[12:21] <samcv> not gonna make that mistake again haha
+
+[12:22] <jnthn> :)
+
+[12:22] <samcv> 6.c errata and master are All Correct
+
+[12:22] <jnthn> Unless you'd prefer otherwise, I'm inclined to merge thsi now
+
+[12:22] <samcv> nope go ahead and merge :)
+
+[12:22] <samcv> \o/
+
+[12:22] <jnthn> And using codepoint iter or adding the Unicode DB script can come later
+
+[12:23] <dalek> MoarVM: 874b6bd | jnthn++ | / (5 files):
+
+[12:23] <dalek> MoarVM: Revert "Fix RT #122471 and #122470 return <control-0000> for \0 and other controls"
+
+[12:23] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/874b6bd274
+
+[12:23] <dalek> MoarVM: e8a2c43 | samcv++ | / (4 files):
+
+[12:23] <dalek> MoarVM: Add code for processing the Unicode collation weights to ucd2c.pl
+
+[12:23] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=122471
+
+[12:23] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=122470
+
+[12:23] <samcv> yep
+
+[12:23] <samcv> samcv++
+
+[12:23] <jnthn> There we go, merged
+
+[12:23] <samcv> am i allowed to ++ myself?
+
+[12:23] <samcv> lol.
+
+[12:23] <jnthn> samcv++
+
+[12:23] <jnthn> samcv++
+
+[12:23] <jnthn> :)
+
+[12:24] <samcv> also. why did dalek say that
+
+[12:24] <samcv> weird
+
+[12:24] <samcv> oh well.
+
+[12:24] *** dalek joined
+[12:25] <jnthn> Not sure about why it reported the first commit
+
+[12:25] <jnthn> It has a tendedncy to flood and get itself booted for some reason when reporting a bunch of commits
+
+[12:25] <samcv> heh
+
+[12:25] <dalek> MoarVM: 86dc577 | (Jimmy Zhuo)++ | src/core/frame.c:
+
+[12:25] <dalek> MoarVM: remove unused MVMROOT
+
+[12:25] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/86dc577f46
+
+[12:25] <dalek> MoarVM: 0a170ab | (Jimmy Zhuo)++ | src/spesh/deopt.c:
+
+[12:25] <dalek> MoarVM: remove another unused MVMROOT
+
+[12:25] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/0a170abe4c
+
+[12:25] <dalek> MoarVM: 293bda7 | jnthn++ | src/ (2 files):
+
+[12:25] <dalek> MoarVM: Merge pull request #459 from MoarVM/needless_mvmroot
+
+[12:25] <dalek> MoarVM:
+
+[12:25] <dalek> MoarVM: Remove needless MVMROOT usages
+
+[12:25] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/293bda71be
+
+[12:26] <jnthn> There, I think I'm caught up on MoarVM PR review for the moment :)
+
+[12:28] * samcv checks when her paperback unicode books come
+
+[12:29] <jnthn> ooh, you ordered the paperback version?
+
+[12:29] * jnthn just read PDFs :)
+
+[12:29] <samcv> yea
+
+[12:29] <samcv> like 8 bucks each volume, there's two volumes total
+
+[12:29] <samcv> i think they're printed on demand or something so might be a bit. i want something i can leaf through
+
+[12:29] <samcv> i mean.
+
+[12:30] <samcv> would be really nice. and for 19 bucks you can have all 850ish pages
+
+[12:30] <samcv> prolly price with shipping or something idk
+
+[12:30] <jnthn> I did most of my reading of them when I was doing the NFG implementation.
+
+[12:30] <samcv> i didn't know they had a paperback book because wiki said the last one was unicode 5
+
+[12:31] <jnthn> Did at least have an iPad to read them on, which was a bit more comfortable than laptop :)
+
+[12:34] <jnthn> Paperback woulda been nicer again...didn't even think of it. That said, I was away from home the month I did the NFG impl, and not sure I'd have felt like lugging the books with me even if I had 'em.
+
+[12:36] <samcv> i didn't know it existed until like
+
+[12:36] <samcv> somehow discovered it on some odd unicode.org blog
+
+[12:38] *** dalek joined
+[12:39] *** travis-ci joined
+[12:39] <travis-ci> MoarVM build failed. Jonathan Worthington 'Merge pull request #474 from samcv/unicode_collation
+
+[12:39] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/187680690 https://github.com/MoarVM/MoarVM/compare/3c5253c6613a...833c723be3e1
+
+[12:39] *** travis-ci left
+[12:40] <samcv> what
+
+[12:40] <samcv> i just built it...
+
+[12:41] <samcv> oh only one of them failed? weird ===SORRY!===
+
+[12:41] <samcv> No suitable MoarVM (moar executable) found using the --prefix
+
+[12:41] <samcv> (You can get a MoarVM built automatically with --gen-moar.)
+
+[12:42] <jnthn> Oh
+
+[12:42] *** FROGGS joined
+[12:42] <jnthn> Yeah, there's a bit of a race here
+
+[12:42] <jnthn> We get the MoarVM Travis build to also grab an NQP and build it
+
+[12:43] <jnthn> Unfortunately, if it's a bit slow starting off the builds, and you bump MOAR_REVISION in NQP, then it ends up grabbing an NQP that wants a Moar newer than the commit it's testing :S
+
+[12:43] <jnthn> This does tend to rectify itself when it builds the next commit
+
+[12:44] <FROGGS> samcv++
+
+[13:34] *** timo joined
+[13:52] *** nebuchadnezzar joined
+[14:24] *** FROGGS joined
+[14:50] *** nebuchadnezzar joined
+[15:45] *** zakharyas joined
+[16:05] *** Ven joined
+[16:32] *** Ven joined
+[16:39] <dalek> MoarVM/even-moar-jit: 11ead5e | brrt++ | src/jit/ (3 files):
+
+[16:39] <dalek> MoarVM/even-moar-jit: Fix some more bugs with linear_scan
+
+[16:39] <dalek> MoarVM/even-moar-jit:
+
+[16:39] <dalek> MoarVM/even-moar-jit: We should not account uses for non-register references. I think there is
+
+[16:39] <dalek> MoarVM/even-moar-jit: still a bug with register releasing.
+
+[16:39] <dalek> MoarVM/even-moar-jit:
+
+[16:39] <dalek> MoarVM/even-moar-jit: Because the MVM_JIT_ARCH macro trickery relies on the symbol naem of the
+
+[16:39] <dalek> MoarVM/even-moar-jit: macro, and because we also need to distinguish between possible values,
+
+[16:39] <dalek> MoarVM/even-moar-jit: it's necessary to #define MVM_JIT_ARCH_X64 etc. and later #undef them.
+
+[16:39] <dalek> MoarVM/even-moar-jit:
+
+[16:39] <dalek> MoarVM/even-moar-jit: I'm looking into a more regular way to solve this.
+
+[16:39] <dalek> MoarVM/even-moar-jit: review: https://github.com/MoarVM/MoarVM/commit/11ead5e538
+
+[16:48] *** pyrimidine joined
+[16:52] *** Ven joined
+[17:32] *** Ven joined
+[17:52] *** Ven joined
+[17:55] <dogbert2> jnthn: are you lurking or resting :)
+
+[17:59] <dogbert2> just wondering if the following gist contains any useful information that might come in handy next year? https://gist.github.com/dogbert17/4096deaab03fa1dc3a577c2f7b6834c7
+
+[18:00] *** zakharyas joined
+[18:12] *** Ven joined
+[18:32] *** Ven joined
+[18:37] <jnthn> dogbert2: Well, not anything that's new to me at least. There's an interesting general issue there with lazy evaluation.
+
+[18:50] *** pyrimidine joined
+[18:52] *** Ven joined
+[18:54] <dogbert2> jnthn: is there anything I can do in order to get more information or do you think that you have enough already?
+
+[18:55] <jnthn> dogbert2: I understand that one (at least, in terms of the problem) well already. :)
+
+[18:57] <jnthn> walk &
+
+[18:59] <dogbert2> jnthn: thx, will look for something else then. have a nice walk.
+
+[19:03] *** Ven joined
+[19:23] *** Ven joined
+[19:49] *** domidumont joined
+[20:02] *** Ven joined
+[20:16] <dogbert2> a new gist hopefully moar :) interesting: https://gist.github.com/dogbert17/801b712c6c71fee21b7b9d37398514b5
+
+[20:21] *** Ven joined
+[20:25] *** zakharyas joined
+[20:29] *** pyrimidine joined
+[20:32] <jnthn> That's a good one...
+
+[20:35] <dogbert2> seems 100% reproducible as well
+
+[20:37] <jnthn> Goodie :)
+
+[20:38] <dogbert2> sometimes it also spews out a lot of stuff before the panic, like
+
+[20:38] <jnthn> Will have a look into that next week once I get back to things.
+
+[20:38] <dogbert2> 6opaque: no such attribute '$!named' in type QAST::Var+{QAST::SpecialArg} when trying to bind a value
+
+[20:38] <dogbert2> in any named at gen/moar/stage2/QASTNode.nqp line 30
+
+[20:39] <dogbert2> should I write a MoarVM issue for it or is the RT enough?
+
+[20:42] <jnthn> Feel free to file a MoarVM issue
+
+[20:42] <jnthn> And reference the RT
+
+[20:42] <dogbert2> will do
+
+[20:42] <jnthn> Thanks :)
+
+[20:50] *** Ven joined
+[21:09] *** Ven joined
+[21:30] *** Ven joined
+[21:45] <samcv> jnthn, uhm was having an issue with trying to fix grapheme count
+
+[21:45] <samcv> for ZWJ
+
+[21:46] <samcv> oh wait nvm i'm half awake
+
+[21:46] <samcv> let me wake up i cannot even put this in words properly atm ;)
+
+[21:46] <jnthn> Oh, I mighta just answered it on #perl6-dev? :)
+
+[21:47] <jnthn> ZWJ rings a bell 'cus the exact treatement of it in the Unicode text segmentation algo changed between Unicode 8 and 9.
+
+[21:48] <jnthn> I *think* it was ZWJ anyway
+
+[21:51] <samcv> yeah it is ZWJ but i need to program in more cases
+
+[21:52] <samcv> but i wasn't able to affect change, it just didn't seem to do anything
+
+[21:52] <samcv> even when i had it panic in the same function and deleted moar. maybe that function isn't calleld much
+
+[21:52] <jnthn> I didn't actually fully do the new TR29 :/
+
+[21:52] <jnthn> It...seemed to contradict itself.
+
+[21:53] <jnthn> (It claimed you only needed to look at the immediately surrounding 2 chars. But also had rules about regional indicators and odd/even counts of them.)
+
+[21:54] <samcv> yeah it is complicated ;)
+
+[21:54] <jnthn> Well, complicated is OK, contradicting itself in the space of a few paragraphs less so ;)
+
+[21:55] <jnthn> And if we *do* need to track odd/even we'll need a refactor
+
+[21:55] <samcv> i think we want to do a quick-check and see if it's emoji ond then being able to do more checks
+
+[21:55] <samcv> yep
+
+[21:56] <samcv> oh but this shouldn't be too hard to fix. we need to not break when ZWJ + Emoji character
+
+[21:56] <samcv> (let's say there are only two characters) i was trying to get it to count as one graphpme
+
+[21:56] <samcv> let me open the file
+
+[21:56] <jnthn> OK, *that* bit will be easy enough
+
+[21:56] <samcv> yeah
+
+[21:56] <samcv> was going to do that to start with
+
+[21:57] <jnthn> Go ahead :)
+
+[21:57] <samcv> will at least make us more accurate
+
+[21:57] <jnthn> Yeah
+
+[21:57] * jnthn is glad somebody else is hacking on this stuff :)
+
+[21:57] * lizmat too
+
+[21:57] <lizmat> jnthn: BTW,. are you aware that --profile doesn't produce any Allocation info anymore ?
+
+[21:58] <jnthn> It's not that I don't like working on it (I find Unicode stuff interesting), it's just that there's so many things that need looking at...
+
+[21:58] <jnthn> lizmat: No :(
+
+[21:58] <samcv> jnthn, i was looking at `should_break` and somehow
+
+[21:58] <samcv> even when i had moarvm panic and clean install it didn't even panic
+
+[21:58] <lizmat> jnthn: should I make that a MoarVM issue?
+
+[21:58] <samcv> maybe that's not called in many cases? which one do i need to look
+
+[21:59] <jnthn> samcv: There's an NFG quickcheck property
+
+[21:59] <samcv> jnthn, agreed
+
+[21:59] <jnthn> samcv: That hides it.
+
+[21:59] <samcv> ah
+
+[21:59] <samcv> poo!
+
+[21:59] <jnthn> "hides"
+
+[21:59] <jnthn> So yeah, you'd need to fiddle with that too :)
+
+[21:59] <samcv> so what is this NFG quickcheck
+
+[21:59] <samcv> where do i have to look
+
+[21:59] <jnthn> lizmat: I don't know that code has changed at all in MoarVM. (mroe)
+
+[21:59] <samcv> should_break is only called if conditions for our moar NFG quickcheck are a certain way?
+
+[22:00] <jnthn> lizmat: I did however notice that it was rendering a bit odd wih the tabs last time I used it in Firefox
+
+[22:00] <jnthn> lizmat: So I wonder if one of the AngularJS version updates mighta knocked it out
+
+[22:00] <lizmat> ah, possibly only on Safari ?
+
+[22:00] <lizmat> hmmm./...
+
+[22:00] <jnthn> Think it was Firefox I saw that oddness in
+
+[22:01] <jnthn> samcv: Yes. The trail starts in normalize.h, where we try to avoid doing anything expensive.
+
+[22:01] <jnthn> samcv: NFG quickcheck is a synthetic Unicode property (as in, we add it ourselves). It's handled in udc2c.pl
+
+[22:02] <samcv> yeah i understand that part. oh ok
+
+[22:02] <jnthn> lizmat: Anyway, if that is the place it busted (most likley IMO) then the code in question is in the NQP repo, not Moar
+
+[22:02] <samcv> about it being our own synthetic property
+
+[22:02] <jnthn> samcv: iirc I did it based on the NFC quick check and then some extra bits
+
+[22:02] <lizmat> jnthn: ok, will try to find that
+
+[22:02] <samcv> kk
+
+[22:02] <lizmat> it's very annoying to me  :-)
+
+[22:02] * samcv curses udc2c.pl
+
+[22:02] <jnthn> I think (hope!) I wrote a few comments explaining it even ;)
+
+[22:02] <jnthn> Well, that's one of the bits of ucd2c.pl that I wrote, so at least I should be able to explain it :P
+
+[22:03] <samcv> # If it's the NFC_QC property, then use this as the default value for
+
+[22:03] <samcv> # NFG_QC also.
+
+[22:03] <samcv> so i need to set NFG_QC to uh. 0? to get it to handle it with more conditions?
+
+[22:03] <jnthn> umm, lemme see
+
+[22:04] <jnthn> sub tweak_nfg_qc should be informative
+
+[22:04] <jnthn> But yes, set it to 0 is the trick
+
+[22:04] <samcv> there are only certain characters currently used in ZWJ sequences
+
+[22:04] <samcv> so will probably have it set to 0 for those ones
+
+[22:04] <samcv> so we can do some checking and make sure it's not a combining sequence
+
+[22:05] <samcv> and prolly will add the ones in Emoji 5.0 too i don't want to have to do this again
+
+[22:05] <samcv> and they aren't going to remove any, anyway
+
+[22:05] <samcv> since unlike a lot of unicode stuff, the usage of them is predating the actual codification
+
+[22:05] <samcv> err. the _final_ release of the spec that is
+
+[22:06] <samcv> what happens if I set NFG_QC to 0 for everything? theoretically we should _still_ have it work the same or will it break things
+
+[22:06] <samcv> even though it will be slower
+
+[22:07] <samcv> may be a good thing to check. what do you think about that
+
+[22:09] *** Ven joined
+[22:12] <jnthn> Sorry, got dragged away to taste freshly made vinegret :D
+
+[22:14] <jnthn> If you set it to zero for everything then we'd end up in should_break always (and it'd be slow :))
+
+[22:15] <jnthn> But the idea is to set it to zero if it can ever answer "no" if it's one of the arguments to should_break
+
+[22:15] <samcv> ah ok
+
+[22:15] <jnthn> ZWJ already has it as 0 https://github.com/MoarVM/MoarVM/blob/master/tools/ucd2c.pl#L1720
+
+[22:18] <jnthn> Since I believe multiple emoji can now form a single grapheme, we should likely set those to 0 also
+
+[22:28] *** Ven joined
+[22:49] *** Ven joined
+[22:50] <samcv> yeah
+
+[22:50] <mst> unicode: the gift that keeps on giving
+
+[22:51] <samcv> m: "a\x[200C]b".chars.say
+
+[22:51] <camelia> rakudo-moar b2332c: OUTPUT«2␤»
+
+[22:51] <samcv> that is fine. 200C is often used to specify ligatures were used
+
+[22:57] <samcv> m: Uni.new(0x200D, 0x1F1E6).say
+
+[22:57] <camelia> rakudo-moar b2332c: OUTPUT«Uni:0x<200d 1f1e6>␤»
+
+[22:57] <samcv> m: Uni.new(0x200D, 0x1F1E6).Str.say
+
+[22:57] <camelia> rakudo-moar b2332c: OUTPUT«‍🇦␤»
+
+[23:08] *** Ven joined
+[23:18] <samcv> jnthn, do we have a call to check which unicode version we have?
+
+[23:19] <samcv> if we don't, we should
+
+[23:19] <samcv> and i'll automate setting that with ucdcpll
+
+[23:28] *** Ven joined
+[23:37] <samcv> woo 51/744 failing tests => 45 failed only
+
+[23:40] <samcv> jnthn, you missed the Grapheme_Cluster_Break property for setting NFG_QC!!!
+
+[23:40] <samcv> well I am here now!
+
+[23:40] <samcv> will all be fixed :)
+
+[23:41] <samcv> jnthn, did you see my comments on java's string compareTo function?
+
+[23:48] *** Ven joined
+[23:56] *** Ven joined
+[23:58] <samcv> they totally duck collation and sorting issues using any actual real algorithm, just say they sort it "Lexically" and are super vauge about how that works

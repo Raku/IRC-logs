@@ -1,0 +1,472 @@
+[00:23] <dalek> MoarVM: 5de8e14 | jnthn++ | src/core/continuation.c:
+
+[00:23] <dalek> MoarVM: Simplify frame refcount handling in continuations.
+
+[00:23] <dalek> MoarVM:
+
+[00:23] <dalek> MoarVM: Avoid a couple of seemingly unrequired fiddles. Doesn't help with the
+
+[00:23] <dalek> MoarVM: frame leak, but simpler/cleaner.
+
+[00:23] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/5de8e1466c
+
+[00:23] <dalek> MoarVM: 8d2fe21 | jnthn++ | src/6model/reprs/MVMContinuation.c:
+
+[00:23] <dalek> MoarVM: Fix a source of frame leaks in continuations.
+
+[00:23] <dalek> MoarVM:
+
+[00:23] <dalek> MoarVM: When we GC a continuation that sliced off some active handlers, and
+
+[00:23] <dalek> MoarVM: those handlers still reference frames, make sure we decrement the
+
+[00:23] <dalek> MoarVM: frame reference count. Can happen for a gather/take that does not
+
+[00:23] <dalek> MoarVM: ever complete its execution. So, not the big leak affecting all of
+
+[00:23] <dalek> MoarVM: the gather/takes, but a needed fix anyway.
+
+[00:23] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/8d2fe2134e
+
+[00:27] <jnthn> OK, I have a clue.
+
+[00:28] <jnthn> 44-try-catch.t leaks a frame.
+
+[00:28] <jnthn> Commenting out the test that resumes from an exception seems to remove the frame leak.
+
+[00:28] <jnthn> And gather/take uses resumable exceptions.
+
+[00:28] <timotimo> that seems conclusive
+
+[00:28] <jnthn> Well, it's certainly suggestive, yeah.
+
+[00:29] <jnthn> Looking at resumption now.
+
+[00:29] <jnthn> oh, yeah...
+
+[00:29] * timotimo is expecting an "oh, how was this ever supposed to work?" :)
+
+[00:29] <timotimo> ah, there it is! :)
+
+[00:29] <jnthn> Well, I think I see what's wrong.
+
+[00:29] <jnthn> /* Clear the current active handler. */
+
+[00:29] <jnthn> ah = tc->active_handlers;
+
+[00:29] <jnthn> tc->active_handlers = ah->next_handler;
+
+[00:29] <jnthn> free(ah);
+
+[00:29] <jnthn> That's correct in terms of "will work"
+
+[00:30] <jnthn> But when we make an active handler record, it takes a ref to the frame.
+
+[00:30] <jnthn> yeah...
+
+[00:30] <jnthn> /* Install active handler record. */
+
+[00:30] <jnthn> ah->frame           = MVM_frame_inc_ref(tc, lh.frame);
+
+[00:30] <timotimo> and there's no dec_ref there?
+
+[00:32] <timotimo> i mean ... yeah, there's no dec_ref there :)
+
+[00:33] <jnthn> I think that fixes the 44-try-catch.t leak...
+
+[00:34] <TimToady> pity my test case is so big :)
+
+[00:35] <jnthn> One line of Perl 6 can do a lot :P
+
+[00:36] <jnthn> Turns out that t/moar/01-continuations.t exhibits the leak also.
+
+[00:36] <jnthn> And still has it after the fix I just did.
+
+[00:36] <jnthn> So that wasn't the entire problem.
+
+[00:38] * TimToady waits for the declaration that all our current behavior depends on a bug
+
+[00:40] <timotimo> perl 6 is just the result of the undefined behavior of a small subroutine in the computer that was built by Deep Thought to figure out the question to which the answer is 42
+
+[00:41] <jnthn> Well, currently working my way through the continuations tests, seeing what I have to uncomment to get a leak...
+
+[00:44] <timotimo> and i'm still wondering why and how i got the libpath problem in my moarvm :\
+
+[01:12] <timotimo> (but that seems to be gone now, so ...)
+
+[01:20] * TimToady suspects jnthn++ has passed out :)
+
+[01:22] <timotimo> drowned from all the leak
+
+[01:35] <jnthn> TimToady: Nah. Got it reduced down to something pretty small by now. :)
+
+[01:38] <TimToady> it's probably the thing that makes one statement happen after the previous one :)
+
+[01:43] <TimToady> either that, or the thing that makes the next statement happen after this one...
+
+[01:45] *** benabik joined
+[02:13] <jnthn> OK, time to cross fingers...
+
+[02:14] * jnthn does an optimized build and spectests the patch.
+
+[02:17] <TimToady> alas, there is no unicode glyph for crossed fingers
+
+[02:17] <TimToady> crossed swords, or crossed flags
+
+[02:18] *** benabik joined
+[02:18] *** FROGGS_ joined
+[02:21] <dalek> MoarVM: 5d0209e | jnthn++ | src/core/exceptions.c:
+
+[02:21] <dalek> MoarVM: Missing frame dec ref on exception resume.
+
+[02:21] <dalek> MoarVM:
+
+[02:21] <dalek> MoarVM: Active handler's frame reference goes away, so decrement.
+
+[02:21] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/5d0209ee60
+
+[02:21] * japhb__ disbelieves that statement ... but is not actually planning to check.
+
+[02:21] <dalek> MoarVM: 7a2652c | jnthn++ | src/core/continuation.c:
+
+[02:21] <dalek> MoarVM: Fix "on stack" continuation ref-count handling.
+
+[02:21] <dalek> MoarVM:
+
+[02:21] <dalek> MoarVM: When a frame is on the current call stack, it gets its reference count
+
+[02:21] <dalek> MoarVM: incremented by 1 to indicate it's active at the very least as a result
+
+[02:21] <dalek> MoarVM: of currently being running. When we take a continuation, to make sure
+
+[02:21] <dalek> MoarVM: frame lifetimes are handled correctly, we just decrement this count as
+
+[02:21] <dalek> MoarVM: we slice frames away. Similarly, continuation invoke should re-instate
+
+[02:21] <dalek> MoarVM: the count as we splice the frames back onto the active call stack.
+
+[02:21] <dalek> MoarVM: Fixes gather/take memory leak reported by TimToady++.
+
+[02:21] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/7a2652cfcd
+
+[02:23] <TimToady> \o/
+
+[02:23] <jnthn> TimToady: perl6-m -e "my @bar = (gather take 42) while 1;" # now memory stays constant
+
+[02:24] <timotimo> 151.68user 0.70system 2:33.51elapsed 99%CPU (0avgtext+0avgdata 1650512maxresident)k
+
+[02:24] <japhb__> timotimo: Any more improvement in maxresident for the setting build on your machine now?
+
+[02:24] <timotimo> this is parrot, btw
+
+[02:24] <japhb__> Ah, you were already on it.  :-)
+
+[02:24] <jnthn> japhb__: The setting compile doesn't gather/take, afaik.
+
+[02:25] <jnthn> msvc++ # debug malloc can find leaks
+
+[02:26] <japhb__> jnthn: You had other fixes since the last time he reported in channel.
+
+[02:26] <timotimo> the timing is on my desktop vs my laptop, btw
+
+[02:26] <timotimo> so don't compare those.
+
+[02:26] <japhb__> I just didn't want to ask until you'd done all the fixes.
+
+[02:26] <jnthn> japhb__: ah, k
+
+[02:28] <japhb__> Was it nwc10 who tried r-m builds on a Raspberry Pi?
+
+[02:28] <timotimo> that would be an impressive feat
+
+[02:28] <timotimo> given it took like 0.75 gigabytes of ram
+
+[02:28] <timotimo> where the fattest raspi has half a gig in total
+
+[02:29] <jnthn> We're down to 0.6something now, though :)
+
+[02:29] <japhb__> We're getting close with swap, I should think, depending on how many of those resident K are touched continuously.
+
+[02:29] <timotimo> 65.74user 0.18system 1:06.21elapsed 99%CPU (0avgtext+0avgdata 619072maxresident)k
+
+[02:29] <timotimo> hardly any measurable memory saving from the frame reference counting improvements
+
+[02:29] <japhb__> Another 224K
+
+[02:29] <timotimo> not necessarily. it fluctuates quite a bit.
+
+[02:30] <timotimo> but it's still more than twice as fast as parrot
+
+[02:30] <timotimo> and takes more than 1 gig less ram.
+
+[02:30] <timotimo> though IIUC parrot will just keep memory it once allocated around forever, rather than freeing it
+
+[02:30] <timotimo> so it's hard to tell if the memory usage is really that more dramatic
+
+[02:30] <japhb__> Ah, I misunderstood, I thought you meant the maxresident didn't change when you said they were "quite stable" -- you just meant not multiple MB change, I take it?
+
+[02:31] <timotimo> about 1 megabyte from run to run
+
+[02:31] <japhb__> Ah, OK
+
+[02:31] * japhb__ wonders where that variance comes from.
+
+[02:31] <timotimo> let me verify
+
+[02:31] * jnthn too :)
+
+[02:32] <timotimo> yeah, fluctuations of about 0.75 megabyte
+
+[02:35] <timotimo> could be ordering of things going on in the uv event loop that throws off gc timings or maybe hash randomization?
+
+[02:35] <timotimo> 1 megabyte of fluctuation for that amount is about 1/6th of 1%
+
+[03:05] <dalek> MoarVM: e9b018f | jnthn++ | src/mast/compiler.c:
+
+[03:05] <dalek> MoarVM: Some missing cleanup in MAST compiler.
+
+[03:05] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/e9b018f2b1
+
+[03:05] <jnthn> Guess I should sleep a bit :)
+
+[03:05] <jnthn> 'night o/
+
+[03:06] <JimmyZ> good night jnthn++
+
+[08:22] *** tgt joined
+[08:49] *** ggoebel11110 joined
+[09:14] *** lue joined
+[09:21] <dalek> MoarVM: 10785df | svatsan++ | build/probe.pm:
+
+[09:21] <dalek> MoarVM: Update probe.pm
+
+[09:21] <dalek> MoarVM:
+
+[09:21] <dalek> MoarVM: Using the newer 'make_path' and 'remove_tree' causes build/configure to bail out on older versions of File::Path (especially those shipped with perl v5.10). Please see [File::Path#APIChanges][1]
+
+[09:21] <dalek> MoarVM:
+
+[09:21] <dalek> MoarVM: [1]: https://metacpan.org/pod/File::Path#API-CHANGES
+
+[09:21] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/10785df2a5
+
+[09:21] <dalek> MoarVM: eae662b | (Tobias Leich)++ | build/probe.pm:
+
+[09:21] <dalek> MoarVM: Merge pull request #79 from svatsan/patch-1
+
+[09:21] <dalek> MoarVM:
+
+[09:21] <dalek> MoarVM: Update probe.pm
+
+[09:21] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/eae662b9de
+
+[09:28] *** camelia joined
+[09:32] *** FROGGS_ joined
+[09:37] *** camelia joined
+[09:41] *** tgt joined
+[10:34] *** cognominal joined
+[10:46] *** tgt joined
+[11:47] *** tgt joined
+[12:18] <dalek> MoarVM: 537a176 | jnthn++ | src/6model/reprs/MVMCallCapture.c:
+
+[12:18] <dalek> MoarVM: Don't leak named_used in MVMCallCapture.
+
+[12:18] <dalek> MoarVM:
+
+[12:18] <dalek> MoarVM: This caused over 300,000 1-byte leaks in CORE.setting compilation.
+
+[12:18] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/537a17612f
+
+[12:18] <dalek> MoarVM: 054c086 | jnthn++ | src/io/fileops.c:
+
+[12:18] <dalek> MoarVM: Don't leak C string in library lookup.
+
+[12:18] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/054c0866e3
+
+[12:18] <dalek> MoarVM: adfa8fc | jnthn++ | src/core/loadbytecode.c:
+
+[12:18] <dalek> MoarVM: Don't leak C string in bytecode loading.
+
+[12:18] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/adfa8fc17a
+
+[12:26] <jnthn> There's more to be had, but this'll do me for now :)
+
+[12:28] <jnthn> Eyeballing it, seems I just got a setting build in under 600MB.
+
+[12:51] * JimmyZ wonders how to build a moarvm with crt dmalloc
+
+[12:51] *** tgt joined
+[12:57] <timotimo> \o/
+
+[12:59] <jnthn> JimmyZ: http://msdn.microsoft.com/en-us/library/e5ewb1h3(v=vs.90).aspx
+
+[12:59] <timotimo> 68.67user 0.24system 1:09.43elapsed 99%CPU (0avgtext+0avgdata 606624maxresident)k
+
+[12:59] <timotimo> so another 13 megabytes less
+
+[13:00] <JimmyZ> jnthn: thanks
+
+[13:00] <jnthn> Not bad :)
+
+[13:02] <timotimo> considering one of the leaks you fixed was a single byte big :)
+
+[13:02] <jnthn> Yeah, but I bet tracking that allocation had overhead...
+
+[13:02] <timotimo> yeah
+
+[13:08] <timotimo> hm. wasn't nqp-m -e 'say(1)' once at 10 megabytes? or am i misremembering?
+
+[13:08] <timotimo> because it's at 20 right now
+
+[13:14] <jnthn> Misremembering, I think.
+
+[13:21] <jnthn> Turns out https://rt.perl.org/Public/Bug/Display.html?id=121298 golfs further
+
+[13:47] <FROGGS[mobile]> how much further?
+
+[13:48] <FROGGS[mobile]> I am eager to see the solution, though I think I probably won't unterstand it
+
+[13:48] <jnthn> I don't have one yet :(
+
+[13:48] <jnthn> Constants.pm golfs to
+
+[13:48] <jnthn> module MoarMoneyMoarProblems::Constants;
+
+[13:48] <jnthn> our sub get-value { say 'ok' }
+
+[13:49] <jnthn> The other pm golfs to:
+
+[13:49] <jnthn> need MoarMoneyMoarProblems::Constants;
+
+[13:49] <jnthn> And then test.p6 is just
+
+[13:49] <jnthn> use MoarMoneyMoarProblems;
+
+[13:49] <jnthn> say MoarMoneyMoarProblems::Constants::get-value;
+
+[14:16] <jnthn> FROGGS[mobile]: Here's a patch, if you have time to try it: https://gist.github.com/jnthn/9431169
+
+[14:17] <jnthn> With that the original code now outputs the correct value
+
+[14:18] * FROGGS compiles
+
+[14:28] <jnthn> spectests look fine with it
+
+[14:37] <FROGGS> jnthn: it seems to fir it for moar but not for jvm, right?
+
+[14:37] <FROGGS> I get a NPE for jvm with the snippets you posted
+
+[14:38] <FROGGS> perl6-j test.p6
+
+[14:38] <FROGGS> java.lang.NullPointerException
+
+[14:38] <FROGGS> in sub get-value at lib/MoarMoneyMoarProblems/Constants.pm:2
+
+[14:40] <FROGGS> and it also only fails when using precompiled modules
+
+[14:40] <jnthn> Aww, too bad. I'd hoped it'd maybe fix it for both.
+
+[14:40] <jnthn> I guess when JVM adopts the same closure model as Moar then it fixes it...
+
+[14:41] <jnthn> Still, good it helps on Moar. Does it help URI?
+
+[14:41] <FROGGS> let my try
+
+[14:46] <jnthn> ok. btw, the bug wasn't to do with the data structure; it was about the our-scoped sub...
+
+[14:47] <jnthn> Gonna take a walk while the weather's nice :) bbl
+
+[14:47] <FROGGS> yes, that was my guess too :o)
+
+[14:47] <FROGGS> have fun
+
+[14:47] <FROGGS> jnthn: ==> Successfully installed URI
+
+[14:47] <timotimo> i'll go on a little jog while the weather is so lovely :)
+
+[14:47] <jnthn> yay!
+
+[14:48] <jnthn> FROGGS: And that failed before, yes?
+
+[14:48] <FROGGS> jnthn: I think so
+
+[14:48] <jnthn> k
+
+[14:48] <jnthn> &
+
+[14:57] <timotimo> that's something very nice for the weekly changes :)
+
+[14:57] <timotimo> along with the memory leak removals
+
+[15:33] <jnthn> aye :)
+
+[15:33] <jnthn> wow, so sun
+
+[15:38] <masak> much bright
+
+[15:41] * jnthn figures he can get back to concurrency stuff now he fixed some leaks and the SC bug :)
+
+[15:42] <timotimo> aye! :D
+
+[16:07] <dalek> Heuristic branch merge: pushed 43 commits to MoarVM/moar-conc by jnthn
+
+[16:24] <timotimo> jnthn: what's next on the plan for moar-conc?
+
+[16:25] <jnthn> Refactor Promises to use cond ars
+
+[16:25] <jnthn> uh, cond vars
+
+[16:25] <timotimo> i like the sound of that :)
+
+[16:25] <jnthn> And then provide those on Moar too
+
+[16:25] <jnthn> And then get promises to work on Moar.
+
+[16:25] <TimToady> promises, promises...
+
+[16:26] <jnthn> :P
+
+[16:26] <timotimo> does the thread pool scheduler come directly after that? or did i miss it and it's already done?
+
+[16:27] <jnthn> It's there for non-time-based things.
+
+[16:27] <jnthn> The time-based scheduling is NYI
+
+[16:27] <timotimo> ah, i remember even writing about that
+
+[16:27] <jnthn> I'll probably do the time-based stuff after getting the rest going...
+
+[16:28] <timotimo> what is missing for that, ooc?
+
+[16:28] <jnthn> Me figuring out how to implement it :P
+
+[16:29] <jnthn> Not quite sure how it should be factored yet.
+
+[16:29] <timotimo> hehe. ok
+
+[17:31] *** hoelzro joined
+[20:53] *** remiznik joined
+[21:57] *** denysenko joined
+[22:24] <dalek> MoarVM/moar-conc: b77debf | jnthn++ | / (12 files):
+
+[22:24] <dalek> MoarVM/moar-conc: Implement condition variables.
+
+[22:24] <dalek> MoarVM/moar-conc: review: https://github.com/MoarVM/MoarVM/commit/b77debf869
+
+[22:40] <dalek> MoarVM/moar-conc: 75edce9 | jnthn++ | src/6model/reprs/ConditionVariable.c:
+
+[22:40] <dalek> MoarVM/moar-conc: Fix pointer-o.
+
+[22:40] <dalek> MoarVM/moar-conc: review: https://github.com/MoarVM/MoarVM/commit/75edce912b
+
+[23:08] *** woolfy1 joined
+[23:12] <dalek> MoarVM/moar-conc: 13706df | jnthn++ | / (8 files):
+
+[23:12] <dalek> MoarVM/moar-conc: Implement queuepoll.
+
+[23:12] <dalek> MoarVM/moar-conc: review: https://github.com/MoarVM/MoarVM/commit/13706df869
+
+[23:19] *** grekspb joined
+[23:25] <[Coke]> jnthn++
+
+[23:30] *** lizmat joined

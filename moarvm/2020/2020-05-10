@@ -1,0 +1,379 @@
+[01:03] *** konvertex left
+[03:42] *** farcas1982regreg joined
+[08:10] *** konvertex joined
+[08:20] *** sena_kun joined
+[09:29] <MasterDuke> nine: around?
+
+[09:30] <nine> yes
+
+[09:32] <MasterDuke> re https://github.com/MoarVM/MoarVM/pull/1281#issuecomment-626137192, are you suggesting running MVM_hll_sym_get in spesh's optimize_getcurhllsym and then removing the getcurhllsym and replacing with a getspeshslot instruction?
+
+[09:36] <MasterDuke> similar to what is done with hllbool(for)
+
+[09:39] <nine> Not exactly. If the symbol name passed to getcurhllsym is a contant known value, we can in theory get the hash slot directly in optimize_getcurhllsym and put that into a spesh slot. Then at runtime we only have to fetch that slot, thus get the hash entry and follow its value pointer.
+
+[09:39] <nine> If the symbol name is not a constant, we can still get the cur HLL's symbol hash, saving at least one hash lookup.
+
+[09:40] <nine> The thing is, that I still can't see where getcurhllsym is used for IO
+
+[09:40] <nine> DYNAMIC doesn't use it either
+
+[09:47] <MasterDuke> uh, i see it when i do a spesh log of `my $o; $o := $*OUT for ^1_000_000;`
+
+[09:48] <MasterDuke> but yeah, it's not used directly by IO, but because the IO is looking up $*OUT
+
+[09:48] <nine> But where?
+
+[09:49] <MasterDuke> BB 14
+
+[09:49] <nine> There aren't that many HLL symbols in the first place. It's mostly used for getting the low level ModuleLoader, GLOBAL and @END_PHASERS
+
+[09:54] <MasterDuke> 1000009 calls to MVM_hll_sym_get looking up 'GLOBAL' in 'Raku'
+
+[09:55] <MasterDuke> but afk for a bit
+
+[09:55] <nine> Ah, so it is about GLOBAL. Those lookups are done with static strings, which means it could indeed be that perfect case I wrote about
+
+[10:16] *** Altai-man_ joined
+[10:18] *** sena_kun left
+[10:21] *** mtj_ joined
+[11:14] <MasterDuke> so an `if (facts->flags & MVM_SPESH_FACT_KNOWN_VALUE)` branch which stores the result of actually calling MVM_hll_sym_get in a spesh slot? and an else branch which does the second part of MVM_hll_sym_get manually?
+
+[11:17] <MasterDuke> to be precise, `if (sym_facts->flags & MVM_SPESH_FACT_KNOWN_VALUE)`? or sym and hll?
+
+[12:07] *** MasterDuke left
+[12:07] <nine> Not the result of MVM_hll_sym_get, because that would be the actual value which may change. Instead the result of the MVM_HASH_GET, i.e. the pointer to the hash entry struct which holds the ->value pointer
+
+[12:08] <nine> This way, it still works when the hash entry gets updated, i.e. a nqp::bindcurhllsym('GLOBAL', $myglobal)
+
+[12:17] *** sena_kun joined
+[12:18] *** Altai-man_ left
+[12:33] *** MasterDuke joined
+[12:34] <MasterDuke> nine: ah, so both branches will manually implement part of MVM_hll_sym_get (just the first branch will do more)?
+
+[12:35] <nine> yes
+
+[12:38] <MasterDuke> ok. i'll give that a shot
+
+[13:54] *** discord6 joined
+[13:54] *** discord6 left
+[13:54] *** discord6 joined
+[14:01] <timotimo> wasn't there a worry that something in the hll mapping could change that invalidates the lookup we do?
+
+[14:16] *** Altai-man_ joined
+[14:18] *** sena_kun left
+[14:30] <MasterDuke> i think that's why i'm only going to store a hash entry, not it's value
+
+[14:31] <MasterDuke> though right now i'm getting: `src/jit/x64/emit.dasc:2126: error: bad operand mode in `mov x?,x?':        | mov WORK[dst], OBJECT:TMP1->value;`
+
+[14:40] <nine> MasterDuke: TMP1 is no OBJECT
+
+[14:40] <nine> It's an MVMHashEntry
+
+[14:41] <MasterDuke> yeah, i made that change. moarvm now compiles, but i'm getting the occasional segv
+
+[14:41] <nine> timotimo: I'm reasonably sure that my plan is correct, though jnthn may still veto on the grounds that we may not want to fulfil the assumptions I made
+
+[14:42] <timotimo> storing a hash entry into a spesh slot sounds like a very bad idea, is that what you're doing?
+
+[14:42] <MasterDuke> yep. seems to work
+
+[14:43] <MasterDuke> well, sometimes it works. other times i get a segv or `MoarVM panic: Internal error: invalid thread ID -1071437992 in GC work pass`
+
+[14:43] <nine> Oh, seems like spesh slots are for MVMCollectables only
+
+[14:44] <nine> But....it actually doesn't have to be a spesh slot. Since it's not garbage collected, you may as well use the pointer to the MVMHashEntry as a literal
+
+[14:44] <nine> It won't change, that's the whole point.
+
+[14:45] <nine> It can only be free'd if the whole HLL disappears, in which case the code that has that pointer baked in would have to be gone, too
+
+[14:46] <timotimo> so is the MVMHashEntry kept around when the hash gets resized?
+
+[14:46] <nine> As well as I understood the macro soup, yes
+
+[14:50] <MasterDuke> hm, something doesn't like that change
+
+[14:52] <timotimo> may be easier to introspect the addresses in a live hash in gdb
+
+[14:55] <MasterDuke> this is what i have so far https://gist.github.com/MasterDuke17/fa73039e2bdd1844fd430fee8fa993ef
+
+[14:56] <MasterDuke> but i just realized it shouldn't be sslot in the oplist
+
+[14:56] <nine> No, it's a int64 literal
+
+[14:57] <timotimo> don't forget a use_facts
+
+[15:00] <MasterDuke> hm. should it be `ins->operands[1].lit_i64 = entry;` or `sym_facts->value.i = entry`?
+
+[15:01] <nine> I'd say ins->operands[1].lit_i64
+
+[15:02] <nine> Though they are not mutually exclusive. Both make sense actually
+
+[15:04] <nine> The code's missing a few error checks (hash and entry != NULL) and needs to mark the thread as blocked before taking the lock
+
+[15:04] <MasterDuke> well either by themselves or both and i still get a segv
+
+[15:06] <MasterDuke> i thought we could assume hash would not be null since this wouldn't be the first time we see it?
+
+[15:08] <nine> It's extremely unlikely, but not guaranteed. If there's a language that doesn't use hll syms much and you have hot code like sub i'm-hot() { if $++ > 1000000 { nqp::getcurhllsym("foo") } } then it's possible the getcurhllsym has never been run when we spesh
+
+[15:09] <MasterDuke> ah
+
+[15:09] <nine> Won't happen, but it's just more correct to check
+
+[15:09] <MasterDuke> in the asm?
+
+[15:10] <nine> No, check in optimize_getcurhllsym and just bail on the optimization if you don't get a hash - it's an unrealistic scenario anyway
+
+[15:15] <MasterDuke> same with entry?
+
+[15:15] <nine> yes
+
+[15:16] <nine> That's actually much more likely to return a negative result
+
+[15:20] <MasterDuke> gist updated. still segvs
+
+[15:21] *** zakharyas joined
+[15:22] <MasterDuke> do i need a size on any of my movs?
+
+[15:24] <MasterDuke> oh, think i got it now
+
+[15:24] <nine> what was it?
+
+[15:24] <MasterDuke> heh. nope. now it's back to usually working, something a panic
+
+[15:25] <MasterDuke> but i changed to `MVMint64 entry = ins->operands[1].lit_i64; | mov64 TMP1, entry;`
+
+[15:26] <nine> You don't need the mov64, plain mov will do the right thing according to the register you use
+
+[15:26] <nine> But of course, lit_i64 is the right thing
+
+[15:27] <nine> Also make sure no now invalid facts remain
+
+[15:27] <MasterDuke> MVM_spesh_usages_delete_by_reg?
+
+[15:29] <MasterDuke> i backed out the mov64, but now it's segv all the time, 
+
+[15:29] <MasterDuke> yep, that makes a big difference
+
+[15:31] <nine> ???
+
+[15:33] <nine> No idea what the rules are then... There are 655 mov in emit.dasc vs. only 14 mov64
+
+[15:34] <MasterDuke> well, just build nqp and rakudo
+
+[15:34] <MasterDuke> nqp tests pass
+
+[15:39] <MasterDuke> but a couple fails in spectests
+
+[15:48] <MasterDuke> nine: oh, you mentioned "needs to mark the thread as blocked before taking the lock". MVM_hll_sym_get doesn't do that, but do we need to because we're in a special spesh thread?
+
+[15:50] <nine> The way I see it that's actually a bug in MVM_hll_sym_get. If 2 threads enter that function and the HLL hash doesn't exist and allocating that hash triggers a GC run, we end in a dead lock.
+
+[15:50] <nine> Because the thread waiting for the lock doesn't let other threads steal it's GC
+
+[15:50] <MasterDuke> ah. btw, the segv i'm getting is in my interp.c implementation of sp_getcurhllsym
+
+[15:52] <MasterDuke> oh, i removed an operand
+
+[15:52] <nine> Shouldn't that be cur_op += 4;?
+
+[15:52] *** AlexDaniel left
+[15:52] <MasterDuke> yeah, just made that change. same error though
+
+[15:52] <nine> what causes the segfault? Should be easy to see in gdb
+
+[15:53] <MasterDuke> GET_REG(cur_op, 2).i64 is 0
+
+[15:54] <nine> But...you now protect against exactly that?
+
+[15:54] <MasterDuke> yeah...
+
+[15:56] <nine> does the spesh log shine any light on this?
+
+[15:58] <MasterDuke> huh. it's not segfaulting if i log...
+
+[15:58] <MasterDuke> it has `sp_getcurhllsym  r12(2), liti64(94107760500576)  # [000] specialized from getcurhllsym` in the after of DYNAMIC
+
+[16:00] <nine> that looks quite ok
+
+[16:07] <nine> If you run with spesh log in gdb, can you look at that value if it actually points to an MVMHashEntry?
+
+[16:16] *** sena_kun joined
+[16:18] *** Altai-man_ left
+[16:22] *** zakharyas left
+[16:26] *** zakharyas joined
+[16:27] <MasterDuke> hm, in gdb with a spesh log it doesn't end up in interp.c
+
+[16:27] <nine> Of course not. That would be too easy now, wouldn't it?
+
+[16:29] <MasterDuke> same thing with some of the other test files that failed. segv without a spesh log, no segv with a spesh log
+
+[16:29] <MasterDuke> oh, one did just segv with a spesh log
+
+[16:33] <MasterDuke> `(gdb) p *(MVMHashEntry *)93825016168416$2 = {value = 0x555557cef4d8, hash_handle = {tbl = 0x555555ba26f8, hh_next = 0x0, key = 0x555555e9e170, keylen = 0, hashv = 6044822457095861110}}`
+
+[16:34] <MasterDuke> but still segv in interp.c
+
+[16:35] <nine> does *(MVMObject*)((MVMHashEntry *)93825016168416)->value look sensible?
+
+[16:35] <MasterDuke> `(gdb) call MVM_string_utf8_encode_C_string(tc, ((MVMHashEntry *)93825016168416)->hash_handle->key)$4 = 0x555560c4e390 "GLOBAL"`
+
+[16:35] <MasterDuke> `$5 = {header = {sc_forward_u = {forwarder = 0x100000016, sc = {sc_idx = 22, idx = 1}, st = 0x100000016}, owner = 1, flags = 17, size = 24}, st = 0x555558208520}`
+
+[16:36] <nine> Yep, that's definitely correct
+
+[16:36] <nine> So...how comes it has a correct value according to the spesh log, but no longer when interpreting the byte code?
+
+[16:37] <MasterDuke> so my optimize_getcurhllsym is probably correct, but there's something wrong with my asm?
+
+[16:40] <nine> is the gist up to date?
+
+[16:44] <nine> Does it work when the JIT is disabled?
+
+[16:44] <nine> Not sure if it should be .type MVMHASHENTRY, MVMHashEntry or .type MVMHASHENTRY, MVMHashEntry*
+
+[16:46] <MasterDuke> updated the gist just to be sure it has exactly what i'm running now
+
+[18:15] <nine> So does it work with JIT disabled?
+
+[18:16] *** Altai-man_ joined
+[18:18] *** sena_kun left
+[18:22] *** discord6 left
+[18:22] *** raku-bridge joined
+[18:22] *** raku-bridge left
+[18:22] *** raku-bridge joined
+[18:48] <MasterDuke> nope
+
+[18:49] <MasterDuke> same segv
+
+[19:08] *** zakharyas left
+[19:16] *** farcas1982regreg left
+[19:27] <MasterDuke> and still a valid MVMHashEntry pointer in the spesh log
+
+[19:28] <MasterDuke> but GET_REG(cur_op, 2).i64 is 0
+
+[19:29] <nine> Does a call MVM_dump_bytecode(tc) at that position show any light on the issue?
+
+[19:46] <MasterDuke> uh, i think that segfaulted
+
+[19:46] <MasterDuke> yeah
+
+[19:58] <MasterDuke> recompiled with optimization off. still segv, but slightly different
+
+[19:58] <MasterDuke> speshlog say pointer is 93825016043664. GET_REG(cur_op, 2).i64 is 137438953554
+
+[20:17] *** sena_kun joined
+[20:18] *** Altai-man_ left
+[20:23] *** zakharyas joined
+[20:30] <MasterDuke> is it something about the facts? am i not correctly deleting usage or using facts?
+
+[20:31] <nine> So, no chance of getting a MVM_dump_bytecode? That would tell us what the bytecode really looks like, as the spesh log doesn't seem to tell the full story
+
+[20:31] <MasterDuke> oh, that worked with this unoptimized build
+
+[20:32] <nine> can you gist?
+
+[20:32] <MasterDuke> https://gist.github.com/MasterDuke17/98198b1e8adf5686daa08314a3b6d124
+
+[20:33] <nine> But, but, but, that still shows the 93825016038512?
+
+[20:33] <MasterDuke> same value as in the spesh log
+
+[20:33] <nine> And you have checked *(MVMObject*)((MVMHashEntry *)93825016038512)->value to be sensible
+
+[20:33] <MasterDuke> $1 = {header = {sc_forward_u = {forwarder = 0x100000016, sc = {sc_idx = 22, idx = 1}, st = 0x100000016}, owner = 1, flags = 2065, size = 24}, st = 0x55555898cfb0}
+
+[20:34] <nine> You haven't deleted usage of the string constant, so spesh didn't delete it. But that won't cause any trouble.
+
+[20:34] <MasterDuke> that's not what `MVM_spesh_usages_delete_by_reg(tc, g, ins->operands[1], ins);` does?
+
+[20:35] <nine> Maybe MVM_SPESH_CHECK_DU tells us something
+
+[20:35] <nine> oh...you did
+
+[20:35] <nine> And GET_REG(cur_op, 2).i64 is NULL in gdb?
+
+[20:36] <MasterDuke> $1 = 36426291347713
+
+[20:39] <MasterDuke> if i set MVM_SPESH_CHECK_DU should i expect some output somewhere?
+
+[20:49] <timotimo> only if things are wrong
+
+[20:52] <MasterDuke> ok. there wasn't any output
+
+[20:54] <nine> MasterDuke: what do the other work registers look like? Is the value anywhere to be found?
+
+[20:56] *** zakharyas left
+[20:56] <nine> Wait a minute....is the value actually expected to be in a work register at all? How do constants work?
+
+[20:57] <MasterDuke> well, extend_u8 is `GET_REG(cur_op, 0).u64 = (MVMuint64)GET_REG(cur_op, 2).u8`
+
+[20:57] <nine> All ops that take literals do so with code like this: MVMuint64 idx = MVM_BC_get_I64(cur_op, 4);
+
+[20:58] <nine> There's surely a difference between literals and native values in registers
+
+[20:58] <nine> Does MVM_BC_get_I64(cur_op, 2) yield the value?
+
+[20:58] <MasterDuke> yes. yes it does
+
+[20:59] <nine> Ah, finally....should have realized this so much sooner :/
+
+[21:01] <MasterDuke> hm. but i'm still getting a segv. and how there's no backtrace
+
+[21:02] <MasterDuke> jit still disabled
+
+[21:05] <nine> cur_op += 10
+
+[21:05] <nine> 2 bytes for the opcode + 8 bytes for the actual literal value
+
+[21:06] <MasterDuke> and how that test file passes
+
+[21:06] <MasterDuke> *now
+
+[21:06] <nine> Usually an op consists of the opcode + the 16 bit indices into the WORK array for the arguments, that's why we increment cur_op with some multiple of 2.
+
+[21:06] <MasterDuke> time to try nqp+rakudo rebuild and full testing again
+
+[21:06] <nine> and a benchmark :)
+
+[21:06] <MasterDuke> nine++ i've learned a bunch doing this
+
+[21:06] <nine> Oh, does the JIT work as well now?
+
+[21:07] <nine> probably does
+
+[21:07] <MasterDuke> yep
+
+[21:08] <MasterDuke> `my $o; $o := $*OUT for ^1_000_000; say $o` takes ~1.14s before, ~0.98s after (rough numbers)
+
+[21:09] <timotimo> wow
+
+[21:10] <lizmat> MasterDuke++
+
+[21:17] <nine> Nice work! :)
+
+[21:17] <MasterDuke> all tests pass
+
+[21:18] <MasterDuke> i still have both `ins->operands[1].lit_i64 = entry;` and `sym_facts->value.i = entry;`. are they both required and/or useful?
+
+[21:19] <nine> I think so
+
+[21:20] <MasterDuke> k
+
+[21:21] <MasterDuke> anything else to do or clean up before pushing a commit? and should i just rebase this over the first commit?
+
+[22:08] <MasterDuke> does this look correct based on the newly changed implementation? `(template: sp_getcurhllsym (^getf (copy $1) MVMHashEntry value))`
+
+[22:16] *** Altai-man_ joined
+[22:18] *** sena_kun left
+[22:39] <MasterDuke> i'm off to sleep, hopefully will get these last questions cleared up and a finalized PR ready tomorrow
+
+[22:41] <MasterDuke> also, any reason not to do the same thing for gethllsym (assuming MVM_SPESH_FACT_KNOWN_VALUE for both sets of facts)?
+
+[22:54] *** Kaiepi joined
+[23:01] *** Altai-man_ left
+[23:58] *** raku-bridge1 joined
+[23:58] *** raku-bridge1 left
+[23:58] *** raku-bridge1 joined

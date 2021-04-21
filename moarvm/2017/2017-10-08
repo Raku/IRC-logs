@@ -1,0 +1,328 @@
+[00:13] *** cognominal joined
+[01:34] *** evalable6 joined
+[01:55] *** ilbot3 joined
+[02:11] *** releasable6 joined
+[03:47] <ugexe> libuv 1.15.0 released, which includes the stack size fix for musl
+
+[03:51] <ugexe> https://github.com/libuv/libuv/issues/1507
+
+[04:38] *** evalable6 joined
+[04:51] <samcv> good hi
+
+[05:57] *** evalable6 joined
+[07:10] *** domidumont joined
+[07:15] *** domidumont joined
+[08:04] *** Voldenet joined
+[08:04] *** Voldenet joined
+[08:41] *** dogbert17 joined
+[09:31] <lizmat> good *, #moarvm
+
+[09:31] *** rba_ joined
+[09:32] <lizmat> .ask jnthn should the BUILDPLANs of nqp match the layout of Perl 6 or not?  currently not matching is the underlying cause of RT #132236
+
+[09:32] <yoleaux> lizmat: I'll pass your message to jnthn.
+
+[09:32] <synopsebot> RT#132236 [open]: https://rt.perl.org/Ticket/Display.html?id=132236 [REGRESSION] Meta object construction
+
+[09:46] *** rba joined
+[10:02] *** rba_ joined
+[10:16] *** rba joined
+[10:31] *** rba_ joined
+[10:46] *** rba joined
+[11:01] *** rba_ joined
+[11:03] *** rba joined
+[11:22] <timotimo> ugexe: i feel a bit bad now. we were totally able to do spesh inside the limit imposed by musl
+
+[11:22] <timotimo> and they fixed it for us in the mean time. maybe i should have told them we already made it :|
+
+[11:49] <MasterDuke> timotimo: interesting, my string fsa branch is panicking on freeing "&infix:<−>"
+
+[11:52] <MasterDuke> even though body.num_graphs == 10 and body.storage_type = MVM_STRING_GRAPHEME_32
+
+[11:52] <MasterDuke> m: say "&infix:<−>".chars
+
+[11:52] <camelia> rakudo-moar 830084: OUTPUT: «10␤»
+
+[11:53] <timotimo> does it use a buffer that had more space in it?
+
+[11:57] <MasterDuke> yeah
+
+[11:59] <MasterDuke> got 40 (which equal to 10*sizeof(MVMGrapheme32)), expected 48
+
+[12:00] <MasterDuke> alloced at utf8.c:183
+
+[12:00] <MasterDuke> MVM_string_utf8_decode
+
+[12:05] <MasterDuke> i'm seeing what happens if i remove this https://github.com/MoarVM/MoarVM/blob/master/src/strings/utf8.c#L293 if and just always realloc
+
+[12:06] <MasterDuke> oh, that succeeds
+
+[12:13] <MasterDuke> rakudo's `make m-test` passed
+
+[12:14] <MasterDuke> spectest did not
+
+[13:02] <MasterDuke> Invalid read of size 8 at 0x504A3E4: MVM_fixed_size_free (fixedsizealloc.c:277) by 0x5076B66: gc_free (MVMString.c:87) ... Address 0xfffffffffffffff8 is not stack'd, malloc'd or (recently) free'd
+
+[13:07] <timotimo> sounds like you tried to fixed_size_free a null pointer
+
+[13:07] <timotimo> because 0xfffffffffffffff8 is just -8
+
+[13:07] <timotimo> MasterDuke: ^
+
+[13:07] <MasterDuke> probably
+
+[13:08] <MasterDuke> unfortunately your valgrind script isn't firing, so i don't know where it came from
+
+[13:08] <timotimo> it's very possible to fix that!
+
+[13:09] <timotimo> just put a null pointer check in front and do "the same thing" as when the size doesn't match
+
+[13:09] <timotimo> wait
+
+[13:09] <timotimo> actually, there's no information we could get here
+
+[13:10] <timotimo> we'd have to inspect the address of the variable that was passed to the free function i guess
+
+[13:11] <MasterDuke> right, cause this is where it's segving: if (dbg->alloc_size != bytes) {
+
+[13:34] <timotimo> MasterDuke: what pieces of code exist that can set the pointer you were trying to free to zero?
+
+[13:35] <MasterDuke> lots!
+
+[13:35] <MasterDuke> it's gcing a string
+
+[13:36] <MasterDuke> https://gist.github.com/MasterDuke17/5ca4c5507dd034ee0d0fc9c515c8ab76 full valgrind output
+
+[13:36] <timotimo> oh, do we set the pointer to null when gc_free is called on the string?
+
+[13:37] <timotimo> hm. if we gc_free the same string multiple times, or if we share buffers between multiple strings, we'd have had "double free" errors before in this situation
+
+[13:39] <MasterDuke> it's just a free of str->body.storage.any and str->body.num_graphs = str->body.num_strands = 0;
+
+[13:41] <MasterDuke> in MVMString's gc_free
+
+[14:11] <timotimo> hm. what is the size "to be freed", ooc? maybe it is actually zero
+
+[14:12] <timotimo> it could very well be we've so far been freeing zero-length fields without erroring out
+
+[14:23] <timotimo> is MVM_fixed_size_alloc ever called with a size of 0?
+
+[14:24] <MasterDuke> timotimo: yep, bytes=0 when it dies
+
+[14:24] <timotimo> aha!
+
+[14:25] <timotimo> and do we allocate something with size 0 ever?
+
+[14:26] <MasterDuke> don't know. gotta afk for a while, will work some more on it when back (unless you've fixed everything in the meantime of course)
+
+[14:26] <timotimo> hm but if we allocate something with size 0 in the fsa debug mode we'll actually create something of size 8
+
+[14:26] <timotimo> it's all in your branch?
+
+[14:29] *** evalable6 joined
+[14:29] <MasterDuke> yep
+
+[14:30] <MasterDuke> with a recent commit just pushed
+
+[15:31] *** dogbert17 joined
+[15:34] *** leont joined
+[16:39] *** wander4096 joined
+[16:54] <ugexe> timotimo: on the bright side 1.50 also has an improvement for file watching on osx to not use a handle per file, so maybe that flopping osx test will be fixed. i will have to check
+
+[16:57] <ugexe> hmm also exposed libuv api for recursive mutex on linux
+
+[17:21] *** domidumont joined
+[17:31] <MasterDuke> timotimo: interesting, i added some fprintfs to fixed_size_(re)?alloc in case the bytes are 0 and it dies in the free, but those never print
+
+[17:33] *** timo2 joined
+[17:39] *** timo3 joined
+[17:41] <jnthn> ugexe: I think we could still do with bumping the stack size for the specializer thread; I suspect there are other places where, at the moment, we only just squeak by due to use of recursive algorithms. So we can still make some use of it. :)
+
+[17:41] <yoleaux> 6 Oct 2017 15:31Z <Zoffix> jnthn: when you get a chance, take a look at t/spec/S17-channel/stress.t It seems to take a lot longer than before. My pre-moar-bump stresstest time was 160s, post-bump it's 261s with the stresstest sitting on that test file
+
+[17:41] <yoleaux> 7 Oct 2017 10:58Z <lizmat> jnthn: would it make sense to also auto-generate BUILD_LEAST_DERIVED ?
+
+[17:41] <yoleaux> 7 Oct 2017 20:34Z <bartolin> jnthn: if you have a few minutes to look at my try to implement killprocasync on jvm: https://github.com/perl6/nqp/tree/jvm_killprocasync -- when you stubbed the op, you planned to return $RT_OBJ. do you remember what you expected the op to return?
+
+[17:41] <yoleaux> 09:32Z <lizmat> jnthn: should the BUILDPLANs of nqp match the layout of Perl 6 or not?  currently not matching is the underlying cause of RT #132236
+
+[17:41] <synopsebot> RT#132236 [open]: https://rt.perl.org/Ticket/Display.html?id=132236 [REGRESSION] Meta object construction
+
+[17:41] <jnthn> sheesh, so message :P
+
+[17:42] <jnthn> The libuv support for reentrant mutexes is good; we currently implement those ourselves on top of non-reentrant ones
+
+[17:43] <jnthn> .tell lizmat iirc NQP uses some codes that aren't used in Rakudo, and Rakudo supported them for that reason. I think you asked me about them a while back 'cus you were considering removing them from Mu.BUILDALL.
+
+[17:43] <yoleaux> jnthn: I'll pass your message to lizmat.
+
+[17:44] <jnthn> .tell lizmat If you changed the meanings of the integers and didn't align NQP too then it's possible something coulda broken.
+
+[17:44] <yoleaux> jnthn: I'll pass your message to lizmat.
+
+[17:47] <jnthn> .tell bartolin https://github.com/perl6/nqp/blob/master/src/vm/moar/QAST/QASTOperationsMAST.nqp#L2895 is how it's defined on Moar, so 1 means evaluate to argument 1 (zero-based)
+
+[17:47] <yoleaux> jnthn: I'll pass your message to bartolin.
+
+[17:48] <jnthn> .tell lizmat auto-generating BUILD_LEAST_DERIVED would make mixins cheaper; note it's only worth doing for mixin types, but I think you have that information available to you in method compose, or via some .is_mixin method or some such. Can't remember off the top of my head, but I'm sure it's available. So I'd only generate them in that case, not for all classes where it'd be useless
+
+[17:48] <yoleaux> jnthn: I'll pass your message to lizmat.
+
+[17:49] <jnthn> Think that's all of 'em, except the channel stress test, which I dunno what'll be :)
+
+[17:49] <jnthn> And I sure don't have the brane left today to look at it :)
+
+[17:50] <timo2> hello Jonathan how are you doing today?
+
+[17:51] <jnthn> timo2: Fine, just a little tired from having family visiting for some days. :)
+
+[17:51] <jnthn> And you?
+
+[17:51] *** committable6 joined
+[17:52] <jnthn> timo2: Also, congrantsulations :)
+
+[17:53] <timo2> well my wrists have been hurting for a few days now and I have finally decided to use voice recognition to chat
+
+[17:53] <timo2> thank you
+
+[17:53] *** unicodable6 joined
+[17:54] <jnthn> Ugh, sore wrists is no fun. :( Hope with some rest and care they'll improve.
+
+[17:54] <MasterDuke> timo2: did you see my comment earlier about adding fprintfs in fs_(re)alloc?
+
+[17:55] <timo2> I'm sorry I did not see that? What did you find
+
+[17:55] <timo2> whoops
+
+[17:57] <MasterDuke> i added some fprintfs to fixed_size_(re)?alloc in case the bytes are 0 and it dies in the free, but those never print
+
+[17:57] <timo2> I'm wondering if I should buy a new version of Dragon because it says on the website that the newest version is better at understanding accents and noisy environments
+
+[17:57] <timo2> and of course I'm also going to looking tools solutions to do some programming with my voice
+
+[17:58] <timo2> most of these solutions include some Rube Goldberg kind of set up with virtual machines
+
+[17:58] <timo2> right now I literally just have a web browser open inside the virtual machine
+
+[17:59] <timo2> also it seems like I have exhausted all of my license activations and I don't even know where the other activated versions are installed
+
+[17:59] <timo2> and going from version 12.52 version 15 seems like a decent upgrade
+
+[17:59] <timo2> books that understood the two as a number instead of the word
+
+[18:01] <timo2> also I accidentally installed the virtual machine on my SSD even though I thought I put it on the external hard drive and my computer ran out of space three times while installing the software
+
+[18:03] <MasterDuke> looks like you need to treat yourself to a bigger ssd and more ram
+
+[18:04] <timo2> well the grant will be paid at the end, but I'll see what I can do
+
+[18:09] <timo2> while it looks like I would have to pay $300 to get the newest version of Dragon
+
+[18:09] <MasterDuke> ouch
+
+[18:10] <timo2> alternatively I can get version 13 for not quite as much money
+
+[18:10] <MasterDuke> looked on ebay?
+
+[18:10] <timo2> I don't think that is going to work very well
+
+[18:11] <timo2> given how they do the whole license thing and everything
+
+[18:11] <MasterDuke> ah
+
+[18:15] <MasterDuke> ugh, hoped the 0 byte free was a precomp thing, deleted all my .precomp folder, but nope, still dies in m-install
+
+[18:16] <timotimo> it's time to run rr on one of those problems
+
+[18:18] <MasterDuke> ok, i'm in rr replay
+
+[18:19] <MasterDuke> SEGV: 0x00007f4b3944e449 in MVM_fixed_size_free (tc=0x556b5cc2ba20, al=0x556b5cc2cf00, bytes=0, to_free=0x0) at src/core/fixedsizealloc.c:280
+
+[18:19] <timotimo> ok, ow up
+
+[18:20] <timotimo> you should be able to "print &the_var" to get the addresses where the size and pointer live
+
+[18:20] <timotimo> it'll give you something like (MVMuint32 *) 0x12345
+
+[18:21] <timotimo> you'll want to "watch *((MVMuint32 *) 0x12345)"
+
+[18:21] <timotimo> and reverse-cont until it trips
+
+[18:21] <MasterDuke> p &(str->body.storage.any)
+
+[18:21] <MasterDuke> $3 = (void **) 0x7f4b38421680
+
+[18:21] <timotimo> ah, yeah, one extra * of course
+
+[18:22] <timotimo> i've gotta boot my windows quickly and hope there's a dragon installed on there
+
+[18:23] <MasterDuke> Old value = (void *) 0x0
+
+[18:23] <MasterDuke> New value = (void *) 0x550000000000
+
+[18:29] <MasterDuke> https://gist.github.com/MasterDuke17/5ca4c5507dd034ee0d0fc9c515c8ab76 updated with what i've done in rr so far
+
+[18:44] <MasterDuke> hm, so if i'm following this, the reason that address is 0 is because the gc zeroed the remaining tospace at collect.c:168
+
+[18:45] <MasterDuke> and then it's being fixed_size_freed
+
+[18:46] <timotimo> my kboard myruoaerr
+
+[18:46] <timotimo> may be running out of battery
+
+[18:47] <MasterDuke> heh
+
+[18:47] <timotimo> also, turns out i seem to own dragon 13 professional for some reason
+
+[18:47] <timotimo> oh, there's the license key and confirmation email
+
+[18:48] <MasterDuke> that's good
+
+[18:49] <timotimo> i can't redownload the setup file ... it's been too long since i ordered the thing
+
+[18:49] <timotimo> but i've got the file name now. no wonder i couldn't find it anywhere
+
+[18:49] <MasterDuke> that's ridiculous
+
+[18:49] <timotimo> BEGIN DOWNLOAD EM-K61A-33000-DLM-SR.exe
+
+[18:50] <timotimo> yeah, i still have it on one of my hard drives
+
+[18:55] *** evalable6 joined
+[18:56] <timotimo> Securely back up your software online for two (2) years.
+
+[18:56] <timotimo> Now purchasing software online is more convenient than ever. Our Extended Download Service frees you from the time-consuming — but critical — chore of backing up your new software.
+
+[18:56] <timotimo> isn't that great
+
+[18:56] <timotimo> surely they have a different installer for every single purchaser
+
+[19:04] <MasterDuke> hm, i keep following that address back in time and it turns into `((MVMP6intBody *)data)->value.i64 = value`, but i guess that's because of the gc moving things around
+
+[19:10] <timotimo> oh, the file was actually just a little downloader program
+
+[19:12] <timotimo> not sure what's up with that rr stuff :\
+
+[19:12] <timotimo> might be one * too few, too many, who knows? :(
+
+[19:12] <timotimo> perhaps the type has to be changed
+
+[19:12] <timotimo> because 0x100 isn't a sensible value here
+
+[19:15] <timotimo> but even then it should be enough that one byte of the whole pointer gets changed?
+
+[19:15] <timotimo> are we looking at the pointer, though? or at whatever it points at?
+
+[19:18] <MasterDuke> not sure
+
+[20:00] *** timo2timo joined
+[20:10] *** releasable6 joined
+[20:35] <timo2timo> I have now spent some extra time dictating some text with the newer version of Dragon and recognition performance should now be acceptable
+
+[20:35] <timo2timo> But first I'm going to make some dinner
+
+[21:19] <Geth> ¦ MoarVM: ugexe++ created pull request #719: Use uv_fs_copyfile API
+
+[21:19] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/719
+
+[23:43] *** evalable6 joined

@@ -1,0 +1,147 @@
+[00:06] *** patrickb joined
+[00:56] *** patrickb left
+[01:27] *** AlexDani` is now known as AlexDaniel
+
+[01:27] *** AlexDaniel left
+[01:27] *** AlexDaniel joined
+[01:48] *** lucasb left
+[03:36] *** vrurg left
+[04:08] *** vrurg joined
+[04:11] *** vrurg left
+[04:12] *** vrurg joined
+[05:42] *** AlexDani` joined
+[05:43] *** AlexDaniel left
+[05:47] *** AlexDani` left
+[07:24] *** AlexDani` joined
+[08:04] *** domidumont joined
+[08:12] *** domidumont left
+[08:50] *** AlexDani` left
+[10:02] *** robertle joined
+[10:04] *** sena_kun joined
+[10:54] *** sena_kun left
+[11:09] *** sena_kun joined
+[12:54] *** sena_kun left
+[13:10] *** sena_kun joined
+[13:37] *** vrurg left
+[13:47] *** lucasb joined
+[14:20] *** Kaiepi left
+[14:21] *** Kaiepi joined
+[14:22] *** Kaiepi left
+[14:22] *** Kaiepi joined
+[14:55] *** sena_kun left
+[15:08] *** sena_kun joined
+[15:09] <nine> Actually a rather interesting question is also, how we get back to JITed code after an invoke.
+
+[15:12] *** vrurg joined
+[16:24] <timotimo> something something trampoline something far jump?
+
+[16:35] <nine> Ok, the JIT bytecode prologue sets tc->jit_return_address to the address of a stack variable. MVM_frame_invoke calls MVM_jit_code_trampoline which sets *tc->jit_return_address = code->exit_label; That exit_label is the ->exit: in https://github.com/MoarVM/MoarVM/blob/master/src/jit/x64/emit.dasc#L348
+
+[16:36] <nine> Called a global label in dynasm lingo
+
+[16:54] <nine> I just don't get it. I can't really find how we invoke something in the first place and not how we get back. I can't find anything about what happens after the MVM_frame_invoke which just sets up the interpreter's state so it would start invoking the target. But how do we get from the JIT code to the interpreter?
+
+[16:54] *** sena_kun left
+[16:56] <nine> The code gen for invocation does generate a reentry_label, but I can't find a reference to that anywhere
+
+[17:06] *** domidumont joined
+[17:09] *** sena_kun joined
+[17:29] <nine> The stack variable I mentioned is rsp-0x8. The stack grows top-down, i.e. rsp-0x8 is actuall the next stack slot that _will_ be used. It's where the `call` to MVM_frame_invoke_code (or friend) will place the current instruction pointer, i.e. the return address.
+
+[17:30] <nine> This means that the call to MVM_jit_code_trampoline will actually overwrite the return address of the MVM_frame_invoke_code call itself. This is how we end up in the JIT code's epilogue, which returns to the interpreter.
+
+[17:31] <nine> The interpreter will then go on to perform the actual invocation (which may itself just be an sp_jit_enter op)
+
+[17:37] <nine> Before storing the JIT code's epilogue's address into *tc->jit_return_address (i.e. the ret address), MVM_jit_code_trampoline will move the current value to tc->cur_frame->jit_entry_label which is later used by sp_jit_enter. I.e. jit_entry_label is a moving target that gets updated whenever we interrupt the JIT code's control flow for an invocation
+
+[17:38] <nine> So it's actuall a jit_(re-)entry_label
+
+[17:46] *** zakharyas joined
+[18:20] *** zakharyas left
+[18:26] <nine> Putting all of that together I arrive at just a few lines of assembly that I generate after the call to MVM_nativecall_invoke which check if tc->cur_frame->spesh_cand is NULL and if yes jump to ->exit, so we get back to the interpreter.
+
+[18:26] <nine> Alas, I seem to arrive in the wrong place in the bytecode still
+
+[18:39] <nine> Of course! I also need to call MVM_jit_trampoline(tc) before calling MVM_nativecall_invoke, to record the current position. And with that it works!!
+
+[18:45] <nine> All tests successful. with MVM_JIT_EXPR_DISABLE=1 MVM_SPESH_BLOCKING=1 MVM_SPESH_NODELAY=1. Now what's still missing is the same for the expr jit (the call to MVM_jit_trampoline and the deopt check) and then all of that for nativeinvoke_o
+
+[18:54] *** sena_kun left
+[19:01] <nine> Actually the tests succeed even with the expr JIT turned on. It bails before reaching the nativecallinvoke anywy
+
+[19:11] *** sena_kun joined
+[19:40] <nwc10> nine: is that only "good luck" on the part of the tests? - ie is it possible to write other code that would not bail, and hence crash in the way you assumed that it would?
+
+[19:40] <nwc10> (I think that this is the first useful question I can ask all evening. The rest of the detail is beyond me)
+
+[19:42] <Geth> ¦ MoarVM: c799de4218 | (Stefan Seifert)++ | 5 files
+
+[19:42] <Geth> ¦ MoarVM: Fix relocatability of modules using NativeCall
+
+[19:42] <Geth> ¦ MoarVM:
+
+[19:42] <Geth> ¦ MoarVM: There are cases where we actually don't want the library's path to get
+
+[19:42] <Geth> ¦ MoarVM: serialized into the bytecode file, e.g. when building a module into a Staging
+
+[19:42] <Geth> ¦ MoarVM: repository for packaging. The previous attempt to solve this failed because
+
+[19:42] <Geth> ¦ MoarVM: we cannot keep the NativeCall site's state in sync with HLL function's state
+
+[19:42] <Geth> ¦ MoarVM: due to repossession issues. The latter were the whole reason for serializing
+
+[19:42] <Geth> ¦ MoarVM: <…commit message has 7 more lines…>
+
+[19:43] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/c799de4218
+
+[19:43] <Geth> ¦ MoarVM: d7b6855d35 | (Stefan Seifert)++ | 13 files
+
+[19:43] <Geth> ¦ MoarVM: Fix segfault caused by deopt all in NativeCall callback
+
+[19:43] <Geth> ¦ MoarVM:
+
+[19:43] <Geth> ¦ MoarVM: A callback from a native function starts a new runloop. When a deopt all
+
+[19:43] <Geth> ¦ MoarVM: happens in that runloop, the outer runloop did not jump back to the unoptimized
+
+[19:43] <Geth> ¦ MoarVM: bytecode. An sp_getspeshslot op would then cause a segfault because
+
+[19:43] <Geth> ¦ MoarVM: tc->cur_frame->effective_spesh_slots was NULLed by the deopt.
+
+[19:43] <Geth> ¦ MoarVM:
+
+[19:43] <Geth> ¦ MoarVM: <…commit message has 6 more lines…>
+
+[19:43] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d7b6855d35
+
+[19:45] <nine> nwc10: I'm not sure. Code that's simple enough to make it through the expr JIT is more likely to get fully JIT compiled and go through nativeinvoke_o instead of the old generic nativecallinvoke that I worked on.
+
+[19:46] <nine> I pushed the fixes because that nested runloop segfault thing has been there forever, so even just fixing it in some cases is an improvement already
+
+[20:01] *** domidumont left
+[20:23] <japhb> nine: I'm seeing new warnings I didn't see before.  My compiler is warning that your new backup variables might get clobbered by longjmp or vfork.  I'm assuming this is not surprising to you, but just in case it is ....
+
+[20:53] *** sena_kun left
+[20:55] *** zakharyas joined
+[21:02] <nine> japhb: yeah, I'm aware. Hope someone else knows what to do about it though...
+
+[21:06] <dogbert17> nine: I get plenty of test failures when running with a reduced nursery
+
+[21:08] <dogbert17> more or less all files in t/spec/S01-perl-5-integration fails with a SEGV when the nursery size is reduced. Could possibly be something wrong on my system.
+
+[21:10] *** sena_kun joined
+[21:14] <dogbert17> #0  0x00007fb5fe296575 in MVM_serialization_demand_object (tc=0x1edbb10, sc=0x7fb5fed00640, idx=47) at src/6model/serialization.c:2848
+
+[21:14] <dogbert17> 2848     MVM_reentrantmutex_unlock(tc, (MVMReentrantMutex *)sc->body->mutex);
+
+[21:22] <nine> dogbert17: how small?
+
+[21:23] <nine> dogbert17: seems to run fine on 512 bytes here
+
+[21:24] *** MasterDuke joined
+[22:15] <dogbert17> nine: it works after I wiped my rakudo install, sorry for the noise
+
+[22:40] *** zakharyas left
+[22:54] *** sena_kun left
+[23:09] *** sena_kun joined
+[23:41] *** sena_kun left

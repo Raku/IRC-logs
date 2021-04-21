@@ -1,0 +1,191 @@
+[00:27] <timotimo> jnthn: would you accept a fact "visible at a deopt point" that we would put on versions of registers that are current whenever a deopt annotation is hit?
+
+[00:27] <timotimo> (and then i'd also introduce a "transferrable_facts" mask that would prevent this fact from being propagated by "set" instructions ... or something to that effect)
+
+[00:28] <timotimo> one thing that annoys me a bit is that we still have to have data in redundant registers, even if they could safely be omitted
+
+[01:11] *** kjs_ joined
+[02:48] *** ilbot3 joined
+[02:50] *** JimmyZ joined
+[02:58] *** zakharyas joined
+[03:22] *** JimmyZ joined
+[04:59] *** JimmyZ joined
+[08:50] <dalek> MoarVM/longlit: c697119 | TimToady++ | src/6model/reprs/NFA.c:
+
+[08:50] <dalek> MoarVM/longlit: add debugging to NFA runner
+
+[08:50] <dalek> MoarVM/longlit: review: https://github.com/MoarVM/MoarVM/commit/c697119073
+
+[08:56] *** kjs_ joined
+[08:56] *** kjs_ left
+[09:02] *** woolfy joined
+[09:02] *** lizmat joined
+[09:10] *** woolfy left
+[09:33] *** FROGGS[mobile] joined
+[09:51] *** lizmat joined
+[10:28] *** woolfy joined
+[10:43] *** FROGGS joined
+[11:52] <jnthn> timotimo: As far as I can tell, the trick with bumping usage over de-opt boundaries is already sufficient to let us delete writes that won't be needed beyond the point.
+
+[11:57] <timotimo> hm, ok, so if i have something like
+
+[11:57] <timotimo> opthatwrites r5(10)
+
+[11:57] <timotimo> set r20(3) r5(10)
+
+[11:57] <timotimo> i can turn that into opthatwrites r20(3) if and only if r5(10) only has one usage and that is the set
+
+[11:57] <jnthn> Correct.
+
+[11:58] <jnthn> That'll nail a lot of cases.
+
+[11:58] <jnthn> Since a lot of sets are "chains" that eventually write to a more persistent location.
+
+[12:00] <timotimo> i'll be car-ing a lot today, i'll see if i can get something whipped up tonight
+
+[12:01] <timotimo> have you seen what our sink code specializes to in many cases?
+
+[12:01] <jnthn> Not recently
+
+[12:01] <jnthn> Though I know I rewrote the sink code generation a while back to it should stand a chance of specializing away in many cases.
+
+[12:01] <timotimo> if i understand correctly, we definitely get a sp findmeth with a cache, but the "can" invocation is "left behind"
+
+[12:02] <jnthn> oh...
+
+[12:02] <jnthn> But...we should in general have a good clue what the type of the thing we're sinking is. Odd.
+
+[12:03] <timotimo> i should find a specific spot where this happens before i bother you with it any more, i guess
+
+[12:06] <timotimo> nqp::push($rpa, $!nextiter) if $!nextiter.defined;
+
+[12:06] <timotimo> seems like we try to sink there
+
+[12:07] <jnthn> Interesting :)
+
+[12:07] <timotimo> that's Parcel of List
+
+[12:07] <timotimo> oh
+
+[12:07] <timotimo> it could be trying to sink the else-part of the if branch
+
+[12:08] <timotimo> ah, yes, it sinks the return value of the if
+
+[12:09] <timotimo> which is either what push_o returns (is that the list or the first argument?) or the wval the else-branch gives (which i believe is Nil)
+
+[12:11] <timotimo> another instance where we don't get rid of the sink is in ListIter's reify; the very first unless ... { } block gets sink'd
+
+[12:14] <timotimo> so maybe it's a thing in general that branches don't sink very happily yet
+
+[12:33] <timotimo> doing something like constant folding across PHI could be interesting
+
+[12:34] <jnthn> We don't do much with our PHIs yet...
+
+[12:37] <timotimo> yup
+
+[12:38] <timotimo> if we have a PHI where on one side we have a known constant argument and on the other we have an unknown argument we could in theory move the operation before the PHI and have only one side of it constant folded
+
+[12:45] *** btyler joined
+[12:45] *** woolfy joined
+[13:29] *** zakharyas joined
+[15:29] *** woolfy left
+[16:39] *** vendethiel joined
+[17:46] *** hoelzro joined
+[17:51] *** FROGGS_ joined
+[18:18] *** tgt joined
+[18:23] *** woolfy joined
+[18:35] *** lizmat joined
+[19:28] *** brrt joined
+[19:31] <brrt> \o
+
+[19:31] <brrt> long story short
+
+[19:31] <brrt> i want to create a static binary for perl6-m
+
+[19:32] <brrt> why? static binaries are the future with regard to deployments / devops; also a static binary should play well into a process isolation system
+
+[19:35] <brrt> but.. what i find is that moar is started with any number of libpaths and a single .moarvm binary. so i think we'd need to 'collapse' that somehow
+
+[19:35] <jnthn> Not to mention that you need a solution for the ext ops which are dyn linked
+
+[19:37] <brrt> hmm
+
+[19:37] <brrt> that, too
+
+[19:37] <brrt> didn't think of that
+
+[19:44] <japhb> And the future of deployments is actually the present: containers
+
+[19:45] <japhb> I believe someone had built a docker container with r-m in it ....
+
+[19:51] <btyler> containers are awesome, but (imo) require a lot more commitment/learning than plopping an executable blob somewhere
+
+[19:52] <brrt> containers are more awesome with static binaries :-)
+
+[19:52] <btyler> I'd be happy to put together a r-m dockerfile if there isn't one floating around
+
+[19:53] <btyler> I think it's telling how much positive reaction golang got RE being able to just toss a single executable around to deploy
+
+[19:53] <brrt> my point is that - with containers and all - people are rather not in the business of figuring out all dependencies and making them match nicely
+
+[19:53] <btyler> totally
+
+[20:27] *** kjs_ joined
+[20:33] <brrt> anyway.. what i wanted to know is, is there any way to determine without evaluating anything which modules and libraries a moarvm bytecode file requires?
+
+[20:34] <brrt> i have a sneaking suspicion the answer is going to be 'no'
+
+[21:04] <jnthn> 'no'
+
+[21:05] <brrt> :-)
+
+[21:05] <brrt> why not
+
+[21:05] <jnthn> Well, in no small part 'cus you can't do the same at Perl 6 level... :P
+
+[21:06] <brrt> hmm
+
+[21:07] <brrt> so that invalidates a static perl6 fakeexcutable, no?
+
+[21:08] <jnthn> It's not that Perl 6 itself is unpredictable/non-static in what it needs
+
+[21:08] <jnthn> It's that Perl 6 module loading in general is
+
+[21:08] <jnthn> So you could still make a manifest of stuff to bundle
+
+[21:09] <brrt> ok, clear enough
+
+[21:10] <brrt> :-) i suppose the rakudo makefile knows about what is needed
+
+[21:10] <jnthn> You could even implement a mechanism such that loadbytecode instructions first consult the stuff you've got bundled.
+
+[21:13] <brrt> hmm. that should be simple, considering that loadbytecode pre-consults the loaded bytecode hashtable
+
+[21:15] <TimToady> note that official modules are supposed to be immutable, so are static once given a permanent identity
+
+[21:17] <TimToady> so maybe we should warn if you make a fakecutable out of something that isn't locked down
+
+[21:17] <brrt> as far as i'm concerned, i only want to make a perl6-binary
+
+[21:18] <brrt> not having fakecutables for user stuff is perfectly acceptable
+
+[21:18] <jnthn> But also nice if we can :)
+
+[21:18] <brrt> agreed
+
+[21:19] <brrt> might also help with startup time
+
+[21:19] <TimToady> as soon as you've checked something into git, it has a sort of permanent identity
+
+[21:19] <brrt> oh, we already have a MVM_cu_from_bytes
+
+[21:19] <TimToady> so maybe that could be a temporary expedient for user files
+
+[21:20] <jnthn> brrt: Yes, I designed it that way to try and make such cleverness possible :)
+
+[21:22] <brrt> excellent
+
+[23:04] * brrt afk
+
+[23:04] *** brrt left
+[23:08] *** colomon joined

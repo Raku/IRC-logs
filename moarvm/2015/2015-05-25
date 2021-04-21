@@ -1,0 +1,214 @@
+[00:07] *** ggoebel joined
+[02:57] *** vendethiel joined
+[03:46] *** FROGGS__ joined
+[04:16] *** njmurphy joined
+[05:25] *** vendethiel joined
+[06:41] *** FROGGS[mobile] joined
+[07:02] *** flaviusb joined
+[08:17] *** vendethiel joined
+[08:51] *** vendethiel joined
+[09:17] *** FROGGS[mobile]2 joined
+[09:38] *** vendethiel joined
+[09:39] * jnthn is part way to a solution that gets rid of the "timers etc. drive a core up to 100%" issue
+
+[09:49] <lizmat> jnthn++
+
+[09:53] <jnthn> lizmat: Not sure immediately...
+
+[09:53] <jnthn> lizmat: It probably shouldn't make a difference.
+
+[09:54] <lizmat> pasting the question from #perl6 for posterity
+
+[09:54] <lizmat> [11:48:44]  <lizmat>	reverting 24aca6a8, seeing if that makes a difference
+
+[09:54] <lizmat> [11:53:01]  <lizmat>	it does...  :(  but why?
+
+[10:04] *** vendethiel joined
+[10:41] <jnthn> argh
+
+[10:42] <jnthn> Lazy deserialization contains a nasty race, it seems
+
+[10:42] <jnthn> This explains...various things.
+
+[10:43] <lizmat> indeed..  :)
+
+[10:43] <jnthn> Including the method cache thing.
+
+[10:43] <lizmat> even in one thread ?
+
+[10:44] <jnthn> No, turns out that the fact we SEGV in the method cache lookup is coincidence in the single-thread bug we saw.
+
+[10:45] <jnthn> That's an unrelated pre-comp issue so far as I can tell.
+
+[10:46] <jnthn> Anyway, I think my changes to avoid the "swallow a whole core" are OK. Not quite as good as I wanted, but seem to help a good bit
+
+[10:47] <jnthn> In theory, we can use prepare/check handlers to block/unblock ourselves for GC
+
+[10:48] <jnthn> In practice something didn't quite work out there, but maybe I'll try again after fixing the lazy deserialization stuff
+
+[10:49] <jnthn> That probably explains much of the 20% failure rate of TimToady++'s crashing Proc::Async thing
+
+[10:50] <jnthn> Ugh
+
+[10:50] <lizmat> is there a way to deserialize everything immediately, to allow tracing these types of issues ?
+
+[10:50] <jnthn> Actually we seem to hit the darn lazy deserialize thing almost all the time in my async socket test case now, I guess because it doesn't drive a core up to 100% and so we race harder on the rest. :/
+
+[10:51] <jnthn> lizmat: There's a #define you can set
+
+[10:51] <jnthn> Note that lazy deserialization hasn't typically been to blame for much so far as pre-comp bugs, though.
+
+[10:53] *** vendethiel joined
+[10:57] * jnthn tries the good way of integrating GC with the event loop again, now he knows lazy deserialization is likely to blame for the crashes he saw
+
+[11:05] <jnthn> Yes, it works nicely
+
+[11:07] <jnthn> I need to tidy up the patch with some eror checking, but otherwise it's good and we'll hvae that "oh noes 100% CPU" problem solved.
+
+[11:08] <lizmat> jnthn++  # can't be said enough :-)
+
+[11:09] <jnthn> Plus diagnozed the lazy des race, so now need to ponder a solution
+
+[11:09] <jnthn> But for now, lunch :)
+
+[11:20] *** colomon joined
+[11:21] *** vendethiel joined
+[11:43] *** FROGGS[mobile] joined
+[11:47] *** Ven joined
+[13:32] *** ggoebel joined
+[13:45] *** FROGGS[mobile] joined
+[14:27] *** colomon joined
+[14:47] <nwc10> jnthn: I'm wondering/hoping if the bug in lazy serialisation explans all that strangeness I found but couldn't (yet) track down when I tried to tweak how string indexes were serialised
+
+[14:50] *** colomon joined
+[15:03] *** colomon joined
+[15:15] <timotimo> i'm glad to see this figured out, as well as the 100% usage thing
+
+[15:26] *** vendethiel joined
+[15:47] *** Ven joined
+[16:36] <dalek> MoarVM: 58226af | jnthn++ | src/ (2 files):
+
+[16:36] <dalek> MoarVM: Eliminate 100% core use for async things.
+
+[16:36] <dalek> MoarVM:
+
+[16:36] <dalek> MoarVM: Use async wake-ups instead of an idle handler. For this to work out we
+
+[16:36] <dalek> MoarVM: also need a semaphore to avoid a race in sending the first task to the
+
+[16:36] <dalek> MoarVM: event loop. GC is also far better handled, using prepare/check handles
+
+[16:36] <dalek> MoarVM: so another thread can work-steal the event loop thread for GC purposes
+
+[16:36] <dalek> MoarVM: when it is sleeping awaiting an I/O notification etc.
+
+[16:36] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/58226af4aa
+
+[16:36] <timotimo> oooh jnthn is back :)
+
+[16:37] <timotimo> huh? why would we want to have other threads work-steal if the event loop thread is waiting for an I/O notification?
+
+[16:37] <jnthn> timotimo: 'cus the wait is deep in libuv somewhere
+
+[16:37] <timotimo> oh!
+
+[16:37] <timotimo> OK
+
+[16:38] <jnthn> Also, in most real world scenarios I've seen, we do have more threads than cores, so having some work stealing going on probably helps work against over-subscription duing the parallel GC.
+
+[16:38] <jnthn> Uh, we do *tend to*.
+
+[16:38] <jnthn> Not universally true of course.
+
+[16:39] <jnthn> Note that while this is an improvement overall, it *will* make things potentially seem worse, 'cus the lazy deserialization bug can be a good bit more noticable for some workloads now.
+
+[16:39] <jnthn> All being well, I'll dream of a good solution to that tonight and have it fixed tomorrow. :)
+
+[16:39] <timotimo> mhm
+
+[16:40] <jnthn> But anyway, our GTK apps that happen to use time won't drive a core up to 100% now :)
+
+[16:40] <timotimo> yeah, and sufficient amounts of other things
+
+[16:41] <timotimo> do we want to put a "use I/O directly rather than through libuv for synchronous I/O" thing onto moarvm's roadmap?
+
+[16:42] <nwc10> sideways from that question, something that might be a win (on Win32) is not using libuv for stat. Or, more specifically, not doing a full "real" stat for anything that doesn't need all the fields of stat.
+
+[16:42] <nwc10> it's something that Perl 5 should be fixed to avoid, but no-one on Win32 seems to hear me suggesting it.
+
+[16:43] <nwc10> specifically, "file size" and "file permissions" and even "file type" don't require faking up a device and inode
+
+[16:43] <nwc10> and all the other stuff that is expensive to emulate a stat structure 100%
+
+[16:44] <nwc10> but as best I can tell, libuv only has a "stat" interface. which means faking stuff up, only to discard it
+
+[16:44] <jnthn> timotimo: Probably yes.
+
+[16:44] <jnthn> Anyways, dinner &
+
+[16:51] <timotimo> i think i'll write up a quick piece of text
+
+[16:51] <timotimo> since you manually update the website anyway, no need for a pull request for this
+
+[16:58] <JimmyZ> I have someting to say about libuv on win32, we have to do unicode -> utf8 -> unicode on win32, because libuv api args is utf8.
+
+[16:58] <JimmyZ> :)
+
+[16:58] <JimmyZ> sometimes
+
+[17:00] <timotimo> oh
+
+[17:03] <dalek> moarvm.org: 0ac79d2 | timo++ | roadmap.html:
+
+[17:03] <dalek> moarvm.org: roadmap: avoid libuv for synchronous I/O
+
+[17:03] <dalek> moarvm.org: review: https://github.com/MoarVM/moarvm.org/commit/0ac79d2da4
+
+[17:03] *** zakharyas joined
+[17:03] <JimmyZ> anyway, to be CJK-friendly, I  prefer to use the unicode API on win32
+
+[17:16] *** Ven joined
+[17:43] *** FROGGS joined
+[17:48] <japhb> JimmyZ: What encoding is the 'unicode API' using?  UCS-2?  UTF-16?
+
+[18:02] <FROGGS> segfault in $string.NFD: https://rt.perl.org/Ticket/Display.html?id=125248
+
+[18:32] <nwc10> jnthn: ASAN doesn't seem to hate you, but 3 tests are hung, multi-threaded
+
+[18:33] <nwc10> Id   Target Id         Frame
+
+[18:33] <nwc10> 4    Thread 0x7ffc38486700 (LWP 25337) 0x00007ffc3d9b45bc in pthread_cond_wait@@GLIBC_2.3.2 () from /lib64/libpthread.so.0  3    Thread 0x7ffc36f7b700 (LWP 25338) 0x00007ffc3e63b4d0 in AO_nop_full ()
+
+[18:33] <nwc10> at 3rdparty/libatomic_ops/src/atomic_ops/sysdeps/gcc/x86.h:38
+
+[18:33] <nwc10> 2    Thread 0x7ffc35a60700 (LWP 25339) 0x00007ffc3d9b45bc in pthread_cond_wait@@GLIBC_2.3.2 () from /lib64/libpthread.so.0
+
+[18:33] <nwc10> * 1    Thread 0x7ffc40153760 (LWP 25248) 0x00007ffc3d9b45bc in pthread_cond_wait@@GLIBC_2.3.2 () from /lib64/libpthread.so.0
+
+[18:52] <nwc10> full backtrace of all 4 threads: http://paste.scsys.co.uk/482769
+
+[19:01] <nwc10> slightly different structure http://paste.scsys.co.uk/482773
+
+[19:08] <nwc10> had 4 local patches atop MoarVM master. Which should not affect async. But retrying with the real master
+
+[19:08] <nwc10> (including having the FSA disableD)
+
+[19:45] *** Ven joined
+[19:46] <nwc10> jnthn: now on master
+
+[19:46] <nwc10> http://paste.scsys.co.uk/482784
+
+[19:48] <nwc10> http://paste.scsys.co.uk/482785
+
+[19:49] <nwc10> http://paste.scsys.co.uk/482787
+
+[19:49] <nwc10> same three hangs as last time
+
+[19:53] <nwc10> and 5 other things fail. detail for 2: http://paste.scsys.co.uk/482790
+
+[19:53] <nwc10> linux hates everyone
+
+[20:41] *** Peter_R joined
+[21:29] *** colomon joined
+[22:40] *** vendethiel joined
+[23:16] *** vendethiel joined

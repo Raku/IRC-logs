@@ -1,0 +1,655 @@
+[00:00] *** reportable6 left
+[00:00] *** reportable6 joined
+[00:44] *** sena_kun left
+[02:23] *** pamplemousse left
+[02:23] *** pamplemousse joined
+[02:34] *** MasterDuke left
+[04:46] *** pamplemousse left
+[05:29] *** robertle left
+[06:00] *** reportable6 left
+[06:02] *** reportable6 joined
+[06:56] *** robertle joined
+[07:33] *** brrt joined
+[07:48] <brrt> \o
+
+[07:59] *** zakharyas joined
+[08:06] *** squashable6 left
+[08:10] *** squashable6 joined
+[08:22] *** brrt left
+[09:02] *** brrt joined
+[09:56] *** brrt left
+[11:15] <Guest37021> nine: do you want to reach 25 GC related fixes?
+
+[11:16] <Guest37021> dogbert@dogbert-ubuntu:~/repos/rakudo$ while ./perl6-m -Ilib t/spec/S02-literals/quoting.t; do :; done
+
+[11:16] <Guest37021> MoarVM panic: Collectable 0x560f1920d000 in fromspace accessed
+
+[11:16] <Guest37021> nursery size was set to 2048
+
+[11:17] *** zakharyas left
+[11:32] <nine> LOL I think even parrot was faster: Stage parse      : 5293.738
+
+[11:33] <lizmat> not if you had any non-ascii characters in the setting
+
+[11:34] <lizmat> I once killed it with that after several hours
+
+[11:36] <nine> Guest37021: that's odd...it doesn't show up here despite running a collection at every allocation
+
+[11:38] <nine> Guest37021: do you have a backtrace of that?
+
+[11:43] <lizmat> perhaps it only happens with a nursery size of 2048 ?
+
+[11:46] <nine> But why would it?
+
+[11:47] <nine> Well, this string is definitely corrupted: (gdb) call fprintf(stderr, "%p -> %p -> %p\n", orig, orig->body.storage.strands[0].blob_string, orig->body.storage.strands[0].blob_string->body.storage.strands[0].blob_string)
+
+[11:47] <nine> 0x67d55f0 -> 0x5be2dc0 -> 0x5be2dc0
+
+[11:47] <nine> String has a strand that's again a string consisting of strands (which I think we don't allow) and the first strand is the string itself
+
+[12:00] *** reportable6 left
+[12:00] <Guest37021> nine: backtrace coming up, just came back from a quick lunch
+
+[12:01] *** reportable6 joined
+[12:02] <Guest37021> oops, I lied nursery size is set to 512
+
+[12:02] <Guest37021> https://gist.github.com/dogbert17/9e4bd97daa70a97647f390c3156635c8
+
+[12:03] <Guest37021> the problem vanishes if I set MVM_JIT_DISABLE=1
+
+[12:18] <nine> Looks like the actual error happens either in the JITed code or somewhere before that
+
+[12:20] <Guest37021> so how do we tackle this?
+
+[12:26] *** robertle left
+[12:28] *** robertle joined
+[12:45] *** pamplemousse joined
+[12:47] <nine> This is really odd: when I turn on MVM_DEBUG_STRANDS stuff reliably segfaults
+
+[12:48] <nine> But not in any of the checking code. Instead it fails in MVM_string_gi_init because that is used on strings that have storage type MVM_STRING_STRANDS but 0 strands
+
+[12:50] <nine> Ah, god damn it! if (s->body.storage_type = MVM_STRING_STRAND)
+
+[12:51] <nine> nine's debugging rule #1: the bug is always in my own code!
+
+[12:52] <Guest37021> oops
+
+[13:11] *** pamplemousse left
+[13:11] *** pamplemousse joined
+[13:11] *** zakharyas joined
+[13:11] <timotimo> whoops
+
+[13:16] <Guest37021> timotimo: did you see that MasterDuke had received his Ryzen 3700X machine?
+
+[13:16] <timotimo> yeah
+
+[13:17] <Guest37021> spectest run in 133 secs and Rakudo parse time of 36s is very fast
+
+[13:17] <timotimo> jealous of the performance, but i depend on rr too often
+
+[13:18] <Guest37021> there's always the Intel 9900k
+
+[13:18] <Guest37021> a tad expensive though
+
+[13:24] <nwc10> timotimo: "rr" in this context is?
+
+[13:28] *** brrt joined
+[13:30] <Guest37021> dogbert@dogbert-ubuntu:~/repos/rakudo$ while ./perl6-m -Ilib t/spec/S17-procasync/no-runaway-file-limit.t; do :; done
+
+[13:30] <Guest37021> 1..1
+
+[13:30] <timotimo> mozilla's "rr" is a recorder and reverse debugger
+
+[13:30] <Guest37021> Segmentation fault (core dumped)
+
+[13:45] *** sena_kun joined
+[13:59] *** brrt left
+[13:59] <nine> How on earth can a string end up in its own strands?
+
+[13:59] *** lucasb joined
+[14:01] <timotimo> it could be an empty string :P
+
+[14:01] <timotimo> yeah, that don't make much sense either
+
+[14:01] <timotimo> use rr to figure out what writes the strands array :)
+
+[14:06] <nine> I guess not even rr would be of much use with objects moving around all the time?
+
+[14:11] <timotimo> well, the strands array in particular is a malloced thing
+
+[14:11] <timotimo> so that doesn't move unless it gets realloced
+
+[14:20] <nine> If I had to guess, I'd say it's a missing write barrier somewhere
+
+[14:28] <nine> But adding MVM_gc_write_barrier_hit(tc, (MVMCollectable *)result); after every write to a result->body.storage.strands[0].blob_string makes it explode right after startup in the ModuleLoader
+
+[14:29] <timotimo> um, why would you put barrier_hit in there
+
+[14:30] <timotimo> the write barrier is supposed to be conditional
+
+[14:31] <sena_kun> o/
+
+[14:31] <sena_kun> so I took a two heap snapshots in a separate thread, one is after 10 seconds of run, second is after 20 seconds, between them like 1 gb of memory was eaten
+
+[14:32] <sena_kun> what can I do to be helpful next?
+
+[14:32] <timotimo> open both in one instance of the moarvm-heapanalyzer each
+
+[14:33] <sena_kun> done, now `summary`?
+
+[14:33] <timotimo> probably wants the "incidents" branch of the moarvm heapanalyzer because i started working on stuff in there and never bothered to pick apart the feature back into master
+
+[14:33] <timotimo> or something
+
+[14:34] <sena_kun> oki, getting it...
+
+[14:34] <timotimo> but yeah, summary can be interesting
+
+[14:34] <timotimo> and also "top objects by count", "top objects by size", "top frames by count", "top frames by size"
+
+[14:34] <sena_kun> github gists are ok?
+
+[14:35] <timotimo> sure
+
+[14:36] <nine> timotimo: probably because I don't know what I'm doing :)
+
+[14:36] <timotimo> it seems a little dangerous to hit the wb every time
+
+[14:37] <timotimo> like, wouldn't that add the same memory location in the inter-generation set multiple times?
+
+[14:37] <timotimo> and then the same pointer would be updated multiple times, which might upset an assert somewhere perhaps
+
+[14:37] <sena_kun> https://gist.github.com/Altai-man/b6e6c40b81fdef59c1f26246dadf4460 <- this is without incidents branch, now preparing branch version...
+
+[14:37] <sena_kun> seems like only Buf is growing
+
+[14:39] <sena_kun> timotimo, I can re-run it with incidents branch, should I?
+
+[14:39] <nine> I think I meant MVM_gc_write_barrier(tc, (MVMCollectable *)result, (MVMCollectable *)a); instead
+
+[14:39] <timotimo> ok
+
+[14:40] <timotimo> sena_kun: now you can 'find 1000 objects type="Buf"' i think? maybe?
+
+[14:40] <sena_kun> got a bunch of IDs
+
+[14:40] <timotimo> right, and you can "path" each of the IDs
+
+[14:40] <sena_kun> only 13 of them
+
+[14:41] <timotimo> even better
+
+[14:41] <timotimo> you can "info" them to get their size
+
+[14:41] <timotimo> (maybe only in the incidents branch tho)
+
+[14:42] <timotimo> "path" will let you find what keeps a given object alive
+
+[14:43] <sena_kun> I am running `perl6 -Ip6-app-moarvm-heapanalyzer/lib p6-app-moarvm-heapanalyzer/bin/moar-ha heapsnapshot-493-2.mvmheap` but info is not working
+
+[14:43] <sena_kun> I checkouted the branch, of course
+
+[14:43] <Guest37021> timotimo: do you see anything suspicious here: https://gist.github.com/dogbert17/1c8a0dccdb5d416f833200f9681f9ef6
+
+[14:43] <timotimo> oh maybe it's "show" rather than "info"
+
+[14:44] <sena_kun> don't understand. :S
+
+[14:44] <timotimo> Guest37021: whenever i see "dogbert17" at the top of a gist, it's very suspicious already
+
+[14:44] <timotimo> sena_kun: just "show 1234"
+
+[14:44] <sena_kun> d'oh
+
+[14:44] <sena_kun> timotimo, sorry
+
+[14:44] <nine> And that does seem to help!
+
+[14:45] <Guest37021> :)
+
+[14:46] <timotimo> Guest37021: well, that looks damning
+
+[14:47] <Guest37021> it's with a 512 byte nursery
+
+[14:47] <nine> This could have caused a number of string related issues
+
+[14:47] <sena_kun> show for all objects returns me `Buf (Object) --[ <STable> ]--> Buf (STable) (34330)
+
+[14:47] <nine> With lots of action at a distance
+
+[14:48] <timotimo> that's the list of things it points at. isn't there a section at the top with some infos?
+
+[14:49] <timotimo> Guest37021: could try to use the FSA_DEBUG define to figure this one out
+
+[14:49] <sena_kun> timotimo, https://gist.github.com/Altai-man/b6e6c40b81fdef59c1f26246dadf4460#file-3-info
+
+[14:50] <timotimo> damn it, it's supposed to show some extra info
+
+[14:50] <Guest37021> timotimo: will do
+
+[14:50] <timotimo> well, you can get the "path" to each of these objects and see which seem unrelated
+
+[14:53] <sena_kun> timotimo, how can I know unrelated if not? https://gist.github.com/Altai-man/b6e6c40b81fdef59c1f26246dadf4460#file-4-paths
+
+[14:53] <sena_kun> I see traces to HTTP::HPACK, HTTP2 code, Async::SSL
+
+[14:54] <sena_kun> and the leak is visible when using HTTP/2, while HTTP/1.1 is fine, so all components are used
+
+[14:55] <Geth> ¦ MoarVM: 695a24de35 | (Stefan Seifert)++ | src/strings/ops.c
+
+[14:55] <Geth> ¦ MoarVM: Fix memory corruption caused by missing write barriers in string ops
+
+[14:55] <Geth> ¦ MoarVM:
+
+[14:55] <Geth> ¦ MoarVM: result may be promoted to gen2 in some cases while one of its strands is still
+
+[14:55] <Geth> ¦ MoarVM: in the nursery.
+
+[14:55] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/695a24de35
+
+[14:56] <timotimo> yeah, that's not quite as obvious
+
+[14:56] <timotimo> let me go dig up code that shows the size of an object
+
+[14:59] <timotimo> you can try to manually apply the commit 024a06db1b5065e20edcfb1af351ef80aeaae33a
+
+[15:00] <sena_kun> timotimo, to analyzer?
+
+[15:00] <timotimo> yes
+
+[15:00] <timotimo> can also ugly-hack it in
+
+[15:00] <timotimo> only need to see which object id has which size and unmanaged size
+
+[15:00] <timotimo> unmanaged size will be the interesting one for Buf
+
+[15:02] <sena_kun> `cherry-pick 024a06db1b5065e20edcfb1af351ef80aeaae33a` says bad object
+
+[15:03] <timotimo> oh, perhaps it's only in my repo
+
+[15:03] <timotimo> [email@hidden.address]
+[15:03] <sena_kun> https://github.com/jnthn/p6-app-moarvm-heapanalyzer/commit/024a06db1b5065e20edcfb1af351ef80aeaae33a
+
+[15:03] <sena_kun> no, it is here
+
+[15:03] <sena_kun> hmm
+
+[15:03] <timotimo> since it's just a one-line patch
+
+[15:03] <timotimo> just copy-paste it :D
+
+[15:03] <sena_kun> oki
+
+[15:06] <sena_kun> ok, now `show` shows sizes as `56 + 496 bytes`
+
+[15:06] <timotimo> yeah, that's not big
+
+[15:06] <sena_kun> 56 + 1511251968 bytes
+
+[15:06] <sena_kun> :)
+
+[15:06] <timotimo> hm, that could be big
+
+[15:06] <sena_kun> path is...
+
+[15:06] <timotimo> of course that depends on how big a byte is on your system
+
+[15:07] <sena_kun> I also see 56 + 32768 bytes
+
+[15:07] <sena_kun> everything else is not above 1024
+
+[15:07] <sena_kun> not the not fun part, or not sure...
+
+[15:08] <sena_kun> path is very undescriptive
+
+[15:08] <timotimo> "path" shows only the shortest path; that's the reason i built the "incidents" command
+
+[15:09] <sena_kun> https://gist.github.com/Altai-man/b6e6c40b81fdef59c1f26246dadf4460#file-path
+
+[15:09] <sena_kun> I am running `incidents 106880`
+
+[15:09] <timotimo> ha, yeah, that's very short
+
+[15:10] <timotimo> "last handler result" has something to do with what implements "return" and other stuff
+
+[15:10] <timotimo> nine: good work :)
+
+[15:11] <sena_kun> https://gist.github.com/Altai-man/b6e6c40b81fdef59c1f26246dadf4460#file-5-incidents
+
+[15:12] <timotimo> OK, looking at the scalar object (with incidents again) should give us the name of the variable that holds on to it
+
+[15:12] <timotimo> but the frame is also interesting
+
+[15:12] <sena_kun> (Cro::HTTP2::FrameParser):31) is `whenever $in -> Cro::TCP::Message $packet`
+
+[15:13] <sena_kun> hmm
+
+[15:13] <timotimo> it's possible that the http2 frame parser keeps adding bytes to one end of the buf an consuming bytes from the other and somehow rakuo isn't reclaiming the space in front of the "moving window" of data?
+
+[15:13] <sena_kun> no idea, but I am going to play a bit with FrameParser, like print packages and see what it can give us...
+
+[15:14] <timotimo> unfortunately, the "actual size" of the buffer isn't visible to perl6 code, you can get at it with gdb, though
+
+[15:14] <sena_kun> oh, so it won't help me much?
+
+[15:15] <sena_kun> we use $buffer for storing incomplete message piece, but we `$buffer = Buf.new;` it on every new package, so hmm
+
+[15:15] <timotimo> a cleverly placed nqp::sin(1), turning off the jit, and a corresponding breakpoint in interp.c can get you a long way
+
+[15:16] <sena_kun> >OK, looking at the scalar object (with incidents again) should give us the name of the variable that holds on to it
+
+[15:16] <sena_kun> how can I do it?
+
+[15:16] <sena_kun> ah, incidents and ID...
+
+[15:16] <timotimo> literally just "incients 122704"
+
+[15:16] <sena_kun> <anon> (FrameParser.pm6 (Cro::HTTP2::FrameParser):22) (Frame) (106858)
+
+[15:16] <sena_kun> a supply. :S
+
+[15:17] <timotimo> then "show 106858" will give you all links, incluing the one to the scalar, which will tell us the name
+
+[15:17] <timotimo> if it's in a lexical, that is
+
+[15:18] <sena_kun> there are a lot of scalars, and the one with 122704 is $_.
+
+[15:18] <timotimo> OK
+
+[15:18] <timotimo> well, we've close in a lot alreay
+
+[15:18] <sena_kun> ah, stop
+
+[15:19] <sena_kun> https://gist.github.com/Altai-man/8c6e6987142911429780ca7aa54a50fb <- am I interpreting it correctly? seems like it is $buffer, after all
+
+[15:21] <timotimo> yeah, that's $buffer
+
+[15:21] <timotimo> gotta be afk for a bit
+
+[15:24] <sena_kun> oh wow
+
+[15:24] <sena_kun> seems like it is fixed
+
+[15:24] <sena_kun> I have a feeling that it somehow relied on a bug somewhere
+
+[15:25] <sena_kun> let me check...
+
+[15:25] *** AlexDaniel is now known as testable9291
+
+[15:27] *** testable9291 is now known as AlexDaniel
+
+[15:32] <nine> Guest37021: does my commit by any chane fix your issue, too?
+
+[15:34] *** robertle left
+[15:40] <sena_kun> timotimo, commited a working fix. thanks a lot for your help!
+
+[15:43] *** zakharyas left
+[15:56] <dogbert17> nine: let me check ...
+
+[16:00] <dogbert17> this still fails with a 512 byte nursery: while ./perl6-m -Ilib t/spec/S02-literals/quoting.t; do :; done
+
+[16:00] <timotimo> sena_kun: you're very welcome!
+
+[16:02] <dogbert17> t/spec/S17-procasync/no-runaway-file-limit.t still SEGV's
+
+[16:06] <timotimo> dogbert17: any difference in output with the fsa ebug thing turne on?
+
+[16:06] <timotimo> oh no
+
+[16:06] <timotimo> my d key is starting to misbehave i think :o
+
+[16:06] <timotimo> ddddd - pressed 8 times, got 5 (
+
+[16:06] <timotimo> also, : is on the d key so the smiley also b0rked
+
+[16:06] <lizmat> ah, the joys of a German keyboard  :-)
+
+[16:07] <dogbert17> timotimo: no difference
+
+[16:07] <timotimo> dogbert17: none at all, though? add_page shouldn't even exist any more if that's turned on
+
+[16:07] <dogbert17> perhaps a 512 byte nursery is too small
+
+[16:07] <timotimo> lizmat: wellllll, it's actually a neo2 variant of the german keyboard, so the d is actually on what others have as the ö key
+
+[16:07] <lizmat> ah...  ok  :-)
+
+[16:08] <lizmat> I wouldn't know: the "d" only has "d" on it on my keyboard
+
+[16:10] <timotimo> :)
+
+[16:10] <timotimo> the key that has a "d" on it works fine
+
+[16:10] <timotimo> see: aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa
+
+[16:11] <lizmat> .oO( encrypted keyboards, the new trend! )
+
+[16:11] <timotimo> at one point i tweeted a tweet where i typed on de as if i had neo2 or the other way around, which resulted in basically gibberish, and i tagged it with #neo2
+
+[16:11] <timotimo> a few months ago some magazine calling themselves "neo2 magazine" appeared out of nowhere
+
+[16:12] <timotimo> now every other day i get a notification on twitter that they liked that tweet
+
+[16:12] <lizmat> :-)
+
+[16:12] <timotimo> like, they have some automated thing that keeps liking that same tweet over and over and over again
+
+[16:13] <dogbert17> I'll recheck
+
+[16:19] <nine> dogbert17: LOL apparently your bug goes away when we collect garbage all the time?!
+
+[16:19] <nine> I can reproduce it easily with just a 512 byte nursery
+
+[16:27] <nine> Yes, something happens in the JITed code
+
+[16:29] *** brrt joined
+[16:37] <brrt> oh hey, I hear the signal
+
+[16:38] <timotimo> brrtman, the brrtsignal is burning bright!
+
+[16:41] <dogbert17> nine: cool, where is brrt :)
+
+[16:41] <lizmat> nnnnnnnnnnnnnnnnnnnnnn brrtman!
+
+[16:41] <brrt> ... but what's the issue
+
+[16:41] <dogbert17> timotimo: https://gist.github.com/dogbert17/5da2ca38e9b7444c40346088f75b23c5
+
+[16:42] <dogbert17> brrt: https://gist.github.com/dogbert17/9e4bd97daa70a97647f390c3156635c8
+
+[16:42] *** pamplemousse_ joined
+[16:44] *** pamplemousse left
+[16:47] *** brrt left
+[16:47] *** brrt joined
+[16:56] <nine> Well it's at least not the expr jit
+
+[16:57] *** sena_kun left
+[16:57] *** sena_kun joined
+[16:59] <brrt> hmmm
+
+[16:59] <brrt> well that reduces the surface area quite considerably
+
+[16:59] <nine> Since MVM_repr_bind_attr_inso gets called from JITed code, we're looking for a frame where the bindattr did not get turned into sp_bind_o
+
+[16:59] *** mst joined
+[16:59] *** ChanServ sets mode: +o mst
+
+[16:59] <brrt> nine: does jit-bisect.pl help?
+
+[17:05] <nine> This program cannot be bisected: 256 at nqp/MoarVM/tools/jit-bisect.pl line 181.
+
+[17:06] <nine> Apparently jit-bisect.pl only disables the expr jit when doing the initial run
+
+[17:09] <nine> Ah, the lego JIT does not support bisection at all
+
+[17:10] <nine> But since I can catch it in the debugger, shouldn't I be able to find out which frame is currently running?
+
+[17:14] <nine> Even tc->cur_frame claims to be !cursor_start. But in the spesh log I don't find any untouched bindattr_* ops
+
+[17:15] <timotimo> nine: it could be an attrref
+
+[17:15] <nine> Oh, there are multiple specializations!
+
+[17:15] <timotimo> ah, yes there are
+
+[17:21] <nine> One of them does a getattr_o, then an getlexperinvtype_o (which may allocate), then the bindattr_o
+
+[17:21] <nine> So what's the JIT equivalent of an MVMROOT?
+
+[17:21] <nine> brrt: ^^^
+
+[17:22] <timotimo> it doesn't have that, it just has all locals registered with the gc if they are object locals
+
+[17:22] <timotimo> other than that you can always gc_root_temp_push gc_root_temp_pop
+
+[17:22] <nine> Apparently this one isn't?
+
+[17:25] <timotimo> this is the template jit, yeah?
+
+[17:25] <nine> no
+
+[17:25] <timotimo> exprjit?
+
+[17:25] <nine> Ok, confusion of terms. It's the lego jit
+
+[17:25] <timotimo> OK
+
+[17:26] <brrt> nine: no, there's nothing like MVMROOT
+
+[17:26] <timotimo> that will store everything back into the locals after every compiled instruction
+
+[17:26] *** sena_kun left
+[17:26] <brrt> it's not something we do.... any idea which template doe sit
+
+[17:26] <brrt> nine: lego jit does support bisect, try jit-bisect.pl with --spesh option
+
+[17:26] <nine> Of course it's also possible that the pointer returned from getattr_o was already outdated
+
+[17:27] <timotimo> that would be impressive
+
+[17:27] <brrt> (I've been meaning to unify that behaviour)
+
+[17:27] * brrt will have a quick look
+
+[17:30] *** chloekek joined
+[17:36] <nine> A debug check in getattr_o does not trigger though
+
+[17:37] <nine> But there's a second bindattr_o in that spesh cand. One of the 2 PHI nodes is the result of an invocation
+
+[17:41] *** brrt left
+[17:43] <nine> Stupid me...it's easy to identify the right bindattr_o: I do have the name of the attribute that gets set
+
+[17:43] <nine> So it's bindattr_o        r1(2),   r8(6), lits($!regexsub),  r3(15), liti16(-1)
+
+[17:45] <nine> Which is the result of a getcodeobj which gives me a place to add a check
+
+[17:46] <nine> Gotcha! This check triggers. getcodeobj returns an outdated pointer
+
+[17:52] <nine> Alas the code_object was already outdated when we enter MVM_frame_get_code_object.
+
+[17:54] <timotimo> wow
+
+[17:55] <nine> So the next challenge will be to find out where that MVMCode thing comes from
+
+[18:00] *** reportable6 left
+[18:00] *** reportable6 joined
+[18:01] <nine> It's not from deserialization of closures as those will be allocated in gen2
+
+[19:17] *** robertle joined
+[19:37] *** brrt joined
+[20:21] <nine> Huh! I replaced the setcodeobj primitive in the JIT with a call to a new MVM_frame_set_code_object function that just does the MVM_ASSIGN_REF thing and the error went away
+
+[20:22] <nine> So either I made a mistake, or the JIT implementation of setcodeobj is simply wrong. I suspect the latter, because it does assign a reference without any GC related magic. It just sets a pointer
+
+[20:23] <nine> And even worse! The JIT implementation of setcodeobj was done by me! Now I'm back to my debugging rule #1 the bug is always in my own code
+
+[20:28] <timotimo> the jit doesn't have MVMROOT, but i'm pretty sure it has MVM_ASSIGN or what it's called
+
+[20:29] <nine> check_wb and hit_wb
+
+[20:29] <Geth> ¦ MoarVM: 9c969b1bac | (Stefan Seifert)++ | src/jit/x64/emit.dasc
+
+[20:29] <Geth> ¦ MoarVM: Add missing write barrier to lego JIT implementation of setcodeobj
+
+[20:29] <Geth> ¦ MoarVM:
+
+[20:29] <Geth> ¦ MoarVM: Thanks to dogbert17++ for finding the error!
+
+[20:29] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/9c969b1bac
+
+[20:31] <nine> I think that's now #26. I guess I can go on vacation now with a pretty good conscience :)
+
+[20:32] <timotimo> publish the patch you're using to cause GC on every allocation so someone else can also give it a try while you're away?
+
+[20:36] <Geth> ¦ MoarVM: 35101eb850 | (Stefan Seifert)++ | 6 files
+
+[20:36] <Geth> ¦ MoarVM: New GC debug level
+
+[20:36] <Geth> ¦ MoarVM:
+
+[20:36] <Geth> ¦ MoarVM: MVM_GC_DEBUG 3 will trigger the GC on every allocation. In addition it
+
+[20:36] <Geth> ¦ MoarVM: will poison the past fromspace by overwriting it with 0xef (which is
+
+[20:36] <Geth> ¦ MoarVM: easily recognizable as garbage and cause explosions when dereferenced).
+
+[20:36] <Geth> ¦ MoarVM: Note that this will also disable destructors as they rely on STables
+
+[20:36] <Geth> ¦ MoarVM: remaining in past fromspace till the next GC run
+
+[20:36] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/35101eb850
+
+[20:37] <timotimo> destructors means finalizers?
+
+[20:37] <nine> yes
+
+[20:38] <nine> A couple more debug assertions and a nonworking implementation of saving those STables even when poisoning the rest: https://gist.github.com/niner/065c8585c477f2ec98997e816b54cd4b
+
+[20:39] <nine> dogbert17: it's fixed!
+
+[20:43] <dogbert17> nine+++, very impressive
+
+[20:43] <timotimo> .o( time for another point release so that the upcoming rakudo star can be really good? )
+
+[20:44] <dogbert17> we might actually be out of fromspace errors now
+
+[20:45] <dogbert17> I had just run a spectest with a 512 byte nursery, there were 5 fromspace errors but nine's setcodeobj fix seems to have taken care of them all :)
+
+[20:56] <nine> Ok, boarding now. Wish you all a nice 3 weeks!
+
+[20:57] <timotimo> have a good one!
+
+[20:57] <nine> thanks!
+
+[20:58] *** travis-ci joined
+[20:58] <travis-ci> MoarVM build errored. Stefan Seifert 'New GC debug level
+
+[20:58] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/567116024 https://github.com/MoarVM/MoarVM/compare/9c969b1bac66...35101eb8501d
+
+[20:58] *** travis-ci left
+[21:00] <dogbert17> have a nice vacation
+
+[21:09] *** lucasb left
+[21:15] <brrt> noine++
+
+[21:16] <brrt> nine++ well done
+
+[21:17] *** chloekek left
+[21:27] *** MasterDuke joined
+[21:33] *** pamplemousse_ left
+[21:38] *** brrt left
+[21:48] *** pamplemousse_ joined
+[21:59] *** tellable6 joined
+[22:02] *** tellable6 left
+[22:04] <Geth> ¦ MoarVM: b3469f9264 | (Daniel Green)++ | src/spesh/optimize.c
+
+[22:04] <Geth> ¦ MoarVM: Actually optimize smrt_intify when able
+
+[22:04] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/b3469f9264
+
+[22:23] *** travis-ci joined
+[22:23] <travis-ci> MoarVM build passed. Daniel Green 'Actually optimize smrt_intify when able'
+
+[22:23] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/567145134 https://github.com/MoarVM/MoarVM/compare/35101eb8501d...b3469f926454
+
+[22:23] *** travis-ci left

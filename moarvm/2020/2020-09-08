@@ -1,0 +1,304 @@
+[00:22] <timotimo> doesn't segfault on my machine, oddly neough
+
+[00:31] <timotimo> not even running with valgrind gives a single peep when compiling nqpmo
+
+[00:35] <timotimo> oh i might have found it
+
+[00:35] <timotimo> i have an idea
+
+[00:45] <timotimo> not finding the right fix yet, but what happens is that a spesh candidate gets freed even though it should still be in use, and the jit code was being accessed to help find a dynvar
+
+[00:46] <timotimo> so it's either a temp root missing somewhere (or in multiple places of course) or one of the gc_mark or root adding functions missing something
+
+[00:47] <timotimo> nine had a gcc plugin that can find missing temp roots
+
+[00:47] <timotimo> probably needs to have MVMSpeshCandidate added to the list of collectables
+
+[02:01] *** AlexDaniel left
+[02:01] *** AlexDaniel joined
+[02:01] *** AlexDaniel left
+[02:01] *** AlexDaniel joined
+[06:03] <nwc10> good *, #moarvm 
+
+[06:08] *** Kaiepi left
+[06:16] *** domidumont joined
+[06:36] *** Kaiepi joined
+[06:50] *** Altai-man joined
+[07:10] *** leont joined
+[07:19] *** sena_kun joined
+[07:21] *** Altai-man left
+[07:26] *** zakharyas joined
+[07:30] *** zakharyas1 joined
+[07:31] *** zakharyas left
+[07:41] *** domidumont left
+[08:09] <MasterDuke> oldest child's first ever day of school. the house is quieter
+
+[08:19] <MasterDuke> timotimo: good thinking. though for some reason now i'm getting `cc1: error: failed to initialize plugin python.so` when running...
+
+[08:22] <MasterDuke> oh, i think my python was upgraded recently, maybe i need to rebuild the plugin
+
+[08:24] <MasterDuke> yep, that was it
+
+[08:26] <MasterDuke> hm, lots of output. i think nine++ said there are a bunch of false positives that he reviewed
+
+[08:26] <MasterDuke> can i trim the list of things down to just MVMSpeshCandidate to see if there are any related to that? or does it need the whole list to work?
+
+[08:28] <MasterDuke> oooh, if i do that i get a bunch of "Missing root for `spesh_cand`...". this looks promising
+
+[09:38] <MasterDuke> timotimo: pushed a new commit fixing the things that check-roots.py found. however, it doesn't change anything for me, i still get a segv when compiling nqpmo
+
+[09:39] <MasterDuke> valgrind is noisy though, and `MVM_spesh_candidate_add (MVMSpeshCandidate.c:260)` is in its errors
+
+[09:47] <timotimo> "is in", but only in the "was alloc'd at" section, right?
+
+[09:53] <MasterDuke> yeah
+
+[09:54] <MasterDuke> `if (candidate->body.jitcode) 65         MVM_jit_code_destroy(tc, candidate->body.jitcode);` is in the free'd at section
+
+[09:56] <MasterDuke> afk for a bit, should be able to check back after lunch
+
+[10:07] <timotimo> yeah, i believe it's correct that the gc_free calls jit_code_destroy to free the thing, it's just that something is neglecting to tell the GC that the spesh candidate object is still needed
+
+[11:18] *** Altai-man joined
+[11:20] *** sena_kun left
+[11:44] *** zakharyas1 left
+[11:44] *** squashable6 left
+[11:46] *** squashable6 joined
+[12:37] <MasterDuke> timotimo: a missing MVMROOT somewhere? or an incorrect gc_mark?
+
+[12:50] <MasterDuke> hm. should there be some condition for this https://github.com/MoarVM/MoarVM/pull/1344/files#diff-ea09739cd0cd4d057f63f170d89ff1d2L33-R33 to add the candidate? e.g., `if (!body->spesh_candidates[i]->body.jitcode)`
+
+[13:01] *** zakharyas joined
+[13:16] <timotimo> no, i don't think there ought to be a conditional in that gc_mark
+
+[13:16] <MasterDuke> or should the mark of the candidates instead happen in the MVMStaticFrameSpesh.c's gc_free?
+
+[13:17] <timotimo> at least in that code i don't see anything that marks jit code stuff?
+
+[13:17] <MasterDuke> instead of its gc_mark
+
+[13:17] <timotimo> no, marking doesn't belong in gc_free
+
+[13:19] <timotimo> oh that's because there's nothing in a jit code to be marked
+
+[13:20] <timotimo> but i would think there's a place missing that puts a pointer to an MVMSpeshCandidate into a worklist or a temporary root
+
+[13:22] <timotimo> the piece of code that repr_alloc_init's the MVMSpeshCandidate is inside the "must not GC in spesh" area
+
+[13:23] <timotimo> that will want to be adjusted
+
+[13:23] <MasterDuke> ah
+
+[13:24] <MasterDuke> the `tc->spesh_active_graph = NULL;`?
+
+[13:24] <timotimo> no
+
+[13:25] <timotimo> steal the two ifdefed lines from spesh_gc_point and put them around the repr_alloc_init of the candidate
+
+[13:27] <MasterDuke> `tc->in_spesh = 0;` then back to 1?
+
+[13:28] <timotimo> yeah
+
+[13:29] <MasterDuke> but not ifdef'ed?
+
+[13:29] <timotimo> do ifdef it
+
+[13:30] <MasterDuke> no change
+
+[13:31] <timotimo> well, it'll only prevent the panic if you've got gc debug turned on
+
+[13:32] <timotimo> will let me get further in valgrind with gc debug cranked up all the way
+
+[13:32] <MasterDuke> ah, ok
+
+[13:33] <timotimo> ==43742==  Address 0xefefefefefeff00f is not stack'd, malloc'd or (recently) free'd
+
+[13:33] <MasterDuke> that's an amusing address
+
+[13:35] <timotimo> i think we have a memset for 0xfe somewhere
+
+[13:35] <MasterDuke> couple in src/core/threadcontext.c
+
+[13:36] <timotimo> only the nursery?
+
+[13:39] <MasterDuke> didn't look
+
+[13:39] <MasterDuke> btw, is https://github.com/MoarVM/MoarVM/pull/1344/files#diff-b26a3689b87415a1c76692b9a43a02d7L182-R315 correct?
+
+[13:41] <MasterDuke> looks like from_space and to_space are set. the tc itself is when destroyed
+
+[13:43] <timotimo> not sure if these lines are right. what happens if you leave them in?
+
+[13:45] <MasterDuke> jnthn mentioned "they may become redundant", but i don't remember if i've tried with them in. doing so now
+
+[13:46] <timotimo> ok, how on earth does this MVMStaticFrameSpesh have valid contents, but the one MVMSpeshCandidate it points to is b0rked
+
+[13:46] <MasterDuke> magic. a missing root somewhere?
+
+[13:46] <MasterDuke> no change if i uncomment those lines
+
+[13:47] <timotimo> when the MVMStaticFraeSpesh gets marked, it's supposed to mark all its candidates as well
+
+[13:47] <timotimo> hm.
+
+[13:48] <timotimo> does the MVMSpeshPlanned need to mark the things?
+
+[13:55] <MasterDuke> it marks its MVMStaticFrame, is that not sufficient?
+
+[13:56] <timotimo> ah, that's probably enough, yeah
+
+[14:13] <MasterDuke> oh, what about https://github.com/MoarVM/MoarVM/pull/1344/files#diff-b26a3689b87415a1c76692b9a43a02d7L185 this comment and code? all stays the same?
+
+[14:14] <timotimo> yeah i think that's correct
+
+[14:22] <MasterDuke> afk for a while again. will be back in the evening at least
+
+[14:53] *** MasterDuke left
+[15:19] *** sena_kun joined
+[15:20] *** Altai-man left
+[15:42] *** dogbert17 left
+[16:02] *** MasterDuke joined
+[17:10] *** zakharyas left
+[17:42] *** domidumont joined
+[18:34] *** dogbert17 joined
+[18:36] <MasterDuke> well, building with MVM_GC_DEBUG set to 3 hasn't really turned up any new information
+
+[18:38] *** sena_kun left
+[18:41] *** sena_kun joined
+[18:43] <timotimo> i guess i'll have to rr it
+
+[18:45] <MasterDuke> oh, i just got a new backtrace. get_osr_deopt_index at src/spesh/osr.c:14
+
+[18:45] <MasterDuke> `if (cand->body.deopts[2 * i] == offset)` and cand's body is garbage
+
+[18:45] <MasterDuke> (gdb) p (MVMSpeshCandidateBody) (cand->body)$2 = {cs = 0xefefefefefefefef, type_tuple = 0xefefefefefefefef, discarded = 239 '\357', bytecode_size = 4025479151, bytecode = 0xefefefefefefefef <error: Cannot access memory at address 0xefefefefefefefef>, handlers = 0xefefefefefefefef,   spesh_slots = 0xefefefefefefefef, num_spesh_slots = 4025479151,
+
+[18:45] <MasterDuke> num_deopts = 4025479151, deopts = 0xefefefefefefefef, deopt_named_used_bit_field = 17289301308300324847, deopt_pea = {materialize_info = 0xefefefefefefefef,     materialize_info_num = 17289301308300324847, materialize_info_alloc = 17289301308300324847, deopt_point = 0xefefefefefefefef, deopt_point_num = 17289301308300324847, deopt_point_alloc =
+
+[18:45] <MasterDuke> 17289301308300324847}, num_inlines = 4025479151,   inlines = 0xefefefefefefefef, local_types = 0xefefefefefefefef, lexical_types = 0xefefefefefefefef, num_locals = 61423, num_lexicals = 61423, work_size = 4025479151, env_size = 4025479151, num_handlers = 4025479151,   jitcode = 0xefefefefefefefef, deopt_usage_info = 0xefefefefefefefef}
+
+[18:46] <MasterDuke> but yeah, i still can't use rr on this desktop, if you can find something that would be great
+
+[19:18] <MasterDuke> if frame #2, MVM_spesh_osr_poll_for_result (tc=0x55555555aec0) at src/spesh/osr.c:171 `perform_osr(tc, spesh->body.spesh_candidates[ag_result]);`, spesh->body looks fine
+
+[19:18] *** Altai-man joined
+[19:18] <MasterDuke> {spesh_arg_guard = 0x55555570b2a0, spesh_candidates = 0x55555557e1d0, num_spesh_candidates = 1, spesh_entries_recorded = 169, spesh_stats = 0x7ffff0017c90, plugin_state = 0x0, num_heap_promotions = 0}
+
+[19:19] <MasterDuke> but yeah, spesh->body.spesh_candidates[0] is all 0xefefefefefefefef
+
+[19:19] <timotimo> huh
+
+[19:19] <timotimo> now that's interesting
+
+[19:19] <MasterDuke> oh?
+
+[19:20] <timotimo> the spot where the candidate data gets overwritten to be fefefe is in a gc run caused by creating a spesh candidate
+
+[19:21] *** sena_kun left
+[19:21] <MasterDuke> huh
+
+[19:23] <timotimo> i wonder if it's the previous spesh candidate that's getting blorped out
+
+[19:25] <MasterDuke> here? https://github.com/MoarVM/MoarVM/pull/1344/files#diff-b26a3689b87415a1c76692b9a43a02d7L167-L179
+
+[19:25] <timotimo> that link doesn't seem to point at a line on my end
+
+[19:25] *** zakharyas joined
+[19:26] <MasterDuke> you have to unfold/expand the lines
+
+[19:26] <MasterDuke> right above here https://github.com/MoarVM/MoarVM/pull/1344/files#diff-b26a3689b87415a1c76692b9a43a02d7L179 does that link work?
+
+[19:26] <timotimo> that one work
+
+[19:27] <MasterDuke> it and the lines right above are what i meant
+
+[19:32] <timotimo> i mean more like the code that calls this function
+
+[19:32] <timotimo> it's a loop over the planned things
+
+[19:33] <MasterDuke> ah
+
+[19:34] <timotimo> so the allocation of a spesh candidate that runs the GC where the SpeshCandidate that later gets accessed blows up is when n is 4 out of 10 in that loop
+
+[19:35] <timotimo> getting super annoyed by the MVMROOT vs debugger thing yet again
+
+[19:36] <MasterDuke> i assume there's nothing special about 4, that just happens to be when the GC happens?
+
+[19:39] <timotimo> this level of gc debug forces a gc after every allocation
+
+[19:41] <timotimo> it's two different SFs at least
+
+[19:42] <timotimo> yeah, the plan has all different SFs
+
+[19:45] <MasterDuke> oh, so it could be something about the plan itself if not every gc is a problem
+
+[19:49] <timotimo> could be; including something about the sf being "interesting"
+
+[19:50] <timotimo> i mean, the plan is marked, so all SFs that have something planned for it during the current spesh round are all marked
+
+[19:50] <timotimo> and there's no allocation in between creating the candidate and bumping the number of candidates
+
+[19:51] <timotimo> so any just-added candidate should be reachable "immediately"
+
+[19:53] <MasterDuke> hmm
+
+[20:02] <timotimo> why isn't any fprintf(stderr, ...) in gc_mark of MVMStaticFrame, MVMStaticFrameSpesh, or MVMSpeshCandidate firing?!
+
+[20:05] <MasterDuke> i get the same with MVM_GC_DEBUG set to 3. but i get prints with it set to 0
+
+[20:05] <timotimo> wtf.
+
+[20:06] <timotimo> are the static frames perhaps from-the-beginning put into gen2?
+
+[20:06] <timotimo> in that case, we will quite possibly have to MVM_ASSIGN_REF the MVMSpeshCandidate into MVMStaticFrameSpesh?
+
+[20:07] <timotimo> and also the MVMStaticFrameSpesh into MVMStaticFrame, though i would assume that is already done
+
+[20:12] <MasterDuke> i don't know MVM_ASSIGN_REF
+
+[20:18] *** domidumont left
+[20:24] <timotimo> MVM_ASSIGN_REF gets information about the object assigned into as well as what is being assigned
+
+[20:25] <timotimo> so when the object that is being assigned into is a gen2 object and the one being assigned is a nursery object, it knows to mark the pointer into the inter-generation set
+
+[20:25] <timotimo> because a nursery collection will not go through gen2 objects at all, it would then miss the pointer in question
+
+[20:30] <MasterDuke> src/6model/reprs/MVMStaticFrame.c has some in its copy_to
+
+[20:30] <MasterDuke> none in src/6model/reprs/MVMStaticFrameSpesh.c (except the one they all have in type_object_for)
+
+[20:37] *** zakharyas left
+[20:39] <MasterDuke> so we would add one in src/6model/reprs/MVMStaticFrameSpesh.c ? when it marks the candidates?
+
+[20:41] <timotimo> it doesn't belong in marking
+
+[20:41] <timotimo> it goes where a pointer value is set
+
+[20:45] <timotimo> i think it would go where we put a candidate into the candidates list
+
+[20:45] <timotimo> but also
+
+[20:45] <timotimo> when we reallocate the candidates list, we'll want to re-ASSIGN_REF all the entries
+
+[20:46] <timotimo> or else earlier entries may get missed again
+
+[20:52] <MasterDuke> hrm
+
+[20:54] <MasterDuke> so `sg->cand = candidate;` and `new_candidate_list[spesh->body.num_spesh_candidates] = candidate;`?
+
+[20:58] <MasterDuke> in src/6model/reprs/MVMSpeshCandidate.c
+
+[21:04] *** Altai-man left
+[21:13] <timotimo> i think so, yeah
+
+[21:14] <timotimo> i always got confused by the arguments to MVM_ASSIGN_REF
+
+[21:14] * MasterDuke has no idea
+
+[21:55] <jnthn> iirc, they're: tc, the collectable that will come to reference the object, the place to assign to, and the thing to assign
+
+[21:55] <jnthn> Sorry I've not had time to follow more closely today; $dayjob task used all the brane, and I had a few other bits to do this evening
+
+[21:58] <MasterDuke> thanks. i'll be to bed soon, but should come back to this tomorrow evening
+
+[23:29] *** leont left

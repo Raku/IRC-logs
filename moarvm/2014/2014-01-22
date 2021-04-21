@@ -1,0 +1,1795 @@
+[00:00] <jnthn> I've just cut stage mast in half.
+
+[00:00] <jnthn> Uh, to less than half.
+
+[00:00] <diakopter> er, wow.
+
+[00:00] <diakopter> such cut
+
+[00:00] <jnthn> need spectest
+
+[00:00] <jnthn> desire verify
+
+[00:01] *** woolfy joined
+[00:05] <diakopter> jnthn: what was your big fix
+
+[00:07] <jnthn> The funny thing is it's a constant factor fix rather than an algorithmic one...
+
+[00:07] <jnthn> Patching coming up
+
+[00:09] <dalek> MoarVM: e072c4c | jnthn++ | src/6model/ (6 files):
+
+[00:09] <dalek> MoarVM: Optimize root objects list in SC.
+
+[00:09] <dalek> MoarVM:
+
+[00:09] <dalek> MoarVM: This doesn't make things better from an algorithmic point of view, but
+
+[00:09] <dalek> MoarVM: looking up objects in SCs - and in particular, searching the SC to find
+
+[00:09] <dalek> MoarVM: the index of an object - is a very common operation. This makes all SC
+
+[00:09] <dalek> MoarVM: object operations a good bit faster, and easier for the compiler to do
+
+[00:09] <dalek> MoarVM: inlining on, which is a very notable win.
+
+[00:09] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/e072c4c8f7
+
+[00:10] <jnthn> The spectests don't hit the serialize path that was terribly slow, so it's only several more seconds off that.
+
+[00:11] <diakopter> oh no :)
+
+[00:11] <jnthn> Down to 329s.
+
+[00:11] <diakopter> wait, why couldn't you mark the index on the obj itself
+
+[00:11] <jnthn> Bloats all the obj...
+
+[00:11] <jnthn> Most objects aren't ever in an SC
+
+[00:12] <diakopter> but if it was only like 8 bits from the bitflag field
+
+[00:12] <jnthn> But it's not that, it's more
+
+[00:12] <jnthn> uh
+
+[00:12] <jnthn> I mean, there's more than 256 things
+
+[00:13] <diakopter> I figured ?)
+
+[00:13] <jnthn> But yeah, you could << 8 and cap
+
+[00:13] <diakopter> oh, then linear search just the multiples :)
+
+[00:13] <jnthn> No, that's cache-horrid. I meant you could know you could skip that number << 8 entries before starting searching.
+
+[00:14] <diakopter> oh
+
+[00:14] <jnthn> I need to re-profile to see where the costs are now
+
+[00:14] <diakopter> well how about this - since they're always deserialized into gen2, do a hashtable on their memory address :D :D
+
+[00:15] <diakopter> (and then expire the hashtable if they move..)
+
+[00:15] <jnthn> Yeah, a hash table approach could be wise.
+
+[00:16] <diakopter> how much time was it spending in sc index lookup previously
+
+[00:16] <diakopter> (did the profiler indicate that?)
+
+[00:17] <jnthn> Around 15-20% of total time for compiling CORE.setting
+
+[00:18] <diakopter> I seem to recall being the one to code that linear search
+
+[00:18] <diakopter> .oO( oh, this won't matter, right, except when compiling... )
+
+[00:19] <jnthn> Well, it's linear search elsewhere too
+
+[00:19] <jnthn> Now it's still worth improving, but much smaller
+
+[00:19] <jnthn> Like, way down the list.
+
+[00:20] <jnthn> 26% of time goes on memory management, with 25% of that on the collection side.
+
+[00:20] <jnthn> Which is kinda what you'd expect given we do bump-the-pointer allocation.
+
+[00:22] <jnthn> 4% of the time is on the walk through the old nursery to gc_free things that need it. That's possible to push off to another thread.
+
+[00:22] <diakopter> yup
+
+[00:23] <diakopter> I noted that in a comment in the code in the gcorch branch
+
+[00:23] <diakopter> (and then you noted it in master)
+
+[00:23] <diakopter> I think
+
+[00:24] <jnthn> Well, and I knew we could at the point I designed Moar ;)
+
+[00:24] <jnthn> try_get_slot is very hot.
+
+[00:24] <jnthn> timotimo: How far did your hintfor work get?
+
+[00:25] <jnthn> If this profile is right, which I've little reason to doubt, we spend over 5% of our time looking up dynvars.
+
+[00:25] <jnthn> $*foo and the like
+
+[00:26] <jnthn> 4.6% on string comparison
+
+[00:27] <diakopter> eww
+
+[00:27] <diakopter> how many of those successes?
+
+[00:27] <jnthn> Most...
+
+[00:27] <jnthn> Oh, it's 'cus attribute lookup
+
+[00:27] <jnthn> Once we have hintfor a bunch of those go away.
+
+[00:28] <jnthn> And when we've a specializer another load to
+
+[00:28] <jnthn> *do
+
+[00:32] <diakopter> jnthn: I think timotimo pasted a link to a diff or something
+
+[00:33] * [Coke] ponders hacking on sixperl or working on his sixperl presentation.
+
+[00:33] * [Coke] does the former and calls it "research"
+
+[00:33] <diakopter> I'm good at that kind of research too
+
+[00:36] <jnthn> Um, wow
+
+[00:37] <diakopter> so scare
+
+[00:37] <jnthn> Is it me, or is the MVMStaticFrame marked refs_frames for no reason...
+
+[00:37] <diakopter> sounds like git blame diakopter
+
+[00:38] <jnthn> coulda been me
+
+[00:38] <jnthn> And it could be that it once did
+
+[00:38] <diakopter> wait, why doesn't it
+
+[00:39] <jnthn> But we spend 6.8% of time adding inter-generational roots to the worklist
+
+[00:39] <[Coke]> m: class A { has $.a = 0 }; for ^2 { my $a = .a given A.new; say $a; } # RT 121049
+
+[00:39] <camelia> rakudo-moar 07c483: OUTPUT«0␤0␤»
+
+[00:39] <jnthn> But just under half of that is calling gc_mark on MVMStaticFrame instances.
+
+[00:39] <[Coke]> ^^ I cannot duplicate raydiak++'s bug report.
+
+[00:39] <diakopter> oh
+
+[00:40] <jnthn> [Coke]: That's 'cus I already fixed it.
+
+[00:40] <[Coke]> jnthn: but the ticket is still open. :P
+
+[00:40] <jnthn> :P
+
+[00:40] <[Coke]> Is there a test?
+
+[00:41] <[Coke]> ... if not, that's fine.
+
+[00:41] <jnthn> No, no test
+
+[00:41] <jnthn> Oh, unless raydiak already wrote one
+
+[00:42] <jnthn> We talked about where to put it but I don't recall seeing it going in
+
+[00:42] <jnthn> (S04-statement-modifiers/given.t)
+
+[00:42] <[Coke]> danke.
+
+[00:43] *** benabik joined
+[00:43] <jnthn> Well, seems s/1/0/ shaved another couple of seconds off CORE.setting
+
+[00:44] <lee__> benabik: i'm getting a fun new libmoar error when building rakudo on OS X :P do i need to pull another patch for it to work?
+
+[00:44] <benabik> lee__: AFAIK, Rakudo master builds on OS X.  :-/
+
+[00:44] <lee__> darn, ok
+
+[00:45] <benabik> What was the error?
+
+[00:45] <lee__> here is the error: https://gist.github.com/leedo/ba22b9c6ed7220ef21ca
+
+[00:46] <benabik> Hmmmmmmm....
+
+[00:47] <lee__> i actually get the same error when using gcc
+
+[00:47] <lee__> though i should double check that
+
+[00:48] <benabik> Maybe I should change it from -l to just a path to the library.
+
+[00:48] <benabik> I thought rpath would make it look in the right place.
+
+[00:48] <benabik> It probably works for me because it's installed in /usr/local/lib and that's in my linker search path already.
+
+[00:48] <lee__> ah, makes sense
+
+[00:48] *** Util joined
+[00:49] <lee__> you'd think rpath would take care of that
+
+[00:49] <benabik> rpath is part of the runtime search.  I guess ld uses it's own at link time.
+
+[00:51] <dalek> MoarVM: 370f3cf | jnthn++ | src/6model/reprs/MVMStaticFrame.c:
+
+[00:51] <dalek> MoarVM: MVMStaticFrame does not directly ref an MVMFrame.
+
+[00:51] <dalek> MoarVM:
+
+[00:51] <dalek> MoarVM: Thus refs_frames can be cleared. It may have referenced them at some
+
+[00:51] <dalek> MoarVM: point in the past, but it doesn't now. Since MVMStaticFrame was the
+
+[00:51] <dalek> MoarVM: most costly of the refs_frames things to mark, and there were a lot
+
+[00:51] <dalek> MoarVM: of them, this makes the intergenerational roots a bunch cheaper to
+
+[00:51] <dalek> MoarVM: handle.
+
+[00:51] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/370f3cfe0d
+
+[00:52] <jnthn> Spectest time from 329s => 321s with that.
+
+[00:52] <[Coke]> ~>
+
+[00:53] <diakopter> XD
+
+[00:54] <benabik> Rakudo PR #244 should fix it.
+
+[00:55] <jnthn> benabik: merged
+
+[00:55] <jnthn> Thanks
+
+[00:55] <benabik> jnthn++
+
+[00:55] <benabik> lee__: Try again.  :-D
+
+[00:56] <lee__> benabik: nice! trying, after i revert my bad attempt
+
+[00:57] <lee__> benabik: missing -l ?
+
+[00:58] <lee__> hmm or not
+
+[00:58] <benabik> lee__: Shouldn't need it when giving a path.
+
+[00:59] <benabik> -lmoar => ...../libmoar.dylib
+
+[01:00] *** lizmat joined
+[01:00] <lee__> ah i see, a new error. i wish i could be more help
+
+[01:00] <lee__> https://gist.github.com/leedo/329cca50dc20f8a70b35
+
+[01:01] <lee__> actually that is probably a side effect of my hacking
+
+[01:01] <benabik> Yeah, that seems odd.
+
+[01:01] <benabik> I dunno where the dynext/ comes from.
+
+[01:02] <benabik> Actually, no.  I don't know where the rest of the path comes from.
+
+[01:02] <benabik> It should just be dynext/libperl6_ops_moar.dylib
+
+[01:04] <lee__> nuking and trying again
+
+[01:04] *** jnap joined
+[01:19] <lee__> benabik: success!
+
+[01:19] <lee__> thank you!
+
+[01:20] <benabik> \o/
+
+[01:20] <benabik> I'm glad.  I realized I didn't reconfigure before testing, which is silly to do with build changes.  O.o
+
+[01:21] <benabik> I mean, it was Obviously Correct (tm), but...
+
+[01:21] <jnthn> benabik++ lee__++
+
+[02:02] *** benabik joined
+[02:37] *** cognominal joined
+[04:29] *** jnap joined
+[04:56] <diakopter> the LCTG for moar is taking significantly longer today
+
+[04:56] <diakopter> er.
+
+[04:56] <diakopter> LTCG
+
+[05:30] *** jnap joined
+[06:18] *** FROGGS joined
+[06:31] *** jnap joined
+[07:14] *** FROGGS joined
+[07:15] <FROGGS> a p-spectest shows a similar maxresident again... 2606.11user 163.62system 14:14.56elapsed 324%CPU (0avgtext+0avgdata 769168maxresident)k
+
+[07:15] <FROGGS> MoarVM++ :o)
+
+[07:32] *** jnap joined
+[07:53] <timotimo> jnthn: i implemented hintfor and that's already in the stage0; my usage of it was still trying to "shoehorn" it into getattr and bindattr ops compilation, rather than the way you suggested it
+
+[07:53] <timotimo> it does seem to correctly get hints, though
+
+[07:54] <timotimo> jnthn: could the fix for the MVMStaticFrame thingie cause the algorithmic improvement in the branch you did the other day to work?
+
+[08:09] *** FROGGS joined
+[08:30] *** odc joined
+[08:32] *** jnap joined
+[08:33] <timotimo> oops, i was wrong
+
+[08:34] <timotimo> i added nqp::hintfor in a branch, not in master :(
+
+[08:34] <timotimo> and then i did an unnecessary stage0 update
+
+[08:34] <timotimo> d'oh
+
+[08:34] <timotimo> what an expensive blunder
+
+[08:36] <FROGGS> gah!
+
+[08:36] <FROGGS> :P
+
+[08:36] * FROGGS .oO( you are an insensitive clod )
+
+[08:38] <timotimo> here we go
+
+[08:38] <timotimo> and now for making bindattr and getattr use it, too
+
+[08:51] <timotimo> ah, hm, i need to make another version of getattr/bindattr for when the attribute name isn't constant :\
+
+[09:27] <dalek> MoarVM: a0a4666 | diakopter++ | src/6model/6model.c:
+
+[09:27] <dalek> MoarVM: type in no such method error.. I think
+
+[09:27] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/a0a4666342
+
+[09:33] *** jnap joined
+[10:22] <nwc10> jnthn: once MoarVM handles things like native ints better, will that just speed up benchmarks that test this, or are they used extensively in NQP and the setting?
+
+[10:23] <jnthn> nwc10: The problem wasn't/isn't actually at MoarVM level
+
+[10:23] <nwc10> oh, OK.
+
+[10:23] <jnthn> nwc10: NQP already does pretty well with them, afaik
+
+[10:23] <nwc10> pretend I asked it on #perl6 then :-)
+
+[10:23] <jnthn> nwc10: The problem was that Rakudo didn't inline operators.
+
+[10:24] <jnthn> Now it does, but the inline comes out badly
+
+[10:24] <jnthn> I think the latter is an all-backends issue though
+
+[10:24] <jnthn> diakopter: You can't assume every meta-object is a KnowHOW. a0a4666 is gonna SEGV...
+
+[10:26] <diakopter> oh
+
+[10:26] <diakopter> :(
+
+[10:26] <diakopter> add a check for that repr?
+
+[10:26] <diakopter> oh, well, nm
+
+[10:27] <dalek> MoarVM: d7f4857 | diakopter++ | src/6model/6model.c:
+
+[10:27] <dalek> MoarVM: gah
+
+[10:27] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d7f4857916
+
+[10:27] <jnthn> Well, I was gonna go for a better fix than that, and have one that lets us actually get the invocant...
+
+[10:27] <jnthn> ...in some HLL code, so we can construct a better typed exception.
+
+[10:27] <diakopter> oh
+
+[10:34] *** jnap joined
+[10:35] <diakopter> jnthn: did you fix the callsite signature dupe detection? :)
+
+[10:35] <jnthn> timotimo: Measurable change for me too with getattr/bindattr changes so far...
+
+[10:35] <jnthn> diakopter: Yes, it shaved tens of kilobytes off CORE.setting.moarvm.
+
+[10:36] <diakopter> oh :)
+
+[10:36] <diakopter> I wonder what I borked
+
+[10:36] <jnthn> I can't remember how I patched it...
+
+[10:36] <jnthn> git log --grep=callsite -p
+
+[10:36] <jnthn> :P
+
+[11:05] <jnthn> I was gonna say that getattr/binattr tweaks so far made no spectest difference, but then I noticed we ran 7 extra tests in about the same time :)
+
+[11:06] <FROGGS> that sounds like >99% to me
+
+[11:10] <diakopter> jnthn: I'm getting this when building with that: https://gist.github.com/diakopter/70d38c838f9633751983
+
+[11:13] <jnthn> my $obj_mast := $qastcomp.as_mast( $op[0] );
+
+[11:13] <jnthn> my $type_mast := $qastcomp.as_mast( $op[1] );        my $obj_mast := $qastcomp.as_mast( $op[0] );
+
+[11:13] <jnthn> oops
+
+[11:13] <diakopter> oops :)
+
+[11:13] <jnthn> On those two I'd :want($MVM_reg_obj)
+
+[11:13] <jnthn> Just to be sure
+
+[11:13] <diakopter> ok
+
+[11:14] <diakopter> same error
+
+[11:15] <diakopter> nqp builds fast as lightning, btw
+
+[11:15] <jnthn> Well, sub-minute anyway...
+
+[11:15] <jnthn> Yeah, I don't immediately see why the error...
+
+[11:16] <jnthn> It's gotta be some silly though
+
+[11:17] <jnthn> 'cus here's the line it blows up on:
+
+[11:17] <jnthn> nqp::bindattr($der, NQPRoutine, '$!dispatchees', nqp::clone($!dispatchees));
+
+[11:17] <jnthn> The the value there is an array
+
+[11:18] <diakopter> hm
+
+[11:19] <diakopter> missing decont on something/
+
+[11:19] <diakopter> ?
+
+[11:19] <diakopter> value maybe?
+
+[11:19] <diakopter> er, cont?
+
+[11:21] <jnthn> No, only class handle should be deconted and it is being
+
+[11:23] <diakopter> when I've seen that before it turned out to be a bug in another place in the compiler
+
+[11:23] <diakopter> reusing a register when it shouldn't have been
+
+[11:24] <diakopter> (such as the only one we release that could've been passed - the name str expr)
+
+[11:24] <jnthn> oooh
+
+[11:24] <jnthn> my $name_mast := $qastcomp.as_mast( :want($MVM_reg_str), $op[2] );
+
+[11:24] <jnthn> push_op(@ins, $namedop, $obj_mast.result_reg, $type_mast.result_reg,
+
+[11:24] <jnthn> $name_mast.result_reg, $val_mast.result_reg);
+
+[11:24] <jnthn> Forget to push_ilist(@ops, $name_mast); here
+
+[11:24] <diakopter> hee
+
+[11:25] <diakopter> good eye
+
+[11:25] <diakopter> timotimo: since you understood what the qast-generating version was doing, you should be able to see how it translates to the mast emission version
+
+[11:27] <diakopter> jnthn: erm
+
+[11:27] <diakopter> same error?
+
+[11:28] <diakopter> jnthn: oh, it needs box?
+
+[11:30] <diakopter> jnthn: oh, you're not going to believe this
+
+[11:30] <jnthn> Is there another bug too? :)
+
+[11:33] <tadzik> it made rakudo faster than perl 5
+
+[11:34] <diakopter> faster than go
+
+[11:34] <tadzik> come on, go is slow. It's like chess
+
+[11:34] <diakopter> I LIKE MAGLEV
+
+[11:34] <jnthn> Anybody for > 100 MB off CORE.setting compile memory use? :)
+
+[11:34] <tadzik> :o
+
+[11:35] *** jnap joined
+[11:35] <diakopter> jnthn: u fixed?
+
+[11:37] <jnthn> diakopter: Your patch? No, I did something else :)
+
+[11:37] <jnthn> diakopter: You want me to look at it, or you still working on it?
+
+[11:37] <diakopter> yeah I'll push and break the build :)
+
+[11:40] <diakopter> bbiab
+
+[11:41] <dalek> MoarVM: 2faf743 | jnthn++ | 3rdparty/uthash.h:
+
+[11:41] <dalek> MoarVM: Reduce initial count of hash buckets from 32 to 8.
+
+[11:41] <dalek> MoarVM:
+
+[11:41] <dalek> MoarVM: Most of the hashes we build are rather small. Changing this produces
+
+[11:41] <dalek> MoarVM: no noticable time difference to Rakudo CORE.setting build or spectest
+
+[11:41] <dalek> MoarVM: time, however does appear to shave 100MB or so off CORE.setting build
+
+[11:41] <dalek> MoarVM: memory use.
+
+[11:41] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/2faf743ff4
+
+[11:42] <jnthn> diakopter: a...branch may have been better :P
+
+[12:00] <dalek> MoarVM: a85a25f | jnthn++ | src/6model/reprs/P6opaque.c:
+
+[12:00] <dalek> MoarVM: Don't explode on uncomposed in hintfor.
+
+[12:00] <dalek> MoarVM:
+
+[12:00] <dalek> MoarVM: It simply means we're not in a position to optimize.
+
+[12:00] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/a85a25f965
+
+[12:12] <diakopter> jnthn: any ideas why we're stuck with -O1 on linux?
+
+[12:12] <tadzik> to make windows look good :P
+
+[12:12] <jnthn> diakopter: No
+
+[12:13] <jnthn> diakopter: It needs some detective work to figure out which optimization(s) -O2 enables break us
+
+[12:16] <FROGGS> -O2 and -O3 explodes when compiling rakudo's BOOTSTRAP.pm
+
+[12:22] *** lizmat joined
+[12:25] <jnthn> We need 7s more off CORE.setting compilation time before it's within a minute for me.
+
+[12:27] <nwc10> on your desktop?
+
+[12:33] <jnthn> Yes.
+
+[12:33] <jnthn> Though my current laptop is no slouch either.
+
+[12:33] <jnthn> It's almost competitive on CORE.setting build. It isn't on spectest 'cus it's only got 2p/4v cores, rather than 4p/8v on my desktop
+
+[12:35] <jnthn> One of my jobs for Feb: big MoarVM IO overhaul.
+
+[12:35] *** jnap joined
+[12:36] <jnthn> I'm really not happy with it.
+
+[12:36] <jnthn> No discredit to anybody who worked on it; I'm happy the amount that works does so.
+
+[12:37] <jnthn> But...the design seems to mean we're doing checks for things all over rather than figuring things once and then having a vtable-y thing that just takes us off to the right place.
+
+[12:37] <jnthn> And it's gonna get worse still once we add in async IO stuff.
+
+[12:38] <nwc10> please don't steal from the Perl 5 PerlIO vtable
+
+[12:39] <nwc10> do ask leont what the Perl 5 should have had :-)
+
+[12:42] <jnthn> nwc10: Well, I wasn't really thinking of Perl 5 at all (I've no idea how its IO looks), but more replicating the approach I took on JVM
+
+[12:42] <nwc10> aha
+
+[12:42] <timotimo> could it be that concat and trim_string suffer from MVM_string_flatten?
+
+[12:43] <jnthn> timotimo: Well, the flattening is always going on to avoid tickling bugs.
+
+[12:43] <timotimo> right.
+
+[12:43] <timotimo> i feared that :)
+
+[12:44] <jnthn> I'm hoping diakopter++ may get tuits to look at that stuff at some point.
+
+[12:44] <timotimo> also, i think the most common case for concat will be that our LHS has multiple strands and our RHS will have one
+
+[12:44] <jnthn> Yeah
+
+[12:44] <timotimo> but since the strings will always be flattened after concatenation, we'll end up with only one strand on either side for now
+
+[12:45] * JimmyZ hopes to see the NFG branch
+
+[12:48] <timotimo> jnthn: if the flatten function resets the body.flags from MVM_STRING_TYPE_ROPE to MVM_STRING_TYPE_INT64, shouldn't it free the strands array?
+
+[12:48] <timotimo> or does it continue using the rope stuff?
+
+[12:48] <jnthn> timotimo: I'm really not sure without looking further into it
+
+[12:49] <jnthn> timotimo: At first thought, sounds like yes
+
+[12:49] <timotimo> i'll just try adding it and see if the spectests fail :P
+
+[12:49] <jnthn> Would it mean we never free it later?
+
+[12:50] <timotimo> maybe. let me check.
+
+[12:51] <timotimo> P6str doesn't have a gc_free or gc_cleanup
+
+[12:52] <timotimo> am i looking at the wrong place?
+
+[12:52] <jnthn> Wrong place
+
+[12:52] <jnthn> MVMString
+
+[12:52] <timotimo> OK
+
+[12:53] <timotimo> gc_free never touches the strands
+
+[12:53] <timotimo> so it would appear that this leaks
+
+[12:54] <timotimo> that doesn't explain why the complexity seems to be so bad, but ... whatevs.
+
+[12:56] * timotimo runs spectests
+
+[12:57] <timotimo> hm, yeah, how do i tell if the failures are my fault or are currently normal? %)
+
+[12:58] <jnthn> Compare it to before you started :)
+
+[12:59] <timotimo> i'll have to generate that data first :|
+
+[12:59] <timotimo> luckily the spectest run is pretty darn fast
+
+[13:00] <timotimo> 833.71user 37.61system 4:01.45elapsed 360%CPU (0avgtext+0avgdata 280704maxresident)k
+
+[13:01] <jnthn> Is that 280 with my recent patch for initial hash size, ooc?
+
+[13:01] <timotimo> it might be. let me check
+
+[13:01] <timotimo> yes, it is
+
+[13:02] <timotimo> 4 minutes for a full spectest run is really good
+
+[13:02] <moritz> timotimo: on how many cores?
+
+[13:03] <timotimo> 4
+
+[13:03] <timotimo> i *think* 4 physical, 4 virtual
+
+[13:03] <timotimo> how do i find out?
+
+[13:03] <jnthn> Do you have hyperthreading enabled?
+
+[13:03] <jnthn> That's what gives you the virtual ones.
+
+[13:03] <timotimo> yeah, how do i find that out?
+
+[13:03] <timotimo> cpu cores	: 4
+
+[13:03] <jnthn> Not sure on your OS :)
+
+[13:04] <tadzik> htop or /proc/cpuinfo gives you virtual ones
+
+[13:04] <timotimo> yeah, 4 of those
+
+[13:04] <tadzik> is that i5?
+
+[13:04] <timotimo> model name	: Intel(R) Core(TM) i5-3570 CPU @ 3.40GHz
+
+[13:04] <tadzik> I _think_ all i5s are 2 physical, 4 virtual
+
+[13:04] <timotimo> OK
+
+[13:05] <timotimo> i have an i7 in my laptop, but it's 2p, 4v, too
+
+[13:05] <timotimo> i seem to have made new b0rks with my free call in MVM_string_flatten
+
+[13:06] <tadzik> ok, wrong. It's 4 physical, and 4 HW threads
+
+[13:06] <timotimo> i'll let someone who knows the string implementation inside-out try it out
+
+[13:06] <tadzik> according to wikipedia
+
+[13:06] <jnthn> ah...then it probably ain't right...
+
+[13:06] <tadzik> and compared to my 3320M, which is 2/4
+
+[13:16] *** FROGGS joined
+[13:16] <FROGGS> timotimo: in case you have a core i5, you have two physical plus ht
+
+[13:36] <timotimo> fair enough
+
+[13:36] *** jnap joined
+[13:36] <timotimo> calloc allocates on the stack, doesn't it?
+
+[13:37] <timotimo> or was that alloca?
+
+[13:37] <timotimo> right, it's alloca
+
+[13:37] <timotimo> there should be some free for the calloc that creates the strands, i think.
+
+[13:37] * FROGGS .oO( Living a vid alloca? )
+
+[13:38] <JimmyZ> calloc is malloc&&memset zeror
+
+[13:38] <timotimo> it's still amazing that moarvm takes 100 megs of rss for just "say 1"
+
+[13:38] <JimmyZ> *zero
+
+[13:38] <timotimo> but parrot takes 2.5x that
+
+[13:38] <timotimo> so ... yay i guess?
+
+[13:42] <jnthn> Probably lower than JVM too :)
+
+[13:43] <timotimo> yes, the jvm has another 200 megabytes more
+
+[13:43] <jnthn> o.O
+
+[13:44] <timotimo> 0.19user 0.04system 0:00.24elapsed 98%CPU (0avgtext+0avgdata 104036maxresident)k
+
+[13:44] <timotimo> 0.28user 0.08system 0:00.39elapsed 92%CPU (0avgtext+0avgdata 247232maxresident)k
+
+[13:44] <timotimo> 8.38user 0.20system 0:04.77elapsed 179%CPU (0avgtext+0avgdata 429280maxresident)k
+
+[13:52] <timotimo> i wonder how low we're going to get
+
+[13:52] <timotimo> lazy loading of the setting, for example, would probably be an amazing win to get the minimum memory usage down
+
+[13:58] <timotimo> if all you want to do is say 1, you don't need bags/mixes/complex/...
+
+[13:59] <moritz> or sockets
+
+[14:00] <FROGGS> that is an interesting idea...
+
+[14:00] <timotimo> that's an old idea :)
+
+[14:01] <nwc10> stop thinking fun thoughts, and get back to the grindstone of making tests pass! :-)
+
+[14:03] <timotimo> what do we need to keep the .moarvm files around for?
+
+[14:03] <timotimo> i mean, mmapped in memory?
+
+[14:03] <timotimo> big parts of it are deserialized into in-memory structures after loading it
+
+[14:04] <timotimo> so maybe only the rest (bytecode i guess) is actually needed?
+
+[14:09] <jnthn> timotimo: Correct
+
+[14:09] <jnthn> timotimo: That's a plausible optimization
+
+[14:09] <timotimo> are the two pieces cleanly separated?
+
+[14:09] <jnthn> Well, sort of
+
+[14:09] <timotimo> hehe.
+
+[14:09] <jnthn> I mean, the bytecode is all in one big chunk
+
+[14:10] <timotimo> i think i can mmap /dev/zero over it and linux will DTRT
+
+[14:10] <jnthn> I think you need to keep annotations mapped in too
+
+[14:10] <timotimo> otherwise, memadvise can set an "unused" flag, but i don't think it'll get rid of the memory ASAP
+
+[14:10] <timotimo> are the annotations in one chunk, too?
+
+[14:11] <timotimo> at least we open the bytecode file readonly, so the kernel *should* share it between processes already
+
+[14:12] <jnthn> Yes, they're in another chunk. Maybe not right next to the bytecode one...
+
+[14:12] <timotimo> that'd be okay
+
+[14:13] <nwc10> If I follow the munmap() man page correctly, you can unmap areas of memory (ie not the entire file)
+
+[14:13] <nwc10> so if that's right, you don't need to madvise(), and you don't need to map in zero
+
+[14:13] <jnthn> nwc10: That sounds just what we need.
+
+[14:13] <jnthn> Yeah, mapping in zero feels like a hack to me...
+
+[14:13] <timotimo> oh, that seems nice
+
+[14:13] <nwc10> so, try to have the file ordered with things to keep contiguous
+
+[14:13] <timotimo> we'll only ever waste one page, i think
+
+[14:13] <timotimo> well, on either side
+
+[14:13] <nwc10> does the deserialise happen before any bytecode is executed?
+
+[14:14] <nwc10> yes, that's what I thought too. At most 1 page each side
+
+[14:14] <timotimo> how big are pages? like 4 kbytes?
+
+[14:15] <nwc10> I believe nearly everywhere, yes
+
+[14:15] <jnthn> nwc10: No
+
+[14:15] <timotimo> that doesn't sound too bad, though
+
+[14:15] <nwc10> OK. No :-)
+
+[14:15] <jnthn> But we get chance to do the munmap afterwards
+
+[14:15] <nwc10> oh, no, to deserialise
+
+[14:16] <nwc10> not to 4k
+
+[14:16] <nwc10> threads. What IRC lacks
+
+[14:16] <jnthn> Right :)
+
+[14:16] <timotimo> yes, 4096 says getpagesize on my machine
+
+[14:17] <timotimo> since the bytecode files are multiple megabytes big, that ought to be a small loss if the bytecode and annotations are both chunks and the rest around and between can be discarded
+
+[14:18] <nwc10> I believe that this is how ELF lays out files. Sparse files, rounded to some size, which might be 32K
+
+[14:18] <nwc10> but I haven't checked that
+
+[14:18] <timotimo> we can surely embed some padding
+
+[14:27] *** jnap joined
+[14:35] <timotimo> a friend just pointed out that mmapped files don't count for the rss, only for "shared" memory
+
+[14:36] <nwc10> oh. But I think that it's still a good idea
+
+[14:37] <timotimo> yeah
+
+[14:37] * jnthn is working on making our code-gen less awfuls
+
+[14:38] <timotimo> jnthn: is there something i can do to implement nqp::locallifetime on moar?
+
+[14:38] <timotimo> i'm not sure if we use it anywhere besides $foo++ and friends, though
+
+[14:38] <timotimo> oh, in sinking we use it
+
+[14:39] <timotimo> ah, in many places actually
+
+[14:41] <jnthn> And ACCEPTS...
+
+[14:45] *** camelia joined
+[14:47] *** benabik joined
+[14:57] <timotimo> any mechanism in mast that would allow me to signal locallifetime to the mast compiler?
+
+[14:58] <jnthn> timotimo: Well, see how QAST::Stmt does it...
+
+[15:00] <timotimo> will do
+
+[15:00] <timotimo> have to finish my commute first
+
+[15:04] <timotimo> why exactly can't we just use stmt instead of locallifetime?
+
+[15:05] <timotimo> other than that i should be able to make that work somehow
+
+[15:05] <jnthn> Because we want to contorl which locals are killed
+
+[15:06] <timotimo> just need to find out what to put into the QAST tree so that the mast compiler knows that there even was ablocallifetime op
+
+[15:06] <timotimo> oh, is there an argument to locallifetime?
+
+[15:12] *** FROGGS[mobile] joined
+[15:23] <jnthn> timotimo: Yes, it's AST and then names of locals
+
+[15:24] <timotimo> fair enough
+
+[15:25] *** jnap1 joined
+[15:25] <jnthn> timotimo: I think you need to replicate the force-freeing that QAST::Stmt does, anyways
+
+[15:25] <jnthn> timotimo: Just that you know the names to force-free
+
+[15:26] <timotimo> yeah
+
+[15:31] <jnthn> Sadly, make release doesn't work at all well on Windows and I dunno what to do about it :)
+
+[15:32] <nwc10> delegate!
+
+[15:32] <moritz> or write a better 'make release' target :-)
+
+[15:32] <jnthn> moritz: Yes, that's the "not sure how to do better" bit :)
+
+[15:33] <moritz> install tar and gzip?
+
+[15:34] <jnthn> Doesn't even get that far :)
+
+[15:34] <jnthn> [ -n "2014.01" ] || ( echo "\nTry 'make release VERSION=yyyy.mm'\n\n"; exit 1 )
+
+[15:34] <jnthn> '[' is not recognized as an internal or external command,
+
+[15:34] <jnthn> operable program or batch file.
+
+[15:34] <timotimo> %)
+
+[15:34] <timotimo> does windows have "test" instead?
+
+[15:34] <moritz> .oO( install [ )
+
+[15:34] <moritz> and echo
+
+[15:34] <benabik> And ( ?  ;-)
+
+[15:35] <jnthn> moritz: make release doesn't seem to include the sub-modules in the .tar, anyway
+
+[15:35] <nwc10> replace the shell with Perl (5, that is) and become portable
+
+[15:35] <jnthn> moritz: Was the intention that it would?
+
+[15:36] <moritz> jnthn: it did for me
+
+[15:36] <jnthn> moritz: The directories are there but empty
+
+[15:37] <jnthn> 3rdparty/dyncall is empty, for example
+
+[15:37] <moritz> mlenz@mlenz-workstation:~/p6/MoarVM$ tar tzf MoarVM-2014.01|grep 3rdparty|wc -l
+
+[15:37] <moritz> 255
+
+[15:37] <moritz> that's not just directories
+
+[15:37] <moritz> maybe different git version?
+
+[15:37] <moritz> huh, dyncall/ is empty
+
+[15:37] <moritz> but libatomic_ops isn't
+
+[15:37] <moritz> wtf?
+
+[15:37] <jnthn> libatomic_ops isn't a submodule, though?
+
+[15:38] <jnthn> No, it ain't...
+
+[15:38] <moritz> what about libtommath?
+
+[15:38] <moritz> that's included in the tarball also
+
+[15:38] <jnthn> No
+
+[15:38] <jnthn> Only linenoise, libuv and dyncall are submodules
+
+[15:39] <moritz> ok, so I need a betters solution :(
+
+[15:39] <moritz> probably the git ls-files hack from nqp/
+
+[15:40] <benabik> I don't know that ls-files follows submodule boundaries.
+
+[15:40] <benabik> *crosses.
+
+[15:40] <moritz> it doesn't :(
+
+[15:40] <moritz> wonder how nqp does it, then
+
+[15:40] <benabik> does nqp have submods?
+
+[15:40] <moritz> oh, probably doesn't
+
+[15:40] <jnthn> NQP doesn't seem to use submodules.
+
+[15:40] <moritz> I assumed that dyncall was one, but it isn't
+
+[15:41] <moritz> maybe I'll have a clever idea while taking the subway home
+
+[15:41] <jnthn> Yeah, docs I@m reading seem to suggest submodules aren't included in by git archive
+
+[15:43] <benabik> You could do something like `git submodule foreach 'git ls-files | sed -e "s/^/$path/"'`
+
+[15:44] <benabik> Oops, the /s in the path get interpreted by sed.
+
+[15:44] <benabik> git submodules need to suck less.
+
+[15:46] <moritz> aye; they mostly suck by being ignored by most git commands right now
+
+[15:46] * benabik notes that git.git uses subtree merges instead.
+
+[15:47] <timotimo> is that like submodules, but without having a separate repository for the submodule's object files?
+
+[15:47] <benabik> Kinda-sorta.
+
+[15:47] <moritz> you basically import a whole repo and their history into your own
+
+[15:47] <benabik> Right.
+
+[15:48] <timotimo> i really love the simplicity of gits object database
+
+[15:48] <moritz> but shove the files into a subdir
+
+[15:48] <benabik> The subtree merge is basically "do a merge as-if the 2nd parent was at /path the whole time"
+
+[15:48] * moritz hasn't actually used subtree yet
+
+[15:49] <benabik> I think git.git/git-gui used to be a s
+
+[15:49] <benabik> *submodule
+
+[15:50] <benabik> Oh, no, it just used to be part of the mainline.  :-/
+
+[15:51] <benabik> Submodules are something of a clever hack that got accepted but never quite integrated.
+
+[15:52] <jnthn> timotimo: Just cut natives time in half again for a loop up to a million...
+
+[15:52] <timotimo> wow.
+
+[15:52] <jnthn> timotimo: So if you didn't start benchmarking yet...
+
+[15:52] <jnthn> Yeah, the code-gen is almost decnt now
+
+[15:52] * timotimo hits ctrl-c
+
+[15:52] <jnthn> decunt
+
+[15:52] <timotimo> no i didn't start yet!
+
+[15:52] <jnthn> decent
+
+[15:52] <jnthn> dammit
+
+[15:52] <jnthn> :)
+
+[15:52] <timotimo> decont? :)
+
+[15:52] <jnthn> :P
+
+[15:53] <jnthn> I need to spectest this latest change
+
+[15:53] <timotimo> sure, go ahead
+
+[15:53] <jnthn> I'm not completely happy with it yet, but it's a lot better
+
+[16:03] <diakopter> mourn
+
+[16:03] <diakopter> moarn
+
+[16:05] <timotimo> can we somehow do a cheap indexing step over the SC and then only deserialize the stuff we find ourselves actually needing at the first moment we need them?
+
+[16:05] <jnthn> timotimo: Not easily
+
+[16:05] <timotimo> OK
+
+[16:05] <timotimo> hm. does deserialization parallelise at all?
+
+[16:05] <jnthn> Not yet
+
+[16:05] <timotimo> i mean in theory :)
+
+[16:05] <jnthn> Oh...
+
+[16:05] <jnthn> It may well be able to
+
+[16:06] <timotimo> that sounds nice
+
+[16:06] <jnthn> Depends whihc phase. :)
+
+[16:06] <jnthn> But probably it can.
+
+[16:06] <timotimo> could shave off another third of startup perhaps
+
+[16:06] <jnthn> Yeah, but question is how much we can shave off by spending some time looking at what makes the serialization blob large and seeing if we can make it smaller
+
+[16:07] <timotimo> that'd be something, too
+
+[16:07] <timotimo> what do we think of variable-sized ints a la google protocol buffers and Sereal?
+
+[16:07] <jnthn> Is it a similar scheme the CLR uses, using higher bits to indicate how much should be read?
+
+[16:08] <timotimo> i think so
+
+[16:08] <timotimo> that could very well quarter a big portion of our ints
+
+[16:08] <timotimo> and make a small-ish portion of our ints a bit bigger
+
+[16:08] <jnthn> aye
+
+[16:09] <timotimo> though, if we could find a way to express "all the leading bits are 1" or rather "this number is negative", we should be able to save even more
+
+[16:09] <jnthn> True
+
+[16:09] <jnthn> It should be quite easy to try, anyway
+
+[16:10] <timotimo> moarvm files already carry their serialization version info with them, aye?
+
+[16:10] <jnthn> Right
+
+[16:10] <jnthn> Well
+
+[16:10] <jnthn> The serialization blob starts with it
+
+[16:10] <timotimo> sounds good. i shall dig in :)
+
+[16:13] <timotimo> This encoding uses the high bit of each byte to signal there is another byte worth of data coming, and the last byte always having the high bit off. ← sereal's varint, google's varint128
+
+[16:14] <timotimo> er, what file exactly should i be looking at?
+
+[16:16] <timotimo> bytecode.c looks the place
+
+[16:17] <timotimo> at least for loading
+
+[16:18] <jnthn> timotimo: No, src/6model/serialization.c
+
+[16:18] <timotimo> ah, thanks
+
+[16:19] <jnthn> Cool, I just got a 14s nqp make test (non-parallel)
+
+[16:21] <timotimo> wowza.
+
+[16:22] <dalek> MoarVM: 9680f23 | jnthn++ | src/strings/ops.c:
+
+[16:22] <dalek> MoarVM: Two strings at the same location are equal.
+
+[16:22] <dalek> MoarVM:
+
+[16:22] <dalek> MoarVM: Duh.
+
+[16:22] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/9680f23db5
+
+[16:22] <timotimo> jnthn: that gives us how big a speed improvement? :)
+
+[16:24] <jnthn> Not huge, but I saw stage mast dip just below 20s for the first time ever here
+
+[16:25] <FROGGS> \o/
+
+[16:25] <jnthn> Will know if there's a spectest time improvement soon
+
+[16:27] * FROGGS .oO( sooner? )
+
+[16:27] <jnthn> Few more seconds off
+
+[16:32] <timotimo> ghlad to hear it
+
+[16:32] <timotimo> the benchmarks have finished :)
+
+[16:33] <jnthn> ooh
+
+[16:33] <jnthn> link?
+
+[16:34] <timotimo> soon
+
+[16:34] * timotimo tries to get access to his webspace
+
+[16:40] <timotimo> i'll just host it on my desktop
+
+[16:49] <diakopter> jnthn: I swear it compared memory addresses before
+
+[16:50] <jnthn> diakopter: Dunno. It sure does now :)
+
+[16:50] <jnthn> We spend a LOT of our time doing hash lookups.
+
+[16:50] <jnthn> And we don't cache the computed hash value anywhere...
+
+[16:51] <jnthn> I'm wondering if we maybe should start doing so.
+
+[16:52] <diakopter> er I thought we did
+
+[16:52] <jnthn> Nope
+
+[16:52] <jnthn> We re-compute it every time.
+
+[16:52] <diakopter> weird...
+
+[16:54] <timotimo> jnthn: you do have ipv6, right?
+
+[16:54] <jnthn> Also, looking in MVM_string_flatten
+
+[16:54] <jnthn> buffer = calloc(sizeof(MVMCodepoint32), sgraphs);
+
+[16:54] <jnthn> for (; position < sgraphs; position++) {
+
+[16:54] <jnthn> /* XXX make this use the iterator */
+
+[16:54] <jnthn> buffer[position] = MVM_string_get_codepoint_at_nocheck(tc, s, position);
+
+[16:54] <jnthn> Is there any reason to use calloc there?
+
+[16:55] <jnthn> It looks to me like we fill the thing
+
+[16:55] * jnthn tries changing it to malloc
+
+[16:56] <diakopter> I'd need a url to expediently find the source
+
+[16:56] <jnthn> Don't worry, I'm fairly happy I analyzed it right
+
+[16:59] <diakopter> oki
+
+[17:02] <moritz> https://github.com/meitar/git-archive-all.sh/blob/master/git-archive-all.sh that would solve the git archive + submodules problem
+
+[17:11] <moritz> https://gist.github.com/moritz/8562794 # hacky shell script for creating a MoarVM tarball
+
+[17:13] <jnthn> moritz++
+
+[17:13] <jnthn> Feel free to commit it in tools
+
+[17:28] <timotimo> jnthn: the concat benchmark spends 50% of the complete time doing MVM_string_get_codepoint_at_nocheck
+
+[17:28] <timotimo> i think that's from flattening the strings
+
+[17:29] <timotimo> it could be that using an iterator woul dhelp
+
+[17:29] <jnthn> Yeah
+
+[17:33] <jnthn> OK, I think I got working caching of hash vlaues on strings.
+
+[17:33] <jnthn> *values
+
+[17:36] <diakopter> it's not from flattening the strings
+
+[17:36] <masak> TIL 'exec >MANIFEST'. cute. moritz++
+
+[17:36] <tadzik> cat: MANIFEST: input file is output file
+
+[17:36] <tadzik> ain't that funny :P
+
+[17:36] <diakopter> in fact, if you can assume they're all flat, you can write a much more efficent comparator
+
+[17:37] <diakopter> *efficient
+
+[17:37] <diakopter> but any decent optimizer should inline that call anyway
+
+[17:37] <diakopter> er, sry, sufficiently smart optimizer :)
+
+[17:38] *** jnap joined
+[17:39] <timotimo> diakopter: what is flattening?
+
+[17:39] <timotimo> it would seem if the string types of the individual strands are compatible, we can just memcpy the pieces together
+
+[17:40] <diakopter> well all the strin goperations that allocate a new string as the result try to conserve copying of codepoint data, so it has its own substring reference system
+
+[17:40] <timotimo> yeah, but at the moment a concat calls the flattener
+
+[17:40] <diakopter> right, because of some gremlins
+
+[17:40] <timotimo> which does a loop through the individual codepoints, going through the get_codepoint_at_nocheck thingie
+
+[17:40] <timotimo> if you can get rid of that, the benchmarks ought to improve drastically
+
+[17:40] <timotimo> have at it! :)
+
+[17:40] <diakopter> (which jnthn hopes I'll have time to address soon)
+
+[17:41] <timotimo> fine :)
+
+[17:41] <diakopter> the flattener has to do that, except the note I mentioned about using the iterator functor
+
+[17:41] <diakopter> (the XXX)
+
+[17:42] <diakopter> since it would be traversing the tree otherwise anyway
+
+[17:42] <timotimo> yeah, but the concatenator doesn't have to flatten all the things
+
+[17:42] <diakopter> it does, because of gremlins
+
+[17:42] <diakopter> (currently)
+
+[17:44] <diakopter> gremlins with the tree-strings system, which originated (in spirit) from this post: http://www.nntp.perl.org/group/perl.perl6.internals/2001/06/msg3236.html
+
+[17:44] <timotimo> it should of course flatten parts
+
+[17:44] <timotimo> if we add one "x" per concat, we'll get a quite horrible rope
+
+[17:44] <diakopter> yes, see the todo notes at the top of ops.c
+
+[17:44] <timotimo> i don't know at what length a rope breaks even
+
+[17:44] <timotimo> so it should perhpas be twice that number
+
+[17:46] <diakopter> the todo notes discuss that
+
+[17:46] <diakopter> (needing to discover those thresholds)
+
+[17:46] <diakopter> iirc
+
+[17:46] <timotimo> fair enough
+
+[17:51] <dalek> MoarVM: 01b7dfa | jnthn++ | src/strings/ops.c:
+
+[17:51] <dalek> MoarVM: Don't calloc when malloc will do fine.
+
+[17:51] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/01b7dfaafa
+
+[17:51] <dalek> MoarVM: dcc4340 | jnthn++ | / (3 files):
+
+[17:51] <dalek> MoarVM: Cache hash values of strings.
+
+[17:51] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/dcc434025a
+
+[17:51] <diakopter> it's actually not similar to ropes, so I don't call it that
+
+[17:51] <diakopter> [anymore]
+
+[17:52] <jnthn> Down to a 63s CORE.setting build here, and my spectest run just completed in 304s.
+
+[18:01] <FROGGS> 304s is not much
+
+[18:03] <jnthn> And yet it leaves much room for improvement :)
+
+[18:04] <FROGGS> yes :o)
+
+[18:04] * FROGGS .oO( spectest in less time than getting a coffee )
+
+[18:06] <diakopter> jnthn: if you can make all the windows system .dlls late-bound dynamically linked instead of always loaded at every launch by the crt (or else fix the static compile) that would save 22ms off the startup, according what I can see
+
+[18:07] <jnthn> diakopter: I'm not sure how to do that...
+
+[18:07] <diakopter> fix the static compile? :)
+
+[18:08] <jnthn> Well, we can't jsut do --static all the time, if that's what you mean...
+
+[18:08] <jnthn> At least, I don't think so...
+
+[18:12] <diakopter> I thought you were saying it's only rakudo that couldn't handle it
+
+[18:12] <diakopter> (so far)
+
+[18:13] <diakopter> b/c I thought we built both versions
+
+[18:13] <diakopter> er, I think not_gerd set it up to build static and dynamic in the same makefile eventually
+
+[18:13] <diakopter> so that we could do such a thing eventually
+
+[18:15] <jnthn> Yeah, but Rakudo relies on the dynamic...
+
+[18:16] <diakopter> but it doesn't have to if we make it build static too
+
+[18:17] <diakopter> just sayin' we could reduce the startup time to within p5 levels or a binary order of magnitude :)
+
+[18:20] <[Coke]> arglebargle. the scripts I have for building rakudo for the daily runs work fine offline... except for moar, which is doing a git pull somewhere and failing.
+
+[18:20] <[Coke]> (during config, dealing with 3rdparty stuff)
+
+[18:21] * [Coke] wonders if he can trick it to not go online, just like the nqp/moar fetches.
+
+[18:21] <nwc10> gah, firefox stupid
+
+[18:22] <nwc10> I *can* SOCKS proxy over IPv4 to a machine with IPv6
+
+[18:22] <nwc10> (Actually this machine I'd IRCing from)
+
+[18:22] <nwc10> but I have to use the IPv6 address in the URL (ie 2a02:8071:2909:7b00:5604:a6ff:fe93:d1a6 )
+
+[18:22] <nwc10> It's too stupid to simply assume that it by default the not-special-case name is to be sent to the proxy
+
+[18:28] <TimToady> r: say "Hi, I'm running on $*VM<name>.";  # don't need the braces
+
+[18:28] <camelia> rakudo-moar d78036: OUTPUT«Hi, I'm running on moar.␤»
+
+[18:28] <camelia> ..rakudo-jvm d78036: OUTPUT«Hi, I'm running on jvm.␤»
+
+[18:28] <camelia> ..rakudo-parrot d78036: OUTPUT«Hi, I'm running on parrot.␤»
+
+[18:29] <nwc10> oh, sorry, that was supposed to be to #perl6 I think
+
+[18:29] <TimToady> ooops
+
+[18:30] <nwc10> me, not you :-)
+
+[18:31] <TimToady> metoo
+
+[18:32] <TimToady> was responding to the #perl6 bah clog
+
+[19:21] <dalek> MoarVM: ac6a3fc | (Tobias Leich)++ | src/io/fileops.c:
+
+[19:21] <dalek> MoarVM: do not always create target in copy
+
+[19:21] <dalek> MoarVM:
+
+[19:21] <dalek> MoarVM: In case the soure does not exist, the target should be left untouched.
+
+[19:21] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ac6a3fce45
+
+[19:25] <FROGGS> everybody should delete files like non-existent-copy-mtgt and non-existent-copy-stgt in his rakudo dir if he/she spectested moar in the past
+
+[19:38] <dalek> MoarVM: ba1af90 | (Tobias Leich)++ | src/strings/ops.c:
+
+[19:38] <dalek> MoarVM: return empty string if pos > chrs in substr
+
+[19:38] <dalek> MoarVM:
+
+[19:38] <dalek> MoarVM: Just to be in line with the other backends.
+
+[19:38] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ba1af90401
+
+[19:38] <diakopter> FROGGS: have the clean stage do it?
+
+[19:40] <FROGGS> diakopter: what? I don't understand
+
+[19:40] <diakopter> make clean
+
+[19:40] <diakopter> or just add the deletions to configure :)
+
+[19:40] <FROGGS> hmmm, good point
+
+[19:40] <diakopter> [and remove them in a few months]
+
+[19:40] <FROGGS> diakopter++
+
+[19:40] *** jnap joined
+[19:57] <tadzik> oh, that might help panda
+
+[20:46] <jnthn> argh, readline works how...
+
+[20:46] <diakopter> a line at a time
+
+[20:46] <jnthn> a byte at a time AND THEN SEEKS BACKWARDS AND READS IT ALL AGAIN
+
+[20:46] <jnthn> No wonder it doesn't work on a tty...
+
+[20:49] * FROGGS hides
+
+[20:49] <jnthn> grmbl
+
+[20:49] * FROGGS also hides JimmyZ
+
+[20:49] <nwc10> jnthn: this is our less than awesome code, or third party awesomeness?
+
+[20:49] <nwc10> was not wanting more names named than that
+
+[20:50] <jnthn> Ours
+
+[20:50] <nwc10> oh. oops
+
+[20:50] <diakopter> ours, ish
+
+[20:52] <nwc10> Oh my!
+
+[20:52] <nwc10> The original torture has made some progress
+
+[20:52] <nwc10> Stage start      :   0.005
+
+[20:52] <nwc10> Stage parse      : 1144911.468
+
+[20:52] <diakopter> O_O
+
+[20:53] <nwc10> rn: say 1144911.468/86400
+
+[20:53] <camelia> rakudo-parrot 19ba6a, rakudo-jvm 19ba6a, rakudo-moar 19ba6a, niecza v24-109-g48a8de3: OUTPUT«13.25129014␤»
+
+[20:53] <jnthn> Wow
+
+[20:53] <nwc10> OK. So it may well complete
+
+[20:53] <nwc10> give it another week or so
+
+[20:53] <jnthn> Stage parse survived the torture! :)
+
+[20:54] <nwc10> Stage syntaxcheck:   0.068
+
+[20:54] <nwc10> Stage ast        :   1.188
+
+[20:54] <nwc10> so now in optimize? I forget
+
+[20:54] <FROGGS> ohh wow
+
+[20:56] <jnthn> Yes, optimize now
+
+[20:56] <jnthn> Thing is, since you started, the time phase optimize takes has kinda halved :)
+
+[20:56] <jnthn> And the time stage mast does also has :)
+
+[20:56] <FROGGS> ctrl+c and try again?
+
+[20:56] <FROGGS> >.<
+
+[20:56] <nwc10> there are more cores
+
+[20:57] <nwc10> have already been doing other things in parallel
+
+[20:58] <FROGGS> jnthn: I shall take a look at readline then? ó.ò
+
+[20:59] *** jnap joined
+[20:59] <jnthn> FROGGS: Well, trying a few things wiht it here...
+
+[21:00] <FROGGS> k
+
+[22:00] <jnthn> C:\consulting\rakudo>type README | perl6-m -e "say $*IN.lines.elems"
+
+[22:00] <jnthn> 121
+
+[22:00] <jnthn> phew
+
+[22:01] <jnthn> Though, what I've done is a total hack really.
+
+[22:01] <jnthn> Just that the larger re-work needed is mroe than I've time for.
+
+[22:02] <FROGGS> :/
+
+[22:03] <jnthn> (as in, if I want $*IN not to be totally busted in the release)
+
+[22:12] <timotimo> why didn't anything happen while i was gone? :(
+
+[22:13] <jnthn> timotimo: It...did, I just didn't push it yet
+
+[22:16] <timotimo> ah, phew :)
+
+[22:17] <dalek> MoarVM: 55e543a | jnthn++ | src/io/fileops.c:
+
+[22:17] <dalek> MoarVM: Do Just Enough so $*IN.get/$*IN.lines work.
+
+[22:17] <dalek> MoarVM:
+
+[22:17] <dalek> MoarVM: This is *not* a good way to do, well, anything. However, pending the
+
+[22:17] <dalek> MoarVM: upcoming review of IO stuff after this release, it hopefully gets us a
+
+[22:17] <dalek> MoarVM: working $*IN.get and $*IN.lines. Does at least work in Windows. For
+
+[22:17] <dalek> MoarVM: now, regress on supporting a plain \r as line ending in readline; can
+
+[22:17] <dalek> MoarVM: put that back more easily after the future cleanup.
+
+[22:17] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/55e543ae5d
+
+[22:17] <jnthn> FROGGS, timotimo: Please could one of you test that cat README | perl6-m -e 'say $*IN.lines.elems' works now after ^^
+
+[22:17] <FROGGS> sure
+
+[22:20] <jnthn> Only needs a Moar rebuild, not the whole stack
+
+[22:20] <[Coke]> Dirty trick, but moar pulled ahead today.
+
+[22:21] <jnthn> I think honest mistake more than dirty trick :)
+
+[22:21] <[Coke]> I prefer my version of reality!
+
+[22:22] <FROGGS> jnthn: it hangs
+
+[22:22] <jnthn> oh ffs
+
+[22:22] <FROGGS> let me take a look
+
+[22:23] <jnthn> FROGGS: Does say $*IN.get work?
+
+[22:23] <FROGGS> it says nothing
+
+[22:23] <jnthn> :/
+
+[22:24] <jnthn> I assume README exists in the directory you're doing this in?
+
+[22:25] <FROGGS> I am doing this with VERSION in moar
+
+[22:27] <FROGGS> for README.markdown both callbacks get called for about ten times each
+
+[22:29] <FROGGS> nread at line 300 is positive
+
+[22:29] <FROGGS> the condition in line 302 is never met
+
+[22:33] <FROGGS> there is something in read_char
+
+[22:35] <FROGGS> ohh, it does not blok
+
+[22:35] <FROGGS> block*
+
+[22:36] <jnthn> "it"?
+
+[22:37] <dalek> MoarVM: c57b446 | jnthn++ | 3rdparty/dyncall:
+
+[22:37] <dalek> MoarVM: Update dyncall submodule for Solaris 11 patch.
+
+[22:37] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/c57b446f1c
+
+[22:37] <FROGGS> well, it calls the callbacks after it already left the readline function
+
+[22:40] <FROGGS> it == the program
+
+[22:41] <jnthn> wat
+
+[22:42] <jnthn> oh, I wonder if it's a refcount thing
+
+[22:42] <FROGGS> I see my printf() after uv_run() before the callbacks get called
+
+[22:43] <jnthn> grrr
+
+[22:46] <jnthn> FROGGS: Works on Windows...
+
+[22:46] <jnthn> FROGGS: Which is really odd
+
+[22:46] <jnthn> FROGGS: Got a patch for you to try
+
+[22:46] <FROGGS> sure
+
+[22:46] * jnthn woulda expected failure on both...
+
+[22:47] *** btyler joined
+[22:47] <jnthn> https://gist.github.com/jnthn/71e1e9fd60a3be0f99e9
+
+[22:48] <jnthn> FROGGS: Maybe that helps...or maybe not
+
+[22:49] <FROGGS> jnthn++
+
+[22:49] <FROGGS> works!
+
+[22:49] <btyler> works on osx too :)
+
+[22:50] <FROGGS> almost...
+
+[22:50] <FROGGS> .get works, but lines.elems still hangs
+
+[22:51] <FROGGS> yeah, lines hangs at eof
+
+[22:51] <btyler> both of those worked ok here (OSX 10.9)
+
+[22:52] <dalek> MoarVM: f9d020c | jnthn++ | src/io/fileops.c:
+
+[22:52] <dalek> MoarVM: Make readline a little less broke on non-Windows.
+
+[22:52] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/f9d020cfe7
+
+[22:52] <FROGGS> >.o
+
+[22:53] <jnthn> FROGGS: Any idea how/where it's hanging?
+
+[22:53] <FROGGS> yeah, it looks like if it hangs when there is nothing to read
+
+[22:53] <FROGGS> it does not even call the a callback
+
+[22:54] <FROGGS> so I guess we should switch to UV_RUN_NOWAIT, and check for zero length after that too
+
+[22:58] <jnthn> hang on...
+
+[23:02] *** Mouq joined
+[23:04] <jnthn> FROGGS: Please can you try https://gist.github.com/jnthn/baa8286627c4695be9e7 to see if it helps?
+
+[23:05] <FROGGS> jnthn: hangs too
+
+[23:05] <FROGGS> .get still working
+
+[23:05] <jnthn> FROGGS: Really? Wow...
+
+[23:06] <jnthn> Do we ever see the UV_EOF?
+
+[23:06] <FROGGS> no
+
+[23:06] <Mouq> FROGGS: what's the sh line that hangs?
+
+[23:06] <FROGGS> we get stuck before line 340
+
+[23:06] <FROGGS> MoarVM$ make install && cat README.markdown | perl6-m -e 'say $*IN.lines'
+
+[23:07] <Mouq> Ah :(
+
+[23:07] <FROGGS> looks like that on_read is not called when there is nothing to read
+
+[23:08] <jnthn> FROGGS: Could you printf the return value from uv_read_start?
+
+[23:08] <FROGGS> always zero
+
+[23:09] <jnthn> argh
+
+[23:10] <FROGGS> it reads the 42 bytes (last line of README.markdown), and then tries again, and hangs in UV_RUN_DEFAULT
+
+[23:10] <jnthn> Can you see what uv_is_readable on the handle gives?
+
+[23:11] <FROGGS> always 32
+
+[23:12] <jnthn> wtf
+
+[23:14] * jnthn tries it with the NOWAIT
+
+[23:15] <jnthn> Yeah, that won't do it...
+
+[23:16] * FROGGS reads https://github.com/mozilla/rust/issues/10237
+
+[23:18] <jnthn> Ah, nice find
+
+[23:18] <jnthn> Looks like libuv patched it...
+
+[23:20] <jnthn> yeah, and we don't have that commit
+
+[23:21] <FROGGS> hmm, I dunno how to update submodules
+
+[23:22] <jnthn> on it
+
+[23:25] <jnthn> oh...
+
+[23:25] <FROGGS> hmm?
+
+[23:25] <jnthn> Can you do git submodule status in your MoarVM repo?
+
+[23:26] <FROGGS> 083b4051dd65f82907e38c1bcea3cbe33b56dc9a 3rdparty/dyncall (remotes/origin/HEAD)
+
+[23:26] <FROGGS> 3e054c36294f9d8fc197c9d1b715ea2db334f6bf 3rdparty/libuv (v0.11.12-1-g3e054c3)
+
+[23:26] <FROGGS> 41bb5a7df157173e3555d2074ec9a61212fe85c0 3rdparty/linenoise (heads/master)
+
+[23:28] *** benabik joined
+[23:30] <dalek> MoarVM: ee5a5bd | jnthn++ | 3rdparty/libuv:
+
+[23:30] <dalek> MoarVM: Update to latest libuv.
+
+[23:30] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ee5a5bd1e4
+
+[23:33] <FROGGS> src/io/socketops.c:113:13: error: too few arguments to function ‘uv_tcp_bind’
+
+[23:33] <FROGGS> uv_tcp_bind(server, &bind_addr);
+
+[23:34] * jnthn wonders why he didn't see that
+
+[23:34] <FROGGS> I just pass a zero as third arg (flags)
+
+[23:34] <jnthn> oh, I didn't make clean. d'oh
+
+[23:34] <jnthn> yeah, go for that
+
+[23:35] <FROGGS> jnthn: I made a realclean, because it still hanged
+
+[23:35] <FROGGS> works!
+
+[23:35] <jnthn> As in, doesn't hang?
+
+[23:35] <FROGGS> MoarVM$ cat README.markdown | perl6-m -e 'say $*IN.lines.elems'
+
+[23:35] <FROGGS> 75
+
+[23:35] <FROGGS> and I see the text
+
+[23:35] <jnthn> \o/
+
+[23:35] <FROGGS> .get works too
+
+[23:36] <jnthn> Bad news: when I bumped dyncall, it broke the ability to build it...
+
+[23:36] <jnthn> Gonna have to back that out :(
+
+[23:36] <FROGGS> jnthn: that is HEAD btw, so not applied the gist atm
+
+[23:37] <jnthn> which gist?
+
+[23:37] <jnthn> https://gist.github.com/jnthn/baa8286627c4695be9e7 ?
+
+[23:37] <jnthn> I think it's better design to have that gist.
+
+[23:38] <FROGGS> jnthn: okay, I apply and test
+
+[23:38] <jnthn> ok
+
+[23:38] <jnthn> I got the socket build fix locally too
+
+[23:38] <jnthn> Gonna do an nqp/rakudo build and spectest cycle with this lot
+
+[23:40] <FROGGS> okay, that gist works well too :o)
+
+[23:42] <jnthn> OK. One more thing. What happens now repl wise?
+
+[23:43] <Mouq> jnthn: Infinite '>' on nqp-m and perl6-m
+
+[23:43] <btyler> likewise, at head with that last gist applied
+
+[23:43] <Mouq> (on my end, anyway)
+
+[23:44] <FROGGS> jnthn: same, infinit ">\n"
+
+[23:45] <jnthn> OK
+
+[23:46] <jnthn> I'll try something for that in a moment
+
+[23:46] <btyler> er, sorry, needed a clean. with the 'baa828' gist I get an error during the build. gisting
+
+[23:46] <jnthn> I think that's the last thing I'd really like to fix pre-release
+
+[23:47] <btyler> https://gist.github.com/kanatohodets/c3e26a60ff067706d2a4#file-gistfile1-txt-L184
+
+[23:47] <dalek> MoarVM: e13e697 | jnthn++ | src/io/socketops.c:
+
+[23:47] <dalek> MoarVM: Build fix for latest libuv.
+
+[23:47] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/e13e697083
+
+[23:49] <dalek> MoarVM: 49f8eb8 | jnthn++ | src/ (2 files):
+
+[23:49] <dalek> MoarVM: Further improvements to EOF handling.
+
+[23:49] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/49f8eb8ef3
+
+[23:52] <dalek> MoarVM: 872224b | jnthn++ | 3rdparty/dyncall:
+
+[23:52] <dalek> MoarVM: Revert "Update dyncall submodule for Solaris 11 patch."
+
+[23:52] <dalek> MoarVM:
+
+[23:52] <dalek> MoarVM: This reverts commit c57b446f1c69a99d299471f4dddedea61888c9ba. Sadly,
+
+[23:52] <dalek> MoarVM: there are configure issues after the update, even if the Solaris patch
+
+[23:52] <dalek> MoarVM: is wanted.
+
+[23:52] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/872224bb1a
+
+[23:52] <jnthn> btyler: Hopefully pulling that last bunch helps
+
+[23:52] <btyler> jnthn: yep! it did
+
+[23:57] <jnthn> FROGGS, btyler: Maybe one of you could try https://gist.github.com/jnthn/8570089 to see if it helps get a basically functioning REPL
+
+[23:58] <btyler> roger
+
+[23:59] <btyler> yeah! works!
+
+[23:59] <FROGGS> > say(42);
+
+[23:59] <FROGGS> 42

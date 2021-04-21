@@ -1,0 +1,365 @@
+[00:42] <MasterDuke> samcv: so compiling the core setting is now *not* slower with that PR?
+
+[01:00] *** lizmat joined
+[01:03] *** MasterDuke_ joined
+[01:28] *** leedo__ joined
+[01:28] *** avar joined
+[01:28] *** moritz joined
+[01:31] *** yoleaux joined
+[01:45] <samcv> yep
+
+[01:46] <samcv> i fixed it. it was not returning the same string when it was already flat but i remedied that
+
+[01:48] <MasterDuke_> ah, cool
+
+[02:01] *** lizmat joined
+[02:02] <Geth> ¦ MoarVM: de6b0e4b13 | (Samantha McVey)++ | src/strings/ops.c
+
+[02:02] <Geth> ¦ MoarVM: collapse_strands with memcpy if all strands are same type 4x faster
+
+[02:02] <Geth> ¦ MoarVM:
+
+[02:02] <Geth> ¦ MoarVM: If all the strands to collapse are of the same type (ASCII, 8bit, or
+
+[02:03] <Geth> ¦ MoarVM: 32bit) then use memcpy to collapse the strands. If they are not all the
+
+[02:03] <Geth> ¦ MoarVM: same type then we use the traditional grapheme iterator based collapsing
+
+[02:03] <Geth> ¦ MoarVM: that we previously used to collapse strands.
+
+[02:03] <Geth> ¦ MoarVM:
+
+[02:03] <Geth> ¦ MoarVM: If it's 8bit and a repetition with only one grapheme, it will use memset
+
+[02:03] <Geth> ¦ MoarVM: to more quickly write the memory.
+
+[02:03] <Geth> ¦ MoarVM:
+
+[02:03] <Geth> ¦ MoarVM: This is 4-4.5x faster as long as all the strands are of the same type.
+
+[02:03] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/de6b0e4b13
+
+[02:03] <Geth> ¦ MoarVM: e876f1484e | (Samantha McVey)++ (committed using GitHub Web editor) | src/strings/ops.c
+
+[02:03] <Geth> ¦ MoarVM: Merge pull request #753 from samcv/collapse_better
+
+[02:03] <Geth> ¦ MoarVM:
+
+[02:03] <Geth> ¦ MoarVM: collapse_strands with memcpy if all strands are same type 4x faster
+
+[02:03] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/e876f1484e
+
+[02:34] <MasterDuke> samcv: interesting. i just tested this one-liner: `my $a = "a" x 1_000_000; for ^1000 {$a ~~ /./;}; say now - INIT now`
+
+[02:35] <MasterDuke> 4.3s before your PR, 93% of the time spent in iterate_gi_into_string
+
+[02:36] <MasterDuke> 5.9s after the PR, 43% in collapse_strands, 33% in __memmove_sse2_unaligned_erms, 10.6% in [email@hidden.address] 5.4% in memcpy@plt
+
+[02:56] *** ilbot3 joined
+[03:17] *** colomon joined
+[04:18] <samcv> MasterDuke: well it's 2x faster if it is more than one character repeated
+
+[04:18] <samcv> "ab" x 1_000_000
+
+[04:18] <samcv> well about 1.5x faster with the new code
+
+[04:18] <samcv> interesting it takes longer afterward though
+
+[04:21] <samcv> well that "a" is a 32 bit string
+
+[04:21] <samcv> so it doesn't end up doing memset on it
+
+[06:28] *** domidumont joined
+[06:35] *** domidumont joined
+[06:40] *** brrt joined
+[06:47] <japhb> samcv: Why is it a 32-bit string?
+
+[07:09] <samcv> japhb: probably because it was a substring of the whole document
+
+[07:09] <samcv> is my best guess
+
+[07:18] <brrt> good * #moarvm
+
+[07:18] <brrt> also, good * japhb, samcv
+
+[07:19] <brrt> jnthn: bisecting the jit issue now
+
+[07:40] *** lizmat joined
+[07:48] *** brrt joined
+[08:17] *** zakharyas joined
+[08:21] *** domidumont joined
+[09:22] *** zakharyas joined
+[09:39] *** brrt joined
+[09:39] <brrt> hmm, damnit, it's multithreaded?
+
+[09:42] <brrt> oh, it is multiprocess
+
+[10:13] <jnthn> brrt++
+
+[10:13] <jnthn> Yes, 'fraid so, it shows up in something using a Channel
+
+[10:13] <jnthn> You may or may not have luck producing a golf
+
+[10:14] <brrt> hmmmm
+
+[10:14] <brrt> always when using a channel?
+
+[10:21] <jnthn> Well, the place things go wrong is (try $channel.receive) // buf8
+
+[10:21] <jnthn> The code in the try there is a thunk, and receive is a method call
+
+[10:22] <jnthn> receive is inlined into the thunk, and the thunk is inlined into the code with the try and //
+
+[10:22] <jnthn> And the try then fails to catch the exception
+
+[10:22] <jnthn> It may be that you can set up something very similar with a single-threaded program
+
+[10:22] <jnthn> Just my $channel = Channel.new; $channel.close;
+
+[10:22] <jnthn> And then trying to receive will always throw
+
+[10:37] <samcv> the peak memory usage during core compilation is 1.3G with or without my recent change. though total allocations is down from 13.95Gb to 13.74Gb
+
+[10:37] <samcv> i wish it gave me more detailed info on peak memory usage though
+
+[11:04] *** domidumont joined
+[11:32] <timotimo> jnthn: we need some way to spurt/write bufs bigger than int8 or uint8 into files, otherwise our utf16 encoding is almost completely useless
+
+[11:40] <jnthn> timotimo: It'll just need some tweaks to the stuff behind write_fhb to support things other than 1-byte VMArrays
+
+[11:41] <jnthn> (So, nothing more than an NYI)
+
+[11:43] <timotimo> will we accidentally impose an endianness if we just split the 16 into 8 naively?
+
+[11:43] <timotimo> or is that why there's UTF16LE and UTF16BE encodings?
+
+[11:43] <jnthn> By this point we're already past encodings
+
+[11:43] <jnthn> But yeah, we'll impose native endian
+
+[11:43] <jnthn> Hm
+
+[11:44] <jnthn> Maybe our utf16 encoding should spit out a buf8 too, then we don't have this issue.
+
+[11:44] <jnthn> Or it could always spit out the correct BE/LE BOM at the start for the current platform
+
+[12:33] <timotimo> if the utf16 encoder spits out anything, it'd have to be the same value regardless of platform endianness, because depending on how it gets turned into 8 bit pieces by the write_fhb instruction it'll end up being the correct bom
+
+[12:33] <timotimo> ... or something?
+
+[12:34] <ilmari> encoders should output bytes. full stop.
+
+[12:35] <ilmari> the endianness is an intergral part of the encoding
+
+[12:35] <ilmari> lower layers should not have to know about this. I/O is streams of bytes
+
+[12:37] <timotimo> hum. the utf16 encoder in moar already just gives you a char *, i wonder where it gets turned into 16 bit pieces
+
+[12:38] <timotimo> oh, that just happens if you pass a 16-bit-per-entry VMArray to the decode call
+
+[12:42] <timotimo> so we'd have to either turn the utf16 type into a buffer of 8bit ints or do something different there
+
+[12:42] <timotimo> same with utf32, of course
+
+[13:00] <brrt> hmm, i'll try it out at least
+
+[13:01] <brrt> fwiw, i can try to 'beat' some information out of a single run as well, but it's just not as happy as a bisect
+
+[13:28] <jnthn> timotimo: We should do what ilmari is suggesting, and always have a buf8, I think
+
+[13:39] *** markmont joined
+[13:42] <nwc10> imlari is suggesting a buffet‽ Om nom nom
+
+[13:46] <nwc10> oops, that won't highlight
+
+[13:46] <nwc10> ilmari: ^^
+
+[14:08] *** zakharyas joined
+[14:24] *** zakharyas joined
+[15:13] *** AlexDaniel joined
+[15:26] *** zakharyas joined
+[15:56] *** zakharyas joined
+[16:08] *** zakharyas joined
+[16:14] *** releasable6 joined
+[16:27] *** brrt joined
+[16:42] <brrt> yay, i golfed it
+
+[16:42] <brrt> jnthn++
+
+[16:42] <brrt> your advice worked
+
+[16:43] <jnthn> yay :)
+
+[16:44] <japhb> jnthn: I've been reading the current Cro docs and going through the examples.  I'm *really* impressed.  My stint in the world of web dev seems absolutely ancient in comparison.
+
+[16:45] <brrt> https://gist.github.com/bdw/13cb662504b3f4e1a4f6daacc63c56c6
+
+[16:46] <jnthn> I bet you can pull the first two lines out of the loop and still get it?
+
+[16:46] <jnthn> (might make the generated code you need to debug smaller)
+
+[16:47] <japhb> jnthn: Is there a FreeNode channel for Cro yet?
+
+[16:47] <brrt> hmm, i can try
+
+[16:47] <jnthn> japhb: Nice to hear. :)
+
+[16:47] <jnthn> japhb: Not yet, though maybe it's time... :)
+
+[16:47] <brrt> yep, you are correct
+
+[16:47] <japhb> (I don't see it in the results from alis, but alis seems to miss some already.)
+
+[16:47] <japhb> jnthn: Please!  :-)
+
+[16:47] <brrt> aye!
+
+[16:48] * jnthn wonders if #cro is taken or not
+
+[16:50] <brrt> heh, thats a delightfully fast bisect now
+
+[16:50] <japhb> jnthn: Looks like it's free, I just joined and am the only person
+
+[16:55] <brrt> and there is a guard control inserted into the tree… let's see if it is compiled differently in any way
+
+[16:57] *** zakharyas1 joined
+[17:04] *** zakharyas joined
+[18:04] *** domidumont joined
+[18:12] *** zakharyas joined
+[19:09] *** evalable6 joined
+[19:26] *** robertle joined
+[19:52] <nine> I'm now reasonably sure that the remaining issue is about multi-level un-inlines but only in deopt-one cases, not for deopt-all
+
+[20:06] <timotimo> .o( you are crorect )
+
+[20:06] <jnthn> Oh goodness, deopt /o\
+
+[20:08] <nine> It's not certain though, but the statistics point at this. I've seen lots of multi-level un-inlines that are harmless, but those were all deopt-all. The deopt-one cases appear in failing test files.
+
+[20:08] <timotimo> fascinating
+
+[20:08] <nine> It also fits the incredible rarity of the failures. rakudo builds fine, make test passes (with blocking and nodelay) and most spec test files pass.
+
+[20:09] <nine> Intriguingly, I could golf one of the failures down to: MVM_SPESH_BLOCKING=1 MVM_SPESH_NODELAY=1 perl6 -e '1; { my $a; }; { my Int $a; }'
+
+[20:09] <timotimo> if only we had a simple way/tool to run a frame once from the beginning until it deopts and the next time the unoptimized version until it hits the point it deopted into
+
+[20:09] <nine> Resuling in "No int multidim positional reference type registered for current HLL"
+
+[20:09] <timotimo> so we could compare register content and all that
+
+[20:10] <timotimo> could that be from version skew in rakudo's .c parts and moarvm's parts?
+
+[20:12] <nine> ll-exception backtrace shows the failure coming from a frame that's involved with the Multi-level un-inline
+
+[20:13] <nine> And the error goes away as soon as I leave the pointless goto entering the nested inline in
+
+[20:14] <nine> I.e. this case: https://github.com/MoarVM/MoarVM/blob/inline_in_place/src/spesh/optimize.c#L2369
+
+[20:18] <nine> Another interesting point: if I don't delete the goto op but just turn it into a no_op, the error disappears.
+
+[20:21] <timotimo> so another case where we rely on a goto existing to know about the structure of things?
+
+[20:23] <nine> In this case it looks like it doesn't have to be a goto which is consistent with me being unable to find a reliance on a goto in deopt.c.
+
+[20:24] <nine> Looks more like it stumbles over the removal of an instruction, making me think more about some offset becoming incorrect.
+
+[20:27] <nine> Sooooo....when deopting an inline, wouldn't it look for the instruction calling the inlined frame? And in a nested inline, wouldn't that instruction be that goto op that eliminate_pointless_gotos tries to remove?
+
+[20:29] <nine> From what I see, uninline does not look for some annotation. It relies on the inlines table to get its information. But that table is not updated by eliminate_pointless_gotos
+
+[20:33] <timotimo> hm, but we only ever compute offsets at code-gen time, or at least we should
+
+[20:34] <nine> Offset or this mysterious deopt_idx that I haven't really found out yet what it means
+
+[20:42] *** lizmat joined
+[20:55] <jnthn> deopt_idx is just an index into the deopt table
+
+[20:56] <jnthn> Which contains mappings to locations in the original, interpreted, bytecdoe
+
+[20:57] <nine> And those mappings are created during codegen?
+
+[20:57] <jnthn> The original locations are written in graph.c, iirc
+
+[20:58] <jnthn> https://github.com/MoarVM/MoarVM/blob/master/src/spesh/graph.c#L37
+
+[20:58] <nine> That's this I guess: g->deopt_addrs[2 * g->num_deopt_addrs] = deopt_target;
+
+[20:59] <jnthn> And yes, code-gen fills the rest in: https://github.com/MoarVM/MoarVM/blob/master/src/spesh/graph.c#L37
+
+[20:59] <nine> And deopt_target is the unoptimized code I guess.
+
+[20:59] <jnthn> Right, it's a table of pairs
+
+[20:59] <jnthn> Yes, https://github.com/MoarVM/MoarVM/blob/master/src/spesh/graph.c#L360 for example
+
+[20:59] <jnthn> Just passes pc - g->bytecode
+
+[21:00] <jnthn> Which is a relative offset from the start of the unoptimized bytecode
+
+[21:01] <nine> So that value is certainly still correct regardless of what we do to the optimized bytecode.
+
+[21:01] <nine> And the deopt_offset is only generated at code gen, i.e. after our optimizations. So they ought to be correct, too.
+
+[21:05] * jnthn tries to remember how this thing works
+
+[21:06] <jnthn> Ah, right, https://github.com/MoarVM/MoarVM/blob/b9a01f750ef90b3ce3206b8c281689c3895e93a5/src/spesh/inline.c#L163 is used to identify the location that we return to when doing a multi-level inline
+
+[21:08] <nine> Oooooooh
+
+[21:08] <nine> /* -1 all the deopt targets, so we'll easily catch those that don't get
+
+[21:08] <nine> * mapped if we try to use them. Same for inlines. */
+
+[21:08] <nine> But unline inlines, there is no code for actually checking those deopt targets.
+
+[21:08] <nine> When I add that I get MoarVM oops: Spesh: failed to fix up deopt_addr 1
+
+[21:09] <nine> But I get that even if the program would actually work...hm...
+
+[21:10] <jnthn> Hm, and also it stores and uses the deopt *index*, so the location in the optimized bytecdoe isn't important for this.
+
+[21:10] <jnthn> Is it sensitive to JIT, btw?
+
+[21:11] <nine> no
+
+[21:13] <jnthn> Hmm.
+
+[21:13] * jnthn doesn't have any more guesses, alas
+
+[21:14] <jnthn> But hopefully those pointers helped a little
+
+[21:23] <nine> jnthn: does this look odd to you? https://gist.github.com/niner/5626227d1397bf510cabecc4bcb0b5e3
+
+[21:24] <jnthn> Hmm, where's that "uninline expecting a goto" coming from?
+
+[21:24] <nine> just an additional fprintf I added
+
+[21:25] <nine> The working version does lots of deopts in frame 'MATCH' (cuid '139'), but none in postcircumfix:<{ }>
+
+[21:26] <jnthn> 6632 -> 144 is kinda interesting too
+
+[21:26] <jnthn> Oh, though I guess if we're in an inline the top index is the top frame which would be an inlinee
+
+[21:27] <nine> It's 6636 -> 144 in the working version
+
+[21:27] <jnthn> If you're seeing totally different deopts and you're using MVM_SPESH_BLOCKING, though...
+
+[21:27] <jnthn> Then something's odd
+
+[21:28] <nine> Some output from the working version: https://gist.github.com/niner/35accfac21f264326a8a2ff702a35810
+
+[21:29] <nine> The difference between the version should really just be the removal of the no_op
+
+[21:29] <jnthn> Right
+
+[21:29] <jnthn> It's odd it'd cause different deops
+
+[21:29] <jnthn> *deopts
+
+[21:42] <nine> I guess this riddle needs at least one more night of sleep. Thanks for the help so far :)
+
+[22:08] *** markmont joined
+[22:42] *** zakharyas joined
+[22:53] *** MasterDuke joined
+[23:54] <MasterDuke> samcv: what benchmark were you testing with. the one i've tried `my $a = "a" x 1_000_000; for ^1000 {$a ~~ /./;}; say now - INIT now`, is faster before your recent change, whether it's "a", "ab", or "abcd"

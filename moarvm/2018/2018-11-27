@@ -1,0 +1,453 @@
+[02:08] *** lizmat left
+[05:34] *** avar left
+[05:45] *** avar joined
+[05:45] *** avar left
+[05:45] *** avar joined
+[05:45] *** p6bannerbot sets mode: +v avar
+
+[05:46] *** p6bannerbot sets mode: +v avar
+
+[06:34] *** ilogger2 joined
+[06:35] *** p6bannerbot sets mode: +v ilogger2
+
+[07:03] *** domidumont joined
+[07:04] *** p6bannerbot sets mode: +v domidumont
+
+[07:48] *** robertle joined
+[07:48] *** p6bannerbot sets mode: +v robertle
+
+[09:30] <jnthn> timotimo: I forget exactly what it does; it may just let old ones be GC'd
+
+[09:30] <jnthn> Would have to check the code
+
+[09:30] <timotimo> that seems to be the case
+
+[09:31] <timotimo> i put a breakpoint on its gc_mark and for every gc run there was only ever one that got marked
+
+[09:31] <timotimo> so that shouldn't cause unlimited memory growth
+
+[09:31] <jnthn> Probably I did that because it's "obviously safe", whereas re-use always raises questions :)
+
+[09:31] <jnthn> Well, is its gc_free being called? :)
+
+[09:36] <nwc10> jnthn: ASAN considers e317922036598184745c9b2afc1eafb44597e75b to be boring
+
+[09:36] <nwc10> (Sketch out creating deopt/materialization info)
+
+[09:44] <jnthn> Yay :)
+
+[09:45] <nwc10> please try harder :-)
+
+[09:51] *** domidumont left
+[09:51] *** domidumont joined
+[09:52] *** p6bannerbot sets mode: +v domidumont
+
+[10:01] <timotimo> putting the breakpoint in the wrong spot will get you to a spot where you can "c" as often as you want and you won't make progress, because for some reason the other thread won't release the condition variable
+
+[10:14] <timotimo> ok, i've got some more breakpoints and i'm seeing lots and lots of spesh logs being created and the distance between nursery_alloc_limit and nursery_alloc only shrinking by a very small amount
+
+[10:15] <timotimo> so maybe we should deduct the size of the spesh log buffer from the nursery alloc limit
+
+[10:16] <timotimo> but even then, this shouldn't be unbounded growth
+
+[10:16] <timotimo> i'll wait for a gc run to happen
+
+[10:20] *** lizmat joined
+[10:20] *** p6bannerbot sets mode: +v lizmat
+
+[10:40] *** zakharyas joined
+[10:41] *** p6bannerbot sets mode: +v zakharyas
+
+[10:46] <timotimo> OK, it's not unbounded, the bound is just very, very, very high
+
+[10:47] <timotimo> RSS is currently at 490, the nursery still has 94992 bytes of space
+
+[10:47] <timotimo> the other thread also occasionally creates spesh logs, it's at 126472 bytes left before a GC would happen
+
+[10:48] <timotimo> i'd almost consider freeing the buffer right when the spesh worker is done with it, tbh
+
+[10:48] <timotimo> and letting the gc take care of the object itself, only freeing the buffer if it's not turned into a null pointer yet
+
+[10:49] <timotimo> m: say 93152 / 80
+
+[10:49] <camelia> rakudo-moar 7a82deb6e: OUTPUT: «1164.4␤»
+
+[10:50] <timotimo> m: say (1164 * 16384 * 24) / (1024 * 1024)
+
+[10:50] <camelia> rakudo-moar 7a82deb6e: OUTPUT: «436.5␤»
+
+[10:50] <timotimo> ok, it'd still allocate this many megabytes of ram before the GC kicks in
+
+[11:12] *** squashable6 joined
+[11:13] *** p6bannerbot sets mode: +v squashable6
+
+[11:43] <Geth> ¦ MoarVM/decrease_spesh_log_memory_growth: c933b51669 | (Timo Paulssen)++ | 2 files
+
+[11:43] <Geth> ¦ MoarVM/decrease_spesh_log_memory_growth: free spesh log entries after consuming them
+
+[11:43] <Geth> ¦ MoarVM/decrease_spesh_log_memory_growth:
+
+[11:43] <Geth> ¦ MoarVM/decrease_spesh_log_memory_growth: this prevents threads that do little to no
+
+[11:43] <Geth> ¦ MoarVM/decrease_spesh_log_memory_growth: allocations but lots of spesh logging in an
+
+[11:43] <Geth> ¦ MoarVM/decrease_spesh_log_memory_growth: otherwise idle program from growing to multiple
+
+[11:43] <Geth> ¦ MoarVM/decrease_spesh_log_memory_growth: gigabytes of ram used solely for spesh log entries.
+
+[11:43] <Geth> ¦ MoarVM/decrease_spesh_log_memory_growth:
+
+[11:44] <Geth> ¦ MoarVM/decrease_spesh_log_memory_growth: This happened with rakudo's ThreadPoolScheduler
+
+[11:44] <Geth> ¦ MoarVM/decrease_spesh_log_memory_growth: supervisor thread when a program with multithreading
+
+[11:44] <Geth> ¦ MoarVM/decrease_spesh_log_memory_growth: or async workloads was left idle, like for example
+
+[11:44] <Geth> ¦ MoarVM/decrease_spesh_log_memory_growth: a Cro app.
+
+[11:44] <Geth> ¦ MoarVM/decrease_spesh_log_memory_growth: review: https://github.com/MoarVM/MoarVM/commit/c933b51669
+
+[11:44] <timotimo> m: say (16384 * 24) / (1024 * 1024)
+
+[11:44] <camelia> rakudo-moar 7a82deb6e: OUTPUT: «0.375␤»
+
+[11:47] <Geth> ¦ MoarVM: timo++ created pull request #1002: free spesh log entries after consuming them
+
+[11:47] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1002
+
+[11:47] <timotimo> ^- pull request contains a bit more prose
+
+[11:55] <timotimo> anyway, that makes my program's memory growth stop
+
+[11:56] <timotimo> if it's still at 219 in an hour, i'd say it's done :) :)
+
+[11:57] <nwc10> and you plan to test this by going out for lunch?
+
+[12:02] <timotimo> late breakfast, i believe
+
+[12:16] *** evalable6 joined
+[12:16] *** p6bannerbot sets mode: +v evalable6
+
+[12:19] <timotimo> AlexDaniel: wanna try out that branch to see if it makes things better?
+
+[12:20] <AlexDaniel> timotimo: I don't know any quick and easy way to test it
+
+[12:21] <timotimo> well, how slowly does it grow?
+
+[12:21] <AlexDaniel> well uhh… after like 2 weeks I think the memory usage grows to like two gigs of ram… or something like that
+
+[12:23] <timotimo> mhh
+
+[12:23] <timotimo> that's about what i expect from spesh log growth
+
+[12:23] * timotimo AFK
+
+[12:31] *** shareable6 joined
+[12:32] *** reportable6 joined
+[12:32] *** p6bannerbot sets mode: +v shareable6
+
+[12:33] *** p6bannerbot sets mode: +v reportable6
+
+[12:45] <AlexDaniel> also just got a machine with 64 GB of RAM
+
+[12:45] <AlexDaniel> maybe these memory issues don't matter as much after all :D
+
+[13:00] <timotimo> it'd still be nice to run on raspberry pis (or beaglebones) without blowing all the memory on unused data
+
+[13:02] <timotimo> oh no!
+
+[13:02] <timotimo> it grew to 200 megs! :(
+
+[13:19] *** avar joined
+[13:19] *** avar left
+[13:19] *** avar joined
+[13:19] *** p6bannerbot sets mode: +v avar
+
+[13:19] *** p6bannerbot sets mode: +v avar
+
+[14:02] <nine> timotimo: but does it still grow as much?
+
+[14:17] <timotimo> it has now grown to 181 megs
+
+[14:17] <timotimo> or rather it has nworged to 181 megs
+
+[14:42] <lizmat> nworged >
+
+[14:42] <lizmat> ?
+
+[14:44] <[Coke]> m: say "grown".flip ~ "ed"
+
+[14:44] <camelia> rakudo-moar 7a82deb6e: OUTPUT: «nworged␤»
+
+[14:45] <lizmat> aha!
+
+[14:46] <timotimo> it's still at 181 megs right now
+
+[14:46] <timotimo> though i don't know if it went up some time in between
+
+[14:47] *** domidumont left
+[15:02] *** domidumont joined
+[15:03] *** p6bannerbot sets mode: +v domidumont
+
+[15:05] *** zakharyas left
+[17:30] *** domidumont left
+[17:36] *** robertle left
+[18:17] <timotimo> it nworged to 180 in the mean time
+
+[18:33] *** domidumont joined
+[18:34] *** p6bannerbot sets mode: +v domidumont
+
+[19:10] <samcv> timotimo, minor nitpick: can you make sure you use titlecase in your commit messages from now on?
+
+[19:13] <timotimo> oh
+
+[19:13] <timotimo> i bet there's a git commit hook on the internet that i could steal
+
+[19:13] <samcv> heh
+
+[19:14] <timotimo> title case means every word is capitalized, right? except for maybe words like "the" or "a"?
+
+[19:14] <samcv> luckily i have a (T)itlecase option in my update-changelog script
+
+[19:14] <samcv> oh no just the first one
+
+[19:14] *** AlexDaniel` joined
+[19:14] *** p6bannerbot sets mode: +v AlexDaniel`
+
+[19:15] <samcv> nine, can you give me an overview of the reason for the MAST changes?
+
+[19:15] <samcv> or someone else that knows
+
+[19:15] <samcv> https://github.com/MoarVM/MoarVM/commit/4fbaeee5f3f06425f715b8d9a913abe51c0c8cd7
+
+[19:16] <timotimo> so far we had a set of classes like MAST::Label, MAST::Operand, ... and instruction lists that hold them
+
+[19:16] <timotimo> and that got fed as one big batch to mastcompiler.c
+
+[19:17] <timotimo> now the QAST is turned into mbc as directly as possible
+
+[19:17] <timotimo> this can greatly decrease the maximum memory used
+
+[19:17] <timotimo> samcv: do you think that PR can go into master before this release?
+
+[19:18] <timotimo> maybe i should at least stresstest it
+
+[19:18] <samcv> link to PR
+
+[19:19] <samcv> since what i linked is already merged, so guessing you mean a differentn one
+
+[19:20] *** zakharyas joined
+[19:20] <timotimo> https://github.com/MoarVM/MoarVM/pull/1002
+
+[19:21] *** p6bannerbot sets mode: +v zakharyas
+
+[19:22] <samcv> timotimo, i'm going to merge. let me know how the stresstest goes
+
+[19:23] <Geth> ¦ MoarVM: c933b51669 | (Timo Paulssen)++ | 2 files
+
+[19:23] <Geth> ¦ MoarVM: free spesh log entries after consuming them
+
+[19:23] <Geth> ¦ MoarVM:
+
+[19:23] <Geth> ¦ MoarVM: this prevents threads that do little to no
+
+[19:23] <Geth> ¦ MoarVM: allocations but lots of spesh logging in an
+
+[19:23] <Geth> ¦ MoarVM: otherwise idle program from growing to multiple
+
+[19:23] <Geth> ¦ MoarVM: gigabytes of ram used solely for spesh log entries.
+
+[19:23] <Geth> ¦ MoarVM:
+
+[19:23] <Geth> ¦ MoarVM: This happened with rakudo's ThreadPoolScheduler
+
+[19:23] <Geth> ¦ MoarVM: supervisor thread when a program with multithreading
+
+[19:23] <Geth> ¦ MoarVM: or async workloads was left idle, like for example
+
+[19:23] <Geth> ¦ MoarVM: a Cro app.
+
+[19:23] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/c933b51669
+
+[19:23] <Geth> ¦ MoarVM: 88a776d1ab | (Samantha McVey)++ (committed using GitHub Web editor) | 2 files
+
+[19:23] <Geth> ¦ MoarVM: Merge pull request #1002 from MoarVM/decrease_spesh_log_memory_growth
+
+[19:23] <Geth> ¦ MoarVM:
+
+[19:23] <Geth> ¦ MoarVM: free spesh log entries after consuming them
+
+[19:23] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/88a776d1ab
+
+[19:26] <timotimo> i haven't updated rakudo recently, so a few individual tests fail, but the only symptom that could come from this is terrible memory corruption or very bad mishebaviour
+
+[19:26] <timotimo> maybe nwc10 can run it with asan? :)
+
+[19:28] <jnthn> We can perhaps think about removing src/mast/ stuff, given I guess we're not using it now we generate the bytecode directly
+
+[19:28] <jnthn> (After the release, of course)
+
+[19:29] <timotimo> i'm glad i got around to figuring out the memory growth thing
+
+[19:30] <timotimo> i've gotta go grocery shopping, but maybe i can ssh in later and report on the stresstest
+
+[19:31] <jnthn> timotimo++
+
+[19:33] <Geth> ¦ MoarVM: 856c4dd880 | (Samantha McVey)++ | 2 files
+
+[19:33] <Geth> ¦ MoarVM: Make MVM_string_utf16*_decode consistent and use char*
+
+[19:33] <Geth> ¦ MoarVM:
+
+[19:33] <Geth> ¦ MoarVM: Fixes a bunch of type warnings.
+
+[19:33] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/856c4dd880
+
+[19:33] <Geth> ¦ MoarVM: 4228ad1b07 | (Samantha McVey)++ | tools/update-changelog.p6
+
+[19:33] <Geth> ¦ MoarVM: Use ANSI bold to make update-changelog.p6 easier to read
+
+[19:34] <Geth> ¦ MoarVM:
+
+[19:34] <Geth> ¦ MoarVM: Cosmetic changes.
+
+[19:34] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/4228ad1b07
+
+[19:40] *** ilmari_ joined
+[19:40] *** wictory[m] joined
+[19:40] *** p6bannerbot sets mode: +v wictory[m]
+
+[19:40] *** p6bannerbot sets mode: +v ilmari_
+
+[19:50] *** patrickb joined
+[19:51] *** p6bannerbot sets mode: +v patrickb
+
+[19:52] *** domidumont left
+[19:56] *** ilmari_ left
+[19:56] *** AlexDaniel` left
+[19:56] *** wictory[m] left
+[19:59] *** travis-ci joined
+[19:59] *** p6bannerbot sets mode: +v travis-ci
+
+[19:59] <travis-ci> MoarVM build failed. Samantha McVey 'Use ANSI bold to make update-changelog.p6 easier to read
+
+[19:59] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/460426305 https://github.com/MoarVM/MoarVM/compare/88a776d1abf1...4228ad1b0798
+
+[19:59] *** travis-ci left
+[20:05] *** AlexDaniel` joined
+[20:05] *** p6bannerbot sets mode: +v AlexDaniel`
+
+[20:11] <dogbert11> hmm, a sudden SEGV
+
+[20:13] <dogbert11> ==19776==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000 (pc 0x7f73a87bc830 bp 0x7fff237b19b0 sp 0x7fff237b19b0 T0)
+
+[20:13] <dogbert11>     #0 0x7f73a87bc82f in has_little_endian_bom src/strings/utf16.c:9
+
+[20:13] <dogbert11>     #1 0x7f73a87bc82f in MVM_string_utf16_decode src/strings/utf16.c:207
+
+[20:14] <samcv> i made a typo in my change i think :)
+
+[20:14] <jnthn> .oO( Somebody set up us the bom )
+
+[20:15] <dogbert11> pesky typos :)
+
+[20:17] <Geth> ¦ MoarVM: c9f4863170 | (Samantha McVey)++ | src/strings/utf16.c
+
+[20:17] <Geth> ¦ MoarVM: Fix typo causing segfault in utf16 code
+
+[20:17] <Geth> ¦ MoarVM:
+
+[20:17] <Geth> ¦ MoarVM: Fixes a typo in 856c4dd880b32514c033371d46d0951398f5c2f0
+
+[20:17] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/c9f4863170
+
+[20:17] <samcv> dogbert11, should be fixed now
+
+[20:18] <dogbert11> cool
+
+[20:18] * dogbert11 rebuilds
+
+[20:20] <samcv> jnthn, not sure where the best place to put arch conditional ldflags in Configure.pl
+
+[20:20] <dogbert11> works perfectly, samcv++
+
+[20:20] <samcv> and make sure it works for cross as well
+
+[20:21] <jnthn> samcv: I don't know; I'm pretty weak at build/configure stuff, so most of what we have today has been done by folks who understand that better :)
+
+[20:22] <jnthn> samcv: This is for the AIX fix?
+
+[20:30] <samcv> yeah
+
+[20:31] <samcv> something about memory allocation that was reported to me a while ago. that i remembered recently :)
+
+[20:31] <timotimo> samcv: stresstest was OK :)
+
+[20:31] <samcv> https://github.com/MoarVM/MoarVM/issues/1003
+
+[20:31] <samcv> timotimo, nice!
+
+[20:32] *** wictory[m] joined
+[20:32] *** ilmari_ joined
+[20:32] *** p6bannerbot sets mode: +v wictory[m]
+
+[20:32] *** p6bannerbot sets mode: +v ilmari_
+
+[20:32] *** lizmat left
+[20:36] *** lizmat joined
+[20:36] *** p6bannerbot sets mode: +v lizmat
+
+[20:39] *** travis-ci joined
+[20:39] *** p6bannerbot sets mode: +v travis-ci
+
+[20:39] <travis-ci> MoarVM build passed. Samantha McVey 'Fix typo causing segfault in utf16 code
+
+[20:39] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/460446200 https://github.com/MoarVM/MoarVM/compare/4228ad1b0798...c9f486317072
+
+[20:39] *** travis-ci left
+[20:43] *** zakharyas left
+[21:03] <Geth> ¦ MoarVM: 60c16e6cbe | (Samantha McVey)++ | docs/ChangeLog
+
+[21:03] <Geth> ¦ MoarVM: Update ChangeLog for release
+
+[21:03] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/60c16e6cbe
+
+[21:04] <samcv> ok. changelog is pushed. timotimo can you look at the "Other" section and make sure my MAST description is alright?
+
+[21:05] <timotimo> samcv: i wouldn't say "MAST class changes", because MAST was pretty much completely removed
+
+[21:05] <timotimo> a detail i should probably have mentioned is that what used to be in mastcompiler.c is now implemented in nqp code
+
+[21:06] <timotimo> i gotta go for now, though. food ain't gonna cook itself!
+
+[21:08] <samcv> kk
+
+[21:34] <timotimo> "expose first entry time in profiler data" is in theret wice
+
+[21:34] <samcv> oops
+
+[21:36] <timotimo> otherwise i didn't see anything wrong
+
+[21:36] <samcv> but say that MAST was mostly removed? and is now implemented in nqp code?
+
+[21:37] <samcv> so why does this consume less memory if it's using nqp and not c code? is that just because it's better for other reasons?
+
+[21:50] <samcv> timotimo
+
+[22:16] *** patrickb left
+[23:15] <timotimo> yeah, it's better for other reasons
+
+[23:15] <timotimo> sorry for answering so late
+
+[23:15] <timotimo> good foods was had
+
+[23:16] <timotimo> samcv: still around? i should be able to explain
+
+[23:56] <timotimo> export EXPLAIN_FRONTEND=noninteractive
+
+[23:58] <timotimo> so the previous way required all of the QAST to be transformed into a whole bunch of MAST::Blah objects, and there would be one object for each operation and one for each register, or lexical, or label, ...
+
+[23:58] <timotimo> and since there's only a single op that takes all the MAST objects and turns them into a single mbc compunit, the entire MASTified QAST tree for the whole comp unit has to be in memory at that one point in time, along with the original QAST, because that doesn't get collected just yet
+
+[23:59] <timotimo> (that single op is masttocu, i believe, which is how mastcompiler.c's code has been invoked so far)
+

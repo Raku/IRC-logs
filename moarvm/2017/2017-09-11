@@ -1,0 +1,541 @@
+[01:02] *** dalek joined
+[01:55] *** ilbot3 joined
+[03:18] *** TimToady joined
+[04:15] <MasterDuke> jnthn, timotimo, anybody else: i've started to experiment with making VMArray use the FSA, but have some thoughts/questions ( https://gist.github.com/MasterDuke17/9bd82ae1823f271f7e83d00210817b32 ). any comments/suggestions/etc are much appreciated
+
+[04:46] <MasterDuke> jnthn, timotimo, anybody else: another question that i asked in #perl6-dev, but probably got lost in the noise: any reason the id created by nqp::objectid couldn't be a string? it's usually used as a string in rakudo, and it causes a bunch of coerce_I_s (or something like that), which means a lot of temporary allocations of mp_ints
+
+[05:22] *** domidumont joined
+[05:27] *** domidumont joined
+[05:34] *** brrt joined
+[05:39] <brrt> good hi
+
+[05:42] <brrt> MasterDuke: that's because it is the integer value of a pointer (if it lives in the second generation memory space; if not, a pointer is provided for it)
+
+[06:02] <brrt> i just realized that there is actually no reason at all to maintain a two-phase JIT compiler structure in the legacy JIT
+
+[06:05] <brrt> we could without loss of effectiveness generate bytecode in a single step
+
+[06:07] <brrt> this would, of course, break nine++s work
+
+[06:07] <brrt> although i know how to fix that
+
+[06:21] *** domidumont joined
+[06:29] *** domidumont joined
+[06:49] *** brrt joined
+[07:33] *** zakharyas joined
+[08:08] *** dogbert2 joined
+[08:33] *** leont joined
+[08:57] <samcv> good hi brrt
+
+[08:59] <brrt> good hi samcv
+
+[09:04] *** Skarsnik joined
+[09:09] *** ggoebel joined
+[09:11] <jnthn> morning o/
+
+[09:12] <lizmat> jnthn  brrt samcv o/
+
+[09:12] <nwc10> good *, jnthn
+
+[09:14] <lizmat> jnthn: do you remember offhand how to generate the "container_initializer" case in the BUILDALLPLAN logic ?
+
+[09:15] <jnthn> my %h is BagHash probably does it
+
+[09:15] * lizmat checks
+
+[09:16] <lizmat> doesn't look like it
+
+[09:17] <jnthn> oh
+
+[09:17] <jnthn> has %!h is BagHash of course
+
+[09:17] <lizmat> ack
+
+[09:17] <lizmat> lemme check
+
+[09:18] <lizmat> yup, that's the one
+
+[09:18] <samcv> jnthn, so i'm gonna push a fix making ignoremark work for Prepend graphemes :)
+
+[09:18] <samcv> very shortly
+
+[09:19] <jnthn> MasterDuke: That sounds more like we'd be better off trying to make coercion cheaper, but in the long run we'll be better off having them as integers once object hashes and ObjAt finally get the re-working they need
+
+[09:19] <samcv> if we have: Prepend Extend and no base character, should our base be the first codepoint by default?
+
+[09:19] <jnthn> samcv: Sounce nice :)
+
+[09:19] <samcv> code i currently have would put the base codepoint after the first Prepend character
+
+[09:19] <jnthn> samcv: Yeah, that sounds like a reasonable degenerate thing to do
+
+[09:25] <samcv> yeah
+
+[09:26] <samcv> and it doesn't do this if it's making a utf8_c8 one
+
+[09:26] <samcv> oh one big issue that i sorta wanna fix is utfc8 strings altering under concatenation when re_nfg gets run :\
+
+[09:26] <jnthn> Urgh, yeah, that shouldn't happen
+
+[09:27] <samcv> i mean there's nothing to stop it really
+
+[09:27] <samcv> it iterates by codepoint :\
+
+[09:27] <jnthn> Ah :/
+
+[09:27] <samcv> i mean do we need a setting on the codepoint iterator so that it'll passback synthetics?
+
+[09:27] <samcv> i.e. the only negative numbers we get back ARE utf8_c8 graphemes
+
+[09:27] <jnthn> Maybe
+
+[09:28] <samcv> that seems the simplest way to do it
+
+[09:28] <jnthn> Though it'd want to be turned on explicitly just for these cases
+
+[09:28] <jnthn> Or even be a slightly different iterator
+
+[09:28] <jnthn> Probably the latter
+
+[09:28] <jnthn> It's extra code, but it's worth it given how encoding is a hot path for I/O
+
+[09:28] <samcv> well when do we want to iterate by codepoint and destroy utf8_c8?
+
+[09:28] <samcv> is there ever places we *want* that?
+
+[09:28] <jnthn> Encoding
+
+[09:30] <samcv> it'd be simple enough to add an item to the MVMCodepointIter struct
+
+[09:30] <samcv> so we initialize the CI and then do ci->utf8_c8_synths_literal = 1
+
+[09:30] <samcv> or pass it along as another option, would be another option
+
+[09:30] <jnthn> Yes, I know it's simpler, but it's an extra check on every single codepoint we would encode
+
+[09:31] <samcv> ok that's fine with me
+
+[09:31] <jnthn> Those add up
+
+[09:31] <jnthn> Maybe it's only the "give me a codepoint" function that needs to be different anyway?
+
+[09:32] <jnthn> And the rest are shared
+
+[09:32] <jnthn> Then it's just a different function to call and no state
+
+[09:32] <samcv> yeah that's fine
+
+[09:32] <samcv> and the MVM_string_grapheme_ci_get_codepoint can be simplified now that it's all one array
+
+[09:33] <samcv> but i changed that and it broke some things so i decided to fix the Prepend stuff first then get back to it
+
+[09:33] <samcv> since it works fine now. it just uses the old semantics with base_code but we can eventually remove that from the codepointiter struct and the MVM_string_grapheme_ci_get_codepoint
+
+[09:34] <jnthn> Yeah, that'd be a nice simplification :)
+
+[09:34] <jnthn> Well, perhaps. otoh when the base char was the first one we were typically on a different codepath anyway
+
+[09:34] <jnthn> But as soon as it's not, then it's a simplficiation :)
+
+[09:36] <samcv> what do you mean
+
+[09:36] <samcv> i mean that can all be removed. getting the first codepoint can be just like the ones afterward
+
+[09:36] <samcv> and make the init function simpler too
+
+[09:37] <samcv> and when it gets to the next grapheme
+
+[09:37] <samcv> setting it up to pass back cp's
+
+[09:39] <jnthn> Yes, agree it can all be removed, just saying that it was less of a difference when the base char was always the first char
+
+[09:40] <jnthn> And that the way you're heading is notably cleaner
+
+[09:40] <jnthn> now that this isn't ture
+
+[09:40] <samcv> ah oh i think i get what yo umean
+
+[09:40] <jnthn> Because of prepends
+
+[09:40] <samcv> back in my day there were no such thing as prepends! damn kids get off my lawn
+
+[09:42] <geekosaur> ඏ
+
+[09:44] <Geth> ¦ MoarVM: Skarsnik++ created pull request #687: Nativecall code : fix invalid pointer creation
+
+[09:44] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/687
+
+[10:03] *** brrt joined
+[11:30] *** brrt joined
+[11:48] <nine> jnthn: regarding those superfluous initializations with NULL. Those look like down right trivial for a compiler to optimize away. Maybe it's not a bad idea to have those in the code as a defense for future refactorings?
+
+[11:54] <samcv> i'm getting a doublefree or corruption
+
+[11:54] <samcv> https://gist.github.com/56f26d9365ca9a5800b995c2f0cc4d71 here's the backtrace
+
+[11:55] <samcv> looks like maybe a JIT thing? jnthn thoughts?
+
+[11:55] <samcv> ===> Testing: HTTP::Request::Supply:ver('0.1.1'):auth('github:zostay')
+
+[11:55] <samcv> *** Error in `/home/samantha/perl6/bin/moar': double free or corruption (fasttop): 0x000000000553ef70 ***
+
+[11:56] <timotimo> asan or valgrind should be able to help here
+
+[11:56] <MasterDuke> samcv: does it go away if you MVM_JIT_DISABLE=1 or MVM_SPESH_DISABLE=1?
+
+[11:57] <MasterDuke> timotimo: btw, any thoughts on my fsa realloc question?
+
+[11:57] <samcv> gonna check
+
+[11:59] <nine> set_size_internal again? That looks suspicious
+
+[11:59] *** AlexDaniel joined
+[12:00] <MasterDuke> did anybody see what ugexe was trying in #perl6-dev last night? https://irclog.perlgeek.de/perl6-dev/2017-09-11#i_15144869
+
+[12:00] <timotimo> your gist looks good, MasterDuke
+
+[12:01] <MasterDuke> timotimo: cool, i've never worked with a fixed size allocator before, hoping i wasn't too far off base
+
+[12:04] <MasterDuke> however, what i described seems like it will cause a lot of memcpy's. is that required? or is there a way to grow a bin into the next size without copying?
+
+[12:04] <timotimo> not possible
+
+[12:05] <timotimo> there's allocation schemes that could conceivably do this, but we're not using any of those
+
+[12:05] <MasterDuke> oh well
+
+[12:07] <samcv> not happening anymore
+
+[12:07] <samcv> but it happened like 3 times. and now not
+
+[12:10] <jnthn> nine: I can live with them, they just always strike me as superstitious and make me zone in when reviewing. Like, "did the author really understand the control flow here" kinda thing.
+
+[12:14] <jnthn> As to memcpy on growth - once we reach a certain size we're not using the FSA any more, and before that point the copies are small
+
+[12:16] <MasterDuke> jnthn: true. did you have a look at what i wrote?
+
+[12:17] <jnthn> Yeah. My feeling is that we should provide a realloc function on the FSA API
+
+[12:17] <jnthn> Plus a _safepoint variant of it too
+
+[12:18] <jnthn> That way we can encapsulate the FSA-related (does it fit the bin? is it overflow so we can just MVM_realloc?) inside of fixedsizealloc.c
+
+[12:18] <jnthn> We'd need to pass the old size and the new size
+
+[12:18] <MasterDuke> MVM_fixed_size_realloc that uses MVM_fixed_size_free and MVM_fixed_size_realloc_at_safepoint that uses MVM_fixed_size_free_at_safepoint?
+
+[12:19] <jnthn> Yeah
+
+[12:19] <timotimo> if we only ever grow the storage we'll never accidentally write outside if we read an out-of-date size value
+
+[12:20] <MasterDuke> jnthn: yep, i have a dead simple MVM_fixed_size_realloc that takes old and new sizes and just does MVM_fixed_size_alloc, memcpy, MVM_fixed_size_free
+
+[12:20] <jnthn> MasterDuke: Right. That works. But for the case it's an overflow we can cheat :)
+
+[12:20] <jnthn> As in, delegate to MVM_realloc
+
+[12:21] <jnthn> Need to make sure that path does something sensible when MVM_FSA_DEBUG or whatever it's called is turned on also (probably just tweak the size)
+
+[12:21] <jnthn> In the longer run...
+
+[12:21] <MasterDuke> yep, that's what i was going to work on next, but wanted to make sure i had the various cases thought out correctly
+
+[12:21] <jnthn> VMArray should switch to allocating a block of memory that *includes* the ssize and the element storage
+
+[12:21] <jnthn> And reads it once per operation
+
+[12:21] <jnthn> And bounds checks against *that*
+
+[12:21] <jnthn> And uses the fixed point free mechanism
+
+[12:22] <samcv> star: use JSON::Fast:ver<0.1..*>
+
+[12:22] <camelia> star-m 2017.07: OUTPUT: «===SORRY!===␤Could not find JSON::Fast:ver<0.1..*> at line 1 in:␤    /home/camelia/.perl6␤    /home/camelia/star-2017.07/share/perl6/site␤    /home/camelia/star-2017.07/share/perl6/vendor␤    /home/camelia/star-2017.07/share/perl6␤    CompUnit::R…»
+
+[12:22] <jnthn> That way we can make MVMArray threadsafer
+
+[12:22] <samcv> star: use JSON::Fast:ver<0.1+>
+
+[12:22] <camelia> star-m 2017.07: OUTPUT: «===SORRY!===␤Could not find JSON::Fast:ver<0.1+> at line 1 in:␤    /home/camelia/.perl6␤    /home/camelia/star-2017.07/share/perl6/site␤    /home/camelia/star-2017.07/share/perl6/vendor␤    /home/camelia/star-2017.07/share/perl6␤    CompUnit::Rep…»
+
+[12:22] <samcv> star: use JSON::Tiny:ver<0.1+>
+
+[12:22] <camelia> star-m 2017.07: OUTPUT: «===SORRY!===␤Could not find JSON::Tiny:ver<0.1+> at line 1 in:␤    /home/camelia/.perl6␤    /home/camelia/star-2017.07/share/perl6/site␤    /home/camelia/star-2017.07/share/perl6/vendor␤    /home/camelia/star-2017.07/share/perl6␤    CompUnit::Rep…»
+
+[12:22] <samcv> star: use JSON::Fast
+
+[12:22] <camelia> star-m 2017.07: ( no output )
+
+[12:23] <samcv> star: use JSON::Fast:ver<0.0.1+>
+
+[12:23] <camelia> star-m 2017.07: OUTPUT: «===SORRY!===␤Could not find JSON::Fast:ver<0.0.1+> at line 1 in:␤    /home/camelia/.perl6␤    /home/camelia/star-2017.07/share/perl6/site␤    /home/camelia/star-2017.07/share/perl6/vendor␤    /home/camelia/star-2017.07/share/perl6␤    CompUnit::R…»
+
+[12:23] <samcv> star: use JSON::Fast:ver<0.0.1..*>
+
+[12:23] <camelia> star-m 2017.07: OUTPUT: «===SORRY!===␤Could not find JSON::Fast:ver<0.0.1..*> at line 1 in:␤    /home/camelia/.perl6␤    /home/camelia/star-2017.07/share/perl6/site␤    /home/camelia/star-2017.07/share/perl6/vendor␤    /home/camelia/star-2017.07/share/perl6␤    CompUnit:…»
+
+[12:24] <jnthn> nine: fwiw, https://github.com/MoarVM/MoarVM/commit/f9b65a9e37979ab39fd1283a65ad4e1351ca6058 seems to be causing Windows build issues
+
+[12:24] <jnthn> I might be able to track that down at home some evening this week
+
+[12:24] <jnthn> If not we should revert it ahead of the monthly release
+
+[12:28] <MasterDuke> m: use nqp; my str $a = nqp::objectid(1); say $a
+
+[12:28] <camelia> rakudo-moar 760530: OUTPUT: «45859896␤»
+
+[12:28] <MasterDuke> m: use nqp; my Str $a = nqp::objectid(1); say $a
+
+[12:28] <camelia> rakudo-moar 760530: OUTPUT: «Type check failed in assignment to $a; expected Str but got Int (56132664)␤  in block <unit> at <tmp> line 1␤␤»
+
+[12:29] <MasterDuke> str is ok?
+
+[12:30] <lizmat> MasterDuke: natives int auto-coerce to native strings in nqp land
+
+[12:31] <lizmat> m: my str $a = (my int $ = 42); dd $a
+
+[12:31] <camelia> rakudo-moar 760530: OUTPUT: «"42"␤»
+
+[12:32] <MasterDuke> i thought pmurias was asking about that recently for rakudo-js and jnthn said it shouldn't be allowed
+
+[12:35] *** zakharyas joined
+[12:37] <jnthn> No, that shoudln't happen
+
+[12:37] <jnthn> Something is being rather too leninet
+
+[12:37] <jnthn> Maybe for the same of NQP
+
+[12:37] <jnthn> *sake of
+
+[12:37] <jnthn> But still, should really be fixed in Perl 6
+
+[12:38] <MasterDuke> heh, guess i shouldn't use that to reduce the number of MMV_bigint_to_str calls because of nqp::objectid then
+
+[12:40] <jnthn> bigint_to_str may be optimizable for the case of sufficiently small values
+
+[12:40] <jnthn> Like, those that ain't actually big
+
+[12:42] <samcv> ok i got the crash again
+
+[12:42] <samcv> gonna try with MVM_SPESH_DISABLE=1
+
+[12:45] <samcv> MVM_SPESH_DISABLE=1 makes it not crash
+
+[12:53] <nine> jnthn: I know, but I have no idea how it could go that wrong :/ I do hope another set of eyes finds the reason. I'd guess it's some misunderstanding about C on my part which is why it's not visible to me.
+
+[12:53] <jnthn> I didn't immediately spot it either.
+
+[12:54] <jnthn> Will have another look
+
+[12:54] <nine> jnthn: well, does my fix even make sense? :)
+
+[12:55] *** Skarsnik_ joined
+[12:56] <jnthn> The original patch, or some other follow-up one?
+
+[12:56] <MasterDuke> jnthn: MMV_bigint_to_str has a fast path for the case of actually-small ints, but i don't think it's getting hit in this case
+
+[12:56] <nine> jnthn: f9b65a9e37979ab39fd1283a65ad4e1351ca6058
+
+[12:57] <jnthn> I wonder if 1UL has to be 1ULL or some such
+
+[12:58] <jnthn> That's the first thing I'll probably try
+
+[12:59] <nine> ULL would indeed be the proper suffix for a 64 bit literal
+
+[12:59] <nine> "To specify a 64-bit integral type, use the LL, or ll suffix." https://msdn.microsoft.com/en-us/library/c70dax92.aspx
+
+[12:59] <jnthn> Sounds like it's that, then
+
+[13:05] <nine> Build fails: src/strings/unicode.c:78279:43: error: unknown type name ‘sub_node’
+
+[13:05] <nine> MVM_STATIC_INLINE MVMint64 next_node_min (sub_node node) {
+
+[13:05] <nine> samcv: ^^^
+
+[13:07] <nine> Apparently just removing that file fixes it
+
+[13:15] <Geth> ¦ MoarVM: d78c3707a4 | (Stefan Seifert)++ | src/6model/reprs/VMArray.c
+
+[13:15] <Geth> ¦ MoarVM: ULL is the proper suffix for a 64 bit integer literal
+
+[13:15] <Geth> ¦ MoarVM:
+
+[13:15] <Geth> ¦ MoarVM: "To specify a 64-bit integral type, use the LL, or ll suffix."
+
+[13:15] <Geth> ¦ MoarVM: https://msdn.microsoft.com/en-us/library/c70dax92.aspx
+
+[13:15] <Geth> ¦ MoarVM:
+
+[13:15] <Geth> ¦ MoarVM: May fix #686 "Unable to allocate an array of 8 elements" on Windows
+
+[13:15] <Geth> ¦ MoarVM: Thanks to jnthn++ for the hint!
+
+[13:15] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d78c3707a4
+
+[13:16] <nine> Stupid Github. When I write "Fixes GH #123", it does't do anything. But when I write "May fix #686" the issue gets auto closed.
+
+[13:16] <samcv> nine, the file unicode.c should generate when you run make
+
+[13:16] <samcv> anyway i gotta go to bed guys. see you tomorrow
+
+[13:16] <nine> Good night!
+
+[13:32] *** brrt joined
+[13:38] <brrt> so, what was broken?
+
+[13:39] <nine> brrt: where?
+
+[13:40] <brrt> in ehm, the JIT
+
+[13:40] *** cognominal joined
+[13:44] <nine> I don't think there was something about the JIT.
+
+[13:44] <timotimo> i had to rm unicode.c for some reason :(
+
+[13:45] <timotimo> maybe it also has to have a dependency on the generator script or something?
+
+[13:45] <nine> And it wasn't even my fix in set_size_internal that caused breakage. It just exposed a second bug in that line :)
+
+[13:49] <brrt> okay, that's… good, maybe
+
+[14:09] *** brrt joined
+[14:11] *** Skarsnik_ joined
+[14:13] *** Skarsnik__ joined
+[14:33] <dogbert17_> jnthn: have you tried running t/spec/S02-lexical-conventions/unicode-whitespace.t with MVM_SPESH_NODELAY=1? I get a lot of failures if I do that.
+
+[14:36] <jnthn> I've run all spectest with that + MVM_SPESH_BLOCKING quite recently. Didn't see anything from that.
+
+[14:36] <jnthn> Well, except a couple of cases that are about backtrace lines missing
+
+[14:38] <dogbert17_> the thing which makes this interesting is that the failures vanishes if I add MVM_SPESH_BLOCKING=1
+
+[14:40] *** domidumont joined
+[14:52] *** domidumont joined
+[15:04] <ugexe> if some perl6 code segfaults does that always mean a fix is appropriate for moarvm? or can the proper fix still apply to nqp or perl6 land?
+
+[15:06] *** brrt joined
+[15:13] <jnthn> Unless it's using NativeCall, we'd pretty much always want to fix it in MoarVM
+
+[15:14] <jnthn> There's two big known ways to get a SEGV out of MoarVM
+
+[15:14] <jnthn> Which are to abuse VMArray and VMHash from multiple threads respectively
+
+[15:14] <timotimo> right, NativeCall is simply the opposite of memory-safe
+
+[15:21] <ugexe> i see. yeah, this is a VMArray/threads thing
+
+[15:23] <ugexe> when i removed the segfaulting code from a loop it turned into nqp errors, so I wasn't sure
+
+[15:23] <ugexe> er, removed the loop surrounding segfaulting code
+
+[15:26] *** brrt joined
+[16:02] *** Ven`` joined
+[16:05] *** brrt joined
+[16:11] *** brrt joined
+[16:24] *** brrt1 joined
+[16:25] *** dogbert17 joined
+[16:31] *** nwc10 joined
+[16:36] *** domidumont joined
+[16:58] *** robertle joined
+[17:38] *** ggoebel joined
+[17:44] *** zakharyas joined
+[18:56] *** ggoebel joined
+[19:07] *** AlexDaniel joined
+[19:20] *** hoelzro joined
+[19:21] *** robertle joined
+[19:39] <Geth> ¦ MoarVM: 22000677e9 | Skarsnik++ (committed using GitHub Web editor) | src/core/nativecall.c
+
+[19:39] <Geth> ¦ MoarVM: Nativecall code : fix invalid pointer creation
+
+[19:39] <Geth> ¦ MoarVM:
+
+[19:39] <Geth> ¦ MoarVM: This fix what is probably an extra indirection. If I understand this correctly cptr is the address of a field inside a CStruct, the previous code was assigning to cptr the value of the field.
+
+[19:39] <Geth> ¦ MoarVM: This make efence/valgrind/asan happy (fix an invalid read size of 8 errors message  in this function)
+
+[19:39] <Geth> ¦ MoarVM: The uintptr _t cast are to respect https://www.securecoding.cert.org/confluence/display/c/INT36-C.+Converting+a+pointer+to+integer+or+integer+to+pointer
+
+[19:39] <Geth> ¦ MoarVM:
+
+[19:39] <Geth> ¦ MoarVM: All nativecall tests in rakudo still run fine with this fix
+
+[19:39] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/22000677e9
+
+[19:39] <Geth> ¦ MoarVM: 238f67e49c | (Jonathan Worthington)++ (committed using GitHub Web editor) | src/core/nativecall.c
+
+[19:39] <Geth> ¦ MoarVM: Merge pull request #687 from Skarsnik/patch-2
+
+[19:39] <Geth> ¦ MoarVM:
+
+[19:39] <Geth> ¦ MoarVM: Nativecall code : fix invalid pointer creation
+
+[19:39] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/238f67e49c
+
+[20:19] *** solarbunny joined
+[20:31] *** JimmyZ joined
+[20:31] *** leedo joined
+[20:33] *** ilmari[m] joined
+[20:40] <lizmat> jnthn: moarvm.org still doesn't show 2017.08 on the home page ?
+
+[21:17] <dogbert17> stupid question, will any of the three conditional statements here ever be true given that the offset fields are unsigned? https://github.com/MoarVM/MoarVM/blob/master/src/spesh/codegen.c#L299
+
+[21:18] *** ugexe joined
+[21:18] <lizmat> and another Perl 6 Weekly hits the Net: https://p6weekly.wordpress.com/2017/09/11/2017-37-collating-sorted/
+
+[21:18] <dogbert17> lizmat++ and I haven't even read it yet :)
+
+[21:31] *** nativecallable6 joined
+[21:31] *** releasable6 joined
+[21:31] *** zakharyas joined
+[21:41] <jnthn> lizmat: oops, though tbh the incentive to fix that is low given it'll last 4 days...
+
+[21:41] <jnthn> Release was right as I was prepping for SPW, so...
+
+[21:41] <jnthn> lizmat++ # pun title of weekly
+
+[21:41] <lizmat> yeah, but I'm linking to it from the P6W...  so maybe that's an incentive ?  :-)
+
+[21:44] <jnthn> fwiw, I'm not on perl6-users but the answer to https://www.nntp.perl.org/group/perl.perl6.users/2017/09/msg4237.html is that the close ain't required
+
+[21:45] <jnthn> Also I can't believe someone had the discipline to write an example with the words "Ring ring" without sticking "bananaphone" in somewhere...
+
+[21:47] <geekosaur> if you're old enough you switch to liza minelli instead >.>
+
+[21:49] <lizmat> jnthn: answered on perl6-users
+
+[21:50] <jnthn> To who? :D
+
+[21:51] <lizmat> the list
+
+[21:56] <jnthn> I was replying to geekosaur :-)
+
+[21:56] * dogbert17 figured out the answer to his own question
+
+[22:17] *** committable6 joined
+[22:23] *** nwc10 joined
+[22:35] <timotimo> jnthn: any good ideas for an API to tell the heap snapshot profiler to only do major collections? i'm gravitating towards just an env var rather than giving the HLL::Compiler Yet Another Flag starting in --profile
+
+[22:42] <jnthn> timotimo: We could expand existing syntax
+
+[22:42] <jnthn> --profile=heap is what we have today
+
+[22:43] <jnthn> But we could
+
+[22:43] <jnthn> --profile=heap;key=value,key2=value2 or some such
+
+[22:44] <timotimo> definitely could
+
+[22:44] <timotimo> and then just put all of it into the config hash
+
+[22:44] <jnthn> Right
+
+[22:44] <timotimo> i'm thinking i don't wanna install these as constant strings in the moar instance
+
+[22:44] <timotimo> just turn them from c string into moar string right then and there :P
+
+[23:47] <timotimo> oh! i didn't know about profile-stage
+
+[23:48] <timotimo> but it doesn't pass the profile type on
+
+[23:59] *** MasterDuke joined

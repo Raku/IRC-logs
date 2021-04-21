@@ -1,0 +1,580 @@
+[00:00] <timotimo> not too far apart, eh. not really a big surprise there
+
+[00:59] <samcv> trying to figure out why moarvm segfaults on alpine
+
+[00:59] <samcv> it seems to be happening when realloc is called
+
+[01:02] <samcv> and maybe in build_cfg
+
+[01:03] <samcv> gdb is giving me all kinds of "can't read this variable from this address" warnings on #0 in the backtrace
+
+[01:12] <MasterDuke> didn't someone figure that out a little while ago? something about the max stack size is too small
+
+[01:13] <samcv> that's not the issue
+
+[01:13] <samcv> maybe it's a different issue idk. i just installed it and stack size is 8192
+
+[01:14] <samcv> and valgrind shows the badness as well
+
+[01:16] <MasterDuke> well, there are a bunch of people who've mentioned it in #perl6, but no obvious solutions (at least from a 15s skim of the chat logs)
+
+[01:16] <samcv> i'm not seeing any problem with the stack. no stack overflow
+
+[01:17] <MasterDuke> "exec stack protection"?
+
+[01:18] <samcv> well it's happening in free and maloc
+
+[01:19] <samcv> sec
+
+[01:19] <samcv> MasterDuke, https://cry.nu/p/p72n/
+
+[01:20] <MasterDuke> "Address 0x4e9b180 is in a rw- mapped file /usr/lib/valgrind/vgpreload_memcheck-amd64-linux.so segment" maybe?
+
+[01:20] <MasterDuke> "Bad permissions for mapped region at address 0x408AFA8"
+
+[01:20] <samcv> here's a backtrace one place https://cry.nu/p/gr2w/
+
+[01:21] <MasterDuke> have you tried with MVM_SPESH_DISABLE=1?
+
+[01:22] <samcv> nice it fixes it
+
+[01:24] <samcv> that stack is pretty big though
+
+[01:25] <samcv> did you see the stacktrace? at least 212+ recursive calls to optimize_bb
+
+[01:25] <MasterDuke> yep, fun to dig through
+
+[01:54] *** ilbot3 joined
+[03:34] <samcv> MasterDuke, i think i solved compiling nqp on musl with spesh
+
+[03:35] <MasterDuke> cool, how'd you do that?
+
+[03:36] <samcv> i moved as much code as possible to another function. so we don't trash the stack completely
+
+[03:37] <samcv> so keep as small a function as possible being recursed into
+
+[03:40] <MasterDuke> moved from what function?
+
+[03:40] <MasterDuke> optimize_bb?
+
+[03:42] <Geth> ¦ MoarVM: 5528083df7 | (Samantha McVey)++ | src/spesh/optimize.c
+
+[03:42] <Geth> ¦ MoarVM: Fix segfault when compiling nqp with musl as libc
+
+[03:42] <Geth> ¦ MoarVM:
+
+[03:42] <Geth> ¦ MoarVM: Because optimize_bb() can be deeply recursive, separate as much code
+
+[03:42] <Geth> ¦ MoarVM: as possible into a separate function optimize_bb_switch(), so we don't
+
+[03:42] <Geth> ¦ MoarVM: trash the stack. This fixes a segfault that occured when compiling nqp
+
+[03:42] <Geth> ¦ MoarVM: on Alpine Linux which uses musl as its libc.
+
+[03:42] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/5528083df7
+
+[03:42] <samcv> MasterDuke, there we go :)
+
+[03:43] <MasterDuke> nice
+
+[03:52] <samcv> it recurses at least 99 depth when compiling nqp
+
+[03:53] <samcv> yeah looks like 99, or a total of 100 calls to the funccion including the outer optimize_bb
+
+[04:36] <Geth> ¦ MoarVM: 6d844e0085 | (Samantha McVey)++ | src/spesh/optimize.c
+
+[04:36] <Geth> ¦ MoarVM: Avoid recursion in optimize_bb() when only 1 child node
+
+[04:36] <Geth> ¦ MoarVM:
+
+[04:36] <Geth> ¦ MoarVM: Optimize the case where we only have one child. This avoids having
+
+[04:36] <Geth> ¦ MoarVM: to do a recursive call to optimize_bb(). Keep following the nodes and
+
+[04:36] <Geth> ¦ MoarVM: running optimize_bb_switch() on them until we hit one with more than 1
+
+[04:36] <Geth> ¦ MoarVM: child.
+
+[04:36] <Geth> ¦ MoarVM: Reduces the depth of recursion when compiling nqp from 99 to 29.
+
+[04:36] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/6d844e0085
+
+[07:39] *** domidumont joined
+[07:44] *** domidumont joined
+[08:21] *** zakharyas joined
+[09:48] <nine> Ooook, bytecode validator is happy, too :) Now on to the runtime
+
+[10:04] <JimmyZ> timotimo: https://github.com/cyrus-and/gdb-dashboard # you may like it
+
+[10:05] <JimmyZ> jnthn: ^^ too
+
+[10:17] <samcv> JimmyZ, you find it helpful?
+
+[10:23] <timotimo> JimmyZ: yup! i already got it in use :)
+
+[10:23] <timotimo> samcv: the problem really is the stack size
+
+[10:24] <timotimo> musl libc gives all threads launched with pthread_create a tiny default stack size
+
+[10:24] <timotimo> that's different from the main thread's size as well as whatever ulimit you might have set
+
+[10:24] <samcv> fun
+
+[10:24] <timotimo> that's also the reason why it only started failing now
+
+[10:24] <samcv> anyway the problem is mostly fixed
+
+[10:24] <timotimo> because spesh is now on a thread instead of on the main thread
+
+[10:25] <samcv> fixed it by splitting up the function so it recursises in only a small amount of code
+
+[10:25] <samcv> and reduced recursion needed by 3x
+
+[10:25] <samcv> so we should be pretty safe for now
+
+[10:25] <timotimo> not bad
+
+[10:26] <samcv> yeah. i felt smart for thinking about not recursing when there's only one subnode. and just running the separated code to keep tracing the nodes until it finds more than 1 child
+
+[10:26] <samcv> only then doing recursion
+
+[10:26] <samcv> that function doesn't seem to use up too much cpu time so may not affect our performance though? always good not having 100 levels of recursion just in the nqp compilation. not sure how much it would have been for the rakudo core setting
+
+[10:30] <samcv> going to measure actually.
+
+[10:31] <samcv> though just the 1st optimization of moving all the code into a separate function allowed rakudo to build and spectest to pass
+
+[10:34] <nine> Well reducing memory traffic can only help. It may e.g. free some CPU cache for other usage and thus improve performance more than the CPU stats alone would suggest.
+
+[10:34] <samcv> ok building rakudo it goes up to 59 *now*. before it went up to 313
+
+[10:34] <samcv> wow timotimo
+
+[10:34] <samcv> that's a *huge* improvement
+
+[10:35] <timotimo> that sounds good
+
+[10:35] <samcv> 5.3x less recursion. vs nqp saw 3x less
+
+[10:46] *** Skarsnik joined
+[10:48] *** samcv left
+[10:48] *** samcv joined
+[11:44] *** Skarsnik_ joined
+[12:00] <jnthn> .
+
+[12:00] <yoleaux> 04:06Z <AlexDaniel> jnthn: ? green light from me. SNAFU with Windows and JVM spectests, but it builds fine. No more blockers besides minor RT #132108 (it's a rakudo issue so doesn't prevent you from cutting a moar release). Besides that, everything looks fine from here. Good luck with moar release! ♥
+
+[12:00] <synopsebot6> Link:  https://rt.perl.org/rt3/Public/Bug/Display.html?id=132108
+
+[12:00] <jnthn> Alright, will get to it shortly :)
+
+[12:35] <Geth> ¦ MoarVM: 44dfdf7982 | (Jonathan Worthington)++ | docs/ChangeLog
+
+[12:35] <Geth> ¦ MoarVM: ChangeLog for 2017.09
+
+[12:35] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/44dfdf7982
+
+[12:35] <Geth> ¦ MoarVM: 1e005d2f4b | (Jonathan Worthington)++ | VERSION
+
+[12:35] <Geth> ¦ MoarVM: Bump VERSION
+
+[12:35] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/1e005d2f4b
+
+[12:35] <jnthn> Changelog review welcome
+
+[12:36] <jnthn> Will do the release after lunch
+
+[12:46] <samcv> hey jnthn
+
+[12:48] <samcv> my commits fixing the issue of recursion in optimize_bb, if you coul dcheck out those commits and make sure it seems fine. almost certain it is
+
+[12:50] <jnthn> samcv: Well, I'm not keen on the assignment inside of the call to optimize_switch_bb, could be clearer as a separate statement.
+
+[12:50] <jnthn> But in terms of correctness, looks fine
+
+[12:51] <jnthn> really lunch :) &
+
+[12:55] <samcv> jnthn, the assignment?
+
+[12:58] <timotimo> i've stumbled upon a very strange case where gi_get_grapheme infiniloops
+
+[12:59] <timotimo> i'll need to recompile without opts
+
+[13:00] <timotimo> gi->blob_type is 8864, that seems Very Wrong
+
+[13:01] * timotimo rebases on latest master
+
+[13:02] <timotimo> did the ci_init go wrong somehow?
+
+[13:02] <timotimo> darn, it seems to only break with heap snapshots enabled
+
+[13:02] <timotimo> must be my fault, then :)
+
+[13:03] <Geth> ¦ MoarVM/jit_nativecall: 16 commits pushed by (Stefan Seifert)++
+
+[13:03] <Geth> ¦ MoarVM/jit_nativecall: review: https://github.com/MoarVM/MoarVM/compare/19209de674...0197e92370
+
+[13:07] <Geth> ¦ MoarVM/jit_nativecall: 6cc32bd9dc | (Stefan Seifert)++ | 13 files
+
+[13:07] <Geth> ¦ MoarVM/jit_nativecall: Use proper args buffer for arguments of JIT compiled native subs
+
+[13:07] <Geth> ¦ MoarVM/jit_nativecall:
+
+[13:07] <Geth> ¦ MoarVM/jit_nativecall: Replace the undocumented convention of expecting the args in the first locals
+
+[13:07] <Geth> ¦ MoarVM/jit_nativecall: of the block containing the nativecallinvokejit op by using the existing
+
+[13:07] <Geth> ¦ MoarVM/jit_nativecall: mechanism for passing args to invoking ops.
+
+[13:07] <Geth> ¦ MoarVM/jit_nativecall: The VM now has ncinvoke_* ops mirroring invoke_*.
+
+[13:07] <Geth> ¦ MoarVM/jit_nativecall: The special case in spesh is not needed anymore.
+
+[13:07] <Geth> ¦ MoarVM/jit_nativecall: review: https://github.com/MoarVM/MoarVM/commit/6cc32bd9dc
+
+[13:11] <jnthn> samcv: optimize_bb_switch(tc, g, (bb = bb->children[0]), p);
+
+[13:12] <samcv> ah
+
+[13:12] <jnthn> At first I was like "huh, how is this not an infinite loop", and only then spotted that bb was updated inside the argument list
+
+[13:12] <nine> Ok, now let's see if I can revive the JITing of JITed native calls
+
+[13:12] <samcv> haha
+
+[13:12] <samcv> my bad :)
+
+[13:12] <samcv> i can separate that out jnthn
+
+[13:12] <jnthn> samcv: Yeah, if you don't mind, I think it'd help readability
+
+[13:13] <timotimo> i'm doing something wrong with the "major only" heap snapshot filter. but that's post-release anyway
+
+[13:13] <jnthn> Nice idea to just solve that problem instead of the harder problem of making it fully iterative ;)
+
+[13:13] <samcv> yeah. probably best not to do that unless it is in the if statement itself
+
+[13:13] <samcv> heh
+
+[13:13] <samcv> jnthn, even just taking the switch/while loop and putting it in its own function at least solved the nqp compilation issue
+
+[13:14] <samcv> i was especially happy i thought of making it so it doesn't recurse for when there's only 1 child. so we do 3-5 less times the recursive calls
+
+[13:14] <samcv> if we count the highest number encountered in nqp/rakudo compilation. so we should probably be okay for a while. since even the 1st change fixed compiling nqp and rakudo and passed nqp and rakudo roast
+
+[13:14] <jnthn> Yeah, hopefully that'll be enough
+
+[13:15] <samcv> yeah :)
+
+[13:17] <dogbert2> FWIW, quite often when running spectest one of the tests (no 22) in t/spec/S17-promise/nonblocking-await.t fails with 'connection refused'
+
+[13:17] <timotimo> i think we're already refusing to spesh things that have too many BBs
+
+[13:17] <timotimo> we can surely up that number now, too
+
+[13:17] <jnthn> The nubmer is really high
+
+[13:17] <jnthn> I don't think we want to waste time speshing anything bigger than that
+
+[13:18] <jnthn> It pretty much never happens in real code anyway; it shows up mostly in the mainlines of huge .t files under MVM_SPESH_NODELAY
+
+[13:18] <timotimo> ah
+
+[13:18] <timotimo> fair enough
+
+[13:19] <dogbert2> sometimes the same test hangs
+
+[13:33] <jnthn> It's probably the test
+
+[13:39] <jnthn> Release tagged. https://www.moarvm.org/releases/MoarVM-2017.09.tar.gz
+
+[13:41] <nine> Turns out, JITing an invoke is much harder than JITing a plain op...
+
+[13:45] <MasterDuke> hm, i'm getting rather varying results from `perf record -g --call-graph dwarf /home/dan/Source/perl6/install/bin/moar --libpath="blib" --libpath="/home/dan/Source/perl6/install/share/nqp/lib" --libpath="/home/dan/Source/perl6/install/share/nqp/lib" perl6.moarvm --nqp-lib=blib --setting=NULL --ll-exception --optimize=3 --target=parse --stagestats --output=CORE.setting.moarvm gen/moar/CORE.setting && perf report --call-graph=none
+
+[13:47] <MasterDuke> i.e., running it repeatedly shows different functions in the top 20
+
+[13:51] <MasterDuke> nine: just curious, do you expect a noticeable performance difference once you get all the JITing done?
+
+[13:51] <nine> Actually...not that much :/
+
+[13:52] <timotimo> not? :(
+
+[13:53] <nine> A couple percent. But... performing native calls will at least no longer be this opaque piece of C code. Instead it's speshable and JITable ops, thus we can profit from inlining and JITing larger parts.
+
+[13:53] <nine> Also even-moar-jit will be able to help with the generated code.
+
+[13:54] <nine> Though i have to admit, that I'm suprised that it doesn't help more by itself, considering that dyncall needs memory allocations on every call.
+
+[13:55] *** Zoffix joined
+[13:59] <dogbert2> jnthn, ok, running MoarVM 2017.09 through ASAN atm
+
+[13:59] *** robertle joined
+[14:15] <dogbert2> ASAN is happy with 'make spectest' on my 32 bit Linux VM
+
+[14:16] <Skarsnik> dang
+
+[14:17] <Skarsnik> it's a good and sad ^^
+
+[14:19] *** AelxDnaiel joined
+[14:32] <Geth> ¦ MoarVM: f76ae338f8 | (Samantha McVey)++ | src/spesh/optimize.c
+
+[14:32] <Geth> ¦ MoarVM: optimize_bb: assign on its own line for clarity
+
+[14:32] <Geth> ¦ MoarVM:
+
+[14:32] <Geth> ¦ MoarVM: As @jnthn pointed out, it is confusing to easily see we are assigning
+
+[14:32] <Geth> ¦ MoarVM: `bb` unless we do it on its own line.
+
+[14:32] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/f76ae338f8
+
+[14:35] *** Skarsnik_ joined
+[14:54] *** leont joined
+[15:18] <AlexDaniel> https://github.com/MoarVM/MoarVM/issues/693
+
+[15:19] <AlexDaniel> ^ please :)
+
+[15:21] <AlexDaniel> oh
+
+[15:21] <AlexDaniel> it's already there now?
+
+[15:22] <AlexDaniel> wow that was quick
+
+[15:22] <AlexDaniel> jnthn: please don't hate me :S
+
+[15:23] <jnthn> AlexDaniel: What have you done? :)
+
+[15:23] <jnthn> Set up Appveyor? :)
+
+[15:24] <AlexDaniel> jnthn: I said everything is fine, but there was no moar/nqp bump and I didn't notice that appveyor is failing with the latest moar
+
+[15:24] <jnthn> Failing how?
+
+[15:24] <jnthn> Some tests? To build?
+
+[15:24] <AlexDaniel> https://ci.appveyor.com/project/timo/moarvm/build/1.0.26
+
+[15:24] <AlexDaniel> nmake syntax error
+
+[15:25] <timotimo> yeah, there's an ifneq in there that would have to become an !IF in nmake
+
+[15:25] <jnthn> :-(
+
+[15:26] <AlexDaniel> jnthn: :-( told ya
+
+[15:26] <jnthn> Please everyone stop trying to write clever make files. Do them tedious and boring.
+
+[15:26] <jnthn> And if you can't then write a darn Perl script and call it from the Makefile
+
+[15:26] <timotimo> something for the Makefile.in or for Configure.pl then
+
+[15:26] <timotimo> we need an nmakeable bot %)
+
+[15:26] <jnthn> I'll never, ever complain if you copy-paste in a Makefile.
+
+[15:27] <jnthn> Because it's worse than dealing with cleverness not being widely supported.
+
+[15:27] <jnthn> :/
+
+[15:27] <samcv> i added an ifneq i thought it was a makefile feature :\
+
+[15:28] <AlexDaniel> timotimo: frequent appveyor reports should do the trick, it's just that all these CI things are failing too often and nobody seems to care
+
+[15:28] <samcv> timotimo, so if ifneq is replaced verbatim with !IF then it works?
+
+[15:28] <samcv> jnthn, any way to get appveyor autobuilding for moarvm as well? that would be nice
+
+[15:28] <timotimo> it also needs an != in the middle
+
+[15:28] <timotimo> and !ENDIF
+
+[15:28] <samcv> ok
+
+[15:28] <samcv> will figure something out or remove
+
+[15:29] <jnthn> samcv: I dunno how to set that up, but yeah, we really should have it, and preferably have it report here like Travis does
+
+[15:29] <samcv> well you're an admin, i'm not
+
+[15:29] <samcv> so i can't do it :(
+
+[15:29] <jnthn> Is there some instructions I can follow somewhere to set it up?
+
+[15:29] <samcv> i'll do it if i can temporarily get admin powers
+
+[15:29] <samcv> hmm. no clue
+
+[15:30] <jnthn> OK, let's do that ;)
+
+[15:30] <AlexDaniel> somehow we have appveyor reporth already: https://github.com/MoarVM/MoarVM/commits/master
+
+[15:30] <samcv> ok :)
+
+[15:30] <AlexDaniel> but it's pointing at timo's fork
+
+[15:30] <samcv> AlexDaniel, someone must have run it manulaly
+
+[15:30] <timotimo> ah
+
+[15:30] <timotimo> it me
+
+[15:30] <timotimo> oh there's a "build schedule, crontab syntax"
+
+[15:30] <timotimo> if i remembered crontab syntax :)
+
+[15:31] <AlexDaniel> folks, I'm really sorry :-/
+
+[15:32] <jnthn> samcv: You should now have owner privs; let me know if not
+
+[15:32] <jnthn> We should really scale out MoarVM releases beyond me also.
+
+[15:34] <samcv> sounds like a good idea :)
+
+[15:35] <jnthn> tbh the only step that needs some kind of solution is the upload one, and that really just means me asking somebody to give me a public key and doing some admin work :)
+
+[15:37] <jnthn> Or somebodies who want to help with release cutting :)
+
+[15:37] <samcv> i volunteer
+
+[15:38] <jnthn> Cool; I'll do what's needed to get it worked out in time for the next relesae. ;)
+
+[15:38] <jnthn> *:)
+
+[15:39] <AlexDaniel> \o/
+
+[15:41] <jnthn> Anyway, if somebody gets a Makefile fix together, then I'll cut a point release afterwards
+
+[15:42] <jnthn> Will be away for a bit now; the dinner won't make itself. :)
+
+[15:51] *** domidumont joined
+[15:57] *** geekosaur joined
+[15:59] <samcv> ok i think i have basically solved it
+
+[16:22] <samcv> @ifneq_start@"$(wildcard 3rdparty/libatomic_ops/src/Makefile)"@ifneq_middle@""@ifneq_end@
+
+[16:22] <samcv> did this so we can have it work on all platforms
+
+[16:23] <samcv> we can also replace having @mknoisy@ being different for each platform
+
+[16:38] <samcv> oh looks like some things don't support that. oh well. like solaris
+
+[16:38] <geekosaur> or msvc
+
+[16:39] <samcv> no msvc does have conditionals
+
+[16:39] <samcv> just different syntax
+
+[16:48] <geekosaur> I bmeant $(wildcard)
+
+[16:51] <samcv> ah ok
+
+[16:51] <geekosaur> if you have $(...) and there is a space inside the parens, it's a gnu make extension. if there's a colon, it'd a bsd make extension.
+
+[16:52] <geekosaur> I don't know if there's a quick rule for the (few) ms make extensions
+
+[16:56] <Geth> ¦ MoarVM: 0f59f0cff1 | (Samantha McVey)++ | build/Makefile.in
+
+[16:56] <Geth> ¦ MoarVM: Revert "Fix errors when running `make realclean"
+
+[16:56] <Geth> ¦ MoarVM:
+
+[16:56] <Geth> ¦ MoarVM: Did not work on all of our platforms, so reverting.
+
+[16:56] <Geth> ¦ MoarVM: This reverts commit 238896a50a595879a1e1d66b5bd39943678d73ac.
+
+[16:56] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/0f59f0cff1
+
+[17:09] *** robertle_ joined
+[17:16] *** robertle joined
+[17:17] <AlexDaniel> samcv: so that's it?
+
+[17:28] *** dogbert2 joined
+[17:29] *** robertle joined
+[18:30] <jnthn> So, ready for point release?
+
+[18:39] <timotimo> appveyor is testing still
+
+[18:40] <timotimo> one hour in and it's not yet finished the x64 build
+
+[18:42] <timotimo> maybe having verbose set on the spec tests in appveyor strains the browser to its limits ...
+
+[18:43] <timotimo> which is, of course, unrelated to appveyor taking a long-ass time
+
+[18:44] <timotimo> it's only doing one job at a time, too ;(
+
+[18:44] <timotimo> but since it reached far into the spec tests, i'm sure it'll be fine
+
+[18:44] <timotimo> especially since we're fixing a build problem here
+
+[21:06] <AlexDaniel> jnthn: ready
+
+[21:09] <timotimo> oh, point release? i didn't actually notice we got the first release
+
+[21:14] <AlexDaniel> timotimo: whoops, yeah…
+
+[21:15] <AlexDaniel> timotimo: looking at moarvm release history you can kinda see when I started doing rakudo releases… :S
+
+[21:15] <timotimo> no i mean jnthn said it's a point release now
+
+[21:15] <AlexDaniel> yeah
+
+[21:16] <AlexDaniel> well, moar point release
+
+[22:11] <AlexDaniel> .tell jnthn ready!
+
+[22:11] <yoleaux> AlexDaniel: I'll pass your message to jnthn.
+
+[22:12] <AlexDaniel> buggable: tags
+
+[22:12] <buggable> AlexDaniel, Total: 1685; BUG: 1080; UNTAGGED: 398; LTA: 180; NYI: 96; REGEX: 69; RFC: 61; TESTNEEDED: 55; JVM: 53; CONC: 50; REGRESSION: 38; UNI: 29; PERF: 28; SEGV: 26; @LARRY: 23; IO: 23; NATIVECALL: 23; POD: 21; TODO: 18; PRECOMP: 14; OO: 13; BUILD: 11; TESTCOMMITTED: 10; OPTIMIZER: 9; STAR: 7; PARSER: 6; BOOTSTRAP: 5; REPL: 5; GLR: 4; MATH: 4; OSX: 4; WINDOWS: 3; RT: 2; WEIRD: 2; BELL: 1; CONFIGURE: 1; DOCS: 1;
+
+[22:12] <AlexDaniel> buggable: tag MATH
+
+[22:12] <buggable> AlexDaniel, There are 4 tickets tagged with MATH; See http://fail.rakudo.party/t/MATH for details
+
+[22:12] <AlexDaniel> buggable: tag BELL
+
+[22:12] <buggable> AlexDaniel, There is 1 ticket tagged with BELL; See http://fail.rakudo.party/t/BELL for details
+
+[22:24] <jnthn> o/
+
+[22:24] <yoleaux> 22:11Z <AlexDaniel> jnthn: ready!
+
+[22:24] <jnthn> OK, let me do this
+
+[22:24] <jnthn> Sorry it's later than expected
+
+[22:26] <Geth> ¦ MoarVM: d0e9e6d8a7 | (Jonathan Worthington)++ | VERSION
+
+[22:26] <Geth> ¦ MoarVM: Bump VERSION
+
+[22:26] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d0e9e6d8a7
+
+[22:26] <Geth> ¦ MoarVM: ea35e146cd | (Jonathan Worthington)++ | docs/ChangeLog
+
+[22:26] <Geth> ¦ MoarVM: ChangeLog entries for 2017.09.1
+
+[22:26] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ea35e146cd
+
+[22:30] <jnthn> AlexDaniel: Tagged, tar.gz at https://www.moarvm.org/releases/MoarVM-2017.09.1.tar.gz
+
+[22:30] <AlexDaniel> yay
+
+[22:31] <jnthn> Goodness, where does the weekend go...
+
+[22:34] <AlexDaniel> jnthn: thanks
+
+[22:34] <AlexDaniel> jnthn++
+
+[22:40] <jnthn> I finally managed to knock a little bit off my blog posts backlog also: https://6guts.wordpress.com/2017/09/17/moarvm-specializer-improvements-part-2-planning
+
+[22:47] <cognominal> jnthn++
+
+[22:49] * jnthn goes to rest up so he might be able to do something useful tomorrow :)
+
+[22:49] <jnthn> o/
+
+[22:57] <timotimo> gnite jnthn :)
+
+[23:12] <timotimo> good blog, jnthn++

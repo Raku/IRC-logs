@@ -1,0 +1,430 @@
+[01:16] *** nativecallable6 joined
+[01:17] *** unicodable6 joined
+[01:17] *** quotable6 joined
+[02:18] *** FROGGS joined
+[02:23] *** Kaiepi joined
+[02:27] *** Kaiepi joined
+[03:02] *** ilbot3 joined
+[03:57] *** bloatable6 joined
+[04:33] *** Kaiepi joined
+[05:42] *** lizmat joined
+[06:58] *** domidumont joined
+[07:06] *** domidumont joined
+[07:44] *** domidumont joined
+[08:36] *** zakharyas joined
+[08:47] *** zakharyas1 joined
+[09:12] *** zakharyas joined
+[10:11] *** zakharyas joined
+[10:12] *** brrt joined
+[10:25] <jnthn> morning o/
+
+[10:33] <Geth> ¦ MoarVM/jit-expr-optimizer: a79867b920 | (Bart Wiegmans)++ | 4 files
+
+[10:33] <Geth> ¦ MoarVM/jit-expr-optimizer: Move label assignment to tiler
+
+[10:33] <Geth> ¦ MoarVM/jit-expr-optimizer:
+
+[10:33] <Geth> ¦ MoarVM/jit-expr-optimizer: Branches internal to the expression tree are implemented using
+
+[10:33] <Geth> ¦ MoarVM/jit-expr-optimizer: dynamically assigned labels that are allocated after all 'graph'
+
+[10:33] <Geth> ¦ MoarVM/jit-expr-optimizer: labels (for objects and instructions). Prior to this patch, labels
+
+[10:33] <Geth> ¦ MoarVM/jit-expr-optimizer: were assigned to nodes (using the info structure) during the tree
+
+[10:33] <Geth> ¦ MoarVM/jit-expr-optimizer: analysis phase of tree construction.
+
+[10:33] <Geth> ¦ MoarVM/jit-expr-optimizer: <…commit message has 21 more lines…>
+
+[10:33] <Geth> ¦ MoarVM/jit-expr-optimizer: review: https://github.com/MoarVM/MoarVM/commit/a79867b920
+
+[10:41] *** AlexDaniel joined
+[11:06] <jnthn> Hm, with HEAD of everything and spesh stressing enabled, I can't reproduce a crash in stage parse of Rakudo.
+
+[11:06] <jnthn> (That's with no local patches)
+
+[11:07] <jnthn> Gets through fine with just MVM_SPESH_BLOCKING=1 but not NODELAY too
+
+[11:07] * jnthn tries without any of those just in case
+
+[11:08] <jnthn> Huh, *then* it shows up
+
+[11:08] <jnthn> wat
+
+[11:09] <jnthn> That means it will be nearly impossible to debug.
+
+[11:10] <jnthn> Yup, goes away with any of the debugging tools
+
+[11:15] *** brrt joined
+[11:16] <brrt> morning jnthn
+
+[11:16] <jnthn> o/ brrt
+
+[11:19] <brrt> jnthn, do you think it is a spesh / JIT bug?
+
+[11:19] <jnthn> Certainly a spesh bug
+
+[11:19] <jnthn> I got it to dump the spesh graph on such a crash
+
+[11:19] <brrt> ehm. do you think it is amenable to spesh bisect?
+
+[11:19] <jnthn> No because it goes away under _BLOCKING
+
+[11:20] <jnthn> And without that LIMIT is meaningless
+
+[11:20] <jnthn> It is at least a small sub that gets broken
+
+[11:21] <brrt> oh, darn
+
+[11:21] <jnthn> And I can see how a recent change would have made it optimizable in a way that it wasn't before
+
+[11:21] <jnthn> It removes one branch of a conditional that contains a try
+
+[11:21] <jnthn> Somehow, it doesn't stick it into the unreachable handlers array
+
+[11:21] <jnthn> And the FH_START gets left around
+
+[11:22] <jnthn> Without the END or GOTO
+
+[11:23] <brrt> is it expr JIT sensitivie?
+
+[11:24] <jnthn> No
+
+[11:24] <jnthn> It's something going wrong in dead BB elimination
+
+[11:24] <brrt> aha
+
+[11:24] <brrt> well, unfortunatley, i know nothing about that, or 'very little'
+
+[11:25] <jnthn> Well, I understand why the FH_START moves. I don't understand why the FH_GOTO is lost.
+
+[11:31] <dogbert2_> wasn't nine speaking about GOTO's a few days ago?
+
+[11:31] <jnthn> I think that was goto instructions, this is handler target addresses
+
+[11:32] <dogbert2_> https://irclog.perlgeek.de/moarvm/2018-01-07#i_15661477
+
+[11:32] <dogbert2_> just found it
+
+[11:32] <dogbert2_> though I should mention it just in case
+
+[11:32] <jnthn> Thanks :)
+
+[11:32] <jnthn> Trying to get it to dump, just for this method, the outcome of each stage of dead BB elimination
+
+[11:33] <jnthn> To see if I can spot what/how it messes up
+
+[11:34] <jnthn> oh. At that point it's "correct" (silly, but correct)
+
+[11:35] <jnthn> BB 46 (0x7f785697d330):
+
+[11:35] <jnthn> line: 3615 (pc 1286)
+
+[11:35] <jnthn> Instructions:
+
+[11:35] <jnthn> [Annotation: FH Start (0)]
+
+[11:35] <jnthn> [Annotation: FH Goto (0)]
+
+[11:35] <jnthn> [Annotation: FH End (0)]
+
+[11:35] <jnthn> takehandlerresult   r3(1)
+
+[11:35] <jnthn> It's shuffled the lot of them together
+
+[11:36] <jnthn> If that were making it to the code-gen it'd just produce an harmless but impossible handler in the table
+
+[11:37] <jnthn> So, now to find what trashes it
+
+[11:38] <jnthn> It's fine after the last pass of dead BB elimination
+
+[11:40] <jnthn> That doesn't leave any likely candidates. Hopefully will soon have it narrowed to a particular step
+
+[11:42] <jnthn> eliminate_unused_log_guards(tc, g);
+
+[11:42] <jnthn> eliminate_pointless_gotos(tc, g);
+
+[11:42] <jnthn> eliminate_dead_ins(tc, g);
+
+[11:42] <jnthn> One of those 3 must be doing it
+
+[11:43] <Kaiepi> do you guys have any tips working with gfb?
+
+[11:46] *** committable6 joined
+[11:46] <jnthn> huh, apparently eliminate_unused_log_guards is to blame?!
+
+[11:47] <jnthn> Kaiepi: gfb?
+
+[11:47] <Kaiepi> gdb
+
+[11:47] <Kaiepi> i'm kinda tired
+
+[11:48] <jnthn> gdb in general, or for debugging MoarVM stuff?
+
+[11:48] <Kaiepi> moarvm
+
+[11:49] <jnthn> timotimo wrote some gdb plugin to help in various cases
+
+[11:49] <jnthn> It's in the MoarVM repo somewhere
+
+[11:49] <Kaiepi> nice, thanks
+
+[11:49] <jnthn> Otherwise, p MVM_dump_backtrace(tc) in a frame where tc is available lets one get a dump of the stack from a "what code MoarVM is running" perspective
+
+[11:50] <jnthn> If chasing a GC bug then turn on MVM_GC_DEBUG=1 and there's an extra function compiled in that can try to find a pointer in all the nurseries and gen2 pages
+
+[11:51] <jnthn> p MVM_utf8_encode_C_string(tc, foo) lets you display an MVMString *
+
+[11:51] <jnthn> Those are the things I use most often
+
+[11:58] <Kaiepi> i think there could be a memory bug invaled in what i'm looking at heree
+
+[12:11] <Geth> ¦ MoarVM: c1da6f9688 | (Jonathan Worthington)++ | 3 files
+
+[12:11] <Geth> ¦ MoarVM: Make instruction deletion within dead BBs a no-op
+
+[12:11] <Geth> ¦ MoarVM:
+
+[12:11] <Geth> ¦ MoarVM: Otherwise, annotation motion can become confused in various ways. The
+
+[12:11] <Geth> ¦ MoarVM: work would also be a waste of time, as the instruction is already dead
+
+[12:11] <Geth> ¦ MoarVM: by virtue of its enclosing BB being dead.
+
+[12:11] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/c1da6f9688
+
+[12:14] <jnthn> That addresses the issue
+
+[12:14] <dogbert2_> cool
+
+[12:14] <jnthn> Lunch now, then I guess I've got the not_i thing I was doing yesterday to debug
+
+[12:15] <jnthn> Yeah, this fix doesn't help it at all. That woulda been lucky
+
+[12:15] <jnthn> bbiab
+
+[12:24] *** nebuchadnezzar joined
+[13:28] *** jsimonet joined
+[13:41] *** zakharyas joined
+[13:57] *** AlexDaniel joined
+[14:10] *** brrt joined
+[15:18] <MasterDuke> jnthn: fwiw, c1da6f9688 did not fix the segv when building nqp if moarvm was built with --valgrind
+
+[15:19] <MasterDuke> however, doing some additional debugging, moarvm built with --optimize=0 and --valgrind is fine
+
+[15:27] <jnthn> I didn't even know that issue existed; I'd be surprised if it changed anything
+
+[15:28] <jnthn> oh heck, I think I see what's breaking the not_i opt
+
+[15:30] <jnthn> yeah
+
+[15:30] <jnthn> There's a comment reading
+
+[15:30] <jnthn> /* This is a bit naughty with regards to the SSA form, but
+
+[15:30] <jnthn> * we'll hopefully get away with it
+
+[15:30] <jnthn> Guess what? We don't really.
+
+[15:31] <jnthn> That's probably the issue, anyway
+
+[15:31] <timotimo> that sounds like something i would have done
+
+[15:31] <jnthn> Probably :P
+
+[15:31] <jnthn> Now trying to figure out why it's naugty and what to do about it
+
+[15:32] <jnthn> It's the isfalse spesh that inserts a not_i that's breaking fwiw
+
+[15:34] <jnthn> m: my $i = 1111111111111111111111111111111111111111111111111111111111111; my $a = 0; loop { $a += ?$i }
+
+[15:34] <camelia> rakudo-moar b6004362b: OUTPUT: «(timeout)»
+
+[15:34] <jnthn> Oh, maybe it constant folds it
+
+[15:34] <jnthn> Oh no, it's in a var
+
+[15:35] <jnthn> Ah, and I guess the code under case MVM_BOOL_MODE_UNBOX_INT doesn't apply to Perl 6 (big) Int, perhaps
+
+[15:37] <jnthn> I don't actually see the SSA issue still
+
+[15:37] <jnthn> But
+
+[15:37] <jnthn> -            /* If there's a known value, update the fact. */
+
+[15:37] <jnthn> -            if (res_facts->flags & MVM_SPESH_FACT_KNOWN_VALUE)
+
+[15:37] <jnthn> -                res_facts->value.i = !res_facts->value.i;
+
+[15:37] <jnthn> That seems very dubious
+
+[15:38] <timotimo> oh, yes
+
+[15:38] <jnthn> And removing it seems to help
+
+[15:39] <jnthn> I don't know that we do violate the SSA form here; we obtain a temp register and put a result into that, and then do a not_i from that to the original target register
+
+[15:39] <jnthn> And temp registers play well with SSA form
+
+[15:39] <jnthn> And we're only assigning the result register once
+
+[15:40] <jnthn> Can you remember why you thought it did break it?
+
+[15:41] <timotimo> hm, could it be i changed the code since i wrote that comment?
+
+[15:41] <jnthn> Maybe :)
+
+[15:42] <jnthn> There's a -            /* If there's a known value, update the fact. */
+
+[15:42] <jnthn> -            if (res_facts->flags & MVM_SPESH_FACT_KNOWN_VALUE)
+
+[15:42] <jnthn> -                res_facts->value.i = !res_facts->value.i;
+
+[15:42] <jnthn> gah
+
+[15:42] <jnthn> There's a MVM_BOOL_MODE_BIGINT
+
+[15:42] <jnthn> That could maybe also be handy to implement here
+
+[15:43] <timotimo> at the time i wrote that comment, the fact update wasn't there yet
+
+[15:43] *** zakharyas joined
+[15:44] <jnthn> The fact update is the broked part though, I think
+
+[15:44] <jnthn> And it's not really useful
+
+[15:44] <jnthn> Not with a not_i opt in place
+
+[15:45] <jnthn> The optimize_is_concrete will, if possible, set the known value property on temp
+
+[15:45] <jnthn> The not_i opt will then see it and optimize away the not_i if possible
+
+[15:46] <MasterDuke> https://github.com/MoarVM/MoarVM/issues/779 for the segv with --valgrind, also includes a link to some backtraces
+
+[15:48] <timotimo> i'm operating off of 1% sleep spread out over ~12 hours of lying in bed right now :\
+
+[15:49] <jnthn> Ah, that's really not a good condition for answering spesh questions
+
+[15:49] <jnthn> Or for much of anything really
+
+[15:58] <Geth> ¦ MoarVM: 38a7f57711 | (Jonathan Worthington)++ | src/spesh/optimize.c
+
+[15:58] <Geth> ¦ MoarVM: Remove bogus comment and known value fact tweak
+
+[15:58] <Geth> ¦ MoarVM:
+
+[15:58] <Geth> ¦ MoarVM: The comment seems wrong or perhaps just outdated because the code
+
+[15:58] <Geth> ¦ MoarVM: got fixed; the temp registers play fine with SSA form and there is
+
+[15:58] <Geth> ¦ MoarVM: still one use of the original register and one write to the final
+
+[15:58] <Geth> ¦ MoarVM: destination one, so all's good. The known value fact update code,
+
+[15:58] <Geth> ¦ MoarVM: on the other hand, was rather dubious; it should probably have been
+
+[15:59] <Geth> ¦ MoarVM: looking at the temp facts and setting the res facts. However, with an
+
+[15:59] <Geth> ¦ MoarVM: upcoming not_i optimization about to be added, that will take care of
+
+[15:59] <Geth> ¦ MoarVM: things more elegantly, so just remove it.
+
+[15:59] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/38a7f57711
+
+[15:59] <Geth> ¦ MoarVM: 671bf1dbf9 | (Jonathan Worthington)++ | src/spesh/optimize.c
+
+[15:59] <Geth> ¦ MoarVM: Add some missing fact dependencies
+
+[15:59] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/671bf1dbf9
+
+[15:59] <Geth> ¦ MoarVM: ed7c1234f4 | (Jonathan Worthington)++ | src/spesh/optimize.c
+
+[15:59] <Geth> ¦ MoarVM: Optimize not_i when its input is a known value
+
+[15:59] <Geth> ¦ MoarVM:
+
+[15:59] <Geth> ¦ MoarVM: Can simply turn it into a constant then. This in turn means that we
+
+[15:59] <Geth> ¦ MoarVM: can optimize Foo:U in Perl 6 signatures away completely; previously,
+
+[15:59] <Geth> ¦ MoarVM: the isconcrete/not_i sequence blocked this being optimized out, and
+
+[15:59] <Geth> ¦ MoarVM: thus left some asesrtparamcheck instructions in, which would block
+
+[15:59] <Geth> ¦ MoarVM: inlining.
+
+[16:00] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ed7c1234f4
+
+[16:00] *** zakharyas joined
+[16:09] <dogbert2_> what kind of gains can be expected from this fix?
+
+[16:09] <timotimo> now anything with a Foo:U signature can now be inlined if it's small enough
+
+[16:09] <timotimo> for example, the auto-viv candidates for positional/associative access
+
+[16:10] <timotimo> (i just regurgitated this info from liz and jnthn)
+
+[16:11] <jnthn> my %h; %h{$word}++ will be able to have that ++ op inlined for example
+
+[16:11] <jnthn> Oh, well, it's not quite that simple :)
+
+[16:11] <jnthn> As likely that will be a mix of undefined and defined :)
+
+[16:12] *** squashable6 joined
+[16:12] <jnthn> But it'll still be less signature checking code :)
+
+[16:15] <dogbert2_> every bit counts :-)
+
+[16:39] *** brrt joined
+[16:50] <brrt> rebase coming up
+
+[16:51] <Geth> ¦ MoarVM/jit-expr-optimizer: 14 commits pushed by (Bart Wiegmans)++
+
+[16:51] <Geth> ¦ MoarVM/jit-expr-optimizer: review: https://github.com/MoarVM/MoarVM/compare/a79867b920...295a2b334b
+
+[17:06] *** zakharyas joined
+[17:19] <brrt> any particular reason why MVM_reg_uint types start at 16 and up
+
+[17:19] <brrt> oh, i see
+
+[17:23] *** coverable6 joined
+[17:23] *** benchable6 joined
+[17:39] *** bisectable6 joined
+[18:00] *** Kaiepi joined
+[19:39] *** travis-ci joined
+[19:39] <travis-ci> MoarVM build errored. Jonathan Worthington 'Add some missing fact dependencies'
+
+[19:39] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/327741504 https://github.com/MoarVM/MoarVM/compare/c1da6f968889...671bf1dbf980
+
+[19:39] *** travis-ci left
+[19:39] *** greppable6 joined
+[19:54] *** Ven`` joined
+[20:15] *** zakharyas joined
+[20:48] <Geth> ¦ MoarVM/jit-expr-optimizer: dce091807d | (Bart Wiegmans)++ | src/jit/expr.c
+
+[20:48] <Geth> ¦ MoarVM/jit-expr-optimizer: Remove check_template from expr JIT
+
+[20:48] <Geth> ¦ MoarVM/jit-expr-optimizer:
+
+[20:48] <Geth> ¦ MoarVM/jit-expr-optimizer: Since we now have better checks in the expression compiler, this is
+
+[20:48] <Geth> ¦ MoarVM/jit-expr-optimizer: redundant and wasteful. More importantly I want to change the
+
+[20:48] <Geth> ¦ MoarVM/jit-expr-optimizer: representation of the expression nodes and these checks will then be
+
+[20:48] <Geth> ¦ MoarVM/jit-expr-optimizer: wrong.
+
+[20:48] <Geth> ¦ MoarVM/jit-expr-optimizer: review: https://github.com/MoarVM/MoarVM/commit/dce091807d
+
+[20:59] *** evalable6 joined
+[21:11] *** bart_ joined
+[21:22] *** Kaiepi joined
+[21:22] *** zakharyas joined
+[21:52] *** Kaiepi joined
+[22:09] *** samcv joined
+[22:11] *** bart_ joined
+[22:32] *** statisfiable6 joined
+[22:32] *** releasable6 joined
+[22:32] *** reportable6 joined
+[22:51] *** greppable6 joined
+[23:02] *** Kaiepi joined

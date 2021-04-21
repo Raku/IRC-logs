@@ -1,0 +1,331 @@
+[00:45] <timotimo> how come i never seem to get the fprintf stderr output  from free_repr_data?
+
+[00:45] <timotimo> do we just never free them? do we leak them?
+
+[01:03] <flussence> fflush()?
+
+[01:04] <timotimo> i don't have to fflush when the program exits gracefully, no?
+
+[01:04] <flussence> oh well, dunno then...
+
+[01:14] <timotimo> :)
+
+[01:14] <timotimo> well, i do get it now
+
+[01:18] <timotimo> i started over from scratch by just replacing every malloc with a fixed_size_alloc, but i end up corrupting the FSA free list somehow :|
+
+[01:21] <timotimo> i think i'll head toward bed
+
+[02:48] *** ilbot3 joined
+[03:28] *** JimmyZ_ joined
+[03:29] <JimmyZ_> timotimo: something error like https://github.com/MoarVM/MoarVM/issues/234 ?
+
+[04:35] *** cognominal joined
+[05:21] *** dalek joined
+[06:22] *** virtualsue joined
+[06:50] *** domidumont joined
+[06:55] *** domidumont joined
+[07:14] *** virtualsue joined
+[07:27] *** kjs_ joined
+[08:11] <arnsholt> timotimo: Since you're testing stuff in P6opaque, you probably have to run with the complete cleanup flag (whose precise name escapes me at the moment)
+
+[08:11] <arnsholt> Since types generally live 'till program exit, and thus are not explicitly freed unless you pass that flag
+
+[08:23] *** zakharyas joined
+[09:00] *** virtualsue joined
+[09:43] <jnthn> timotimo: Yeah, you'll need to run with --full-cleanup
+
+[09:44] <timotimo> just popping in quickly:
+
+[09:44] <timotimo> yeah, i'm running with full cleanup
+
+[09:45] <timotimo> no, it's nothing like "too many open files"
+
+[09:46] <timotimo> the bug i'm seeing is that some null object is getting put into "hey, can i have your Num method, please" and refuses to work with that
+
+[10:05] <timotimo> on the "timo comes up with ridiculous optimization strategies" front: we could have a global set of zeroes that we can point anything at that needs a read-only array of zeroes; i've seen many p6opaques scroll by that have at least two of their arrays filled with exclusively zeroes :)
+
+[10:06] <timotimo> my first thought was to just have those sections collapsed into one, but why not go all the way and just allocate a kilobyte of zeroes somewhere and point everything there and have it owned by the instance or threadcontext
+
+[10:06] <timotimo> or even a static array of zeroes that lives in the .text segment of the p6opaque.o?
+
+[10:06] <timotimo> that'd be read-only in a very safe manner
+
+[10:24] <timotimo> not to mention having a single global shared set of zeroes is extremely cache-friendly when you're juggling many different kinds of p6opaque
+
+[10:24] <JimmyZ> timotimo: I didn't mean too many open files, I mean the segfault :)
+
+[10:24] <timotimo> at the end of my work i didn't have a segfault
+
+[10:25] <JimmyZ> you could try open the FSA  DEBUG
+
+[10:25] <timotimo> the p6opaque_packed branch has the logic error, my local restart-from-scratch explodes when trying to free something in FSA
+
+[10:25] <timotimo> i did at some point, i don't remember with which codebase, though
+
+[10:27] <arnsholt> Maybe there's a mismatch between the size you've allocated and the size you're freeing? You could try hardcoding those to test it, perhaps. Just allocate something stupid like 1024 bytes in every case, or somesuch
+
+[10:28] <timotimo> isn't that what FSA debug does?
+
+[10:29] <arnsholt> No idea, I'm afraid
+
+[10:33] <timotimo> it looked to me as if it defines a little structure that has the size in front and the blob following it
+
+[10:34] <jnthn> m: say 2.44 / 3.34
+
+[10:34] <camelia> rakudo-moar 50a4df: OUTPUT«0.730539␤»
+
+[10:34] <timotimo> oooh, i love it when jnthn does that ;)
+
+[10:46] *** cognominal joined
+[10:52] *** zakharyas joined
+[11:09] <masak> when he... divides two decimal numbers? :)
+
+[11:10] <timotimo> yes!
+
+[11:10] <timotimo> especially when the result comes out between 0 and 1
+
+[11:13] * masak .oO( this has been your weekly instalment of "Weird, Specific Fetishes" ) :P
+
+[11:26] <jnthn> m: say 3.34 / 0.08
+
+[11:26] <camelia> rakudo-moar 50a4df: OUTPUT«41.75␤»
+
+[11:27] <jnthn> oops
+
+[11:27] <jnthn> m: say 3.34 / 0.8
+
+[11:27] <camelia> rakudo-moar 50a4df: OUTPUT«4.175␤»
+
+[11:27] <jnthn> So, I figured out why we fail at inlining a bunch of stuff...
+
+[11:28] <jnthn> also, duh, that 0.8 was with spesh logging still on
+
+[11:29] <jnthn> m: say 3.34 / 0.65
+
+[11:29] <camelia> rakudo-moar 50a4df: OUTPUT«5.138462␤»
+
+[11:32] <timotimo> the number is now above 1, what does that mean?!? ;)
+
+[11:33] <jnthn> ah, I did it the other way around before
+
+[11:33] <jnthn> m: say 0.65 / 3.34
+
+[11:33] <camelia> rakudo-moar 50a4df: OUTPUT«0.194611␤»
+
+[11:33] <jnthn> Runs in 19% of the time it did before
+
+[11:34] <jnthn> The other calc gives "around 5 times faster":)
+
+[11:34] <timotimo> holy wow.
+
+[11:35] <jnthn> This is about accessors, fwiw
+
+[11:36] <jnthn> But the inline fix is far more general.
+
+[11:36] <timotimo> right
+
+[11:36] <timotimo> ==29384== Invalid write of size 8
+
+[11:36] <timotimo> ==29384==    at 0x4FB1BCE: add_to_bin_freelist (fixedsizealloc.c:192)
+
+[11:36] <timotimo> ==29384==    by 0x4FB1BCE: MVM_fixed_size_free (fixedsizealloc.c:205)
+
+[11:36] <timotimo> that doesn't seem good
+
+[11:36] <jnthn> Nope, that's epic bustage
+
+[11:36] <timotimo> ==29384== Syscall param write(buf) points to uninitialised byte(s)
+
+[11:36] <timotimo> ==29384==    by 0x50050E8: MVM_mast_to_file (driver.c:75)
+
+[11:37] <jnthn> That one I've seen before...think it's harmless, but worth hutning down
+
+[11:37] <timotimo> OK; that's from precompiling dependencies for the script i was meaning to test
+
+[11:38] <timotimo> it's recursively using perl6-valgrind-m to precompile
+
+[11:38] <jnthn> Alas, some spectest fails to deal with
+
+[11:41] <timotimo> ==29490== 16,361 (15,392 direct, 969 indirect) bytes in 481 blocks are definitely lost in loss record 3,110 of 3,554
+
+[11:41] <timotimo> ==29490==    by 0x4F80E24: MVM_args_copy_callsite (args.c:57)
+
+[11:42] <timotimo> that's from the usecapture opcode
+
+[11:42] * timotimo double-checks that his moar is clean
+
+[11:42] <timotimo> seems like p6opaque's repr data is a tiny bit leaky
+
+[11:52] <timotimo> or maybe free_repr_data is in general not happening for some reason?
+
+[11:53] <jnthn> I didn't quite work those out yet. I did wonder if somehow we double-deserialize them...
+
+[11:53] <jnthn> As I couldn't see any obvious source of leaks
+
+[11:55] <timotimo> OK, an interesting thing to say the least :)
+
+[12:11] *** virtualsue joined
+[12:12] <dalek> MoarVM: 05d9e14 | jnthn++ | src/spesh/inline.c:
+
+[12:12] <dalek> MoarVM: Don't do cross-HLL inlining.
+
+[12:12] <dalek> MoarVM:
+
+[12:12] <dalek> MoarVM: Otherwise, things that look into a frame's HLL will get confused.
+
+[12:12] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/05d9e14afa
+
+[12:12] <dalek> MoarVM: 2e6a1dd | jnthn++ | src/spesh/optimize.c:
+
+[12:12] <dalek> MoarVM: Fix resolution of some non-multis.
+
+[12:12] <dalek> MoarVM:
+
+[12:12] <dalek> MoarVM: We assumed that just because a code type supported multi-dispatch
+
+[12:12] <dalek> MoarVM: meant it always would be multi-dispatch when performaing various
+
+[12:12] <dalek> MoarVM: optimizations. However, in many cases the code is not actually a
+
+[12:12] <dalek> MoarVM: multi, and so we missed out on a lot of opportunities to generate
+
+[12:13] <timotimo> oooh
+
+[12:13] <timotimo> https://asset-3.soupcdn.com/asset/12310/8398_31a4_500.gif
+
+[12:15] <jnthn> :D
+
+[13:37] * [Coke] gets an ERR_CONNECTION_RESET on the soupcdn link, but blames dayjob's http proxy and or firewall.
+
+[14:41] <timotimo> probably :(
+
+[14:42] <jnthn> Pro tip: don't leave a piece of code containing a loop that leaks memory running by accident
+
+[14:42] <jnthn> "Why is this machine suddenly sluggish?!"
+
+[14:45] <moritz> :-)
+
+[14:45] <moritz> pro tip: when running potentially leaky code, enforce a memory limit
+
+[14:45] <moritz> ulimit on linux :-)
+
+[14:47] <jnthn> ;-)
+
+[14:47] <jnthn> Yeah, wasn't in my Linux VM for that
+
+[14:47] <masak> moritz++ # so sensible
+
+[14:47] <jnthn> I only gave it a core or two, and it was valgrinding :)
+
+[14:50] *** dalek joined
+[14:50] <moritz> seems there are options for windows too: http://stackoverflow.com/questions/192876/set-windows-process-or-user-memory-limit
+
+[14:51] *** virtualsue joined
+[15:11] *** lizmat joined
+[15:26] <dalek> MoarVM: 0239906 | jnthn++ | src/core/args.c:
+
+[15:26] <dalek> MoarVM: Avoid some potential uninitialized memory access.
+
+[15:26] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/0239906a6e
+
+[15:26] <dalek> MoarVM: a8beba2 | jnthn++ | src/core/args.c:
+
+[15:26] <dalek> MoarVM: Remove dangerous/broken usecapture optimization.
+
+[15:26] <dalek> MoarVM:
+
+[15:26] <dalek> MoarVM: It caused a huge memory leak, and we actually accidentally relied on
+
+[15:26] <dalek> MoarVM: the leak somewhere (that should have used savecapture). Overall, it's
+
+[15:26] <dalek> MoarVM: just too fragile to have userland code deciding when the optimization
+
+[15:26] <dalek> MoarVM: is safe, and the leak costs a lot.
+
+[15:26] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/a8beba24b9
+
+[15:41] *** virtualsue joined
+[16:12] *** hoelzro joined
+[16:14] *** flussenc1 joined
+[16:15] *** BinGOs_ joined
+[16:15] *** timotimo joined
+[16:44] *** vendethiel joined
+[16:59] *** kjs_ joined
+[17:06] *** zakharyas joined
+[17:13] *** domidumont joined
+[17:22] <dalek> MoarVM: a329e2d | jnthn++ | src/ (15 files):
+
+[17:22] <dalek> MoarVM: Make access to string heap go through a function.
+
+[17:22] <dalek> MoarVM:
+
+[17:22] <dalek> MoarVM: Marked as static inline, so this shouldn't have any performance
+
+[17:22] <dalek> MoarVM: consequences. This paves the way for decoding only the strings that
+
+[17:22] <dalek> MoarVM: are needed at the point of first use.
+
+[17:22] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/a329e2df2b
+
+[17:39] *** virtualsue joined
+[17:39] <timotimo> it occurs to me, that every "on first use" or "lazy" feature kind of wants to have a way of inspecting it
+
+[17:39] <timotimo> the "heap explorer" idea in my head has grown in scope already to also let you inspect bytecode and spesh code
+
+[17:40] <timotimo> it should clearly also let you inspect the state of lazy deserialization, because that's rather closely tied to the idea of "heap exploration" already
+
+[17:41] <jnthn> Would be interesting, yes
+
+[17:43] <timotimo> my intuition tells me i'll want to be constructing object graphs (arrays and hashes) in the moar process and send that off to the front-end as json
+
+[17:43] <timotimo> i'd have to construct a second instance for that, because GC is a thing
+
+[17:47] <jnthn> grr, headache returns
+
+[17:47] <jnthn> Guess I'll take a nom break :)
+
+[17:47] <timotimo> good noms!
+
+[17:59] *** FROGGS joined
+[18:23] *** virtualsue joined
+[18:32] *** BinGOs joined
+[19:26] *** kjs_ joined
+[20:15] <jnthn> m: say 49320 - 48048
+
+[20:15] <camelia> rakudo-moar 3176cb: OUTPUT«1272␤»
+
+[20:15] <jnthn> 1.2MB off Rakudo base memory by lazily deserializing strings, it seems
+
+[20:24] *** kjs_ joined
+[20:26] *** virtualsue joined
+[20:41] <jnthn> nqp-m -e "while 1 {}" is now less than the base memory of the JVM running a Java program with such a loop in it and nothing more too, iirc :)
+
+[20:43] *** Ven joined
+[20:43] <arnsholt> Nice!
+
+[20:48] <dalek> MoarVM/lazy-strings: eff150a | jnthn++ | src/ (4 files):
+
+[20:48] <dalek> MoarVM/lazy-strings: First pass at making string decoding lazy.
+
+[20:48] <dalek> MoarVM/lazy-strings:
+
+[20:48] <dalek> MoarVM/lazy-strings: That is, we only do it the first time a string from the string heap is
+
+[20:48] <dalek> MoarVM/lazy-strings: needed. Not quite right yet; we SEGV one of the NQP tests. But close.
+
+[20:48] <dalek> MoarVM/lazy-strings: review: https://github.com/MoarVM/MoarVM/commit/eff150add1
+
+[20:48] <jnthn> Not gonna manage it all tonight...tired
+
+[20:52] *** Ven joined
+[21:07] <timotimo> that's not bad, damn.
+
+[22:39] *** vendethiel joined
+[22:56] *** virtualsue joined
+[23:02] *** vendethiel joined
+[23:50] *** vendethiel joined
+[23:54] *** virtualsue joined
+[23:57] <timotimo> m: say 148 * 120 + 13 * 24 + 13 * 16 + 12 * 8 + 4 * 48 + 4 * 48 + 2 * 64 + 2 * 56 + 2 * 32 + 2 * 128 + 2 * 104 + 72 + 168
+
+[23:57] <camelia> rakudo-moar 855de7: OUTPUT«19768␤»

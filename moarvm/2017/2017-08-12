@@ -1,0 +1,890 @@
+[00:01] <MasterDuke> returning to my previous question. maybe a `--for-packaging` MoarVM build option that creates both a moar and moar-debug executable?
+
+[00:01] <MasterDuke> and also editing perl6-(gdb|valgrind)-m to wrap the calls to the moar executable in something like `if [-d /path/to/moar-debug] then $MOAR = /path/to/moar-debug else $MOAR = /path/to/moar elif`
+
+[00:01] <MasterDuke> * s/-d/-e/
+
+[00:04] <MasterDuke> and changing topics yet again, this is what heaptrack says now for that test script http://i.imgur.com/mb3gwYv.png
+
+[00:40] <AlexDaniel> MasterDuke: hey, is it the memory issue?
+
+[00:40] <AlexDaniel> MasterDuke: if yes, have you seen this? https://rt.perl.org/Ticket/Display.html?id=131879#txn-1481074
+
+[00:43] <timotimo> must make sure that perl6-gdb-m won't ever use an outdated moar because the user has recompiled and maybe forgotten the flag the second time or something
+
+[00:55] <MasterDuke> i'm not too too worried about users who do re-compile themselves, they should know what they're doing
+
+[00:55] <MasterDuke> more the distro package user who wants to supply a useful error report
+
+[00:56] <timotimo> mhm
+
+[00:56] <timotimo> bedtime, bbl
+
+[00:58] <MasterDuke> AlexDaniel: yeah, that latest heaptrack report is at HEAD
+
+[00:59] <AlexDaniel> MasterDuke: with moar on HEAD also? So it's not fixed?
+
+[01:00] <MasterDuke> yeah, it's improved
+
+[01:04] <MasterDuke> actually, it (HEAD on all three) has the lowest bytes allocated in total (according to heaptrack(
+
+[01:14] <MasterDuke> anybody around know what is the max size that can be allocated with the fixed size allocator?
+
+[01:52] *** ilbot3 joined
+[03:37] <MasterDuke> jnthn, timotimo: is this completely wrong? https://gist.github.com/MasterDuke17/df4f8c79ddeaebf2b3035a2b233ae294 fwiw, it passes nqp's `make m-test` and rakudo's `make m-test m-spectest` and here's what heaptrack thinks of that test script afterward http://i.imgur.com/toaZC85.png
+
+[03:53] *** pharv_ joined
+[04:43] *** geekosaur joined
+[07:22] *** pharv_ joined
+[08:21] *** Voldenet joined
+[08:21] *** Voldenet joined
+[09:24] *** lizmat joined
+[09:37] *** dogbert17 joined
+[10:31] <lizmat> so what causes an param_rp_o ?
+
+[11:02] <timotimo> lizmat: "required positional, object"
+
+[11:13] <jnthn> MasterDuke: It's in fixedsizealloc.h, but it will be a good bit smaller than the 64KB that libuv requests. The FSA falls back to malloc.
+
+[11:14] <jnthn> MasterDuke: Meaning that I'd be somewhat surprised if your patch changed much
+
+[11:15] <jnthn> Unless libuv's request is somehow more realistic for you?
+
+[11:16] <jnthn> lizmat: param_rp_o is what almost every required positional parameter that's not a native type compiles into.
+
+[11:16] <lizmat> yeah, figured the native bit
+
+[11:16] <lizmat> :-)
+
+[11:16] <timotimo> is there any worth in trying to teach MVM_spesh_args to continue in some cases?
+
+[11:17] <timotimo> like it could keep param_rp_{i,n,s} around, but turn a param_rp_o into a sp_* when the callsite says there's an object there
+
+[11:17] <timotimo> also checkarity could go, for example
+
+[11:18] <timotimo> it doesn't have to bail out completely just because it couldn't lower a param_rp_i or something
+
+[11:18] <lizmat> method a(int $a)   # doesn't JIT
+
+[11:18] <lizmat> method a(Int:D $a)    # does JIT
+
+[11:22] <jnthn> I'd need to see what cases it's managing to miss out on
+
+[11:40] <timotimo> aye, the speshlog would be helpful
+
+[11:44] <MasterDuke> jnthn: i hardcode on_alloc to use 1024, instead of the suggested_size. according to heaptrack, the "bytes allocated in total" goes from 1.1g on HEAD to 664m with my patch, "peak memory consumption" goes from 387m to 257m, and on_alloc goes from 480m at the top of the "most memory allocated" column to not even showing up anymore
+
+[11:46] <jnthn> Hmm, but...then we're optimizing for things that don't do any output buffering.
+
+[11:46] <jnthn> And so send us lots of small things
+
+[11:47] <jnthn> And yeah, on_alloc will go away 'cus all of its allocations will fall under the fixed size allocator...
+
+[11:47] <MasterDuke> what would be a good test case to benchmark with?
+
+[11:48] <jnthn> Hm, I guess Perl 5 has output buffering on by default, so just a one-liner to produce a bunch of output?
+
+[11:49] <jnthn> Hm, does on_alloc get the handle?
+
+[11:50] <jnthn> Also the patch makes every array 8 bytes bigger, which will add up
+
+[11:50] <jnthn> hah, it *does* get the handle
+
+[11:50] <MasterDuke> yeah, i added: +    MVMThreadContext *tc  = (MVMThreadContext *)((SpawnInfo *)handle->data)->tc;
+
+[11:50] <jnthn> So we could use the last size rounded up to a power of 2
+
+[11:50] <jnthn> As a predictor
+
+[11:51] <jnthn> That way we'd tune nicely to things that buffer *and* things that don't
+
+[11:51] <jnthn> Though I guess we'd never tune "upwards" again
+
+[11:51] <MasterDuke> the last size is in the handle?
+
+[11:53] <MasterDuke> i wasn't sure if adding that flag was necessary, or just changing the MVM_free's procops.c to MVM_fixed_size_free's was sufficient
+
+[11:56] <jnthn> Yeah, last size in the handle
+
+[11:56] *** evanm joined
+[11:56] <jnthn> Yes, MVMArray takes ownership of the buffer to avoid a copy
+
+[11:56] <jnthn> So it would need to release it in the correct way
+
+[11:57] <jnthn> Oh, and there's a further problem
+
+[11:57] <jnthn> If the user pushes onto the buffer
+
+[11:57] <jnthn> We're screwed
+
+[11:57] <jnthn> As it'll try to realloc
+
+[11:58] <MasterDuke> hm, can that code check the flag?
+
+[12:02] <jnthn> Yeah but...I still don't much feel like making MVMArray 8 bytes bigger for this. Wonder if we can steal a header flag for it instead...
+
+[12:02] <jnthn> I think there's two patches here really though
+
+[12:02] <jnthn> The first to try and get better size choices
+
+[12:02] <jnthn> Which I'd feel quite unconcerned by
+
+[12:02] <jnthn> And the one to switch some uses of MVMArray to use the FSA
+
+[12:03] <jnthn> Which I'm a bit more uncomfortable with
+
+[12:03] <nine> glibc recently got a much faster malloc using a thread local pool
+
+[12:04] <jnthn> nine: What happens if you free it on another thread?
+
+[12:04] <jnthn> (A likelihood in this use case...)
+
+[12:05] <jnthn> MVMArray really does need to switch over to using the FSA, though
+
+[12:05] <jnthn> Because then we can use the free at safepoint mechanism when it grows
+
+[12:06] <jnthn> Which would be a step towards avoiding SEGVs if it's abused from multiple threads
+
+[12:06] <jnthn> So I guess starting to move that way would be reasonable
+
+[12:07] <jnthn> We could steal a header flag instead of making every array bigger for it, though :)
+
+[12:07] <MasterDuke> ok, i'll continue playing around with what i started
+
+[12:07] <MasterDuke> what do you mean header flag?
+
+[12:08] <jnthn> MVMCollectable has a set of flags
+
+[12:08] <jnthn> It's a bit field
+
+[12:08] <jnthn> We use them for GC bits, object ID handling, and similar
+
+[12:08] <jnthn> But there are some spare ones
+
+[12:08] <jnthn> We could designate one or two of them as "per REPR"
+
+[12:08] <MasterDuke> ah, cool, i'll look there
+
+[12:08] <nine> jnthn: no idea :)
+
+[12:09] <jnthn> Probably nothing good :)
+
+[12:09] <jnthn> Alrighty, lunch time :)
+
+[12:09] <nine> jnthn: I figure it must be safe, otherwise that would be a change of semantics
+
+[12:43] <nine> WRT JITing NativeCall it feels like we ought to not do the usual "JIT it when it's hot" thing driven by spesh, but initiate JIT compilation manually on first call of a native sub
+
+[12:47] <timotimo> we can bump up the urgency of a task when we see a nativecallinvoke
+
+[12:47] <timotimo> we still need to collect a bit of stats before we'll do anything much
+
+[12:51] <nine> What stats would we need?
+
+[12:52] <nine> Btw. I do wonder why native subs aren't JITed right now. There is code for mapping nativecallinvoke to MVM_nativecall_invoke at least
+
+[13:04] <timotimo> could be because of flattening callsites perhaps
+
+[13:10] <nine> How I do I find that ou?
+
+[13:10] <nine> out
+
+[13:37] *** HTTP_____GK1wmSU joined
+[13:39] *** HTTP_____GK1wmSU left
+[13:45] <timotimo> hmm
+
+[13:45] <timotimo> if you don't mind debugspam ... :)
+
+[13:46] <timotimo> somewhere there's a check for callsite having is_interned
+
+[13:48] <timotimo> it could be tied to the multi dispatch cache
+
+[13:48] <timotimo> which bails out if the callsite in question doesn't have is_interned set
+
+[13:49] <jnthn> Flattening will break most opts
+
+[13:55] <timotimo> we once had an idea where we could fake up/find an interned callsite if the result of flattening is eligible
+
+[13:56] <timotimo> haven't tried implementing that yet
+
+[13:56] <timotimo> one thing is the call-me-forwarder which we can't make much smarter because it's shared by everything that has a CALL_ME
+
+[13:57] <timotimo> that one uses flattening to pass the arguments on, for example
+
+[13:57] <timotimo> so that call won't be optimized, sadly
+
+[14:01] <nine> It's good that NativeCall doesn't use that anymore then
+
+[14:02] <nine> At least not anymore for everything but the very first call to a sub
+
+[14:06] <timotimo> oh, i didn't realize we were able to throw that out
+
+[14:10] <nine> timotimo: https://github.com/rakudo/rakudo/commit/46ef1b5b48dd51a47a7de70d4740bcea9779a104 and then https://github.com/rakudo/rakudo/commit/cd7dc4ce934003b9da1e540e638ee6dbe1f44b1b
+
+[14:12] <Geth> ¦ MoarVM: 35c4130001 | (Stefan Seifert)++ | src/jit/graph.c
+
+[14:12] <Geth> ¦ MoarVM: JIT nativecallcast
+
+[14:12] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/35c4130001
+
+[14:12] <nine> I think that ^^^ is my first contribution to something JITy :)
+
+[14:21] <MasterDuke> jnthn: i don't see anything quite so obvious as handle->last_size anywhere, do you mean something like sizeof(handle->body.data)?
+
+[14:22] <timotimo> sizeof can only handle compile-time sizes
+
+[14:23] <MasterDuke> right, i guess handle->body.ssize
+
+[14:24] <MasterDuke> without the sizeof
+
+[14:26] <timotimo> is handle a VMArray?
+
+[14:26] <MasterDuke> no, uv_handle_t
+
+[14:27] <MasterDuke> ->body is definitly wrong
+
+[14:27] <timotimo> uv_handle_t doesn't have any kind of ssize i don't think
+
+[14:27] <timotimo> i'm not sure we're allowed to access uv structs or if their contents are implementation details we're not supposed to change ourselves
+
+[14:27] <MasterDuke> "jnthn: Yeah, last size in the handle"
+
+[14:28] <MasterDuke> i'm trying to find the size of the last read
+
+[14:29] <MasterDuke> https://irclog.perlgeek.de/moarvm/2017-08-12#i_15005128 here for a little ways is my conversation with jnthn
+
+[14:33] <Geth> ¦ MoarVM: 9a3563aebc | (Stefan Seifert)++ | 2 files
+
+[14:33] <Geth> ¦ MoarVM: JIT trunc_i32
+
+[14:33] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/9a3563aebc
+
+[14:34] <Geth> ¦ MoarVM: a0b6e0dced | (Stefan Seifert)++ | src/jit/graph.c
+
+[14:34] <Geth> ¦ MoarVM: Move trunc_i32 case to where the op fits the comment
+
+[14:34] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/a0b6e0dced
+
+[14:35] <timotimo> oh, we can (or maybe already do) store the last size in the SpawnInfo
+
+[14:37] <timotimo> if we store both the amount of data read and the size of buffer we last allocated we can be clever about growing our "recommendation"
+
+[14:37] <timotimo> i.e. if we've filled up our last buffer completely, go at least one step up for the next one
+
+[14:37] <MasterDuke> i don't see a size in SpawnInfo
+
+[14:37] <timotimo> then we can put one (or two as i suggested) there
+
+[14:38] <MasterDuke> k
+
+[14:38] <timotimo> did you understand why using the fsa for the on_alloc thing threw on_alloc out of the ranking completely?
+
+[14:39] <MasterDuke> yeah, i expected that
+
+[14:39] <timotimo> OK
+
+[14:39] <timotimo> sadly it's not helpful information at all :(
+
+[14:39] <timotimo> anyway, i gotta be AFK for a lil' bit
+
+[14:39] <MasterDuke> it confirmed to me that i'd done it kind of correctly
+
+[14:40] <timotimo> hm, i wouldn't call it that ...
+
+[14:40] <timotimo> it's really just hiding what's going on
+
+[14:40] <timotimo> because heaptrack doesn't understand our allocators it just counts everything that uses the fsa as a single thing
+
+[14:40] <MasterDuke> "done it" == use the fsa correctly, in this case
+
+[14:40] <timotimo> oh
+
+[14:42] <MasterDuke> but yeah, it'd be nice if heaptrack could be told about the fsa and be more useful
+
+[14:42] <Geth> ¦ MoarVM: 427546dc83 | (Stefan Seifert)++ | 2 files
+
+[14:42] <Geth> ¦ MoarVM: JIT extend_i32
+
+[14:42] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/427546dc83
+
+[14:43] <nine> Funny that trunc_i32 and extend_i32 are actually the same code
+
+[14:43] <nine> But it kinda makes sense. With trunc_i32 you want to make sure that the highest 32 bit are zeroed and with extend_i32 you want to make sure that the highest 32 bits don't contain garbage, i.e. they are zeroed
+
+[14:44] <Zoffix> Indentation in that commit looks borked
+
+[14:44] <MasterDuke> "Heaptrack can in principle also profile such applications, but it requires code changes to annotate the memory pool implementation." wonder if they mean code change in heaptrack or the application?
+
+[14:44] * Zoffix puts one point towards "SPACES" team in the Grand Debate
+
+[14:56] *** japhb_ joined
+[14:56] <Geth> ¦ MoarVM: 4e7264bc37 | (Stefan Seifert)++ | src/jit/emit_x64.dasc
+
+[14:56] <Geth> ¦ MoarVM: Fix indentation
+
+[14:56] <Geth> ¦ MoarVM:
+
+[14:56] <Geth> ¦ MoarVM: Thanks to Zoffix++ for noticing
+
+[14:56] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/4e7264bc37
+
+[14:56] <japhb_> nine: Does extend_i32 really mean "zero top bits" or "sign extend top bits"?
+
+[14:57] <japhb_> I would assume extend_u32 would use the same code for both, but not extend_i32
+
+[14:57] <nine> japhb_: excellent point! Probably means the latter
+
+[15:00] <nine> The cdq instruction should do what I need but I have to get off the tram now
+
+[15:01] *** evanm joined
+[15:05] <timotimo> yeah, sign extend
+
+[15:05] <timotimo> extend_u32 would only zero them out
+
+[15:08] <Geth> ¦ MoarVM: 60149d3fde | (Stefan Seifert)++ | src/jit/emit_x64.dasc
+
+[15:08] <Geth> ¦ MoarVM: Fix JITed extend_i32 with negative numbers
+
+[15:08] <Geth> ¦ MoarVM:
+
+[15:08] <Geth> ¦ MoarVM: Of course we have to sign-extend instead of just zeroing out the higher
+
+[15:08] <Geth> ¦ MoarVM: bits.
+
+[15:08] <Geth> ¦ MoarVM: Many thanks to japh++ for actually thinking :)
+
+[15:08] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/60149d3fde
+
+[15:08] <nine> My first 64 bit assembly code and my first assembly code this century :)
+
+[15:09] <timotimo> nice
+
+[15:09] <MasterDuke> millenium also, right?
+
+[15:09] <timotimo> i didn't do any assembly before the turn of the century i believe
+
+[15:09] <nine> Tru :)
+
+[15:10] <nine> Ok, the rest of my day will belong to my girlfriend. Wrote the fix in the tram station and Walking home now :)
+
+[15:22] <jnthn> MasterDuke: Sorry I wasn't clear; I meant to add a field storing the last size we actually got :)
+
+[15:29] <MasterDuke> heh, timotimo++ straightened me out. working on it now. what do you think of his idea of storing both the size we got and the size we last allocated?
+
+[15:30] <timotimo> also, if we get like 1/4th of the amount we allocated space for we could realloc the buffer to fit so we don't always copy, but we do copy if it's worth a bunch of memory
+
+[15:31] <timotimo> may be a bad idea, of course
+
+[15:48] *** evanm joined
+[15:56] <timotimo> hmm. even though the nativecall optimizing compiler uses setcodename i don't see any names in the jitlog for example
+
+[15:56] <timotimo> but the things do get jitted, which is very nice
+
+[16:01] <timotimo> it'd be cool if the generated pieces of code could use locals instead of lexicals
+
+[16:19] <MasterDuke> timotimo: i've lost the point of keeping the two values. why not just always allocate the next power of two greater than the last amount read?
+
+[16:21] <timotimo> oh, if we exactly fill up we'll still go up one power of two?
+
+[16:21] <timotimo> that'd be fine, the n
+
+[16:22] <MasterDuke> well, why go up in that case?
+
+[16:22] <timotimo> imagine we had 10000000 bytes available to stuff in a buffer
+
+[16:22] <timotimo> last time we had 128 bytes
+
+[16:23] <timotimo> there's no way to signal how many bytes we "missed"
+
+[16:23] <MasterDuke> right...
+
+[16:23] <timotimo> but we can know that the buffer was fully used up
+
+[16:23] <timotimo> and then grow
+
+[16:24] <timotimo> if we only build power-of-two buffers anyway, we don't really have to store what we allocated last time, only how much was actually received
+
+[16:24] <timotimo> and that ought to be fine
+
+[16:42] *** pharv_ joined
+[17:06] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #631: Alloc proc read buffer based on amount last read
+
+[17:06] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/631
+
+[17:07] <MasterDuke> timotimo, jnthn: how's ^^^ look?
+
+[17:20] <timotimo> hm, feels like "next power of two" ought to be easier than that
+
+[17:21] <timotimo> stackoverflow has this solution, but also says log2 is highly optimized for modern processors so could also use that and ceil
+
+[17:21] *** MasterDuke_ joined
+[17:21] <timotimo> probably no reason to change it
+
+[17:22] <timotimo> a little comment about it might be nice
+
+[17:22] <timotimo> BBL again
+
+[17:26] *** MasterDuke joined
+[17:38] <MasterDuke> hm. my patch, which wasn't noticeably slower for 5 iterations, is for 20. ~63s before, ~84s after
+
+[17:50] *** MasterDuke joined
+[17:51] *** ilmari[m] joined
+[17:58] <timotimo> oh? huh?!
+
+[17:59] <timotimo> have you tried debugspamming what values you get for size?
+
+[17:59] <timotimo> maybe we need to put a minimum in there?
+
+[17:59] <MasterDuke> but, changing to pow(2, ceil(log2(size)) is much faster
+
+[17:59] *** d4l3k_ joined
+[18:01] <timotimo> oh, really?
+
+[18:01] <MasterDuke> both the bit twiddline and pow+ceil+log2 version give same number, but pow version is about the same runtime as without the patch
+
+[18:02] <MasterDuke> wait, or not...
+
+[18:02] <MasterDuke> hm, i've been testing on my laptop, maybe i need to switch to the desktop
+
+[18:03] <MasterDuke> afk for a while, will re-test on desktop and report back
+
+[18:04] <MasterDuke> or if someone else runs some tests that would be much appreciated also...
+
+[18:04] <timotimo> thanks for your work
+
+[18:06] *** camelia joined
+[18:09] <timotimo> dinner time \o/
+
+[19:46] *** D33P-B00K joined
+[19:48] *** D33P-B00K left
+[20:00] <MasterDuke> odd. the absolute numbers are a lot worse on the desktop, but the relative change is about the same. ~122s before my patch, ~140s after (same for bit twiddling and pow+ceil+log2)
+
+[20:01] <MasterDuke> though memory used went from 885352maxresident)k to 517192maxresident)k
+
+[20:01] <MasterDuke> all according to /usr/bin/time with that test script and 20 iterations
+
+[20:08] <MasterDuke> hm, but adding `if (size < 128) size = 128;` to my patch seems to be the best of both worlds. ~100s and 495656maxresident)k
+
+[20:09] *** dogbert17 joined
+[20:30] *** pharv_ joined
+[20:46] <timotimo> just submitted a recetn moarvm build to coverity
+
+[20:47] <timotimo> 51 outstanding defects, it says
+
+[20:48] <timotimo> that's outstanding!
+
+[20:52] <MasterDuke> any easy pickings from their report?
+
+[20:52] <timotimo> eh
+
+[20:55] <MasterDuke> ooo, reproduced the better numbers on the laptop with adding `if (size < 128) size = 128;`
+
+[20:56] <timotimo> good good
+
+[21:00] *** zakharyas joined
+[21:29] <Geth> ¦ MoarVM: 7c5a9b4709 | (Bart Wiegmans)++ | src/jit/emit_x64.dasc
+
+[21:29] <Geth> ¦ MoarVM: Use 32 bit auto-truncating for trunc_i
+
+[21:29] <Geth> ¦ MoarVM:
+
+[21:29] <Geth> ¦ MoarVM: Because dynasm passes arguments as 32 bit integers the code with a
+
+[21:29] <Geth> ¦ MoarVM: large constant probably doesn't do what we mean anyway, and the
+
+[21:29] <Geth> ¦ MoarVM: desired behaviour is implicit in 32 bit operations on 64 bit registers,
+
+[21:29] <Geth> ¦ MoarVM: so lets use that instead.
+
+[21:29] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/7c5a9b4709
+
+[21:30] <eater> I'm getting the error `invalid argument`
+
+[21:31] <eater> and it's just so generic
+
+[21:31] <eater> I dont even know where it's coming from
+
+[21:31] <timotimo> right, we're probably strerror-ing something
+
+[21:31] <timotimo> is that really all you're getting?
+
+[21:32] <eater> timotimo: input: http://termbin.com/li9m, output: http://termbin.com/h8x5
+
+[21:35] <timotimo> ah it's your unix domain socket stuff
+
+[21:35] <timotimo> are you familiar with gdb at all?
+
+[21:36] <eater> like 3 familiar
+
+[21:36] <eater> I know how to add breakpoints now
+
+[21:36] <timotimo> okay, do you have different line numbers from what's on github right now? for asyncsocket.c?
+
+[21:36] <timotimo> i.e. did you change stuff there?
+
+[21:36] <eater> http://termbin.com/2xod
+
+[21:36] <eater> these are my changes currently
+
+[21:37] <eater> so yea
+
+[21:37] <timotimo> ah, ok
+
+[21:38] <eater> hmm, I'm gonna try breaking at MVM_exception_throw_adhoc
+
+[21:38] <eater> maybe that gives more info :o
+
+[21:38] <timotimo> nope
+
+[21:38] <timotimo> since it's async we're stringifying the error we get from libuv and sending it to the callback
+
+[21:38] <eater> wel
+
+[21:38] <eater> at least I got a call
+
+[21:38] <eater> :)
+
+[21:39] <timotimo> i expect this is in read_setup
+
+[21:39] <timotimo> especially the part where a comment says "Error; need to notify"
+
+[21:39] <timotimo> however, since there's the MVMROOT macro there, you won't get proper breakpoints or stepping in gdb
+
+[21:39] <timotimo> because of course that's not possible >:(
+
+[21:39] <eater> :(
+
+[21:42] <timotimo> i mean it's somewhat trivial to replace MVMROOT with the corrept temp_push and temp_pop invocations
+
+[21:43] *** lizmat joined
+[21:43] <eater> what do you mean?
+
+[21:43] <eater> because it's not trivial enough for me apparently :p
+
+[21:43] <timotimo> hehe
+
+[21:44] <timotimo> "MVMROOT(tc, foo, {" becomes MVM_gc_temp_root_push(tc, (MVMCollectable**)&foo);
+
+[21:44] <timotimo> and "});" becomes MVM_gc_temp_root_pop(tc) i think
+
+[21:44] <eater> yay macro's!
+
+[21:44] <timotimo> yup
+
+[21:44] <timotimo> if they at least really were just text substitutions
+
+[21:45] <timotimo> you know what, i'll build a stage into our compiler that turns MVMROOT into the equivalent
+
+[21:46] <eater> but what does MVM_gc_temp_root_{push,pop} do?
+
+[21:46] <timotimo> how much do you want to learn about GC? :)
+
+[21:46] <eater> well, whatever you want me to learn :D
+
+[21:47] <timotimo> OK, so the GC we have is a "moving GC", i.e. the addresses of objects may change when the GC has run
+
+[21:48] <timotimo> the temp roots are how we tell the GC that our C code is holding on to some of these objects
+
+[21:48] <timotimo> so when the GC moves stuff around it'll also update our local variables for us
+
+[21:48] <timotimo> (also such a root helps keep objects alive, for example if you just created them in the C code)
+
+[21:49] <timotimo> does that make sense? i'd probably have to elaborate more
+
+[21:49] <eater> it makes sense
+
+[21:49] <timotimo> anyway, if you don't root an object, the C code might end up accessing memory where the object used to be
+
+[21:49] <timotimo> and any changes will no longer have any effect
+
+[21:50] <eater> but I'm geuss at each MVMROOT statement it's gonna retrieve the new updated addresses/locations?
+
+[21:51] <eater> *guessing
+
+[21:51] <eater> or is it in a MVMROOT saying "hold these for me"
+
+[21:51] <eater> and when you leave it's dead?
+
+[21:52] <timotimo> not quite
+
+[21:52] <eater> or at least the reference counter goes down something like that
+
+[21:52] <timotimo> the GC code will actually change what's at that address
+
+[21:52] <timotimo> so you only pay the price if an actual GC run happens in between
+
+[21:52] <timotimo> we don't have reference counts
+
+[21:53] <timotimo> the temp roots is just a little stack the threadcontext holds
+
+[21:53] <timotimo> that's also the reason for naming it push and pop
+
+[21:54] <eater> I see :)
+
+[21:55] <timotimo> the mvmroot thing is nice because you can't accidentally forget to pop wrong
+
+[21:55] <eater> yeah I can understand it's neat
+
+[21:55] <timotimo> 1) the nested { } prevent you from calling pop but actually popping a different variable
+
+[21:56] <timotimo> 2) you can't forget to remove a pop (or reduce the number of things to be popped for the multi-pop variant)
+
+[21:56] <timotimo> yeah, we're already in agreement and i keep babbling on, aren't i
+
+[21:57] <eater> haha
+
+[21:57] <eater> it's fine :)
+
+[21:57] <eater> at least I know you're very happy with it :D
+
+[21:58] *** pharv_ joined
+[22:00] <timotimo> anyway, if you do the replacement with a push and a pop, you'll be able to debug into thee
+
+[22:00] <timotimo> there*
+
+[22:01] <eater> well it atleast doesn't come from read_setup
+
+[22:02] <timotimo> OK, but it could be any of those
+
+[22:02] <timotimo> since all it does is stringify uv_strerror (or whatever) and sends it back to be thrown
+
+[22:02] <eater> should I add more info?
+
+[22:02] <eater> could be helpful in the future :)
+
+[22:02] <timotimo> we can make the error message better in rakudo itself, rather than in moar
+
+[22:03] <timotimo> i.e. take the \err we get passed in and concat like "failed to accept" or "failed to receive" or whatever
+
+[22:03] <eater> for rakudo listening is just 1 step
+
+[22:04] <eater> so I don't know if that works
+
+[22:04] <eater> it was listen_setup :)
+
+[22:04] <timotimo> right
+
+[22:05] <timotimo> these functions all belong to one of the nqp::async* functions
+
+[22:05] <eater> yeah but it's also one function there
+
+[22:06] <eater> even in Moar it is
+
+[22:06] <eater> :')
+
+[22:06] <eater> init, bind and listen
+
+[22:06] <timotimo> aren't there just a single error condition in each of those?
+
+[22:07] <eater> https://github.com/MoarVM/MoarVM/blob/master/src/io/asyncsocket.c#L758
+
+[22:07] <eater> this looks like 3 conditions to me
+
+[22:09] <eater> I feel like I'm angering alot of people tho
+
+[22:09] <eater> writing C in Atom :'))
+
+[22:09] <timotimo> ooooh
+
+[22:10] <timotimo> you think we can use the , operator to have a "int stage" in there?
+
+[22:11] <timotimo> shall i try to write something up?
+
+[22:11] <eater> hmm
+
+[22:11] <eater> also an option
+
+[22:12] <eater> http://termbin.com/5o6x
+
+[22:12] <eater> this is my temp. hack :)
+
+[22:13] <eater> altho I don't know how I should do string concat :')
+
+[22:13] <eater> sprintf breaks everything apperantly
+
+[22:13] <timotimo> ah that's better
+
+[22:13] <timotimo> less terrible than my idea
+
+[22:13] <timotimo> sprintf should work there, just gotta have a Big Enough Buffer™
+
+[22:14] <eater> ah!
+
+[22:14] <eater> I was using sprintf in PHP style
+
+[22:14] <eater> aka
+
+[22:14] <timotimo> ah, "returns the string for me"
+
+[22:14] <eater> sprintf(format, datas...) -> string
+
+[22:15] <timotimo> yeah, no :D
+
+[22:15] <eater> yep
+
+[22:15] <eater> would be too easy ofcourse :p
+
+[22:15] <timotimo> yeah, c isn't like that
+
+[22:15] <eater> anyway, I think the best solution would to puut the whole error handling in it's own function
+
+[22:15] <eater> and do all calls in seperate if's
+
+[22:16] <timotimo> you could do that, yeah
+
+[22:16] <timotimo> don't forget to MVMROOT the arguments to your function
+
+[22:19] <eater> "error: ISO C90 forbids mixed declarations and code [-Werror=declaration-after-statement]"
+
+[22:19] <eater> WHY
+
+[22:19] <timotimo> because we have to support MSVC
+
+[22:19] * eater refactors everything for 1 debug statement
+
+[22:19] <timotimo> feel free to put orphan { } in your code to make this work
+
+[22:20] <eater> ah!
+
+[22:20] <eater> I got my datas tho :)
+
+[22:20] <eater> "uv said: invalid argument, init return: 0, bind return: -22, listen return: 0"
+
+[22:22] <timotimo> would you look at that
+
+[22:25] <eater> I think I found the issue
+
+[22:25] <eater> it's trying to set tcp_nodelay :)
+
+[22:26] <timotimo> aha!
+
+[22:27] <timotimo> is there a different flag we'd have to set if they're unix domain sockets?
+
+[22:27] <eater> well
+
+[22:27] <eater> I'm currently looking if it's actually an issue
+
+[22:27] <eater> or
+
+[22:27] <eater> /the/ issue at hand
+
+[22:27] <timotimo> right
+
+[22:27] <eater> and tbh
+
+[22:28] <timotimo> did strace help?
+
+[22:28] <eater> maybe I should do so :')))
+
+[22:28] <timotimo> ooooh
+
+[22:28] <timotimo> nodelay isn't about async, it's about the algorithm to handle congestion and such
+
+[22:30] <timotimo> http://docs.libuv.org/en/v1.x/pipe.html  -  perhaps we have to use different functions actually
+
+[22:30] <eater> yea
+
+[22:30] <eater> I think so too
+
+[22:30] <eater> altho you can UDP or TCP over unix sockets
+
+[22:30] <eater> :'))
+
+[22:30] <timotimo> hmm, true
+
+[22:30] <eater> so don't know how they handle that
+
+[22:30] <timotimo> well, actually
+
+[22:31] <timotimo> the things are called SOCK_STREAM and SOCK_DGRAM
+
+[22:31] <timotimo> it doesn't explicitly mention TCP or UDP :P
+
+[22:31] <eater> oh
+
+[22:31] <eater> true!
+
+[22:32] <timotimo> also, this has windows support, too
+
+[22:32] <eater> yea
+
+[22:32] <eater> so
+
+[22:32] <eater> asyncsocketpipe.c? :D
+
+[22:32] <timotimo> hmm
+
+[22:32] <timotimo> i wonder if there's a lot more duplication if we split it compared to just handling the differences in asyncsocket.c
+
+[22:34] <eater> hmm
+
+[22:35] <eater> well I know at the start already if it's tcp or a pipe
+
+[22:35] <timotimo> yeah
+
+[22:35] <eater> and of most tcp functions are pipe counter parts
+
+[22:35] <eater> so I can make alot of ifs
+
+[22:35] <timotimo> and the read callbacks and such should all only handle stream_ parts of the api
+
+[22:36] <timotimo> on_connection, for example, only deals in stream functions
+
+[22:37] <eater> I can replace uv_tcp_t everywhere with uv_stream_T
+
+[22:37] <eater> and only cast when needded
+
+[22:37] <timotimo> right
+
+[22:48] *** ilbot3 joined
+[22:49] <timotimo> MasterDuke: the minimum size check can also move before the bit twiddling
+
+[22:49] <timotimo> i.e. putting the chaih of |= into an else { }
+
+[22:50] <MasterDuke> ah, nice
+
+[22:51] <geekosaur> TCP_NODELAY dsables the Nagle algorithm, which you typicaly want to do for interactive sessions (ssh) but not for other things
+
+[22:52] <geekosaur> with it set, short packets will be less efficient but responsiveness will be better
+
+[22:52] <geekosaur> for local sockets you don't care
+
+[22:52] <geekosaur> so only use it for INET
+
+[22:52] <timotimo> MasterDuke: it's quite possible the c compiler would do that anyway :D
+
+[22:53] <geekosaur> they're not
+
+[22:53] <geekosaur> TCP and UDP ride on top of IP
+
+[22:53] <geekosaur> (likewise TCP6/UDP6 over IP6)
+
+[22:53] <geekosaur> local sockets don't use ot ned them; you are either using stream or datagram behavior
+
+[22:53] <geekosaur> *or need
+
+[22:53] <eater> yep :) I can call listeninfo->socket->type :)
+
+[22:53] <eater> that has the info I need
+
+[22:54] <eater> anyway, I'm drunk and it's 1am so I'm gonna sleep
+
+[22:54] <eater> thanks for the help timotimo <3
+
+[22:54] <timotimo> sure!
+
+[22:54] <timotimo> thanks for working on moarvm
+
+[23:11] *** lizmat joined
+[23:12] *** sivoais joined
+[23:36] <MasterDuke> jnthn, timotimo: ugexe++ just commented on https://github.com/MoarVM/MoarVM/pull/631, but i don't know the answer
+
+[23:40] <timotimo> hm, i didn't think of default-read-elems as a thing for async stuff
+
+[23:41] <timotimo> because we're not "pulling this much data", we're "being given up to this much data"
+
+[23:41] <MasterDuke> i don't think i've seen that variable before
+
+[23:41] <timotimo> appears in Handle.pm
+
+[23:48] *** ilmari[m] joined

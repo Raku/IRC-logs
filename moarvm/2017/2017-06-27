@@ -1,0 +1,405 @@
+[00:50] <timotimo> ho-hum. we have effective_bytecode, but we don't have a corresponding bytecode size
+
+[00:50] <timotimo> so to dump the "currently executing bytecode", i'll have to hunt through the candidates to find the one that has the matching bytecode array address
+
+[00:50] <timotimo> well, at least i'll be able to :)
+
+[00:59] <timotimo> oh, i should be going to bed
+
+[00:59] <timotimo> but i've made progress already
+
+[01:00] <timotimo> next step is to make it mark up the current op if the frame being dumped is the one the tc is currently running
+
+[01:52] *** ilbot3 joined
+[05:13] *** lizmat_ joined
+[05:51] *** domidumont joined
+[05:57] *** domidumont joined
+[06:41] *** brrt joined
+[06:52] <brrt> good * #moarvm
+
+[06:58] *** vendethiel joined
+[07:01] *** domidumont joined
+[08:19] *** robertle joined
+[08:50] <jnthn> morning o/
+
+[08:52] <brrt> \o jnthn
+
+[08:55] * jnthn digs back into Proc[::Async] things, hoping he can get them wrapped up somewhat today
+
+[09:06] *** FROGGS joined
+[09:09] <brrt> i hope i'm going to have time for That Weird OSR bug
+
+[09:09] <brrt> which doesn't appear to break on the OSR, for some reason
+
+[09:10] <FROGGS> hi brrt
+
+[09:10] <brrt> hi FROGGS
+
+[09:26] *** nebuchad` joined
+[09:27] *** colomon_ joined
+[09:30] *** cono_ joined
+[09:30] *** [Coke]_ joined
+[09:30] *** sivoais_ joined
+[09:41] *** camelia joined
+[09:41] *** FROGGS joined
+[10:13] *** zakharyas joined
+[10:48] <lizmat> jnthn: you may be interested in knowing that HARNESS_TYPE=6 no longer outputs the name of the test-file being run / completed
+
+[10:49] <lizmat> it also appears to hang after a while, with 1 moar process stuck in 0% CPU
+
+[10:50] <jnthn> *sigh*
+
+[10:50] <jnthn> At this point I'm semi-interested in reverting everything I did with Proc and leaving it to be somebody elses problem :/
+
+[10:51] <lizmat> well, maybe try to wrap it up first?  and then maybe that issue will have gone away automagically ?
+
+[10:52] <jnthn> I've got RT #131576 sorted out at least
+
+[10:52] <synopsebot6> Link:  https://rt.perl.org/rt3/Public/Bug/Display.html?id=131576
+
+[10:52] <jnthn> Well, in POSIX-y systems
+
+[10:52] <jnthn> On Windows, guess it's back to how it was before
+
+[10:53] <jnthn> There's just so many icky timing issues when you are doing this sync
+
+[10:53] <lizmat> not really a consolation, but I just found a number of errors in (-) and (+)  :-(
+
+[10:53] <jnthn> And so many ways to deadlock
+
+[10:53] <lizmat> which I had deemed to be done by now
+
+[10:53] <jnthn> Which of course was the case *before* I did any of htis
+
+[10:53] <jnthn> *this
+
+[10:54] <jnthn> I'm currently confused how this test ever worked:
+
+[10:54] <jnthn> my $tt = shell :out, :err, 'tty';
+
+[10:54] <jnthn> if $tt and (my $path = $tt.out.slurp(:close).trim)
+
+[10:56] <jnthn> Oh, and I worry in sorting out the plumbing thing I've probably re-introduced the deadlock in reading from stdout/stderr
+
+[10:56] <jnthn> Which we had before
+
+[10:57] <jnthn> Basically because if you don't know whether the handle is going to be plumbed to something else, you can't start reading from it.
+
+[10:59] <jnthn> The above one stopped working because it seems we made Bool unconditionally block on process exit
+
+[10:59] <jnthn> I'm sure I had it not doing so
+
+[11:00] <jnthn> And we got away with it before when we started reading immediately
+
+[11:00] <jnthn> But we can't have that fix and the plumbing fix.
+
+[11:00] <jnthn> And retain the current API
+
+[11:01] <jnthn> The amount of relatively complex code I've got by now to try and make something inherently async work with a synchronous API scares me.
+
+[11:03] <lizmat> then perhaps we shouldn't try to do it synchronously after all ?
+
+[11:04] <jnthn> Well, yeah, I've been saying that about Proc for a while :)
+
+[11:04] <jnthn> But it's in relatively widepsread use by now in the ecosystem
+
+[11:04] <jnthn> And in some cases it's simpler
+
+[11:04] <jnthn> Until you start dealing with multiple of stdin/stdout/stderr being bound
+
+[11:05] <jnthn> And as soon as there's more than one, a sync API is in bother.
+
+[11:05] <jnthn> About the only consolation is that with the current set of changes you can now do
+
+[11:06] <jnthn> my $foo = start $proc.out.slurp; my $bar = start $proc.err.slurp; and actually ahve the two read in different threads
+
+[11:06] <jnthn> Which you couldn't before
+
+[11:07] <jnthn> So there is at least a way out of the deadlock I guess.
+
+[11:07] <jnthn> I dunno what to do about the boolification change though. I need to check if I'm right that I had it one way and it got changed.
+
+[11:08] <jnthn> Yes
+
+[11:08] <jnthn> https://github.com/rakudo/rakudo/commit/e4468c610c1565be267dc6688d050c985e056afc
+
+[11:09] <jnthn> I'm not sure we can keep e4468c61
+
+[11:09] <jnthn> Or at least, not all of it
+
+[11:10] <jnthn> Since it worked because we faked the file handling plumbing and it no longer can work now I've resolved that
+
+[11:10] <jnthn> So, figure I'll have to undo some of that
+
+[11:12] <jnthn> Lunch; bbiab
+
+[11:24] *** yoleaux joined
+[11:26] <nine> So previously we'd return wrong results if the user neglected to wait. Now we wait for her and could run into deadlocks that way. Leaves two options: 1. just explode instead to make it obvious to the user that he's holding it wrong, 2. close everything instead of waiting, so there's no deadlock. Could cause other issues for the user though.
+
+[11:33] <brrt> i'm for exploding
+
+[11:52] *** domidumont joined
+[11:54] *** AlexDaniel joined
+[11:57] <jnthn> nine: The problem is that we've got spectests that depend on being able to do what I pasted above
+
+[11:57] <jnthn> And so probably ecosystem code too
+
+[11:58] <jnthn> We can go with checking if there are active handles, anyway
+
+[11:58] <jnthn> And only waiting if not
+
+[12:06] <jnthn> That seems to do it
+
+[12:06] * jnthn spectets
+
+[12:30] *** ilbot3 joined
+[12:44] <jnthn> nine: Hm, your suggestion seems to work out nicely :)
+
+[12:44] * jnthn does another spectest
+
+[12:44] <nine> \o/
+
+[12:44] <brrt> nine++ jnthn++ collaborative debugging
+
+[12:49] *** ilbot3 joined
+[12:49] <timotimo> collatteral debuggage
+
+[12:56] <brrt> hehe
+
+[12:56] <brrt> the alternative would be overwriting the bytecode
+
+[12:57] <brrt> well, truth be told, there are a bunch of other bytecode possiilities
+
+[13:03] <timotimo> i might be able to just always use frame->spesh_cand instead of searching through to find which one matches the bytecode address
+
+[13:03] <brrt> that… ought to be right, yes
+
+[13:03] <timotimo> hm, then i get no output for that frame, though
+
+[13:03] <brrt> oh, that reminds
+
+[13:03] <brrt> me
+
+[13:03] <brrt> - the jit currently relies on spesh to run
+
+[13:04] <brrt> - or well, spesh candidate generation to work
+
+[13:04] <brrt> - it shoul dnot
+
+[13:05] <jnthn> Well, yes and no :)
+
+[13:05] <jnthn> This is one of the things I was alluding to in my spesh shortcomings do
+
+[13:05] <jnthn> *doc
+
+[13:05] <timotimo> you mean baseline optimization being completely missing?
+
+[13:06] <jnthn> Yeah
+
+[13:06] <jnthn> Part of the idea of that being that we'd JIT
+
+[13:13] *** ilbot3 joined
+[13:43] *** ilbot3 joined
+[14:02] *** zakharyas joined
+[14:04] *** sivoais joined
+[14:21] *** ilbot3 joined
+[14:42] *** brrt joined
+[14:53] *** ilbot3 joined
+[15:30] *** ilbot3 joined
+[15:39] <timotimo> i think i'll go ahead and merge it to master
+
+[15:39] <Geth> ¦ MoarVM: fcb1b35922 | (Timo Paulssen)++ | src/core/bytecodedump.c
+
+[15:39] <Geth> ¦ MoarVM: add debug helpers: MVM_bytecode_dump, bytecode_dump_stackframe
+
+[15:39] <Geth> ¦ MoarVM:
+
+[15:39] <Geth> ¦ MoarVM: shows not only the whole bytecode, but also puts a little
+
+[15:39] <Geth> ¦ MoarVM: arrow where the current op (or the next-to-run-after-return
+
+[15:39] <Geth> ¦ MoarVM: op) is. won't display jitted frame's original bytecode yet.
+
+[15:39] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/fcb1b35922
+
+[16:06] *** ilbot3 joined
+[16:15] *** ilbot3 joined
+[16:15] *** moritz joined
+[16:26] * jnthn is working a bit on planning for the spesh re-work
+
+[16:26] <jnthn> Well, has been.
+
+[16:26] <jnthn> Time to stop and get some rest, I think
+
+[16:35] <timotimo> good rest!
+
+[16:36] <jnthn> Thanks. I've figured out a good way to get predictable runs, as brrt++ requested, at least :)
+
+[16:36] <jnthn> bbl
+
+[16:39] <timotimo> i'd love to have a good way to get predictable sleeps :|
+
+[16:40] <timotimo> i do know that if i go to bed after a certain time, birds are going to boot up and make trying to sleep impossible
+
+[17:28] *** zakharyas joined
+[17:29] <DeadDelta> Take sleeping pills :)
+
+[17:30] <DeadDelta> 50mg of diphenhydromine hydrochloride immediatelly followed by a small meal. Half an hour later, you're sleeping.
+
+[17:30] <timotimo> is that an over-the-counter drug?
+
+[17:30] <DeadDelta> It is here.
+
+[17:30] <DeadDelta> Some places it isn't
+
+[17:30] <timotimo> there's some notable things that aren't over the counter in germany
+
+[17:58] <geekosaur> maybe you are sleeping after that; I'm not...
+
+[18:03] <DeadDelta> I sleep after 200mg :)
+
+[18:05] <DeadDelta> But are you having a meal? The food is crucial for this drug.
+
+[18:05] <DeadDelta> Or protein shake
+
+[18:12] <timotimo> the code from "'grinding out performance improvements" regressed a fair bit; it's now at 14.7 billion instructions, when in the middle of that blog post it was at 11 billion
+
+[18:15] <geekosaur> I'm just mostly immune to that kind of thing. ambien doesn;t work on e either (rather: it worked *once*. after that, I just get really dizzy for about 3 seconds and then nothing.)
+
+[18:15] <geekosaur> weird brain chemistry ftw?
+
+[18:17] <DeadDelta> :)
+
+[18:18] <geekosaur> (it's genetic. overactive dopamine, possibly overactive GABA. I've already got early signs of familial essential tremor)
+
+[18:24] *** greppable6 joined
+[18:24] *** committable6 joined
+[18:24] *** evalable6 joined
+[18:24] *** unicodable6 joined
+[18:24] *** bisectable6 joined
+[18:24] *** benchable6 joined
+[18:24] *** quotable6 joined
+[18:24] *** bloatable6 joined
+[18:24] *** statisfiable6 joined
+[18:52] *** Ven joined
+[19:12] *** AlexDaniel joined
+[19:32] *** zakharyas joined
+[19:32] *** ggoebel joined
+[21:48] <samcv> good * everyone
+
+[21:51] <timotimo> heyo
+
+[21:51] *** DeadDelta left
+[21:51] *** DeadDelta joined
+[21:52] <lizmat> samcv o/
+
+[21:55] <timotimo> jnthn: i think the way we put prof_allocated in for a param_op_o might be wrong; the branch it jumps to starts with prof_allocated on the register that the op would have written to, then it goes on to create the alternative value and prof_allocated the result value as well?
+
+[22:03] *** FROGGS joined
+[22:13] <jnthn> timotimo: Hm, that does sound suspect. given we just got better at kicking out the optional handling code, it also sounds like a candidate
+
+[22:13] <yoleaux> 21:29Z <DeadDelta> jnthn: RE from-slurpy-flat I tried with 2017.06 and 2017.05 builds, it's there in both at around 32%-38%
+
+[22:14] <timotimo> that doesn't explain the explosion all by itself, but if it mucks up the usage numbers somehow...?
+
+[22:14] <jnthn> Yeah, it's still odd
+
+[22:14] <timotimo> anyway, it throws out not only the block that'd fill in the default value, but also the whole getarg op, as well
+
+[22:15] <timotimo> it says it has a DeadWriter, too, but i don't know if that caused the issue or is just an expression of the same underlying problem
+
+[22:16] <jnthn> timotimo: Also, did you see the discussion on #perl6-dev about perl6-m --profile -e 'class A { method a() { } }; for ^100000 { A.a }' producing profile output that spends a bunch of time in List.from-slurpy-flat?
+
+[22:17] <jnthn> On 2017.05-468-g446dc19 I don't see it on the routines tab at all
+
+[22:18] <timotimo> i haven't looked into that
+
+[22:18] <jnthn> I'll try it at HEAD tomorrow
+
+[22:19] <timotimo> i do see it on HEAD
+
+[22:19] <jnthn> ah, ok
+
+[22:19] <jnthn> bizzare
+
+[22:19] <timotimo> it looks as though Nil.pm:8 calls into from-slurpy-flat on List.pm:275
+
+[22:19] <timotimo> it's the sink method
+
+[22:20] <timotimo> it has sink(*@ --> Nil) { } as its code
+
+[22:20] <jnthn> Why would sink *ever* be passed arguments?!
+
+[22:20] <timotimo> i have not a single clue
+
+[22:20] <timotimo> and since it's a method that also has a *%, why not just (|)?
+
+[22:21] <timotimo> it says "required by RESTRICTED.setting"
+
+[22:21] <timotimo> so it's probably something quite odd
+
+[22:22] <jnthn> That sounds odd too
+
+[22:22] <timotimo> i'm compiling a simpler one now
+
+[22:22] <jnthn> Not to mention that sink in Mu also returns Nil?
+
+[22:23] <timotimo> actually
+
+[22:23] <timotimo> all the methods on nil have *@
+
+[22:23] <timotimo> when they most probably could all just have |
+
+[22:24] <jnthn> I wonder if it was blanket applied
+
+[22:24] <jnthn> Also I wonder if this means soemthing sink-y changed at some point
+
+[22:24] *** Voldenet joined
+[22:24] *** Voldenet joined
+[22:24] <jnthn> Maybe when the for loop code-gen changed
+
+[22:25] <timotimo> i got the commit for it but helpfully fugitive isn't showing the commit itself where i could copy-paste it
+
+[22:25] <timotimo> parent ccee46ef0fa5c23b395ea852e517634dc4541341
+
+[22:25] <timotimo> and yes, all the *@ were put in at the same time
+
+[22:26] <timotimo> with | in the signature the from-slurpy-flat is gone
+
+[22:26] <timotimo> finishes in less than half the time, too
+
+[22:27] <timotimo> i'll spectest and push a commit
+
+[22:28] <jnthn> timotimo++
+
+[22:28] <lizmat> aha, so it's an artefact of sinking Nil
+
+[22:29] <timotimo> yup
+
+[22:29] <lizmat> timotimo++
+
+[22:30] <lizmat> good night, #moarvm!
+
+[22:30] <timotimo> oh no, i have --optimize=0
+
+[22:30] <timotimo> no, i won't spectest like this %)
+
+[22:32] <timotimo> would be good to pull latest nom before
+
+[22:36] <jnthn> :)
+
+[22:36] * jnthn heads for rest also
+
+[22:36] <jnthn> 'night
+
+[22:37] <timotimo> gnite jnthn :)
+
+[22:37] <timotimo> and lizmat
+
+[22:40] <timotimo> i had to kill S11-modules/nested.t
+
+[22:41] <timotimo> S03-operators/mix.t and S32-io/open.rakudo.moar both have one test each failing
+
+[22:42] <timotimo> S32-io/open.rakudo.moar works fine when run outside the harness
+
+[22:42] <timotimo> same for the nested.t test

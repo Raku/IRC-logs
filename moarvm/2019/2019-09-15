@@ -1,0 +1,869 @@
+[00:01] *** anatofuz joined
+[00:05] <timotimo> MVM_args_save_capture always creates an uninterned callsite, even if it'd be a candidate for interning
+
+[00:07] <timotimo> but interning takes a mutex for access to the interned callsites data
+
+[00:08] *** anatofuz left
+[00:08] *** anatofuz joined
+[00:09] <timotimo> ohai jnthn, i just saw the comment about having removed the callsite cache that was causing subtle problems, and the possibility to do something smarter in the optimizer later
+
+[00:09] <timotimo> i haven't looked into it more yet, but would it make sense to have spesh push the callsites that it sees through try_intern?
+
+[00:09] *** anatofuz left
+[00:10] <timotimo> if we have a candidate specialized on args, we could cache a callsite, i expect
+
+[00:10] *** anatofuz joined
+[00:13] <timotimo> or maybe callsites should have a pointer to a version with the initial parameter stripped, just like the reverse of "with_invocant"
+
+[00:16] <timotimo> calling try_intern every time save_capture is called is definitely not a great idea, that much is certain
+
+[00:16] <timotimo> contention on that mutex means bad news
+
+[00:16] <timotimo> though the program got about 3x faster i think
+
+[00:17] <timotimo> a little less than 3x faster
+
+[00:28] <timotimo> OK, this usecapture is actually called inside something that's "certain spesh"ed, i.e. no interned callsite was used to call this function itself
+
+[00:28] <timotimo> that could be the root of the problem
+
+[00:41] <timotimo> ah, yes, the callsite that's used for this call has flattening turned on
+
+[00:42] <timotimo> it's followed by three arg_o and an invoke_o, though; i think that means we can just™ use a "3 positional argument" callsite for this?
+
+[00:44] <timotimo> i know we've thought about this before, to build callsites for places that use flattening
+
+[00:52] <timotimo> benchable6: my $a; $a = $_.starts-with("1").Int for ^1_000_000;
+
+[00:52] <benchable6> timotimo, No new data found
+
+[00:52] <timotimo> benchable6: releases my $a; $a = $_.starts-with("1").Int for ^1_000_000;
+
+[00:52] <benchable6> timotimo, starting to benchmark the 39 given commits
+
+[00:52] <timotimo> that may be a bit much
+
+[00:57] *** benchable6 left
+[00:57] *** benchable6 joined
+[01:02] <AlexDaniel> it probably is, yea
+
+[01:02] <AlexDaniel> doing it with committable first is probably a good idea :)
+
+[01:04] <timotimo> benchable6: 6.c my $a; $a = $_.starts-with("1").Int for ^1_000_000; say now - INIT now
+
+[01:04] <benchable6> timotimo, starting to benchmark the 39 given commits
+
+[01:04] <timotimo> those are aliased?
+
+[01:08] *** benchable6 left
+[01:08] *** benchable6 joined
+[01:12] *** anatofuz left
+[01:13] *** anatofuz joined
+[01:13] *** anatofuz left
+[01:13] *** anatofuz joined
+[01:26] <AlexDaniel> timotimo: yep
+
+[01:26] <AlexDaniel> committable: 6.c my $a; $a = $_.starts-with("1").Int for ^1_000_00; say now - INIT now
+
+[01:27] <committable6> AlexDaniel, https://gist.github.com/6b02f1b33709b291c3dfb98d572d404d
+
+[01:27] <AlexDaniel> committable: 6.c my $a; $a = $_.starts-with("1").Int for ^1_000_000; say now - INIT now
+
+[01:28] <AlexDaniel> timotimo: pretty sure benchable does more than one run on each, which is why it's much slower
+
+[01:30] <timotimo> good point
+
+[01:31] <committable6> AlexDaniel, https://gist.github.com/8fb484bd265d43096c33c0886694a1a0
+
+[01:31] <AlexDaniel> oh…
+
+[01:31] <AlexDaniel> I see what you're looking for
+
+[01:32] <AlexDaniel> right? wtf
+
+[01:32] <AlexDaniel> bisect: old=2017.03 new=2017.04 6.c my $a; $a = $_.starts-with("1").Int for ^1_000_000; say now - INIT now
+
+[01:32] <bisectable6> AlexDaniel, On both starting points (old=2017.03 new=2017.04) the exit code is 1 and the output is identical as well
+
+[01:32] <bisectable6> AlexDaniel, https://gist.github.com/d8f1a09e7fc04af2844dff473d174226
+
+[01:32] <AlexDaniel> bisect: old=2017.03 new=2017.04 my $a; $a = $_.starts-with("1").Int for ^1_000_000; say now - INIT now
+
+[01:32] <timotimo> i don't think bisect can do that?
+
+[01:32] <AlexDaniel> why not
+
+[01:33] <bisectable6> AlexDaniel, Bisecting by exit signal (old=2017.03 new=2017.04). Old exit signal: 0 (None)
+
+[01:33] <timotimo> the difference is chaotic
+
+[01:33] <timotimo> oh
+
+[01:33] <timotimo> you're going for the crash
+
+[01:33] <timotimo> no that was a timeout
+
+[01:33] <AlexDaniel> we can also set timeout=3 and do it again
+
+[01:33] <AlexDaniel> or we can exit 42 if 3 < now - INIT now
+
+[01:34] <timotimo> mhm
+
+[01:34] <timotimo> well, i'm off to bed for now, tho
+
+[01:34] <bisectable6> AlexDaniel, bisect log: https://gist.github.com/e33160df3321a54e756a0c8d7ef325e4
+
+[01:34] <bisectable6> AlexDaniel, (2017-03-18) https://github.com/rakudo/rakudo/commit/8c88b0cc62ee25000603a920002d2060bdb9f5a1
+
+[01:34] <AlexDaniel> good night!
+
+[01:34] <AlexDaniel> c: 8c88b0cc6^,8c88b0cc6 my $a; $a = $_.starts-with("1").Int for ^1_000_000; say now - INIT now
+
+[01:35] <committable6> AlexDaniel, ¦8c88b0cc6^: «1.8792102␤» ¦8c88b0c: ««timed out after 10 seconds» «exit signal = SIGHUP (1)»»
+
+[01:35] <AlexDaniel> yup
+
+[01:38] <AlexDaniel> https://github.com/rakudo/rakudo/issues/3185
+
+[01:38] <AlexDaniel> done
+
+[01:38] <AlexDaniel> c: 2016.05,2016.06 my $a; $a = $_.starts-with("1").Int for ^1_000_000; say now - INIT now
+
+[01:38] <committable6> AlexDaniel, ¦2016.05: «0.8382520␤» ¦2016.06: «1.00037587␤»
+
+[01:38] <AlexDaniel> c: 2016.05,2016.06 my $a; $a = $_.starts-with("1").Int for ^1_000_000; say now - INIT now
+
+[01:38] <committable6> AlexDaniel, ¦2016.05: «0.8197042␤» ¦2016.06: «1.03086281␤»
+
+[01:39] <AlexDaniel> c: 2016.05,2016.06 my $a; $a = $_.starts-with("1").Int for ^5_000_000; say now - INIT now
+
+[01:39] <committable6> AlexDaniel, ¦2016.05: «3.946849␤» ¦2016.06: «4.82430794␤»
+
+[01:39] <AlexDaniel> c: 2016.05,2016.06 my $a; $a = $_.starts-with("1").Int for ^10_000_000; say now - INIT now
+
+[01:39] <committable6> AlexDaniel, ¦2016.05: «7.7233457␤» ¦2016.06: «9.6222518␤»
+
+[01:40] <AlexDaniel> bisect: 2016.05,2016.06 my $a; $a = $_.starts-with("1").Int for ^1_150_000; say now - INIT now
+
+[01:40] <bisectable6> AlexDaniel, Using old=2016.05 new=2016.06 in an attempt to do what you mean
+
+[01:40] <bisectable6> AlexDaniel, Bisecting by output (old=2016.05 new=2016.06) because on both starting points the exit code is 0
+
+[01:40] <AlexDaniel> nonono
+
+[01:40] <AlexDaniel> c: 2016.05,2016.06 my $a; $a = $_.starts-with("1").Int for ^1_150_000; say now - INIT now
+
+[01:40] <committable6> AlexDaniel, ¦2016.05: «0.9978324␤» ¦2016.06: «1.2120359␤»
+
+[01:40] <bisectable6> AlexDaniel, bisect log: https://gist.github.com/d518f07d5ef9e5f1ee1b4a95df69256e
+
+[01:40] <bisectable6> AlexDaniel, (2016-05-21) https://github.com/rakudo/rakudo/commit/2fe776240a959b0763742bf3b7e51e19acbdbeeb
+
+[01:40] <AlexDaniel> c: 2016.05,2016.06 my $a; $a = $_.starts-with("1").Int for ^11_500_000; say now - INIT now
+
+[01:41] <committable6> AlexDaniel, ¦2016.05: «8.89256761␤» ¦2016.06: ««timed out after 10 seconds» «exit signal = SIGHUP (1)»»
+
+[01:41] <AlexDaniel> bisect: 2016.05,2016.06 my $a; $a = $_.starts-with("1").Int for ^11_500_000; say now - INIT now
+
+[01:41] <bisectable6> AlexDaniel, Using old=2016.05 new=2016.06 in an attempt to do what you mean
+
+[01:41] <bisectable6> AlexDaniel, Bisecting by exit signal (old=2016.05 new=2016.06). Old exit signal: 0 (None)
+
+[01:41] <AlexDaniel> fwiw I'm just having some fun
+
+[01:43] <bisectable6> AlexDaniel, bisect log: https://gist.github.com/7a309aecb567103719ae82881f1f387b
+
+[01:43] <bisectable6> AlexDaniel, There are 10 candidates for the first “new” revision. See the log for more details
+
+[01:44] <AlexDaniel> that actually looks about right
+
+[01:44] <AlexDaniel> c: 2017.01,2017.02 my $a; $a = $_.starts-with("1").Int for ^10_000_000; say now - INIT now
+
+[01:45] <committable6> AlexDaniel, ¦2017.01,2017.02: ««timed out after 10 seconds» «exit signal = SIGHUP (1)»»
+
+[01:45] <AlexDaniel> c: 2017.01,2017.02 my $a; $a = $_.starts-with("1").Int for ^5_000_000; say now - INIT now
+
+[01:45] <committable6> AlexDaniel, ¦2017.01: «6.5676648␤» ¦2017.02: «9.1559536␤»
+
+[01:45] <AlexDaniel> c: 2017.01,2017.02 my $a; $a = $_.starts-with("1").Int for ^6_500_000; say now - INIT now
+
+[01:45] <committable6> AlexDaniel, ¦2017.01: «8.482026␤» ¦2017.02: ««timed out after 10 seconds» «exit signal = SIGHUP (1)»»
+
+[01:45] <AlexDaniel> bisect: 2017.01,2017.02 my $a; $a = $_.starts-with("1").Int for ^6_500_000; say now - INIT now
+
+[01:45] <bisectable6> AlexDaniel, Using old=2017.01 new=2017.02 in an attempt to do what you mean
+
+[01:46] <bisectable6> AlexDaniel, Bisecting by exit signal (old=2017.01 new=2017.02). Old exit signal: 0 (None)
+
+[01:47] <bisectable6> AlexDaniel, bisect log: https://gist.github.com/db9762241ef207f311ddf0011235277e
+
+[01:47] <bisectable6> AlexDaniel, (2017-01-25) https://github.com/rakudo/rakudo/commit/9044fcac38262f229df5cc1670816520cebdf88c
+
+[01:48] <AlexDaniel> uhh ok I'll move to #whateverable :D
+
+[02:19] *** anatofuz left
+[02:20] *** anatofuz joined
+[03:09] *** anatofuz left
+[03:10] *** anatofuz joined
+[03:14] *** anatofuz left
+[03:15] *** anatofuz joined
+[04:06] *** anatofuz left
+[04:08] *** anatofuz joined
+[04:25] *** anatofuz left
+[04:27] *** anatofuz joined
+[04:42] *** anatofuz left
+[04:49] *** leedo joined
+[04:53] *** anatofuz joined
+[04:54] *** tbrowder joined
+[04:54] *** mtj joined
+[05:17] *** anatofuz left
+[05:18] *** anatofuz joined
+[05:23] *** anatofuz left
+[05:30] *** anatofuz joined
+[06:31] *** domidumont joined
+[06:43] *** anatofuz left
+[06:43] *** anatofuz joined
+[06:46] *** anatofuz left
+[06:46] *** anatofuz joined
+[07:08] *** anatofuz left
+[07:09] *** anatofuz joined
+[07:12] *** anatofuz left
+[07:13] *** anatofuz joined
+[07:15] <nine> While prohibiting promotion to the old gen yields quite a few more missing MVMROOTs, the extreme runtimes are a real issue. make test's been running for 2 days now and will take a couple more. Estimate a spectest to take about a month.
+
+[07:17] <nine> So I'm thinking, maybe there's a compromise. If I replace the NURSERY_SEEN flag with a counter, I can give objects several runs in the nursery and have them promoted later.
+
+[07:18] <nine> There can only be so many allocations between a pointer taken and it getting dereferenced.
+
+[07:24] <nine> There seem to be 3 bits unused in MVMCollectableFlags. That'd give me 15 rounds in the nursery till I have to promote. That may even be enough.
+
+[07:24] *** sena_kun joined
+[07:51] *** anatofuz left
+[07:52] *** anatofuz joined
+[07:57] *** anatofuz left
+[08:06] *** anatofuz joined
+[08:36] <nine> Well this improves perl6 -e '' from 5m39s to 3m2s
+
+[08:37] <nine> And 15 rounds in the nursery ought to be enough for any bug :)
+
+[08:39] <MasterDuke> heh, that's the sort of improvement that probably shouldn't be tweeted about
+
+[08:45] *** anatofuz left
+[08:46] *** anatofuz joined
+[08:49] <AlexDaniel> MasterDuke: wrong! “it now runs in 54% of the time it used to!”
+
+[08:50] <AlexDaniel> :)
+
+[08:50] *** anatofuz left
+[08:58] *** anatofuz joined
+[09:33] <nine> Lesson learned: always remove memory protections before free()ing as glibc will want to write its own book keeping data into the memory and not actually return it to the OS
+
+[09:38] *** brrt joined
+[09:43] <brrt> \o
+
+[09:43] <brrt> dogbert17: please post notes on how to replicate the issue, or create a GH issue and tag me on it
+
+[09:51] <MasterDuke> brrt: btw, have you seen my latest replies to you comments on https://github.com/MoarVM/MoarVM/pull/1139 ?
+
+[09:53] <brrt> hi MasterDuke
+
+[09:53] <brrt> sorry, hadn't
+
+[09:54] <MasterDuke> no hurry
+
+[09:54] <dogbert17> brrt: I ran t/spec/S32-str/sprintf-b.t with a nursery set to 8k. Also I'm on MoarVM e4a756c6aa.
+
+[09:54] <brrt> that's rakudo right?
+
+[09:54] <brrt> ok, I can try that out
+
+[09:54] <dogbert17> no, it's moarvm, rakudo is on ef2ee79126696
+
+[09:55] <brrt> I know, I mean, that's a rakudo test case :-)
+
+[09:55] <brrt> rather than an NQP one
+
+[09:55] <dogbert17> ah, yes indeed
+
+[10:02] <MasterDuke> dogbert17: have you ever seen problems with t/02-rakudo/15-gh_1202.t ?
+
+[10:06] <dogbert17> I believe so yes
+
+[10:08] <brrt> I'm setting the jit-bisect hounds on it
+
+[10:12] <brrt> well, I agree it breaks and is spesh sensitive
+
+[10:16] *** anatofuz left
+[10:16] *** anatofuz joined
+[10:19] <nine> So, I now keep the last 16 fromspaces with protections against reading and writing. Unfortunately this means that we're spending way more time allocating and zeroing the new tospace (since we don't re-use the old one)
+
+[10:21] *** anatofuz left
+[10:22] <nine> But, when I remove the superfluous memset after allocating the new tospace, I can recover most of the cost. The tospace will be overwritten with the kept objects anyway and the remaining part gets its own memset treatment. This is also an optimization that may help on master!
+
+[10:23] <nine> And when I do not double the size of the tospace but extend it by just a page size instead, I can recover the rest of the cost!
+
+[10:29] <brrt> nine++
+
+[10:43] <brrt> worse, it is PEA sensitive :-o
+
+[10:47] * brrt grumbles
+
+[10:51] <MasterDuke> here's a new SEGV
+
+[10:51] <MasterDuke> https://gist.github.com/MasterDuke17/5d049194b8a59c5e67f8bdfb16807292
+
+[10:52] <MasterDuke> that's with stock moar/nqp/rakudo, no gc debug or altered nursery size
+
+[10:53] <MasterDuke> still segvs with jit disabled
+
+[10:53] <brrt> MasterDuke: humor me and try with PEA disabled?
+
+[10:54] <brrt> MasterDuke: I'm investigating that atm
+
+[10:54] *** anatofuz joined
+[10:54] <MasterDuke> seems to run just fine, i.e., no segv
+
+[10:55] <brrt> yeah, was afraid that it would be
+
+[10:55] <brrt> what about inline disabled?
+
+[10:55] <MasterDuke> well, it's looking like disabling inlining also fixes it
+
+[10:56] <MasterDuke> so maybe it's some interaction between those two optimizations
+
+[10:57] <brrt> yep
+
+[10:57] <brrt> ok
+
+[10:57] <brrt> well, I have a spesh log to study
+
+[10:58] <brrt> and sure enough:
+
+[10:58] <brrt>       [Annotation: INS Deopt Inline (idx 10 -> pc 154; line 149)]
+
+[10:58] <brrt>       sp_guardconc     r10(2),  r10(1), sslot(0), litui32(2)
+
+[10:58] <brrt>  
+
+[10:59] <brrt> because the deopt_idx is 2, rather than 154, this is using an idx, but it's not updating post-inlining, I think
+
+[11:03] <MasterDuke> easy fix?
+
+[11:07] <brrt> hardly
+
+[11:07] <brrt> but it is at least somewhat obvious where the problem is
+
+[11:09] <brrt> theory: the guard op is wrong because of inlining. It breaks because PEA wants the deopt idx for materialization
+
+[11:11] <brrt> and
+
+[11:12] <brrt> previously, we would've done the 'right' thing, because we'd lookup from the deopt source index
+
+[11:12] <brrt> question remains, why the deopt annotation and the deopt index on the instruction are not in sync
+
+[11:14] *** anatofuz left
+[11:14] *** anatofuz joined
+[11:24] <brrt> hmm, that's probably not it though
+
+[11:53] *** brrt left
+[12:39] <timotimo> i've been dreading looking into this, but i was trying to get the path to some collectable in some heap snapshot and it had an out-of-range reference :|
+
+[12:52] *** anatofuz left
+[12:53] *** anatofuz joined
+[12:57] *** anatofuz left
+[12:59] *** lucasb joined
+[13:03] <timotimo> m: nqp::readuint(my $, 0, nqp::const::BINARY_SIZE_16_BIT +| NativeEndian)
+
+[13:03] <evalable6> timotimo, rakudo-moar ef2ee7912: OUTPUT: «(exit code 1) ===SORRY!=== Error while compiling /tmp/ai_F0Hbn1q␤Could n…»
+
+[13:03] <evalable6> timotimo, Full output: https://gist.github.com/d259a4fe79f4dbd5d98dc7c0c9dfe7f9
+
+[13:03] <timotimo> m: use nqp; nqp::readuint(my $, 0, nqp::const::BINARY_SIZE_16_BIT +| NativeEndian)
+
+[13:03] <evalable6> timotimo, rakudo-moar ef2ee7912: OUTPUT: «(signal SIGSEGV) »
+
+[13:04] <timotimo> ^- maybe not very good :) :) :)
+
+[13:11] * timotimo puts more nqp in moar-heapanalyzer and sees it go much faster
+
+[13:16] <timotimo> well, maybe not "much" faster
+
+[13:25] *** anatofuz joined
+[13:58] *** anatofuz left
+[14:06] <timotimo> m: use nqp; nqp::atpos_2d_i(my $, 1, 1)
+
+[14:06] <evalable6> timotimo, rakudo-moar ef2ee7912: OUTPUT: «(exit code 1) ===SORRY!===␤No registered operation handler for 'atpos_2d_i'␤»
+
+[14:06] <timotimo> m: use nqp; nqp::atpos2d_i(my $, 1, 1)
+
+[14:06] <evalable6> timotimo, rakudo-moar ef2ee7912: OUTPUT: «(exit code 1) This representation (P6opaque) does not support positional access (for type Scalar)␤  in block <unit> at /tmp/Or7sr_ttZQ line 1␤␤»
+
+[14:06] <timotimo> ^- that's not the right error text, tho, since it could have a positional delegate
+
+[14:06] <timotimo> i wonder if positional delegates should also support things like read-uint and such
+
+[14:20] <dogbert17> heh,  could have sworn I saw Froggs log on
+
+[14:21] <timotimo> yeah, he did
+
+[14:22] <dogbert17> col
+
+[14:23] <dogbert17> cool
+
+[14:27] <dogbert17> somethings up with my keyboard, hmm
+
+[14:30] <Geth> ¦ MoarVM: 177706fe2c | (Timo Paulssen)++ | 3 files
+
+[14:30] <Geth> ¦ MoarVM: better error message for P6opaque in multidim functions
+
+[14:30] <Geth> ¦ MoarVM:
+
+[14:30] <Geth> ¦ MoarVM: it used to say "the type does not support positional access",
+
+[14:30] <Geth> ¦ MoarVM: but p6opaque has the "positional delegate" mechanism that
+
+[14:30] <Geth> ¦ MoarVM: lets some types offer positional access. it does not, however,
+
+[14:30] <Geth> ¦ MoarVM: offer multidim access. it might at some point, maybe.
+
+[14:30] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/177706fe2c
+
+[14:30] <Geth> ¦ MoarVM: 0864cb76fb | (Timo Paulssen)++ | 6 files
+
+[14:30] <Geth> ¦ MoarVM: don't crash with read-int/write-int on unsupported reprs
+
+[14:30] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/0864cb76fb
+
+[14:54] *** dogbert17 left
+[15:07] *** brrt joined
+[15:09] <brrt> I have a theory for the deopts
+
+[15:15] <brrt> hmmm, I may need to improve my theory a little more
+
+[15:21] <Geth> ¦ MoarVM: 3e8652ead8 | (Timo Paulssen)++ | src/spesh/worker.c
+
+[15:21] <Geth> ¦ MoarVM: add missing root for VMEvent SpeshOverviewEvent
+
+[15:21] <Geth> ¦ MoarVM:
+
+[15:21] <Geth> ¦ MoarVM: nine++ found this
+
+[15:21] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/3e8652ead8
+
+[15:25] *** zakharyas joined
+[15:28] <timotimo> brrt: what can i put for the size in a "load" node for 64, 32, 16, 8 bit integers?
+
+[15:28] <timotimo> or do i just load a 64bit chunk and clear the lower bits and shift over? :P
+
+[15:28] <brrt> hmm?
+
+[15:28] <timotimo> (template: sp_get_i64 (load (add $0 $1) $2 int_sz))
+
+[15:28] <brrt> should put the size of the field needed
+
+[15:29] <brrt> yes, int_sz is right there
+
+[15:29] <timotimo> i would imagine int_sz is wrong here, since that is 32 bits
+
+[15:29] <brrt> no
+
+[15:29] <timotimo> then it's long_sz :P :P
+
+[15:29] <brrt> int_sz isn't sizeof(int)
+
+[15:29] <brrt> it is MVM_JIT_INT_SZ
+
+[15:29] <brrt> and it's 8 bytes
+
+[15:29] <timotimo> OK
+
+[15:29] <brrt> (maybe that's wrong, but that's the size of an integer in moar)
+
+[15:29] <timotimo> "the size of the field needed" is literally what sizeof gives? i.e. size in bytes rather than bits
+
+[15:31] <brrt> yes
+
+[15:31] <timotimo> Can't use string ("$1,") as an ARRAY ref while "strict refs" in use at tools/expr-template-compiler.pl line 269, <STDIN> line 2687.
+
+[15:31] <timotimo> accidentally put a , in my expr template code
+
+[15:31] <brrt> bwhat template are you using?
+
+[15:32] <timotimo> got this very unhelpful error :)
+
+[15:32] <brrt> :-)
+
+[15:32] <brrt> oops
+
+[15:32] *** dogbert17 joined
+[15:33] <dogbert17> it seems I somehow managed to pour some coffee into my keyboard, everything went haywire
+
+[15:35] <timotimo> welp, my sp_get_o is wrong
+
+[15:35] <timotimo> or one of the others
+
+[15:36] <timotimo> something makes it segv
+
+[15:37] <timotimo> (template: sp_get_o (load (add $1 $2) ptr_sz)) (template: sp_get_i64 (load (add $1 $2) int_sz)) (template: sp_get_i32 (load (add $1 $2) 4)) (template: sp_get_i16 (load (add $1 $2) 2)) (template: sp_get_i8  (load (add $1 $2) 1))
+
+[15:39] <timotimo> oh, does it want one more deref
+
+[15:40] <timotimo> oooh
+
+[15:40] <timotimo> of course, get_o has to put vmnull if the thing is null
+
+[15:42] <timotimo> cool that makes it work
+
+[15:44] <Geth> ¦ MoarVM: acfb594996 | (Timo Paulssen)++ | src/jit/core_templates.expr
+
+[15:44] <Geth> ¦ MoarVM: exprjit: templates for sp_get_i* and sp_get_o
+
+[15:44] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/acfb594996
+
+[15:45] *** brrt left
+[15:46] * dogbert17 runs a spectest with a small nursery
+
+[15:49] *** brrt joined
+[15:53] <dogbert17> brrt: did it turn out to be a nasty problem?
+
+[15:55] *** anatofuz joined
+[16:00] *** brrt left
+[16:01] <timotimo> hum. i seem to be using "if" wrong
+
+[16:01] <timotimo> ah, "got reg wanted flag"
+
+[16:09] <timotimo> i hope brrt will hit me up when he can help me with my sp_p6oget_bi
+
+[16:12] <timotimo> brrt, https://gist.github.com/timo/f32c6731b37e440a51e7e20c1de01077
+
+[16:13] <timotimo> oooh
+
+[16:14] <timotimo> i dereferenced once too often
+
+[16:14] <timotimo> i may make the ^bigint_is_smallint macro return a flagval perhaps
+
+[16:15] <timotimo> then i wouldn't have to put an extra nz to get a flagval back from the int made by the macro
+
+[16:16] *** gdonald left
+[16:17] <timotimo> uh, apparently not possible?
+
+[16:22] <Geth> ¦ MoarVM: 21b2b13239 | (Timo Paulssen)++ | src/jit/core_templates.expr
+
+[16:22] <Geth> ¦ MoarVM: exprjit sp_bind_o
+
+[16:22] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/21b2b13239
+
+[16:22] <Geth> ¦ MoarVM: 0674a1e694 | (Timo Paulssen)++ | 2 files
+
+[16:22] <Geth> ¦ MoarVM: exprjit sp_p6oget_bi
+
+[16:22] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/0674a1e694
+
+[16:29] *** anatofuz left
+[16:44] *** Ven`` joined
+[16:49] <Geth> ¦ MoarVM: a4a599e350 | (Stefan Seifert)++ | src/6model/reprs/MVMCode.c
+
+[16:49] <Geth> ¦ MoarVM: Fix possible access to fromspace in MVM_code_location
+
+[16:49] <Geth> ¦ MoarVM:
+
+[16:49] <Geth> ¦ MoarVM: Allocating the result may trigger a GC run which could move code which we
+
+[16:49] <Geth> ¦ MoarVM: access later on. Fix by moving initialization of result till after we've
+
+[16:49] <Geth> ¦ MoarVM: accessed code.
+
+[16:49] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/a4a599e350
+
+[16:49] <Geth> ¦ MoarVM: 9138c69986 | (Stefan Seifert)++ | src/core/frame.c
+
+[16:49] <Geth> ¦ MoarVM: Fix possible access to fromspace in MVM_frame_move_to_heap
+
+[16:49] <Geth> ¦ MoarVM:
+
+[16:49] <Geth> ¦ MoarVM: The update_caller frame is read at the previous iteration and could be outdated
+
+[16:49] <Geth> ¦ MoarVM: by the allocation at the start of the loop, before we get to assign into it.
+
+[16:49] <Geth> ¦ MoarVM: Fix by adding update_caller to the MVMROOTs.
+
+[16:49] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/9138c69986
+
+[16:49] <Geth> ¦ MoarVM: 07983e4cbc | (Stefan Seifert)++ | src/strings/ops.c
+
+[16:49] <Geth> ¦ MoarVM: Fix possible access to fromspace in MVM_string_flip
+
+[16:49] <Geth> ¦ MoarVM:
+
+[16:49] <Geth> ¦ MoarVM: Allocating the res string may cause the original string to move, outdating
+
+[16:49] <Geth> ¦ MoarVM: the s pointer. Fix by MVMROOTing s while allocating res.
+
+[16:49] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/07983e4cbc
+
+[16:50] <timotimo> cool
+
+[17:01] *** anatofuz joined
+[17:24] <MasterDuke> probably time for nqp/rakudo bumps
+
+[17:31] *** domidumont left
+[17:34] *** Ven`` left
+[17:35] *** anatofuz left
+[17:35] *** Ven`` joined
+[17:35] *** Ven`` left
+[17:46] <lizmat> yeah, feels like
+
+[18:15] <timotimo> i just semi-randomly tried adding an OP(blargblarg): in interp.c and didn't get a compiler error, nor a linker error
+
+[18:15] <timotimo> i wonder if we can get that to work
+
+[18:21] <japhb> timotimo: Meaning, get it to notice that at compile time?
+
+[18:21] <timotimo> yep
+
+[18:22] <timotimo> labels that are not used are usually not an error
+
+[18:22] <timotimo> right?
+
+[18:22] <japhb> Dunno, been too long since I tried that.
+
+[18:24] <timotimo> ah dang
+
+[18:24] <timotimo> some warnings for switches are disabled when a "default" exists
+
+[19:04] *** Kaiepi left
+[19:04] *** Kaypie joined
+[19:18] *** brrt joined
+[19:18] *** Ven`` joined
+[19:19] <brrt> \o
+
+[19:19] <tellable6> 2019-09-15T19:17:33Z #perl6-dev <MasterDuke> brrt some expr jit problem https://colabti.org/irclogger/irclogger_log/perl6-dev?date=2019-09-15#l238
+
+[19:19] <brrt> dogbert17: I think I have a fix
+
+[19:21] <brrt> .tell MasterDuke I'll have a look
+
+[19:21] <tellable6> brrt, I'll pass your message to MasterDuke
+
+[19:22] <MasterDuke> brrt: cool. vrurg over in #perl6-dev says he hasn't been seeing it, but his moarvm is a couple days old, which makes https://github.com/MoarVM/MoarVM/pull/1176 a little suspect
+
+[19:25] <brrt> I'll find the bug I'm sure
+
+[19:25] <brrt> and maybe not because it might be something I fixed already
+
+[19:25] <MasterDuke> nice
+
+[19:27] <brrt> well, maybe
+
+[19:27] <Geth> ¦ MoarVM: 2ac137c3d8 | (Bart Wiegmans)++ | 4 files
+
+[19:27] <Geth> ¦ MoarVM: [JIT] Use the new deopt index for synthetic guards
+
+[19:27] <Geth> ¦ MoarVM:
+
+[19:27] <Geth> ¦ MoarVM: Even though the new guard index points to the same target, it doesn't
+
+[19:27] <Geth> ¦ MoarVM: typically have the same deopt_source address as the original one, as
+
+[19:27] <Geth> ¦ MoarVM: that would've been on a prepargs instruction (or similar).
+
+[19:27] <Geth> ¦ MoarVM:
+
+[19:27] <Geth> ¦ MoarVM: Using the old index would've given us the right target, but anything
+
+[19:27] <Geth> ¦ MoarVM: referencing the deopt index on the new annotation (in particular, PEA)
+
+[19:27] <Geth> ¦ MoarVM: would miss the reference. So we should really use the correct one.
+
+[19:27] <Geth> ¦ MoarVM:
+
+[19:27] <Geth> ¦ MoarVM: This fixes the bug in rakudo t/spes/S32-str/sprintf-b.t
+
+[19:27] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/2ac137c3d8
+
+[19:37] *** sena_kun left
+[19:41] <brrt> MasterDuke: can you try after I pushed?
+
+[19:41] <brrt> I'm not getting the problem locally
+
+[19:41] <brrt> (but that was after I fixed the bug in the commit above, so, who knows)
+
+[19:42] <MasterDuke> brrt: the other sprintf-* tests are fine now, but still getting the same error in t/spec/S32-temporal/DateTime.t
+
+[19:42] <brrt> hmmmpf
+
+[19:42] <brrt> I'm not
+
+[19:42] <brrt> what's your rakudo version?
+
+[19:43] <MasterDuke> also t/spec/S32-list/combinations.t is flopping
+
+[19:43] <brrt> anything else that's special?
+
+[19:43] <MasterDuke> HEAD, `This is Rakudo version 2019.07.1-317-g7dede2d37 built on MoarVM version 2019.07.1-211-g2ac137c3d`
+
+[19:43] <MasterDuke> nope
+
+[19:44] <MasterDuke> the error i'm seeing in t/spec/S32-list/combinations.t is `not ok 33 - &combinations with Iterable first argument match calls with method form# Failed test '&combinations with Iterable first argument match calls with method form'# at t/spec/S32-list/combinations.t line 97# You failed 1 test of 33`
+
+[19:53] <nine> Ever wondered if a certain function may trigger a GC run somewhere down the call tree? Just look it up in run_gc's callers: https://gist.github.com/niner/7630201d73176f403327b5047bb2df5a
+
+[19:54] <nine> Though it's missing the repr functions
+
+[19:57] <dogbert17> brrt++
+
+[19:59] *** Kaypie left
+[19:59] *** Kaypie joined
+[20:01] <nine> Updated it with MVM_repr_alloc_init callers
+
+[20:02] <dogbert17> I suddenly get quite a few fromspace errors with an 8k nursery
+
+[20:07] <brrt> timotimo++ - adding templates
+
+[20:08] <brrt> and yes, the (flagval (eq ...)) and then (nz) is quite redundant
+
+[20:08] <nine> dogbert17: that's....odd. Most of the latest commits were fixes to those
+
+[20:09] <dogbert17> yeah, check this gist: https://gist.github.com/dogbert17/2541a1e3fd71607627979144d3eb7bec
+
+[20:09] <brrt> can just be 'ne'
+
+[20:09] <brrt> no good deed goes unpunished nine :-)
+
+[20:11] <dogbert17> perhaps I've made some stupid mistake
+
+[20:12] <brrt> MasterDuke: I ahve it passing locally
+
+[20:12] <brrt> do you have a smaller nursery or anything like that?
+
+[20:13] <nine> brrt: yes, 8k
+
+[20:14] <dogbert17> nine, can you repro or is it just me?
+
+[20:16] <brrt> nine: can you replicate the/an issue with t/spec/S32-temporal/DateTime.t ?
+
+[20:16] <MasterDuke> brrt: nope, everything is stock. fwiw, `gcc (GCC) 9.1.0`, `Linux alexandria 5.2.14-arch2-1-ARCH #1 SMP PREEMPT Thu Sep 12 10:42:38 UTC 2019 x86_64 GNU/Linux`, `AMD Ryzen 7 3700X 8-Core Processor`
+
+[20:16] <nine> dogbert17: I get a different backtrace. But it doesn't happen on every run
+
+[20:17] <dogbert17> at least I'm not alone :)
+
+[20:18] <brrt> hmm
+
+[20:18] <nine> But I do get the other one consistently if anything happens. It's in OP(set)
+
+[20:18] <brrt> d'oh, I'm not actually on master myself
+
+[20:18] <MasterDuke> brrt: same if i use clang
+
+[20:18] <dogbert17> brrt: I can replicate problems with t/spec/S32-temporal/DateTime.t
+
+[20:19] <dogbert17> it doesn't SEGV or panic though
+
+[20:19] <brrt> MasterDuke: then tbh, the deopt problems become a little less suspect
+
+[20:19] <dogbert17> can it be the new exprjit stuff which went in today?
+
+[20:20] <nine> 3e8652ead seems to be OK
+
+[20:20] <brrt> Ok, on actual master, I can replicate the problem
+
+[20:20] <brrt> awesome
+
+[20:22] <brrt> I'm almost certainly going to lay the blame at timotimo's feet though :-P
+
+[20:22] <nine> 21b2b13239bab27a88d5e389798c557db434e224 is the first bad commit exprjit sp_bind_o
+
+[20:23] * brrt is going to look at sp_bind_o then
+
+[20:23] <dogbert17> and he will blame the cats for walking on his keyboard :)
+
+[20:28] <brrt> sp_bind_o actually looks quite alright
+
+[20:28] * nine is thinking the same
+
+[20:28] <nine> But reverting that commit definitely fixes the test
+
+[20:28] <MasterDuke> is this a case for jit-bisect.pl?
+
+[20:29] <brrt> yes, and I'm running it
+
+[20:29] <brrt> :-)
+
+[20:35] <brrt>  last frame 5435
+
+[20:41] <brrt> and.. I think there may be something going on with the BB bisect
+
+[20:47] *** Kaypie left
+[20:47] *** Kaypie joined
+[20:48] <brrt> ok, not finding it right now, jit bisect is not working with me today
+
+[20:51] *** zakharyas left
+[20:52] *** anatofuz joined
+[20:52] <brrt> MasterDuke17: I'm okay with PR #1139 merging, actually
+
+[20:53] <brrt> nine: my theory is, that sp_bind_o probably unblocks something in the expr JIT that's broken, rather than sp_bind_o itself being broken
+
+[20:53] <brrt> but I'm not going to find that today
+
+[20:55] <MasterDuke> brrt: cool. i'll merge it after the next nqp/rakudo bump. i don't want it to go in with all these other changes because all the text changes might throw off future bisecting
+
+[20:58] *** anatofuz left
+[20:59] *** brrt left
+[21:01] *** Ven`` left
+[21:34] *** anatofuz joined
+[22:32] *** anatofuz left
+[22:32] *** anatofuz joined
+[22:37] *** anatofuz left
+[22:37] <Geth> ¦ MoarVM/master: 6 commits pushed by (Daniel Green)++, MasterDuke17++
+
+[22:37] <Geth> ¦ MoarVM/master: ddf5b56b3e | Add more context to error messages, commit 1
+
+[22:37] <Geth> ¦ MoarVM/master: b0e346e6fd | Add more context to error messages, commit 2
+
+[22:37] <Geth> ¦ MoarVM/master: fa2e4f2184 | Add more context to error messages, commit 3
+
+[22:37] <Geth> ¦ MoarVM/master: e0e3ea9feb | Add more context to error messages, commit 4
+
+[22:37] <Geth> ¦ MoarVM/master: 5cf5c56b74 | Simplify freeing of buffer in UTF8_REJECT cases
+
+[22:37] <Geth> ¦ MoarVM/master: bfe499dd6b | Merge pull request #1139 from MasterDuke17/add_context_to_error_messages
+
+[22:37] <Geth> ¦ MoarVM/master: review: https://github.com/MoarVM/MoarVM/compare/2ac137c3d879...bfe499dd6b89
+
+[22:45] *** anatofuz joined
+[22:46] *** anatofuz left
+[22:47] *** anatofuz joined
+[22:57] <japhb> Wait, did the sp_bind_o commit get reverted before the MoarVM/nqp bump?  Or did we just bump to a known broken MoarVM?
+
+[23:06] <timotimo> sp_bind_o is certainly in master
+
+[23:06] <timotimo> +2019.07.1-211-g2ac137c3d
+
+[23:07] <timotimo> and it's bumped into nqp, too
+
+[23:08] <japhb> Yeah, I think the request to bump and the bisect of the JIT problem crossed streams
+
+[23:09] <timotimo> my apologies for angering the jit gods and not being there to brave the thunderstorm
+
+[23:10] <japhb> Heh
+
+[23:10] <timotimo> make test is clean on my end :|
+
+[23:11] <japhb> timotimo: What about t/spec/S32-temporal/DateTime.t
+
+[23:11] <japhb> ?
+
+[23:14] *** anatofuz left
+[23:15] *** anatofuz joined
+[23:16] <timotimo> "failed one test out of 20"
+
+[23:17] <timotimo> and without my patch it succeeds, because of course it does
+
+[23:19] *** anatofuz left
+[23:25] <timotimo> so what, one revert commit on top of moarvm, then more bumps?
+
+[23:28] *** anatofuz joined
+[23:34] *** anatofuz left
+[23:35] *** anatofuz joined
+[23:39] *** anatofuz left

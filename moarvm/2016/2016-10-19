@@ -1,0 +1,591 @@
+[04:57] *** geekosaur joined
+[05:01] *** diakopter joined
+[05:23] *** domidumont joined
+[05:29] *** domidumont joined
+[05:56] *** domidumont joined
+[05:59] *** geekosaur joined
+[06:07] *** geekosaur joined
+[06:09] *** geekosaur joined
+[06:16] *** geekosaur joined
+[06:21] *** geekosaur joined
+[06:30] *** geekosaur joined
+[06:37] *** geekosaur joined
+[06:40] *** geekosaur joined
+[06:42] *** geekosaur joined
+[06:56] <brrt> timotimo: it is not strictly necessary, a refactor
+
+[06:57] <brrt> i may be biased by my environment, but a refactor per se isn't always a good idea
+
+[07:33] *** zakharyas joined
+[07:52] *** lizmat joined
+[08:15] *** FROGGS joined
+[08:44] <nwc10> good *, #moarvm
+
+[08:46] <FROGGS> morning nwc10
+
+[08:58] <jnthn> morning, #moarvm
+
+[08:58] <jnthn> Seems 'tis the season for colds :S
+
+[09:05] <FROGGS> :S
+
+[09:05] <moritz> it is :(
+
+[09:05] * moritz works from home today in order not to spread it further
+
+[09:06] * FROGGS will build a roof for a treehouse the next days and hopes it wont rain all day
+
+[09:07] * jnthn isn't too bad...yet
+
+[09:07] <jnthn> There's actually a rename-related Windows precomp bug too :(
+
+[09:07] <jnthn> Now that the mkdir-related one is gone
+
+[09:08] <FROGGS> uff
+
+[09:08] <jnthn> Uh, to be clear: it was there before
+
+[09:08] <FROGGS> is that one new too?
+
+[09:08] <FROGGS> ahh
+
+[09:08] <jnthn> Relatively new
+
+[09:08] <jnthn> It only seems to happen when you're editing modules
+
+[09:08] <FROGGS> but what's the bug?
+
+[09:10] <jnthn> It crashss with "Failed to rename file: operation not permitted" somewhere in the precomping process it seems
+
+[09:10] <jnthn> I'll try to get a small repro
+
+[09:11] <jnthn> Though I want to look in to https://github.com/MoarVM/MoarVM/issues/426 first
+
+[09:12] <nwc10> jnthn: is there an strace equivalent for windows? In that, would you get that error on Win32 if it's attempting to rename a file which is open?
+
+[09:12] <nwc10> (A legal move on *nix filesystems)
+
+[09:15] <jnthn> nwc10: Renaming an open file had crossed my mind as a reason for this, yeah
+
+[09:16] <jnthn> There's various tools though not sure which would give more detail than "not permitted"
+
+[09:17] <nwc10> was thinking that with strace on linux (or the equivalents) in the massively verbose log, one could find the "not permitted" error, and then work back to figure out which file it was, and when it was opend/closed
+
+[09:32] <geekosaur> strace equivs are few and far between and painful. but procmon and/or filemon would do it
+
+[09:34] <jnthn> https://github.com/MoarVM/MoarVM/issues/426 is proving a difficult golf...
+
+[09:34] <jnthn> Turns out that my $count = +$fixer.out.lines; can become my $count = 42;
+
+[09:34] <jnthn> Without losing the bug
+
+[09:34] <jnthn> But removing the run loses it
+
+[09:36] <FROGGS> :S
+
+[09:36] <FROGGS> fairly hairy then
+
+[10:03] <dalek> MoarVM: 19d951d | jnthn++ | src/ (4 files):
+
+[10:03] <dalek> MoarVM: Introduce MVM_SPESH_LIMIT.
+
+[10:03] <dalek> MoarVM:
+
+[10:03] <dalek> MoarVM: For limiting the number of specializations produced. This can be
+
+[10:03] <dalek> MoarVM: used in conjunction with MVM_SPESH_LOG to bisect which particular
+
+[10:03] <dalek> MoarVM: frame's specialization leads to breakage.
+
+[10:03] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/19d951dafd
+
+[10:29] <dalek> MoarVM: ad87cd9 | jnthn++ | src/spesh/candidate.c:
+
+[10:29] <dalek> MoarVM: Correct thinko; alway spesh when no limit.
+
+[10:29] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ad87cd9564
+
+[10:32] <jnthn> Seems it's something to do with Spesh of 'elems' (cuid: 4215, file: gen/moar/m-CORE.setting:16795)
+
+[11:17] <jnthn> Turns out not; it got weirder
+
+[11:23] <FROGGS> :S
+
+[11:24] <FROGGS> I guess that's the price for have a weirdtual machine...
+
+[11:26] <jnthn> Think I've figured it out at last
+
+[11:27] <jnthn> It's actaully about callframe
+
+[11:27] <jnthn> When we are doing the logging phase of a spesh'd frame, the annotations don't resolve right
+
+[11:27] <timotimo> dangerous op, that
+
+[11:27] <timotimo> oh, huh
+
+[11:27] <timotimo> that's a really weird one!
+
+[11:28] <jnthn> Well, it's because they refer to original bytecode offsets I guess
+
+[11:28] <jnthn> Anyway, the upshot of that is that in MVM_exception_backtrace:
+
+[11:28] <jnthn> if (fshi >= 0 && fshi < cur_frame->static_info->body.cu->body.num_strings)
+
+[11:28] <jnthn> value = MVM_repr_box_str(tc, MVM_hll_current(tc)->str_box_type,
+
+[11:28] <jnthn> We can't take that path
+
+[11:28] <jnthn> MVM_cu_string(tc, cur_frame->static_info->body.cu, fshi));
+
+[11:28] <jnthn> So we take this one:
+
+[11:28] <jnthn> else
+
+[11:28] <jnthn> value = MVM_repr_box_str(tc, MVM_hll_current(tc)->str_box_type,
+
+[11:28] <jnthn> cur_frame->static_info->body.cu->body.filename);
+
+[11:28] <jnthn> But since the file is in memory, not from disk, that is NULL
+
+[11:29] <jnthn> We thus box a NULL
+
+[11:29] <timotimo> and that null string blows up somewhere else?!
+
+[11:29] <jnthn> Which leads to the explosion in the code: "chars requires a concrete string, but got null"
+
+[11:29] <jnthn> What threw me off a bit is I was looking for a problem in the optimized code
+
+[11:30] <jnthn> While actually this is blowing up the moment we hit the logging code
+
+[11:30] <timotimo> i can imagine you would!
+
+[11:30] <timotimo> i just put in a cache for the three most used ContainerDescriptors and got a little reduction in both core setting size and a tiny bit more than that in rakudo startup memory usage
+
+[11:31] <jnthn> Nice
+
+[11:31] <timotimo> the three most used descriptors, btw, are %_ Mu (by a huge margin!), $_ Mu, and \c Any
+
+[11:31] <jnthn> Hm
+
+[11:31] <jnthn> But...I thought we already had them for $_ Mu
+
+[11:31] <jnthn> See magical_cds or so
+
+[11:31] <jnthn> Lunch time here; bbi30 or so
+
+[11:31] <timotimo> i shall investigate magical_cds
+
+[11:31] <timotimo> (they might have great music on them!)
+
+[11:32] <jnthn> :D
+
+[11:32] <timotimo> perhaps we have some $_ spelled out?
+
+[11:33] <timotimo> 483 Container descriptor: $_ Mu, rw: 0, defaults to 'of' not dynamic
+
+[11:33] <timotimo> 3838 Container descriptor: %_ Mu, rw: 0, defaults to 'of' not dynamic
+
+[11:33] <timotimo> this is across the whole core setting, so it's very possible those $_ are explicitly written "my $_ ..."
+
+[11:37] <timotimo> since there's an additional reduction in memory usage compared to just "the core setting file we mmap in got smaller", i'm hopeful this'll be a little saving for every additional method or sub that the user's code pulls in
+
+[12:01] * jnthn back
+
+[12:01] <jnthn> Did you put in a general cache for identical CDs?
+
+[12:05] *** brrt joined
+[12:07] <timotimo> not yet, but i'm about to
+
+[12:07] <timotimo> to harness the power of The Long Tail
+
+[12:07] * brrt notes to jnthn that he might be able to adapt the jit-bisect.pl tool in the even-moar-jit branch to bisect spesh
+
+[12:07] <brrt> not that bisecting is hard, but when it is done for you, why not
+
+[12:11] <jnthn> Sounds nice :)
+
+[12:12] <brrt> although, the jit-bisect.pl tool also bisects the exact basic tree that starts going wrong
+
+[12:12] <brrt> so it does a bunch of things that you strictly don't need
+
+[12:12] <brrt> and, it uses prove etc... it was not designed for extensiblity
+
+[12:13] <jnthn> :)
+
+[12:13] <jnthn> Yeah, probably easier just to write another script
+
+[12:14] <dalek> MoarVM: 715e39a | jnthn++ | src/core/exceptions.c:
+
+[12:14] <dalek> MoarVM: Make sure we never box a NULL filename.
+
+[12:14] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/715e39a522
+
+[12:15] <jnthn> m: sub foo() { caller(1).file.ends-with('x') } for ^300 { foo() };
+
+[12:15] <camelia> rakudo-moar eb6907: OUTPUT«===SORRY!=== Error while compiling <tmp>␤Unexpected block in infix position (missing statement control word before the expression?)␤at <tmp>:1␤------> caller(1).file.ends-with('x') } for ^300⏏ { foo() };␤    expecting any of:␤     …»
+
+[12:15] <jnthn> m: sub foo() { caller(1).file.ends-with('x') }; for ^300 { foo() };
+
+[12:15] <camelia> rakudo-moar eb6907: OUTPUT«===SORRY!=== Error while compiling <tmp>␤Undeclared routine:␤    caller used at line 1␤␤»
+
+[12:15] <jnthn> m: sub foo() { callframe(1).file.ends-with('x') }; for ^300 { foo() };
+
+[12:15] <camelia> rakudo-moar eb6907: OUTPUT«chars requires a concrete string, but got null␤  in sub foo at <tmp> line 1␤  in block <unit> at <tmp> line 1␤␤»
+
+[12:15] <jnthn> m: sub foo() { callframe(1).file.ends-with('x') }; for ^100 { foo() };
+
+[12:15] <camelia> rakudo-moar eb6907: ( no output )
+
+[12:15] <jnthn> m: sub foo() { callframe(1).file.ends-with('x') }; for ^300 { foo() };
+
+[12:15] <camelia> rakudo-moar eb6907: OUTPUT«chars requires a concrete string, but got null␤  in sub foo at <tmp> line 1␤  in block <unit> at <tmp> line 1␤␤»
+
+[12:15] <jnthn> There's a golf of what I just fixed :)
+
+[12:15] <timotimo> huh, having a "has %!foo" won't create a nqp::hash for me when a class is instantiated in nqp?
+
+[12:15] <jnthn> It easier to golf after you found the bug :P
+
+[12:15] <timotimo> well, apparently not
+
+[12:16] <jnthn> timotimo: not if the class has its own BUILD
+
+[12:16] <timotimo> aha, it does!
+
+[12:18] <timotimo> oh, i didn't know about Perl6CompilationContext
+
+[12:18] <timotimo> should the caches go there?
+
+[12:21] <jnthn> I...hmm
+
+[12:21] <jnthn> Where is magical_cds? :)
+
+[12:21] <jnthn> Probably same place as those
+
+[12:23] <timotimo> yeah, it's in that class
+
+[12:23] <timotimo> first measure, then move
+
+[12:43] <domidumont> FROGGS: remember the hanging moar on arm64. Here's an extract from /proc/xx/status while it's hung: SigBlk: 755e4cdab639e800 . If I interpret this correctly, SIGCHLD is blocked. And the mask value is weird. do you think that the right track ?
+
+[12:45] <[Coke]> jnthn: 426++
+
+[12:45] <jnthn> for ^200 { next if $_ < 199; say callframe }
+
+[12:45] <jnthn> m: for ^200 { next if $_ < 199; say callframe }
+
+[12:45] <camelia> rakudo-moar eb6907: OUTPUT«concatenate requires a concrete string, but got null␤  in block <unit> at <tmp> line 1␤␤»
+
+[12:46] <timotimo> same version as before still
+
+[12:46] <jnthn> Yeah, that's a separate MoarVM issue
+
+[12:46] <[Coke]> (hard to golf) I had a hard time getting it down to those 7 lines!
+
+[12:46] <jnthn> That it turns out is also fix
+
+[12:46] <jnthn> *fixed
+
+[12:46] <timotimo> oh, damn
+
+[12:46] <timotimo> but also: yeah!
+
+[12:53] <jnthn> So, two MoarVM issues down
+
+[12:53] <jnthn> [Coke]: Thanks for getting it down that far, at least :)
+
+[12:54] * jnthn ponders what next :)
+
+[12:54] <nwc10> lunch!
+
+[12:55] <jnthn> Already done that ;)
+
+[12:55] <nwc10> jnthn++
+
+[12:55] <timotimo> jnthn: jdv has a bug that's been keeping them away from using perl6 more; it's an async related one
+
+[12:56] <timotimo> he's even been asking if there's "pay for bug" kind of stuff available
+
+[12:56] <[Coke]> RT #128833 - I was going to try to golf it, but probably won't be able to until this evening.
+
+[12:56] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=128833
+
+[12:57] <FROGGS> domidumont: I dunno... I dont know much about signals...
+
+[12:57] <timotimo> yeah, it's using grammars from multiple threads and it's as if variables would suddenly change what's in them ...
+
+[12:57] <jnthn> timotimo: That's almost certainly a case of insufficient clsoure cloning
+
+[12:58] * jnthn takes a look
+
+[12:58] <timotimo> i have no clue how to properly debug that kind of thing, tbh
+
+[12:58] <jnthn> Ah, is that the one that was being golfed somewhat above?
+
+[12:58] <jnthn> uh, not above, but over on #perl6-dev
+
+[12:58] <timotimo> do we have any diagnostics uncommentable that'll point out that kind of problem?
+
+[12:58] <jnthn> Not really
+
+[12:59] <jnthn> Though the cross-thread write logging is a good hint
+
+[13:00] <timotimo> # Failed test 'bound readonly sub param remains readonly (1)'
+
+[13:00] <timotimo> i wonder how my cache breaks that? o_O
+
+[13:02] <timotimo> i sure hope descriptors are never written to
+
+[13:02] <jnthn> Well, descriptors do get tweaked during compilation potentially
+
+[13:02] <jnthn> I *think*
+
+[13:02] <jnthn> Can't quite remember
+
+[13:02] <jnthn> Are you caching based on the rw flag too?
+
+[13:03] <jnthn> An ro $a and an rw $a need two different descriptors
+
+[13:03] <timotimo> only readonly will be cached at all
+
+[13:03] <timotimo> because the rw ones seem to have default values that aren't =:= the .of
+
+[13:04] <timotimo> my first instinct was to look at p6recont_ro, but that doesn't seem to touch the descriptor at all
+
+[13:05] <timotimo> it only looks to see if the descriptor says it's rw
+
+[13:07] <timotimo> "desc" only occurs two times in QASTCompilerMAST, and that's scsetdesc and scgetdesc :\
+
+[13:11] * timotimo AFK for a bit
+
+[13:14] *** mst joined
+[13:59] *** BinGOs joined
+[14:37] * dogbert17 wonders what jnthn will tackle next
+
+[14:37] * FROGGS .oO( might be tea )
+
+[14:38] * dogbert17 shocking :-) when there's coffee
+
+[14:39] <jnthn> I did coffee this morning
+
+[14:39] <jnthn> Next will be get a test to cover the thing I just fixed into roast :)
+
+[14:40] * brrt also does tea in the afternoon rather than coffee
+
+[14:42] * dogbert17 has completed his moronic project, i.e. run every spectest (well 95%) through valgrind to see what if anything shows up (not incredibly much)
+
+[14:44] <timotimo> oh wow
+
+[14:44] <timotimo> that must have taken a *long* time
+
+[14:44] <mst> that sounds incredibly boring and also well worth doing
+
+[14:44] <mst> which is the sort of thing that often doesn't happen for open source projects
+
+[14:44] * mst applauds dogbert17
+
+[14:45] <dogbert17> it took quite a few hours
+
+[14:46] <dogbert17> results are quite good I'd say, one spectest generating invalid reads and a few which leaks memory
+
+[14:47] <jnthn> dogbert17++ for taking the time to do this
+
+[14:48] <dogbert17> I RT'd the one which generated the invalid reads, i.e. RT #129832
+
+[14:48] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=129832
+
+[14:51] <timotimo> interestign. trying to deserialize from a serialized blob belonging to a compunit that got collected??
+
+[14:52] <timotimo> i'm at least not aware of those blobs being shared
+
+[14:52] <timotimo> hm, but serialized blobs don't get mallocd and freed, tthey get mmapped, don't they?
+
+[14:53] * dogbert17 makes coffee
+
+[14:53] <timotimo> ooooh
+
+[14:53] <timotimo> i know what this is
+
+[14:54] <timotimo> the vm is shutting down, but other threads haven't been stopped yet
+
+[14:55] <dogbert17> every time I run valgrind on that test it ends with 'ERROR summary ....' followed by 'Killed'
+
+[14:56] <jnthn> Hm, I thought if we did full-cleanup then we got all threads sync'd
+
+[14:56] <timotimo> computer says "no" :) :)
+
+[14:56] <jnthn> I think next fix will, if I can find it, be for the darn annoying rename bug on Windows
+
+[14:56] <jnthn> Well, may not be a rename bug
+
+[15:12] <jnthn> bah, the tried STraceNT out of curiosity and it SEGVs before producing any data
+
+[15:17] <dogbert17> what about geekosaur's suggestion, i.e. procmon
+
+[15:19] <FROGGS> jnthn: now you need to fix STraceNT first :P
+
+[15:31] <jnthn> dogbert17: That is much more intersting :)
+
+[15:31] <jnthn> (Was also reading docs for MoveFileExW :))
+
+[15:42] <jnthn> From that, it seems that the parent process of the one that gets in trouble when trying to rename has the target file open
+
+[15:56] <japhb> jnthn: If you're still looking for impactful tasks, the OO::Monitors 'no precompilation' thing would definitely reduce my daily annoyance because it would speed up my testing cycles considerably.  :-)
+
+[15:57] <timotimo> what happens if you just remove "no precompilation"? :)
+
+[15:58] <jnthn> timotimo: "Can't serialize SCRef"
+
+[16:00] <timotimo> OK
+
+[16:01] <jnthn> I have a horrible feleing it'll be because I was clever enough to use macros
+
+[16:01] <jnthn> OO::Monitors might be the only module widely depended on that actually does that :P
+
+[16:01] <jnthn> I thought "ah, it'd be good to compile-time check condition variable names"
+
+[16:01] *** domidumont joined
+[16:01] <jnthn> Which is very clever but maybe not worth the inconvenience of not being able to pre-comp it
+
+[16:02] <jnthn> Dammit, I actually found a case of "file not closed when it should be" in CORE.setting, but it's not the one afflicting precomp on Windows
+
+[16:02] <brrt> interestingly, I believe I made that argument against precompilation just yesterday or so
+
+[16:02] <brrt> as in, precompilation is fun, but macros are better
+
+[16:03] <timotimo> i was considering a pretty crazy project today: when serializing (or perhaps when deserializing?) record all positions in the bytestream before and after reading individual tiny pieces together with C-level backtraces, to split the whole serialized blob by what each byte is used for
+
+[16:09] <jnthn> brrt: I don't think they're at odds particularly...
+
+[16:10] <brrt> hmmm.... I think they can be
+
+[16:10] <brrt> but it kind of depends on your ambitions
+
+[16:11] <brrt> did you get to take a look at the spesh alloc extraction?
+
+[16:11] <jnthn> Not yet, sorry
+
+[16:11] <brrt> one thing I'm pondering is configurable block sizes
+
+[16:11] <brrt> np :-)
+
+[16:11] <jnthn> Been bug hunting all day...
+
+[16:11] <brrt> it's a PR for a reason
+
+[16:11] <jnthn> Still am :P
+
+[16:34] *** Util joined
+[17:05] <japhb> .oO( "Be vewwy vewwy quiet ... we're hunting bugs!" )
+
+[17:07] * timotimo is super hungry and super tired :\
+
+[18:25] * jnthn made lamb kebab thingies with feta in them, salad, and tatziki :)
+
+[18:25] <jnthn> Super full now
+
+[18:44] <FROGGS> (good food)++
+
+[18:44] <domidumont> FROGGS: I've cornered the moar bug on arm64
+
+[18:44] <FROGGS> domidumont: wow, how so?
+
+[18:45] <domidumont> Turns out that the blocked SIGCHLD is the issue, introduced by a Debian patch :-(
+
+[18:45] <domidumont> on libuv
+
+[18:45] <FROGGS> uhh
+
+[18:45] <FROGGS> bad patch! :P
+
+[18:45] <domidumont> The patch was added to fix a mips problem
+
+[18:45] <domidumont> I've added all the details on github
+
+[18:46] <domidumont> But I don't know what's wrong with Debian patch...
+
+[18:47] <FROGGS> yeah, I see the patch now...
+
+[18:49] <domidumont> Darn, this package is maintained by Debian javascript team, and I'm also part of this team :-p
+
+[18:50] <FROGGS> haha
+
+[18:54] <FROGGS> it's also not obvious to me in what way this patch is faulty...
+
+[18:55] <FROGGS> domidumont++
+
+[18:56] <geekosaur> link?
+
+[18:56] <FROGGS> geekosaur: https://github.com/MoarVM/MoarVM/issues/428#issuecomment-254901159
+
+[18:57] <FROGGS> and: http://bugs.debian.org/cgi-bin/bugreport.cgi?bug=841354
+
+[19:00] <timotimo> mhhh tadziki
+
+[19:00] <timotimo> very tasty
+
+[19:01] <geekosaur> why is a uint64_t being replaced by a uint64_t* in the same call?
+
+[19:01] <geekosaur> (sigmask with &sigset)
+
+[19:02] <geekosaur> note that sigmask had the same type as sigset
+
+[19:04] * geekosaur does a little poking, concludes that it should not be passing a pointer. what signals get blocked will depend on the bit pattern of the pointer...
+
+[19:06] <geekosaur> so if you're in a position to do so, try with that patch but remove the & in the uv__epoll_pwait call (line 75 of the patch)
+
+[19:10] <FROGGS> geekosaur: but they've changed the signature of uv__epoll_pwait too
+
+[19:10] <geekosaur> hm.
+
+[19:11] <geekosaur> did they change all uses too? didn;t see it in that patch... or is this really the only usage
+
+[19:11] <FROGGS> they must have, because they removed sigmask
+
+[19:13] <geekosaur> oh, yes, it is. but, now I wonder about the logic... because they were building sigset correctly but using the manually built sigmask.
+
+[19:13] <geekosaur> manually as in manual bit twiddling
+
+[19:13] <geekosaur> are the same bits really being twiddled on all platforms?
+
+[19:15] * geekosaur goes back and looks at the bug again... those are really weird masks...
+
+[19:15] <geekosaur> which is what made me think pointer
+
+[19:16] <geekosaur> ... OH
+
+[19:17] <FROGGS> one thinko might be that in line 49 'sigmask = 0;' is removed
+
+[19:17] <geekosaur> the sigset only ever gets sigemptyset-ed if SIGFPROC is added to it
+
+[19:17] <FROGGS> but 'sigemptyset(&sigset);' is not added there
+
+[19:17] <geekosaur> it's going to be random bits otherwise
+
+[19:17] <geekosaur> er SIGPROF
+
+[19:17] <FROGGS> aye
+
+[19:18] *** dalek joined
+[19:18] <FROGGS> same thing we are talking about
+
+[19:21] <FROGGS> domidumont: can you try moving the 'sigemptyset(&sigset);' in front of the condition?
+
+[19:21] <FROGGS> I'm cloning the libuv package currently, but it'll take time
+
+[19:39] <domidumont> geekosaur, FROGGS: I'll have a look tomorrow
+
+[19:50] * geekosaur submits that observation to debian's bug tracker
+
+[20:06] *** pyrimidi_ joined
+[20:08] *** pyrimidi_ joined
+[22:06] <FROGGS> geekosaur: I just sent a patch to the bug tracker... (tested it successfully on arm64)
+
+[22:06] <geekosaur> saw, yes
+
+[22:07] *** lizmat joined
+[22:12] <FROGGS> took a while to actually test it
+
+[22:12] <FROGGS> arm64 on qemu is not quite fast
+
+[22:20] <FROGGS> gnight

@@ -1,0 +1,171 @@
+[01:17] *** unicodable6 joined
+[01:17] *** quotable6 joined
+[02:58] *** ilbot3 joined
+[03:57] *** bloatable6 joined
+[07:52] *** buggable joined
+[07:52] *** huggable joined
+[07:52] *** ZofBot joined
+[09:31] *** lizmat joined
+[09:42] *** lizmat joined
+[10:13] *** lizmat joined
+[11:00] *** lizmat joined
+[11:26] *** Ven`` joined
+[11:32] *** lizmat joined
+[11:41] *** Ven`` joined
+[11:44] *** Ven` joined
+[11:46] *** committable6 joined
+[13:53] *** Ven`` joined
+[14:14] *** bisectable6 joined
+[14:28] *** Ven`` joined
+[14:47] *** squashable6 joined
+[15:04] <nine> Why does the MAST compiler define its own constants for MVM_EX_ACTION_*?
+
+[15:29] <nine> Another interesting bit: _disabling_ the JIT and removing the goto at the end of the inline causes segfaults - with a completely screwed up stack.
+
+[15:30] <nine> And when the non-JITed version doesn't segfault, it throws the infamous "const_iX NYI" error. So something really must corrupt some memory.
+
+[15:36] <timotimo> i wonder if it's worth the hassle to introduce read-only sections to put the bytecode into?
+
+[15:42] <nine> Still not really closer to answering the question of what frame handlers have to do with INLINE_START and INLINE_END annotations.
+
+[15:42] <timotimo> well, that changes where we look, right?
+
+[15:43] <nine> What do you mean?
+
+[15:43] <timotimo> well, we sometimes want to throw something "from" an outer frame
+
+[15:45] <nine> It breaks when the handler's GOTO annotation is outside [INLINE_START..INLINE_END].
+
+[15:47] <nine> What really confuses me is that there's almost nothing that even uses INLINE_END information.
+
+[15:47] <timotimo> but it changes the ranges in the handler table
+
+[15:48] <timotimo> and those probably impact lots of places?
+
+[15:48] <nine> But that's why it makes no sense: the ranges in the handler table are defined by the FH_START and FH_END annotations, not INLINE_START, INLINE_END
+
+[15:50] <timotimo> huh, but we're supposed to store the inline start and end, too?
+
+[15:53] <nine> But maybe the whole INLINE_END thing is just a red herring. Moving INLINE_END "fixes" things only when the JIT is enabled. The weird segfault when the JIT is disabled is unaffected.
+
+[15:54] <timotimo> hmm
+
+[16:05] <timotimo> i'm sufficiently distracted such that i can't think about this
+
+[16:10] <nine> The only thing that would make some sense would be that it's some deopt issue. But I can't find any indication that the optimized cuid is deoptimized somewhere
+
+[16:16] <nine> Can find neither the inliner, nor the inlinee's cuid in the deopt log
+
+[16:16] <timotimo> hm, OK :\
+
+[16:18] <jnthn> INLINE_END is used to src/spesh/codegen.c and a couple of places under src/jit/. It's used at code-gen time to build the table of deopt extents
+
+[16:18] <jnthn> Bytecode extents for when we interpret spesh'd code, and machine code extents for JIT
+
+[16:19] <jnthn> It's used to figure out "are we in an inline" during deopt, but also when resolving $*FOO
+
+[16:25] *** zakharyas joined
+[16:31] <nine> jnthn: order in the deopt table does not matter, does it?
+
+[16:33] <nine> jnthn: also can you confirm that the comment in src/spesh/deopt.c:118 just does not make sense? We get that offset from the inlines and deopt tables, not from any instruction.
+
+[17:23] *** coverable6 joined
+[17:23] *** benchable6 joined
+[17:33] *** domidumont joined
+[17:38] *** domidumont joined
+[17:43] *** zakharyas joined
+[17:52] <jnthn> iirc, order does matter in so far as innermost inlines should come first
+
+[17:54] <jnthn> nine: And yeah, that comment seems out of date
+
+[18:19] <nine> jnthn: the way it works now (in master and my branch) the innermost inlines will always be last. The inlinee's deopt table is appended to the inliner's
+
+[18:40] *** releasable6 joined
+[18:41] *** greppable6 joined
+[18:41] *** reportable6 joined
+[18:41] *** statisfiable6 joined
+[18:41] *** nativecallable6 joined
+[18:42] <jnthn> nine: Hm, I wonder if we scan it in reverse order then...can't remember
+
+[18:42] <jnthn> Ohh...
+
+[18:42] <jnthn> Maybe we don't scan it at all in deopt
+
+[18:42] <jnthn> 'cus we pass in the deopt index
+
+[18:42] <jnthn> Or some such
+
+[18:42] <jnthn> I forget
+
+[18:42] <jnthn> (Sorry, mostly afk today)
+
+[18:42] <jnthn> Somewhere, we must be figuring out the "chain" of inlines, however, so we can reassemble the call stack
+
+[18:47] <nine> jnthn: uninline in deopt.c just iterates over cand->inlines and creates the frames. And there I'm quite sure we want to work from outer to innermost frame.
+
+[18:49] <jnthn> Oh, I guess I coulda done it that way too
+
+[18:49] <nine> So no smoking gun there...
+
+[18:49] <jnthn> Either way there's inter-loop fixups
+
+[18:50] <jnthn> Could always try turning on the deopt logging flag and comparing wiht master
+
+[18:50] <jnthn> iirc it outputs what frames it recreated
+
+[18:52] <jnthn> dinner, bbl
+
+[18:58] <nine> jnthn: I have 2 test cases where I used MVM_SPESH_LIMIT to find the optimization that breaks the code. In one case there is no deoptimization at all of the affected frame and in the other case there are no recreated frames (which I take as we weren't in inlined code at the time)
+
+[19:02] <nine> Ok, now it gets really interesting.
+
+[19:04] <nine> I compared the deopt log of both test cases with that on master. In both cases the log is identical (modulo offset/target differences of course) _except_ for one extra "Recreated frame" message on master.
+
+[19:05] <nine> The message is about the inlinee of the breaking optimization but NOT the same inliner.
+
+[19:05] <timotimo> that sounds fun, but maybe we're just(?) doing better at inlining in your branch for some reason?
+
+[19:10] <nine> And in both cases it's a deopt all that causes the frame to be created on master but not on inline_in_place
+
+[19:37] *** Kaiepi joined
+[20:50] *** evalable6 joined
+[21:12] *** dogbert2 joined
+[21:15] <nine> Correction: the missing "Recreated frame" message is exactly about the inlinee in the inliner of the breaking optimization
+
+[21:15] <nine> I just misread the deopt log before
+
+[21:18] <samcv> https://github.com/MoarVM/moarvm.org/pull/10
+
+[21:18] <samcv> this looks fine i think?
+
+[21:26] <lizmat> yeah, looks ok to me
+
+[21:28] <nine> jnthn: https://github.com/MoarVM/MoarVM/blob/master/src/spesh/deopt.c#L32 are you sure it's supposed to be offset < cand->inlines[i].end? Shouldn't that be <=?
+
+[21:48] <lizmat> .oO( those pesky off-by-ones )
+
+[21:51] <nine> In fact, I'm pretty sure it should be <= as .end is the offset of the last instruction in the inlined code. And the spectest shows that it can at least not be much wronger ;)
+
+[21:51] <Geth> ¦ MoarVM: 7ea08024ed | (Stefan Seifert)++ | src/spesh/deopt.c
+
+[21:51] <Geth> ¦ MoarVM: Fix off-by-one error in uninline
+
+[21:51] <Geth> ¦ MoarVM:
+
+[21:51] <Geth> ¦ MoarVM: The INLINE_END annotation sits on the last instruction of a chain of inlined
+
+[21:51] <Geth> ¦ MoarVM: basic blocks, so it's this instruction's offset in the bytecode we record as
+
+[21:51] <Geth> ¦ MoarVM: the end of the inlined code (mirroring the start offset).
+
+[21:51] <Geth> ¦ MoarVM: This means that if we are exactly at cand->inlines[i].end, we are still in
+
+[21:51] <Geth> ¦ MoarVM: inlined code and have to re-create the frame on uninlining.
+
+[21:51] <Geth> ¦ MoarVM:
+
+[21:51] <Geth> ¦ MoarVM: This probably didn't cause issues before because inlined code always ends
+
+[21:51] <Geth> ¦ MoarVM: with a goto.
+
+[21:51] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/7ea08024ed

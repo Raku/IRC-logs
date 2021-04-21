@@ -1,0 +1,333 @@
+[00:21] *** MasterDuke joined
+[00:23] <MasterDuke> timo: not quite sure what's meant by "size parameters moved into the allocated blob"?
+
+[00:25] <MasterDuke> body->slots and body->ssize would be combined?
+
+[00:28] <MasterDuke> something like `MVMuint64 ssize = (MVMuint64)body->ssize_and_slots` and `*slots = &(body->ssize_and_slots) + sizeof(MVMuint64)`?
+
+[00:28] <MasterDuke> btw, timo++, fixing my silly realloc error
+
+[00:30] <MasterDuke> should i PR what i have now? or do it all together?
+
+[01:54] *** ilbot3 joined
+[04:56] *** geekosaur joined
+[05:05] *** geekosaur joined
+[05:07] *** yoleaux joined
+[05:51] *** Skarsnik joined
+[06:02] *** Skarsnik_ joined
+[06:11] *** brrt joined
+[06:12] *** domidumont joined
+[06:23] *** domidumont joined
+[06:26] *** domidumont joined
+[06:49] <brrt> good * #moarvm
+
+[06:50] <nwc10> good *, brrt
+
+[06:50] <brrt> i'm still… puzzling about doing register allocation using dynamic programming
+
+[06:50] <brrt> that should be a best-of-both-worlds kind of solution
+
+[06:51] <brrt> but, the difficulty is, the dimensional space for spill/no-spill decisions is kind of large
+
+[06:51] <brrt> so what i'd need is a way to 'build' one dimension on top of the other, as it were
+
+[06:52] <brrt> also, good * nwc10
+
+[07:34] *** brrt joined
+[08:31] *** robertle_ joined
+[08:44] *** brrt joined
+[09:02] <jnthn> morning o/
+
+[09:05] <brrt> good hi jnthn
+
+[09:31] <samcv> morning jnthn
+
+[09:32] * jnthn is continuing with this scheduler adventures
+
+[09:42] <samcv> fun :)
+
+[10:31] <MasterDuke> jnthn: since i believe you are the one who originally suggested it: what's meant by "size parameters moved into the allocated blob"?
+
+[10:34] <jnthn> Today we have start/elems/ssize and then the element data
+
+[10:34] <jnthn> The suggest is to store ssize in the same piece of memory as the element data
+
+[10:34] <jnthn> *suggestion
+
+[10:34] <jnthn> So that you could then read that pointer *once*
+
+[10:35] <jnthn> And have a piece of memory and its size
+
+[10:35] <MasterDuke> something like `MVMuint64 ssize = (MVMuint64)body->ssize_and_slots` and `*slots = &(body->ssize_and_slots) + sizeof(MVMuint64)`?
+
+[10:35] <jnthn> Yeah, something like that
+
+[10:36] <jnthn> Though that will throw power-of-2 allocation sizes off some
+
+[10:36] <MasterDuke> what about body->elems? include it also?
+
+[10:36] <jnthn> The key thing is that we want to be able to do a single pointer deref
+
+[10:36] <jnthn> And then never read outside of it
+
+[10:37] <jnthn> Thus how we can get safety if multiple threads try to mess with the safe VMArray
+
+[10:37] <jnthn> *the same
+
+[10:37] <jnthn> Just freeing the memory at a safepoint ain't quite enough
+
+[10:38] <jnthn> Because we could still read outside the bounds of that memory in a race
+
+[10:38] <MasterDuke> right, the related question is, when should the *_at_safepoint functions be used?
+
+[10:38] <jnthn> We could move elems/start too, but we can't really trust them
+
+[10:38] <jnthn> We'd probably have to always use them at the moment
+
+[10:39] <jnthn> ssize is the actual thing that tells us if we're going to read in-bounds or not
+
+[10:40] <MasterDuke> ah, so i should change the code i have now in gc_free to use MVM_fixed_size_free_at_safepoint?
+
+[10:40] <jnthn> Oh
+
+[10:40] <jnthn> That's the one exception
+
+[10:41] <jnthn> In gc_free we are at a afepoint
+
+[10:41] <jnthn> *at a safepoint
+
+[10:41] <jnthn> grr, lag
+
+[10:42] <MasterDuke> ah. the only other free in VMArray.c is for the repr_data, which i didn't modify at all
+
+[10:42] <Geth> ¦ MoarVM: 3c3a52f961 | (Jonathan Worthington)++ | 8 files
+
+[10:42] <Geth> ¦ MoarVM: Implement getrusage op
+
+[10:42] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/3c3a52f961
+
+[10:42] <jnthn> Oh right
+
+[10:42] <jnthn> But you'll need to safepoint version of realloc
+
+[10:43] <MasterDuke> yeah, i added that
+
+[10:44] <jnthn> So that's why there's no other frees needing it; 'cus it's the reallocs that need it :)
+
+[10:45] <MasterDuke> i modified set_size_internal to use my new MVM_fixed_size_realloc, should it be the *_at_safepoint version instead?
+
+[10:46] <jnthn> Yes
+
+[10:47] <jnthn> I guess you already took care of this, but the safepoint version of realloc can't delegate to MVM_realloc for overflows
+
+[10:47] <jnthn> It really must do the defensive copy
+
+[10:47] <MasterDuke> nope, i'll make both those changes
+
+[10:48] <jnthn> Cool
+
+[10:48] <jnthn> MasterDuke++
+
+[10:49] *** Ven`` joined
+[10:50] <MasterDuke> should i PR what i have now? or do the ssize+slots thing also?
+
+[10:51] <jnthn> I think separate PR for the FSA changes would be good
+
+[10:52] <jnthn> Since it's additive that should be an easy/quick review
+
+[10:52] <MasterDuke> k, will do that once the spectest finishes
+
+[10:52] <jnthn> Then maybe one for the switch to use FSA at all for VMArray, and we can merge that after the weekend release
+
+[10:53] <jnthn> And then another for the step afterwards to make it fully safe
+
+[11:34] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #688: Add MVM_fixed_size_realloc
+
+[11:34] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/688
+
+[11:37] <MasterDuke> ^^^ is a cherry-pick  and squash of the commits from my branch i linked earlier that just deal with adding MVM_fixed_size_realloc(_at_safepoint), but don't use them anywhere
+
+[11:38] <MasterDuke> next i'll cherry-pick and squash the commits that use those for the FSA support in VMArray and PR that
+
+[11:50] *** vendethiel- joined
+[12:02] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #689: Use FSA in VMArray
+
+[12:02] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/689
+
+[12:43] <Geth> ¦ MoarVM: 1e6f4afae5 | (Samantha McVey)++ | src/6model/reprs/MVMHash.c
+
+[12:43] <Geth> ¦ MoarVM: Init. points as NULL in MVMHash.c & remove a few unneeded vars
+
+[12:43] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/1e6f4afae5
+
+[12:43] <Geth> ¦ MoarVM: 6971e14524 | (Samantha McVey)++ | 2 files
+
+[12:43] <Geth> ¦ MoarVM: Add documentation on UCA collation implementation
+
+[12:43] <Geth> ¦ MoarVM:
+
+[12:43] <Geth> ¦ MoarVM: This is an overview on some aspects of the Unicode Collation
+
+[12:43] <Geth> ¦ MoarVM: Algorithm, as well as details for my implementation of it in
+
+[12:43] <Geth> ¦ MoarVM: MoarVM.
+
+[12:43] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/6971e14524
+
+[12:43] <samcv> night all o/
+
+[12:48] <lizmat> night samcv!
+
+[12:50] <jnthn> o/ samcv++
+
+[13:03] *** Ven`` joined
+[13:43] *** timo1 joined
+[14:08] *** AlexDaniel joined
+[14:51] <Geth> ¦ MoarVM: a5c9c963fc | (Jonathan Worthington)++ | 2 files
+
+[14:51] <Geth> ¦ MoarVM: Include debug names in some wrong REPR errors
+
+[14:51] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/a5c9c963fc
+
+[14:51] <Geth> ¦ MoarVM: 4a7248e9ec | (Jonathan Worthington)++ | src/io/asyncsocket.c
+
+[14:51] <Geth> ¦ MoarVM: MVMROOT the object intended, not an integer
+
+[14:51] <Geth> ¦ MoarVM:
+
+[14:51] <Geth> ¦ MoarVM: Fixes occasional crashes in async socket servers since the port/host
+
+[14:51] <Geth> ¦ MoarVM: information was added
+
+[14:51] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/4a7248e9ec
+
+[15:01] *** Ven`` joined
+[15:04] *** Skarsnik joined
+[15:24] *** brrt joined
+[15:35] *** Skarsnik_ joined
+[15:47] <timo> ouch, that was my mistake
+
+[16:26] *** leont joined
+[16:57] *** domidumont joined
+[17:33] <Geth> ¦ MoarVM: zoffixznet++ created pull request #690: Use safer macro formatting
+
+[17:33] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/690
+
+[18:19] *** zakharyas joined
+[18:44] <Geth> ¦ MoarVM/heapsnapshot_onlymajor_filter: 9154dcce6a | (Timo Paulssen)++ | 2 files
+
+[18:44] <Geth> ¦ MoarVM/heapsnapshot_onlymajor_filter: allow heapsnapshot to only record major collections
+
+[18:44] <Geth> ¦ MoarVM/heapsnapshot_onlymajor_filter: review: https://github.com/MoarVM/MoarVM/commit/9154dcce6a
+
+[18:44] <Geth> ¦ MoarVM/heapsnapshot_onlymajor_filter: 48470d57ca | (Timo Paulssen)++ | 2 files
+
+[18:44] <Geth> ¦ MoarVM/heapsnapshot_onlymajor_filter: proper is_null check, allow forcing last snapshot
+
+[18:44] <Geth> ¦ MoarVM/heapsnapshot_onlymajor_filter: review: https://github.com/MoarVM/MoarVM/commit/48470d57ca
+
+[18:47] *** zakharyas joined
+[18:54] <Geth> ¦ MoarVM/heapsnapshot_onlymajor_filter: f147cf96ff | (Timo Paulssen)++ | src/profiler/heapsnapshot.c
+
+[18:54] <Geth> ¦ MoarVM/heapsnapshot_onlymajor_filter: fix compiler warning
+
+[18:54] <Geth> ¦ MoarVM/heapsnapshot_onlymajor_filter: review: https://github.com/MoarVM/MoarVM/commit/f147cf96ff
+
+[19:08] <Geth> ¦ MoarVM/heapsnapshot_onlymajor_filter: e499fcbbbe | (Timo Paulssen)++ | src/profiler/heapsnapshot.c
+
+[19:08] <Geth> ¦ MoarVM/heapsnapshot_onlymajor_filter: root some vars while decoding strings into VMStrings
+
+[19:08] <Geth> ¦ MoarVM/heapsnapshot_onlymajor_filter: review: https://github.com/MoarVM/MoarVM/commit/e499fcbbbe
+
+[19:56] * timo starts a "make a table of all snapshot's summaries" feature and notices that ram isn't quite cheap
+
+[20:04] <timo> oopsie, exhausting the whole thread pool with awaiting threads when trying to parse multiple snapshots in parallel for this
+
+[20:05] <timo> completely without guidance this will probably cause catastrophical memory use, too, before the "forget snapshot" function is called even once
+
+[20:06] <timo> oh, huh
+
+[20:07] <timo> m: my @foo = do { await start { do for ^10 { my uint64 @ = 1, 2, 3; }.Slip }, start { do for ^10 { my uint64 @ = 1, 2, 3; }.Slip }; }; for @foo -> @pieces { say @pieces.^name };
+
+[20:07] <camelia> rakudo-moar a8e035: OUTPUT: «array[uint64]␤array[uint64]␤array[uint64]␤array[uint64]␤array[uint64]␤array[uint64]␤array[uint64]␤array[uint64]␤array[uint64]␤array[uint64]␤array[uint64]␤array[uint64]␤array[uint64]␤array[uint64]␤array[uint64]␤array[uint64]…»
+
+[20:07] <timo> m: use v6.d.PREVIEW; my @foo = do { await start { do for ^10 { my uint64 @ = 1, 2, 3; }.Slip }, start { do for ^10 { my uint64 @ = 1, 2, 3; }.Slip }; }; for @foo -> @pieces { say @pieces.^name };
+
+[20:07] <camelia> rakudo-moar a8e035: OUTPUT: «Slip␤Slip␤»
+
+[20:08] <timo> jnthn: ^- i have a feeling this isn't supposed to be like that?
+
+[20:08] <timo> m: use v6.d.PREVIEW; my @foo = do { await start { do for ^10 { my uint64 @ = 1, 2, 3; }.Slip }, start { do for ^10 { my uint64 @ = 1, 2, 3; }.Slip }; }; for flat @foo -> @pieces { say @pieces.^name };
+
+[20:08] <camelia> rakudo-moar a8e035: OUTPUT: «Slip␤Slip␤»
+
+[20:09] <timo> m: use v6.d.PREVIEW; my @foo = do { await start { do for ^2 { my uint64 @ = 9, 9; }.Slip }, start { do for ^2 { my uint64 @ = 1, 2; }.Slip }; }; say @foo.perl
+
+[20:09] <camelia> rakudo-moar a8e035: OUTPUT: «[slip(array[uint64].new(9, 9), array[uint64].new(9, 9)), slip(array[uint64].new(1, 2), array[uint64].new(1, 2))]␤»
+
+[20:09] <timo> m: my @foo = do { await start { do for ^2 { my uint64 @ = 9, 9; }.Slip }, start { do for ^2 { my uint64 @ = 1, 2; }.Slip }; }; say @foo.perl
+
+[20:09] <camelia> rakudo-moar a8e035: OUTPUT: «[array[uint64].new(9, 9), array[uint64].new(9, 9), array[uint64].new(1, 2), array[uint64].new(1, 2)]␤»
+
+[20:09] *** eater joined
+[20:11] <jnthn> timo: Looks interestingish; worth an RT
+
+[20:22] <timo> filed a bug
+
+[20:22] <Geth> ¦ MoarVM: 0925bb8f26 | (Samantha McVey)++ | 3 files
+
+[20:22] <Geth> ¦ MoarVM: Make a few documentation updates for collation/strings
+
+[20:22] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/0925bb8f26
+
+[20:31] <timo> perl #132091
+
+[20:31] <synopsebot6> Link:  https://rt.perl.org/rt3/Public/Bug/Display.html?id=132091
+
+[20:31] <timo> i ... i think i need to take a heap snapshot of the heap snapshot analyzer ...
+
+[20:32] <timo> cool, it segfaults
+
+[20:32] <timo> i suppose it's high time i made some soup
+
+[20:36] <timo> MVM_gc_worklist_add(tc, worklist, &(tc->instance->all_scs[sc_idx]->sc));
+
+[20:36] <timo> sc_idx is 3020696576 here :D
+
+[21:33] <[Coke]> timo: I assume the implicit request on 132091 is that you don't want that change, yes?
+
+[21:33] <[Coke]> .... ww.
+
+[22:11] *** travis-ci joined
+[22:11] <travis-ci> MoarVM build failed. Samantha McVey 'Add documentation on UCA collation implementation
+
+[22:11] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/275451859 https://github.com/MoarVM/MoarVM/compare/3c3a52f961a8...6971e1452453
+
+[22:11] *** travis-ci left
+[22:12] <samcv> travis race
+
+[22:24] <timo> hm, so ... if we properly have an "MVMCollectable common" at the beginning of every single collectable object ... we can totally put a big entry in there that gets declared a red zone when run under valgrind
+
+[22:28] <Geth> ¦ MoarVM: 73e4351caf | (Zoffix Znet)++ (committed using GitHub Web editor) | src/6model/reprs/P6bigint.h
+
+[22:28] <Geth> ¦ MoarVM: Use safer macro formatting
+
+[22:28] <Geth> ¦ MoarVM:
+
+[22:28] <Geth> ¦ MoarVM: To ensure it works right, regardless of what arg is used
+
+[22:28] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/73e4351caf
+
+[22:28] <Geth> ¦ MoarVM: f042d9eb61 | (Jonathan Worthington)++ (committed using GitHub Web editor) | src/6model/reprs/P6bigint.h
+
+[22:28] <Geth> ¦ MoarVM: Merge pull request #690 from zoffixznet/patch-1
+
+[22:28] <Geth> ¦ MoarVM:
+
+[22:28] <Geth> ¦ MoarVM: Use safer macro formatting
+
+[22:28] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/f042d9eb61
+
+[22:38] <timo> it explodes no earlier when run under valgrind :\
+
+[22:38] <timo> even with gc debug being cranked up to 2

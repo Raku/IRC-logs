@@ -1,0 +1,186 @@
+[00:45] *** MasterDuke left
+[01:45] *** leont left
+[08:59] *** sena_kun joined
+[08:59] <nine> So...maybe patch gmp after all and try to upstream that patch? That would probably the best solution in the long term
+
+[09:19] *** MasterDuke joined
+[09:19] <MasterDuke> nine: not actually going to be around for a while to chat about it, but what sort of patch do you have in mind?
+
+[09:21] <nine> One where instead of calling a hard coded abort() it would call a user supplied function instead. This could then throw an appropriate exception
+
+[09:27] <timotimo> plus have something for cleanup
+
+[09:28] <nine> I guess we can recover tc from the TLS, so it wouldn't even needs some way to keep custom data for us
+
+[09:35] <timotimo>  so when we patch, don't we want to go right for the other library that was forked off of gmp?
+
+[09:36] <nine> Oh, yes, there is already one. I forgot about that
+
+[09:37] <timotimo> i pointed this mess out to a friend; he said grepping for "abort" in that other library was not pretty
+
+[09:41] *** Altai-man joined
+[09:41] <nine> I now have some understanding of why nqp::scdisclaim after a precompilation leads to JustPrecompiledModule::return-defined-int-hash() ~~ Hash[Int:D] giving False.
+
+[09:41] <nine> Ordinarily a type gets parameterized during compilation and serialized at the end. When using it at runtime, we deserialize it again. This serialization/deserialization cycle will generate a copy of the object.
+
+[09:41] <nine> When parameterizing the same type for the main program, the VM finds it in the parameterization cache and returns the same object as previously. When serializing this we discover that it has already been serialized (it got an sc and sc_idx) and instead of doing so again just return the same copy we previously got.
+
+[09:41] <nine> With the nqp::scdisclaim however, we clear the sc and sc_idx so we actually go through serialization/deserialization and thus get an independent copy. Since we compare types by comparing pointers to type objects, they no longer match.
+
+[09:43] <lizmat> so it should not look at the parameterization cache ?
+
+[09:44] <nine> That would just make it an entirely new type that wouldn't match either
+
+[09:44] *** sena_kun left
+[09:48] <timotimo> nqp::sclink, replaces an object from one serialization context with one from another, and sets up a dependency
+
+[09:48] <timotimo> not a terrible idea and fragile approach at all
+
+[09:48] <nine> We wouldn't want a dependency in this case
+
+[09:49] <timotimo> hm, so we have a "resolve repossessions" step already, does repossession somehow seem like a good hook point to do a cache unification kind of thing?
+
+[09:51] <nine> IIRC repossession still implies dependency
+
+[09:53] <timotimo> hm, right
+
+[10:02] <nine> LOL
+
+[10:02] <timotimo> here comes a/the thought that blows this case wide open
+
+[10:03] <nine> I've wondered how this works on master when two independent modules create the same parameterization and why they would match if we need them to result in the same object. Turns out: it doesn't at all
+
+[10:04] <timotimo> totally not
+
+[10:05] <nine> And I wouldn't be surprised if this was what "#?rakudo todo 'no 6model parametrics interning yet'" would test
+
+[10:05] <nine> I think "interning" would be the fancy word for reconciling those different type objects
+
+[10:08] * timotimo recoils
+
+[10:20] <nine> Now I wonder how this fits into this picture: https://github.com/MoarVM/MoarVM/blob/master/src/6model/serialization.c#L3127
+
+[10:22] <timotimo> good question. does stuff in there ever run?
+
+[10:23] <nine> Yes: matching 0x7ff2136d3a40 Associative[Int:D] 0 -1, matching 0x7ff2136abae8 Hash::TypedHash[Int:D] 0 -1
+
+[10:23] <timotimo> perhaps we're setting the indices but never reading them?!
+
+[10:26] <nine> I may have an answer. The thing is that Hash[Int:D] is not actually a parameterized type as such. It's really Hash+{Hash::TypedHash[Int:D]}, i.e. a mixin
+
+[10:27] <timotimo> uh oh
+
+[10:28] <timotimo> does that mean when you grab the .^roles of that type, you'll get a Hash::TypedHash[Int:D] that doesn't match what you get from the literal Hash::TypedHash[Int:D] because that got patched? or something?
+
+[10:31] <nine> m: say Hash[Int] ~~ Associative[Int]
+
+[10:31] <camelia> rakudo-moar 85847d2f1: OUTPUT: «True␤»
+
+[10:31] <nine> m: say Hash[Int:D] ~~ Associative[Int:D]
+
+[10:31] <camelia> rakudo-moar 85847d2f1: OUTPUT: «True␤»
+
+[10:31] <nine> m: say Hash[Int:D].^roles[0] ~~ Associative[Int:D]
+
+[10:31] <camelia> rakudo-moar 85847d2f1: OUTPUT: «True␤»
+
+[10:32] <nine> Intriguing...the latter 2 were False on rakudo 2019.11
+
+[10:38] <nine> Cant' test Hash::TypedHash as that's a my scoped role
+
+[10:51] <lizmat> so, do we have a way in Actions to determine whether we'e compiling something for 6.c / 6.d / 6.e.PREVIEW
+
+[10:51] <lizmat> ?
+
+[10:56] <nine> $*W.setting_revision sounds like the closest
+
+[10:57] <nine> Or $*W.lang-ver-before($want) or nqp::getcomp('Raku').language_version
+
+[11:07] <lizmat> $*W.setting_revision gives an ampty string
+
+[11:07] <lizmat> .language_version gives what I was looking for
+
+[11:42] <nine> Mixins actually also go through type parameterization. So the real question is: why don't they appear in the param type interns?
+
+[11:44] <lizmat> actually used $*W.lang-ver-before($want)
+
+[11:45] <lizmat> now in a PR:
+
+[11:45] <lizmat> $ r 'use v6.e.PREVIEW; my %h; %h{ || <a b c> } = 42; dd %h'
+
+[11:45] <lizmat> Hash %h = {:a(${:b(${:c(42)})})}
+
+[11:48] <timotimo> nice
+
+[11:48] <nine> Of course.... interability is 1 while num_params + 1 is 2...
+
+[11:50] <nine> Otherwise, there is no way the parameterized type in question could have been produced by another compilation unit. We keep a counter of things, which should add up to parameters + 1 if we need the intern entry. */
+
+[11:50] <nine> Comment starts with :/* To deserve an entry in the intern table, we need that both the type being parameterized and all of the arguments are from an SC other than the one we're currently serializing.
+
+[11:50] <nine> Now I wonder if that's an optimization or rather something that's essential for this house of cards to stand...
+
+[12:02] *** leont joined
+[12:29] <MasterDuke> we are using a fork of gmp, but i believe it only adds visual studio compilation support and pulls upstream pretty frequently
+
+[12:31] <nine> multi level parameterization!
+
+[12:33] <nine> Hash[Int:D] is actually Hash+{Hash::TypedHash[Int:D]} which is really 3 parameterizations. Now when we read the parameterization intern table, we try to find an existing parameterization for each one. But if we try Hash[Int:D] before Hash::TypedHash[Int:D] the latter won't be available yet, so we won't find an existing parameterization, won't we?
+
+[12:47] <timotimo> that could be it, yeah
+
+[12:47] <timotimo> so we may have to go through again and again until we hit a fix point
+
+[12:48] <nine> That's exactly what I'm currently trying :) And indeed it leads to more hits. But also to an Invalid dependencies table index encountered (index 768) which I'm trying to debug now
+
+[12:54] <nine> Bingo!
+
+[12:55] <nine> *hyperventilates* this fixed the issue
+
+[13:01] *** vrurg joined
+[13:02] *** vrurg_ left
+[13:06] <MasterDuke> nice
+
+[13:16] *** vrurg_ joined
+[13:18] *** vrurg left
+[13:42] *** sena_kun joined
+[13:44] *** Altai-man left
+[15:21] *** domidumont joined
+[15:27] *** domidumont left
+[16:38] <[Coke]> nine++
+
+[17:41] *** Altai-man joined
+[17:44] *** sena_kun left
+[17:50] <timotimo> what, the whole issue?!
+
+[17:55] <nine> Well the TODOed "precompile load of both and identity check passed" in S10/precompilation.t now passes, as does my golfed version of the in-process-precomp issues I was tracking
+
+[17:56] <timotimo> fantastic
+
+[17:56] <nine> With the internability == num_params + 1 check disabled at least
+
+[17:56] <timotimo> greppable6: has ::
+
+[17:56] <greppable6> timotimo, 1 line, 1 module: https://gist.github.com/0121ea6f1d45b06782683dbbdbb5f0b8
+
+[17:57] <timotimo> hmm
+
+[17:58] <nine> Still a bit of an issue, but I'm getting there
+
+[18:03] *** zakharyas joined
+[18:16] *** domidumont joined
+[18:19] *** domidumont left
+[18:40] *** vrurg_ is now known as vrurg
+
+[19:00] <nine> There actually was yet another bug in resolve_param_interns that was just not triggered because it found so few parameterizations...
+
+[20:13] *** zakharyas left
+[20:20] <nine> Yeah, if we need to deserialize an object when processing the interns, we change the serialization reader's state. Need to restore that to continue where we left off.
+
+[20:51] *** Kaiepi left
+[21:02] <timotimo> good catch
+
+[21:14] *** Altai-man left
+[21:32] <lizmat> nine++
+
+[22:52] *** Kaiepi joined

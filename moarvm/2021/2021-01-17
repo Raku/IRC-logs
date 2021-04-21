@@ -1,0 +1,122 @@
+[00:37] *** linkable6 left
+[00:37] *** evalable6 left
+[00:39] *** evalable6 joined
+[00:40] *** linkable6 joined
+[01:04] *** Kaiepi joined
+[01:04] *** Kaeipi left
+[01:18] *** lucasb left
+[01:48] *** moon-child left
+[01:50] *** moon-child joined
+[02:54] *** moon-child left
+[03:28] *** Kaeipi joined
+[03:29] *** harrow` joined
+[03:30] *** harrow left
+[03:30] *** Kaiepi left
+[03:41] *** moon-child joined
+[08:03] *** nine left
+[08:03] *** nine joined
+[09:01] *** sxmx left
+[09:31] <nine> Regarding that MVM_nativecall_refresh regression, the commit makes less and less sense. The refresh is to update child objects (like a CStruct contained in a CStruct) in case the attribute changed in the containing struct. But if the contained struct is actually inlined, it simply cannot change at all.
+
+[09:32] <nine> After all it's not its own entity, it's just a part of the containing struct. So it will always be found at a certain offset. This renders the whole "is the current attribute value equal to the child object's struct pointer" check moot.
+
+[09:44] *** sena_kun joined
+[09:46] <nine> Incidentally we don't seem to have any tests utilizing MVM_nativecall_refresh on CStructs at all...
+
+[11:30] *** Altai-man joined
+[11:33] *** sena_kun left
+[11:54] <Geth> ¦ MoarVM/fix_nc_memory_handling: 7a94f48664 | (Stefan Seifert)++ | src/core/nativecall.c
+
+[11:54] <Geth> ¦ MoarVM/fix_nc_memory_handling: Fix MVM_nativecall_refresh of CStruct always replacing child objects
+
+[11:54] <Geth> ¦ MoarVM/fix_nc_memory_handling: 
+
+[11:54] <Geth> ¦ MoarVM/fix_nc_memory_handling: MVM_nativecall_refresh has never properly handled CStruct, CPPStruct and CUnion
+
+[11:54] <Geth> ¦ MoarVM/fix_nc_memory_handling: members of CStructs, since it always compared the pointer to the 6model
+
+[11:54] <Geth> ¦ MoarVM/fix_nc_memory_handling: object's body with the pointer contained in the referenced C struct. Since
+
+[11:54] <Geth> ¦ MoarVM/fix_nc_memory_handling: those were never the same, we always destroyed any existing child objects.
+
+[11:54] <Geth> ¦ MoarVM/fix_nc_memory_handling: 
+
+[11:54] <Geth> ¦ MoarVM/fix_nc_memory_handling: <…commit message has 10 more lines…>
+
+[11:54] <Geth> ¦ MoarVM/fix_nc_memory_handling: review: https://github.com/MoarVM/MoarVM/commit/7a94f48664
+
+[12:05] <nine> Darn...the whole "hide some flags in the cstruct pointer" trick isn't gonna play well with spesh
+
+[12:14] <nine> The more I think about it, the less sense the call to MVM_nativecall_refresh makes. Currently we run it on all CArray/CStruct/CPPStruct/CUnion arguments to native functions after the call.
+
+[12:14] <nine> On the one hand it's simply wasteful. Such members will rarely be changed by the native code.
+
+[12:16] <nine> On the other hand it's not enough anyway as timotimo++ pointed out. Struct members may get changed by calls where the containing struct is not even an argument. They may also get changed by different threads.
+
+[12:17] <nine> Then there's those cases where the memory simply isn't there anymore after the call. The simplest case for that is: sub free(CArray *a) is native(Str) { !!! }
+
+[12:17] <lizmat> .oO( free, free at last! :-)
+
+[12:18] <lizmat> although one could argue that's a case of DIHWIDT
+
+[12:21] <nine> An alternative would be to simply check those pointers on every attribute access. The comparison for a single attribute isn't terribly expensive. It's just a hand full of memory accesses. This would fix the use-after-free, make it more accurately follow changes of the underlying structure and may end up performing better in everyday code.
+
+[12:22] <lizmat> hmmm...  "every attribute access" feels like a red flag to me ?
+
+[12:22] <nine> lizmat: if it's a DIHWIDT then try to create a NativeCall to the C library's free() function for structs or arrays. That's not possible at all right now. Which means you get the choice of use-after-free or simply leaking memory.
+
+[12:22] <lizmat> ah, ok  indeed then  :-)
+
+[12:23] <nine> If that's a red flag, then look at https://github.com/MoarVM/MoarVM/blob/master/src/6model/reprs/CStruct.c#L463 and compare that to 1 or 2 additional lines of code with I think exactly 3 reads from memory.
+
+[12:26] <nine> To be clear: I do appreciate your feedback, very much so. Even if it turns out that I'm on the right track and have good arguments for it. Because it forces me to find those arguments
+
+[12:27] <lizmat> yeah, I've had years of training as a rubber duck  :-)
+
+[12:56] <nine> I think I'm getting somewhere. Now passing all tests except for those with mixed ownership, e.g. a function returning an allocated struct and transferring ownership of that struct to us, but the struct contains a pointer to a struct that we must not free (e.g. because it's static)
+
+[12:56] <nine> I don't know yet how to communicate that to the VM. The "is transferring-ownership" traits only apply to arguments and return values
+
+[13:12] <nine> On the assumption that it's still (mostly) a static property of the code, I could give that trait optional arguments like is transferring-ownership(:except<name-of-the-static-attribute>) and transferring-ownership(:except({:some-attribute<static-attribute-of-contained-struct>}))
+
+[13:14] <lizmat> that sounds like an interface one can work with
+
+[13:14] <lizmat> although I do like the "is disowned" suggestion by jnthn for the name :-)
+
+[13:25] <nine> yes, that's nicer indeed
+
+[13:52] *** sena_kun joined
+[14:14] <nine> In addition to :except, we're gonna need is disowned(:only<name-of-disowned-attribute>) as well
+
+[14:24] *** Altai-man left
+[14:24] <nine> And I have no idea how to handle either in the VM. Going through complex, flexible data structures like that and looking up attributes by name sounds kinda horrible.
+
+[14:31] <nine> Thinking about it, what that trait means is "when this function is called, set/unset the managed flag of the described object", i.e. an action to be performed.
+
+[14:32] <nine> Since LessVM is kind of a master goal and we're talking about calls that we already generate code for, why not generate code for the actions instead of have the VM do them based on flags we pass through?
+
+[14:34] <nine> No need to parse data structures at runtime and when we're done, spesh and JIT can optimize it to very simple code, following some pointers and writing to one memory location.
+
+[14:36] <nine> In essence, this will be a bit like explicitly-manage, only with a better interface to the VM, not restricted to just strings and done by generated code instead of by the user.
+
+[14:44] *** lucasb joined
+[15:32] *** sena_kun left
+[15:46] *** sena_kun joined
+[16:04] *** japhb left
+[16:09] *** japhb joined
+[16:14] *** sena_kun left
+[16:20] *** sena_kun joined
+[17:05] *** MasterDuke joined
+[19:30] *** Altai-man joined
+[19:32] *** sena_kun left
+[20:23] *** sxmx joined
+[20:54] *** brrt joined
+[20:59] <brrt> good *
+
+[21:42] *** MasterDuke left
+[22:06] *** vrurg left
+[22:06] *** vrurg_ joined
+[22:07] *** Altai-man left
+[22:29] *** vrurg_ is now known as vrurg
+
+[23:11] *** brrt left

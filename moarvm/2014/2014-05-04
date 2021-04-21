@@ -1,0 +1,911 @@
+[00:41] *** jnap joined
+[01:01] *** FROGGS__ joined
+[01:44] *** jnap joined
+[02:25] *** donaldh joined
+[02:43] *** jnap joined
+[03:43] *** jnap joined
+[04:44] *** jnap joined
+[05:27] *** woosley joined
+[05:45] *** jnap joined
+[06:46] *** jnap joined
+[06:55] <nwc10> jnthn: the attribute is written to by set_int() in P6int.c
+
+[06:56] <nwc10> and there is a mismatch here:
+
+[06:56] <nwc10> (gdb) p l->p6o_header.common.header.size
+
+[06:56] <nwc10> $5 = 28
+
+[06:56] <nwc10> (gdb) p sizeof(*l)
+
+[06:56] <nwc10> $6 = 32
+
+[06:56] <nwc10> so, whatever lays out a P6Int doesn't (sufficiently) follow structure alignment rules
+
+[07:43] <nwc10> jnthn: the "story so far" http://paste.scsys.co.uk/364379
+
+[07:44] <nwc10> I infer that watchpoints on ARM are software, as it's 2 small cups of coffee later and not yet got to the punchline
+
+[07:44] <nwc10> (the bit where it reads at a different offset)
+
+[07:44] <nwc10> but anyway, issue is that on ARM the 64 bit in in the structure is 8 byte aligned
+
+[07:45] <nwc10> but P6Opaque is assuming 4 byte alignment is legal, so doesn't put 4 bytes padding in
+
+[07:45] <nwc10> and I don't know where it's making that assumption
+
+[07:45] <nwc10> I shall put the hammock up, as this is a zero hours contract and I'm now unable to continue work :-)
+
+[07:47] *** jnap joined
+[08:22] *** ilbot3 joined
+[08:26] <nwc10> gah, I'm also unable to slack off in the hammock, as there's wind, clouds, and it's only a matter of time before the pine tree scores a direct hit with a pinecone
+
+[08:39] <nwc10> jnthn: when laying stuff out in memory, does P6Opaque have to deal with any "types" other than void *, MVMInt64 and MVMNum64? [technically I guess chars, but the size and alignment of the header is going to be (at least) 4 bytes and 4 bytes]
+
+[08:40] <jnthn> nwc10: At present, no
+
+[08:41] <jnthn> nwc10: Later on, yes. CStruct (which is behind NativeCall) *does* have to and takes more care on alignment for such things
+
+[08:41] <jnthn> P6opaque should learn that too, though we don't rely on it anywhere yet
+
+[08:42] <nwc10> OK, so the problem here is "what is the alignment of a MVMInt64?"
+
+[08:42] <nwc10> which it's getting wrong on ARM
+
+[08:42] <nwc10> in that, the compiler is laying them out at 64 bit alignment when in structs
+
+[08:43] <nwc10> even though the read (at least for the compiler and CPU and optimisation level I was using) is just fine at 32 bit alignment
+
+[08:43] <nwc10> on x86, the compiler puts them at 32 bit alignment in structs
+
+[08:43] <jnthn> Yeah, I mean the key lines in this are
+
+[08:43] <nwc10> and P6Opaque is assuming that that is the case (everywhere)
+
+[08:43] <jnthn> cur_alloc_addr   = sizeof(MVMP6opaqueBody);
+
+[08:44] <nwc10> yes, was going to say, found that about 15 minutes ago
+
+[08:44] <nwc10> and it's the issue
+
+[08:44] <jnthn> Well, later, we do:
+
+[08:44] <jnthn> cur_alloc_addr += bits / 8;
+
+[08:44] <nwc10> because it's right if what comes next is 4 byte constrained
+
+[08:44] <nwc10> s/next/first/
+
+[08:44] <jnthn> But in CStruct it does:
+
+[08:45] <jnthn> if (cur_size % align) {
+
+[08:45] <jnthn> cur_size += align - cur_size % align;
+
+[08:45] <jnthn> }
+
+[08:45] <jnthn> Before that.
+
+[08:45] <nwc10> OK, so WTF is gcc on x86 doing telling me that alignof(int64_t) is 8?
+
+[08:45] <nwc10> when it's putting them in structs at 4 byte alignment
+
+[08:47] <jnthn> In moar.h we have some alignof related stuff
+
+[08:47] <jnthn> It tries to use the GCC built-in
+
+[08:47] <jnthn> Then falls back to:
+
+[08:47] <jnthn> #define ALIGNOF(t) ((char *)(&((struct { char c; t _h; } *)0)->_h) - (char *)0)
+
+[08:47] *** jnap joined
+[08:47] <nwc10> aha :-)
+
+[08:49] <jnthn> I dunno if that second one gets a righter answer...
+
+[08:49] <jnthn> bbi10
+
+[08:49] <nwc10> OK
+
+[08:56] <nwc10> OK, so what sets HAVE_ALIGNOF? :-)
+
+[09:10] <jnthn> Not us :)
+
+[09:10] <jnthn> I figure it's GCC-defined
+
+[09:12] <nwc10> nope. :-)
+
+[09:12] <jnthn> hm
+
+[09:13] <jnthn> Is it defined anywhere? :)
+
+[09:13] <nwc10> I believe that HAVE_* is not the sort of macro a *compiler* is allowed to define
+
+[09:13] <jnthn> OK, but a standard header somewhere?
+
+[09:14] <nwc10> I think "no" also. A standard header would at least prefix _ if not __
+
+[09:14] <nwc10> if not __both__
+
+[09:18] <FROGGS> good that we have SSD's and we can grep for that on our disk :o)
+
+[09:18] <nwc10> laptop has SSD
+
+[09:18] <nwc10> x86 VM I think doesn't, and it was getting hammered by rsync at one point
+
+[09:18] <nwc10> Pi is connected to an external USB disk, which is faster than an SD card
+
+[09:19] <nwc10> but still going over USB 2
+
+[09:19] <nwc10> actually, root filesystem on SD card
+
+[09:26] <nwc10> something strange here, as I "ought" to be able to break x86, but I can't
+
+[09:26] <nwc10> good news for MoarVM - clouds increasing
+
+[09:27] <nwc10> OK. Yes, *strange*
+
+[09:27] <nwc10> __alignof__(MVMint64) is 8
+
+[09:27] <nwc10> This beauty:
+
+[09:27] <nwc10> #define ALIGNOF(t) ((char *)(&((struct { char c; t _h; } *)0)->_h) - (char *)0)
+
+[09:27] <nwc10> says 4
+
+[09:27] <nwc10> 4 is the truth we need
+
+[09:27] <jnthn> wow :)
+
+[09:27] <nwc10> yet the "ought" problem is that if I force the use of the former, I don't see the SNAFU that I see on ARM
+
+[09:28] <nwc10> yes, <nod> <sigh> <expletive> Drink!
+
+[09:29] <nwc10> so, new question (1) is "why can't I break x86 by using __alignof__?"
+
+[09:29] <nwc10> oh, I know
+
+[09:29] <nwc10> lets keep going into Rakudo and then spectests
+
+[09:29] <nwc10> (...)
+
+[09:31] <nwc10> anyway, http://www.imdb.com/title/tt0088846/quotes?item=qt0223927
+
+[09:33] <jnthn> seems so...
+
+[09:38] <FROGGS> hmmm, there is no HAVE_ALIGNOF in my /usr
+
+[09:42] <nwc10> OK, so yes, confirmed
+
+[09:42] <nwc10> computer says: __alignof__(int64_t) is 8
+
+[09:43] <nwc10> computer says: __alignof__() a struct containing just one int64_t is 4
+
+[09:43] <nwc10> how is that for Awesome? :-)
+
+[09:44] <FROGGS> O.o
+
+[09:46] <nwc10> I shall walk the dogs to celebrate
+
+[09:48] *** jnap joined
+[09:49] <jnthn> nwc10++
+
+[09:54] <jnthn> train, but should hopefully have wifi &
+
+[10:04] *** woosley left
+[10:05] *** woosley joined
+[10:08] *** bxdsam_ joined
+[10:49] *** jnap joined
+[11:15] <nwc10> and here was I thinking that 0.5l of Gösser should get me close to the Balmer peak to go fix this
+
+[11:15] <nwc10> and then I looked at the code.
+
+[11:16] <nwc10> mmm.
+
+[11:16] * nwc10 contemplates the drinks cabinet
+
+[11:19] <jnthn> nwc10: Anything about the code in quesiton you'd like explaining?
+
+[11:19] <jnthn> *question
+
+[11:19] <nwc10> (for anyone reading this $n years hence in the archives and getting the wrong impression - I am actually being pretty careful about what I'm drinking, as I have to be stone cold sober to drive home this evening. There are trams...)
+
+[11:19] <nwc10> jnthn: no. It's just more complex than I was thinking
+
+[11:19] <jnthn> ah
+
+[11:19] <nwc10> and I think line 711 is going to have to move a lot later:
+
+[11:19] <nwc10> Gösser
+
+[11:19] <nwc10> oops
+
+[11:20] <nwc10> repr_data->attribute_offsets[cur_slot] = cur_alloc_addr;
+
+[11:20] <nwc10> because it's going to need to have alignment fixed up
+
+[11:20] <nwc10> and I have to work out the implications of tha tmove
+
+[11:20] <jnthn> ah
+
+[11:20] <jnthn> I don't think anything else in the layout computation depends on that, fwiw
+
+[11:20] <nwc10> Stack Overflow already knows about this __alignof__() fun: http://stackoverflow.com/questions/11825081/why-aligning-of-long-long-union-member-is-bigger-than-the-containing-union-struc
+
+[11:21] <nwc10> jnthn: I hoped that too, but I'll figure it out, as it's blocking me, not you
+
+[11:21] <nwc10> also, I think I've got the cheaper drinks service :-)
+
+[11:22] <nwc10> (I didn't buy the beer, but it happens that I did buy the new bottles of sherry and gin)
+
+[11:22] <jnthn> I guess I could buy beer on this train but I doubt it'd be too intresting.
+
+[11:23] <jnthn> Once I get to my destination, though...there's a Bishop's Arms, which should have nice stuff.
+
+[11:23] <nwc10> but the price would be "interesting"? :-(
+
+[11:24] <jnthn> Oh, sure...
+
+[11:24] <jnthn> But...trackamente :)
+
+[11:24] <jnthn> (In Sweden, when you're sent away by $dayjob to work somewhere that's not home, you get some spending money.)
+
+[11:25] <nwc10> cash? or "budget" (ie spend it or it vanishes)?
+
+[11:25] <jnthn> Even simpler: I declare the time I was away from home, and a fixed amount per half day shows up in my slip.
+
+[11:25] <jnthn> If I just go eat cheap crap and don't have any beer I can actually come out ahead. :)
+
+[11:25] <jnthn> But pizza every night really doesn't work for me :)
+
+[11:27] <nwc10> I think I've gone off *cheap* pizza any night. I've got fussy :-(
+
+[11:27] <jnthn> Yeah...I like a good one.
+
+[11:27] <nwc10> so for the purposes of tax residence, you'll be "moving" to a PO Box in Kiruna?
+
+[11:28] <jnthn> Kiruna itself is moving these days...
+
+[11:30] <nwc10> I read about that
+
+[11:50] *** jnap joined
+[12:49] <nwc10> jnthn: style question - why does static void compose() define a bazillion MVMint64's at the top, whereas Cstruct.c does the declarations (usually) in the tightest block?
+
+[12:50] *** jnap joined
+[13:38] <jnthn> nwc10: I prefer the tightest block approach, I suspect the way it is is an accident of history
+
+[13:38] <jnthn> (The P6opaque code has had a long one; the stuff in Moar actually was originally from the 6model code I built for Parrot)
+
+[13:38] <nwc10> I prefer it too, because it makes it clearer what isn't re-used in loops etc
+
+[13:39] <jnthn> right
+
+[13:39] <jnthn> Feel free to make it that way. It's a decided improvement.
+
+[13:51] *** jnap joined
+[14:10] <nwc10> jnthn: even if I change P6Opaque to do alignment in compose(), it doesn't affect the MAST::Local allocation
+
+[14:10] <nwc10> st->size is still 28, not 32
+
+[14:11] <nwc10> and I can't work out *where* that 28 is getting set
+
+[14:11] <nwc10> (gdb) p st
+
+[14:11] <nwc10> $15 = (MVMSTable *) 0x175f0
+
+[14:11] <nwc10> (gdb) p st->size
+
+[14:11] <nwc10> $16 = 28
+
+[14:11] <nwc10> so, from that address, st isn't malloc()ed
+
+[14:11] <nwc10> but I can't work out what compiles it
+
+[14:13] <jnthn> The allocation is also computed in deserialize_repr_data, I think.
+
+[14:14] <jnthn> We can't just persist the allocation because we might load the bytecode on a different machine
+
+[14:14] <nwc10> OK
+
+[14:14] <nwc10> my fan club is wagging like crazy and expects to go out
+
+[14:14] <jnthn> :)
+
+[14:15] <timotimo> d'aaw
+
+[14:25] *** donaldh joined
+[14:32] *** zakharyas joined
+[14:52] *** jnap joined
+[15:34] * nwc10 looks at deserialize_repr_data
+
+[15:34] <nwc10> and again at the drinks cabinent
+
+[15:34] <nwc10> and at the clock :-)
+
+[15:42] <nwc10> jnthn: OK, I can put the aligns into deserialize_repr_data, but I can't see what calculates the size
+
+[15:42] <JimmyZ> Good evening...
+
+[15:45] <nwc10> jnthn: oh, deserialize_stable_size
+
+[15:45] <nwc10> I start to see the same logic in 3 places... :-(
+
+[15:45] <JimmyZ> nwc10++
+
+[15:47] <jnthn> Ugh, battery nearly out...and no power :/
+
+[15:47] <jnthn> nwc10: Yeah, I think it's not entirely easy to factor out...
+
+[15:49] <timotimo> oh no! jnthn won't be able to hack!
+
+[15:49] <jnthn> < 1 hour of trip to go, though
+
+[15:49] <jnthn> bbl
+
+[15:51] <nwc10> Do you want me to hack? No Mr Worthington, I want you to drink!
+
+[15:53] *** jnap joined
+[16:28] <timotimo> :D
+
+[16:53] *** jnap joined
+[17:24] <jnthn> Made it :)
+
+[17:24] <jnthn> Hm, this place has a nice castle :)
+
+[17:30] <nwc10> I like castles
+
+[17:32] <jnthn> Seems this too has an Indian restaurant too. Seems like some kind of civilization. :)
+
+[17:32] <jnthn> Will save that for tomorrow or so
+
+[17:37] <nwc10> you're not in Stockholm? :-)
+
+[17:37] <jnthn> No
+
+[17:38] <jnthn> I'm in Örebro
+
+[17:38] <jnthn> A rather smaller place. :)
+
+[17:38] <jnthn> Took some getting here.
+
+[17:39] * jnthn ponders what he wants for dinner
+
+[17:40] <nwc10> cheap pizza!
+
+[17:40] <nwc10> Drive via E4 · 1,655 km17 h 39 min
+
+[17:40] <nwc10> not *that* close and I would need to fill up
+
+[17:40] <jnthn> :)
+
+[17:41] <nwc10> or 1d 7h with *eight* train symbols
+
+[17:41] <jnthn> Yes, well, it was 2 trains and a bit of a roundabout route to get here sanely...
+
+[17:41] <jnthn> Oddly, the trip home will take me around an hour and a half less...
+
+[17:42] <nwc10> oh, most curious. If I put "St Pancras International Station" in, Google is suggesting that I fly
+
+[17:42] <jnthn> Or maybe 2 hours less
+
+[17:42] <jnthn> hah :)
+
+[17:42] <jnthn> fail
+
+[17:42] <nwc10> it's thoroughly failing to give me a <8 train icon suggestion
+
+[17:42] <nwc10> in that I think that anywhere in the UK will only be 6 trains from here
+
+[17:42] <nwc10> gah.
+
+[17:43] <nwc10> progress. first bug finally nailed, I think
+
+[17:43] <nwc10> got a Bus error
+
+[17:43] <jnthn> If I use bahn.de I can get it to give me a 7-hop route by train from Vienna to here :)
+
+[17:43] <nwc10> about 2 steps further on
+
+[17:44] <jnthn> wtf, this route is insane
+
+[17:44] <nwc10> 175                         ins_node->operands[i].lit_n64 = GET_N64(args, arg_size);
+
+[17:45] <nwc10> OK. I think that that's an alignment fail.
+
+[17:45] <nwc10> all the world is not a VAX
+
+[17:45] <nwc10> yep
+
+[17:45] <nwc10> [39244.575347] Alignment trap: not handling instruction ed910b00 at [<b6e1a9fc>]
+
+[17:45] <nwc10> [39244.584948] Unhandled fault: alignment exception (0x011) at 0xb62c7942
+
+[17:46] <jnthn> Hmmm
+
+[17:47] <jnthn> It's on the RHS, I guess?
+
+[17:47] <nwc10> I think so
+
+[17:49] <nwc10> my poor brane is failing to expant the macro GET_N64
+
+[17:51] <nwc10> (gdb) p args+arg_size
+
+[17:51] <nwc10> $4 = (MVMuint8 *) 0xb62c7942 ""
+
+[17:52] <nwc10> Yep. alignment fail
+
+[17:52] <nwc10> going to need to be a memcpy() on not-a-VAX 2.0
+
+[17:53] <nwc10> why is that mgacro defined in 4 places?
+
+[17:53] <nwc10> bad codebase! naughty codebase! no cookie.
+
+[17:53] <nwc10> right. food
+
+[17:53] <nwc10> I'm too frazzled to fix this
+
+[17:54] *** jnap joined
+[17:54] * jnthn also needs food
+
+[17:56] <jnthn> bbiab
+
+[18:26] <nwc10> I think that GET_N64 is going to need to become an inline function that is a memcpy() on some platforms, and a simple assignment on others
+
+[18:55] *** jnap joined
+[19:34] * jnthn back
+
+[19:34] * nwc10 actually also just back
+
+[19:34] <jnthn> nwc10: Yes, inline functions works for me.
+
+[19:34] <nwc10> bother. that was "patches welcome", wasn't it? :-)
+
+[19:34] <jnthn> Went to the pub. They had a rather nice porter on tap.
+
+[19:34] <jnthn> And I ate raggmunk. This appears to be Swedish for "heart attack on a plate". :)
+
+[19:35] <jnthn> So I took a walk around the lake after it. :)
+
+[19:35] <nwc10> :-)
+
+[19:36] <nwc10> #define GET_I8
+
+[19:36] <nwc10> etc seem to be cargo cult in about 4 places
+
+[19:36] <nwc10> OK, the various ones are 2 to 4 places
+
+[19:36] <nwc10> what's a better name, and where do they go?
+
+[19:37] <jnthn> They're in part cargo-cult out of some uncertaintly if they'll all end up looking the same...
+
+[19:37] <jnthn> interp.h is probably a sensible place
+
+[19:39] <jnthn> interp.c kinda benefits form the terse names, but no reason we can't just do #define in interp.c to keep the short names but may them to MVM_BC_GET_I8 defined as a static function
+
+[19:39] <jnthn> Probably good to check timings to make sure the static functins work out the same performance wise, given the interpreter itself is one of the most performance sensitive bits.
+
+[19:40] <nwc10> for now, I'm going for "does it even build?"
+
+[19:40] <jnthn> :)
+
+[19:40] <nwc10> in a branch
+
+[19:40] <timotimo> jnthn: is there something kinda-obvious we could do to make access to CStruct repr'd things more optimal through spesh?
+
+[19:41] <timotimo> the CStruct repr could get a generator for some of its reprops, no?
+
+[19:42] <jnthn> timotimo: maybe; it's a little complicated though
+
+[19:42] <jnthn> P6opaque is much easier to do such things with
+
+[19:42] <timotimo> dang
+
+[19:56] *** jnap joined
+[19:57] <tadzik> what is the best way to profile things on rakudo-moar?
+
+[19:57] <tadzik> something akin to --profile from parrot backend preferably :)
+
+[19:58] <jnthn> tadzik: There's one area Moar is really lacking at the moment :(
+
+[19:58] <tadzik> aw
+
+[19:59] <jnthn> I did mention how I thought such a thing might be implemented just the other day
+
+[19:59] <jnthn> I don't have tuits for it immediately
+
+[19:59] <tadzik> alright, I guess I can use parrot for the profiling I need
+
+[20:01] <tadzik> heh, apparently my game only works in moarvm anyway
+
+[20:01] <tadzik> both jvm and parrot do nativecall differently somehow
+
+[20:21] <nwc10> jnthn: not got there yet, but if it generates the same assembler, there's no need to benchmark a changeset, is there? :-)
+
+[20:23] <jnthn> no, and, uh, wow. :P
+
+[20:24] <nwc10> no, I meant, I'm going to aim for htat
+
+[20:24] <nwc10> because benchmarking is insane
+
+[20:24] <nwc10> I was getting repeatable different results depending on the order that I linked object files
+
+[20:24] <nwc10> said object files were compiled with everything aligned to 64 bytes
+
+[20:24] <jnthn> wtf...
+
+[20:24] <nwc10> ie L1 cache size
+
+[20:25] <nwc10> yes, utter WTF
+
+[20:25] <nwc10> it DID NOT MAKE SENSE at all.
+
+[20:25] <nwc10> I do not enjoy benchmarking.
+
+[20:25] <nwc10> the computer manages more stupid than I can fight
+
+[20:26] <nwc10> drink!
+
+[20:27] <nwc10> Pi been building NQP for a few minutes now. This is progress.
+
+[20:30] <jnthn> \o/
+
+[20:31] <nwc10> it's building with -fsigned-char
+
+[20:32] <nwc10> I'll tackle removing that hack after I get it to build at all
+
+[20:32] <nwc10> and -funsigned-char fails (far faster) on x86_64
+
+[20:32] <nwc10> where hardware watchpoints work properly
+
+[20:32] <tadzik> Fun Signed! \o/
+
+[20:32] <nwc10> ie in hardware :-)
+
+[20:32] <nwc10> oh, and valgrind, and ASAN
+
+[20:33] <nwc10> and all my favourite hammers
+
+[20:40] <jnthn> Hardware watchpoints are awesome
+
+[20:40] <jnthn> I taught one C++ dev about them a year or so ago and he almost mentions their awesomeness every time we talk now. :)
+
+[20:43] <jnthn> And then in WebApiConfig
+
+[20:43] <jnthn> ooops
+
+[20:56] <nwc10> pig still flying...
+
+[20:57] *** jnap joined
+[20:57] <nwc10> I suppose if I wanted *real* pain I'd get a cross toolchain and figure out how to compile it for the satellite reciever
+
+[21:15] <tadzik> wow
+
+[21:16] <tadzik> I updated rakudo-moar, and now my game can handle 60 collision checks per frame, instead of 20
+
+[21:16] <tadzik> what sorcery is this :o
+
+[21:16] *** TimToady joined
+[21:17] <tadzik> or even 100
+
+[21:18] <jnthn> What version did you update from?
+
+[21:18] <jnthn> I put in a couple of nice opts in the last week
+
+[21:18] <tadzik> it was probably older than that, hard to say now
+
+[21:19] <tadzik> but the speedup is stunning
+
+[21:19] <tadzik> jnthn++
+
+[21:19] <jnthn> If you had a month old you will have missed another round of really nice opts
+
+[21:19] <tadzik> it was definitely spesh
+
+[21:19] <tadzik> but it may have been like 'spesh on merge day' or so
+
+[21:19] <jnthn> yeah, the opts were not just spesh stuff though :)
+
+[21:20] *** brrt joined
+[21:20] <jnthn> spesh is actually currently better at dealing with NQP code than Perl 6 code. My current work is changing that :)
+
+[21:20] <brrt> hi #moarvm
+
+[21:20] <brrt> hi jnthn
+
+[21:20] <jnthn> brrt! \o/
+
+[21:20] <brrt> yes, i'm back :-)
+
+[21:21] <brrt> i'd like to explain my radio silence over the last half week or so, if only to get it off my chest
+
+[21:21] <brrt> my girlfriend was hospitalized last thursday night
+
+[21:21] <jnthn> Ouch. Sorry to hear that. :(
+
+[21:22] <tadzik> ooh
+
+[21:22] <brrt> thanks
+
+[21:22] <brrt> and after about 2,5 days in the IC, she's now on the mend, and hopefully will be back later this week
+
+[21:22] * tadzik hugs brrt
+
+[21:22] <tadzik> I hope she gets well soon
+
+[21:23] <brrt> thanks, i hope so too
+
+[21:23] <brrt> but that why i haven't been arround much, obviously
+
+[21:23] <brrt> :-)
+
+[21:23] <jnthn> brrt: Glad she's on the mend; hope the recovery continues to go well, and of course, take what time's needed for that; people matter more than software.
+
+[21:24] <brrt> thanks for that
+
+[21:24] <brrt> how's spesh and moarvm been doing these last days?
+
+[21:24] <tadzik> amazing, as I've just found :o
+
+[21:25] <tadzik> I mean, I'm used to awesome progress by now
+
+[21:25] <jnthn> brrt: Well, I've started in on the next round of spesh work, getting it to gather more info.
+
+[21:25] <nwc10> All tests successful.
+
+[21:25] <jnthn> brrt: And nwc10++ is doing awesome things on portability.
+
+[21:25] <jnthn> nwc10: On...? :)
+
+[21:25] <jnthn> That was the Pi?
+
+[21:25] <nwc10> that was NQP
+
+[21:25] <nwc10> Files=89, Tests=3239, 726 wallclock secs ( 9.69 usr  0.60 sys + 691.52 cusr 14.49 csys = 716.30 CPU)
+
+[21:25] <nwc10> Result: PASS
+
+[21:25] <nwc10> real    68m16.870s
+
+[21:25] <nwc10> user    66m52.730ssys     0m30.280s
+
+[21:26] <nwc10> om nom nom goes Terminal
+
+[21:26] <nwc10> yes, that was the Pi
+
+[21:26] <nwc10> going to reboot, because it seems it's not doing HDMI
+
+[21:26] <nwc10> and I'd like "console" in case it goes titsup
+
+[21:26] <jnthn> :)
+
+[21:26] <brrt> oooh nice
+
+[21:26] <jnthn> .oO( MoarVM: ARMed and dangerous! )
+
+[21:27] * brrt would still like a pi
+
+[21:28] <nwc10> what stops you? constrained budget? GF objects to even more computers? $other?
+
+[21:28] <brrt> dynasm supports arm i think
+
+[21:28] <brrt> never really bothered with actually getting one :-p
+
+[21:28] <brrt> also everybody in my environment was treating them like cheap media centers and i'm not so interested in that
+
+[21:29] <tadzik> I was doing some electronics with mine :)
+
+[21:29] <tadzik> and LCD that told me how warm it is and when's the next bus
+
+[21:29] <tadzik> and there was some perl (5) in there :)
+
+[21:29] <brrt> nice
+
+[21:29] <tadzik> then one day I bumped the whole installation with my elbow and all the wires disconnected from their slots
+
+[21:29] <tadzik> and I never bothered to put it back together :o
+
+[21:30] <tadzik> should've soldered that
+
+[21:34] <nwc10> We're at:
+
+[21:34] <nwc10> /mnt/Sandpit/moar-gs/bin/nqp-m --target=mbc --output=blib/Perl6/Pod.moarvm --encoding=utf8 \ src/Perl6/Pod.nqp
+
+[21:34] <nwc10> and I'm going to bed
+
+[21:35] <brrt> sleep well
+
+[21:35] <FROGGS> gnight nwc10++
+
+[21:35] <jnthn> 'night, nwc10++
+
+[21:52] <brrt> jnthn, out of curiosity, did you ever learn swedish?
+
+[21:54] <jnthn> brrt: Barely. I can get by in restaurants, supermarket, on the train, decode station announcements about how late the train is today, and various other bits :)
+
+[21:54] <jnthn> brrt: Basically, enough that I don't have to bother folks to use English for trivial situations.
+
+[21:55] <brrt> a bit then
+
+[21:55] <jnthn> Yeah. I tend to be able to get the gist of the work emails that fly by in Swedish too.
+
+[21:55] <brrt> i've been watching both swedish and danish tv-series and movies
+
+[21:55] <woolfy> ncw10++ (wow fantastic!)
+
+[21:55] <jnthn> Reading is always easier though.
+
+[21:56] <brrt> and i must say i found swedish /much/ easier to understand
+
+[21:56] <brrt> i'd like to learn a few more languages too
+
+[21:56] <jnthn> I can read a lot more Russian than I can write/speak/listen too... Guess reading gives you more decoding time. :)
+
+[21:56] <brrt> i suppose so
+
+[21:56] <brrt> russian?
+
+[21:56] <jnthn> Oh yeah...Danish is way harder than Swedish when spoken.
+
+[21:57] <jnthn> But when written it's not so bad.
+
+[21:57] <brrt> i haven't seen much of it written, actually :-)
+
+[21:57] *** jnap joined
+[21:57] <brrt> swedish i could almost (almost) understand as spoken, but then i'm dutch and its probably more similar to swedish than english is
+
+[21:58] <jnthn> Yes, I starting making some lame attempts to decode Dutch menus when I was in the Netherlands for nlpw recently. :)
+
+[21:58] <brrt> did it work out? how was the nlpw?
+
+[21:59] <jnthn> Well, I confused egg and onion consistently :P
+
+[21:59] <brrt> lol
+
+[21:59] <brrt> they're close
+
+[21:59] <jnthn> nlpw was nice
+
+[21:59] <brrt> ei vs ui
+
+[22:00] <jnthn> I gave a talk. People seemed to like it.
+
+[22:00] <brrt> oh yes.. i renember not having clicked on the link, thinking to look at it later
+
+[22:01] <jnthn> Other than that, it was just generally a very nice time. :)
+
+[22:01] <brrt> good to hear
+
+[22:01] <brrt> nothing extraordinary due to the 'kings day / night' celebrations?
+
+[22:02] <brrt> btw, my plan for the duration of the 'community bonding period' was to post a (weekly) entry on the following topic: dynasm, moarvm bytecode, x64 bytecode, and another topic i've forgotten
+
+[22:02] <jnthn> ooh
+
+[22:02] <jnthn> That sounds really nice
+
+[22:03] <jnthn> Was the other topic how spesh works? :)
+
+[22:03] <brrt> yes
+
+[22:03] <brrt> precisely that
+
+[22:03] * jnthn looks forward to reading that :)
+
+[22:04] <tadzik> :D
+
+[22:04] <brrt> and correcting, probably
+
+[22:04] <brrt> :-
+
+[22:04] <brrt> :-)
+
+[22:10] <brrt> wait, whats hardware watchpoints
+
+[22:11] <jnthn> A hardware-supported way of saying "break whenever this memory address gets written to"
+
+[22:11] <jnthn> Exposed by various C debuggers
+
+[22:11] <brrt> hmm okay, including gdb?
+
+[22:11] <brrt> (the only c debugger i know :-))
+
+[22:11] <jnthn> Exceptionally useful when you know that at some point a bit of memory gets corrupted.
+
+[22:12] <jnthn> But have no idea what does it.
+
+[22:12] <jnthn> I used them heavily when debugging the MoarVM GC in the past.
+
+[22:12] <jnthn> Surely gdb supports them.
+
+[22:12] <jnthn> Though I don't know how they look there.
+
+[22:12] <jnthn> But I think that's what nwc10 was using.
+
+[22:12] <brrt> yes, he mentioned them
+
+[22:12] <jnthn> yeah, and I figure he's using gdb
+
+[22:13] <brrt> did i ask what version of visual studio - if at all - you're using to compile moarvm on windows?
+
+[22:13] <jnthn> I know he's not using what I tend to be :)
+
+[22:13] <brrt> what are you using?
+
+[22:13] <jnthn> Don't think so. I've got VS2012 on this machine.
+
+[22:13] <jnthn> But 2010 toolchain was fine too
+
+[22:13] <jnthn> And later ones also should be
+
+[22:13] <jnthn> You can get the free express edition and it's enough
+
+[22:13] <jnthn> I have fancier editions 'cus I do .Net stuff for $dayjob
+
+[22:15] <brrt> ok, i can get that
+
+[22:16] <brrt> i'll need a (strawberry) perl install for building, right?
+
+[22:17] <jnthn> That's probably fine
+
+[22:17] <jnthn> The ActiveState one works out fine too
+
+[22:17] <brrt> never used it, know nothing of it :-)
+
+[22:17] <brrt> oh, thats not true though
+
+[22:17] <brrt> activestate made komodo iirc
+
+[22:26] <brrt> (http://nickdesaulniers.github.io/blog/2014/04/18/lets-write-some-x86-64/ this is a nice and accessible entry into x64, i think, and easier than amd or intel manuals)
+
+[22:29] *** btyler joined
+[22:29] <tadzik> can you still order intel manuals in print for free?
+
+[22:30] <brrt> i have no idea
+
+[22:31] <brrt> if so... that'd be awesome to have
+
+[22:31] <brrt> could you?
+
+[22:31] <tadzik> I think they did that at some point
+
+[22:33] <tadzik> now they're just downloadable, it seems
+
+[22:33] <brrt> shame
+
+[22:33] <brrt> print would be awesome
+
+[22:33] <tadzik> "Note: The Intel® 64 and IA-32 Architectures Software Developer’s Manuals are no longer available to order as hard copy"
+
+[22:34] <brrt> really a shame
+
+[22:40] <brrt> although $16,48 isn't that much
+
+[22:40] <brrt> but i expect shipping to be added
+
+[22:41] <tadzik> oh, so you _can_ order them?
+
+[22:41] <tadzik> I paid more for yesterday's pizza :o
+
+[22:41] <tadzik> it was 1 AM though :P
+
+[22:42] <brrt> you can order them on a site called lulu.com
+
+[22:43] <brrt> http://www.lulu.com/spotlight/IntelSDM :-)
+
+[22:49] <tadzik> oh cool
+
+[22:49] <brrt> yeah, maybe worth it
+
+[22:50] <brrt> though i think it unlikely i'll use the entire instruction set
+
+[22:57] <jnthn> Teaching tomorrow...should sleep :)
+
+[22:57] <jnthn> 'night
+
+[22:58] *** jnap joined
+[22:59] <brrt> goodnight
+
+[22:59] * brrt is off too
+
+[22:59] *** brrt left
+[23:59] *** jnap joined

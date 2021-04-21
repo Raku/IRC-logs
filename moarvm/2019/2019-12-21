@@ -1,0 +1,144 @@
+[00:28] <timotimo> it'll be the wrapture
+
+[00:38] *** sena_kun left
+[00:50] *** lucasb left
+[00:54] *** sena_kun joined
+[02:37] *** sena_kun left
+[02:54] *** sena_kun joined
+[02:59] *** harrow` left
+[03:12] *** harrow joined
+[04:39] *** sena_kun left
+[04:54] *** sena_kun joined
+[06:18] *** AlexDaniel left
+[06:38] *** sena_kun left
+[06:53] *** sena_kun joined
+[08:30] *** domidumont joined
+[08:39] *** sena_kun left
+[08:42] *** domidumont left
+[08:54] *** sena_kun joined
+[09:00] <nine> Wait a minute. If I can use a hypothetical deserialization fixup mechanism to replace Inline::Perl5's INIT phasers, doesn't that mean that I could use such INIT phasers to replace NativeCall's deserialization code?
+
+[09:01] <nine> In the end, all I need is reinitialization of the native call site before native functions are run.
+
+[09:09] <lizmat> nine: that feels a bit weird to me...  I mean, should the HLL even know about deserialization ?
+
+[09:31] <nine> In my case: yes. It needs to bring back some external state.
+
+[09:32] <nine> Precompiled code using Inline::Perl5 expects a perl interpreter running having loaded all the modules that were loaded during compilation.
+
+[10:09] *** Voldenet left
+[10:39] *** sena_kun left
+[10:42] <nine> Trying to find a quick fix that has a chance of making it into the upcoming release, I figure that I could actually defer running the resolve_lib_name callback to the first call of the native function. All it needs is a check for handle being non-NULL.
+
+[10:48] *** Voldenet joined
+[10:48] *** Voldenet left
+[10:48] *** Voldenet joined
+[10:55] *** sena_kun joined
+[11:18] <sena_kun> I don't see modules with Fail status, so it seems to safe to cut a moarvm release.
+
+[11:37] <nine> Well, it seems to work just as well as running the callback during deserialization - including the issues we still have
+
+[11:46] <nine> And no wonder! It's not actually running resolve_lib_name that's causing those issues but my callback deopt fix!
+
+[12:10] <nine> Huh... can't reproduce it with MVM_SPESH_BLOCKING=1 and MVM_SPESH_NODELAY=1
+
+[12:13] <nine> Scrap that. It just took a lot of tries
+
+[12:38] *** sena_kun left
+[12:51] *** Altai-man joined
+[12:51] *** Altai-man is now known as sena_kun
+
+[13:13] *** dogbert11 joined
+[13:14] *** dogbert17 left
+[13:58] *** lucasb joined
+[14:07] *** patrickb joined
+[14:13] *** patrickb left
+[14:15] *** domidumont joined
+[14:16] *** zakharyas joined
+[14:37] *** Altai-man_ joined
+[14:39] *** sena_kun left
+[15:11] *** domidumont left
+[15:13] *** domidumont joined
+[15:14] *** dogbert11 left
+[15:15] *** dogbert11 joined
+[15:23] *** dogbert11 left
+[15:24] *** dogbert11 joined
+[15:35] *** zakharyas left
+[16:10] <nine> So, not writing back interp_cur_op, interp_bytecode_start and interp_reg_base to the outer runloop fixes csv-ip5xs.pl, but of course would bring back the deopt issue
+
+[16:18] <nine> The issue is very sensitive to GC. I can make it fail reliably with a 16K nursery
+
+[16:27] *** lucasb left
+[16:37] *** sena_kun joined
+[16:39] *** Altai-man_ left
+[16:45] *** dogbert17 joined
+[16:48] *** dogbert11 left
+[17:33] <nine> It's destructors!
+
+[17:36] <nine> Thing is: remove_one_frame is responsible for running special_return or special_unwind code attached via a frame's extras. That's usually code that will free some malloc'ed memory or like in my case: destructors queued by the GC.
+
+[17:37] <nine> Before my deopt fix, remove_one_frame would not do so for the top most frame of a runloop. That's OK behaviour for the outermost runloop as the program is going to end anyway and a little sloppyness on cleanup can be forgiven.
+
+[17:38] <nine> My fix changed this as a side effect, now such handlers are also run for top most frames in nested runloops. That's by itself an improvement as it will fix memory leaks and missed destructor calls for callbacks from native code.
+
+[17:38] <nine> But this will currently also leave the outer runloop in an inconsistent state, though I don't know why exactly yet.
+
+[17:44] <nine> Actually, I do have an idea: calling destructors means calling MVM_frame_invoke which will set up the runloop's state so it will execute the called frame. However the nested runloop is at its end and we'll change tc->cur_frame back to the outer runloop's.
+
+[17:45] <nine> Thus we end up with a mix of interp variables.
+
+[17:57] *** sena_kun left
+[17:58] *** sena_kun joined
+[18:03] <nine> Solution: keep that inner runloop running until those handlers are fully processed. We'll get another chance at returning to the outer runloop when the finalizer returns.
+
+[18:03] *** sena_kun left
+[18:04] *** sena_kun joined
+[18:14] <nine> Damn...accidentally pushed the change to when resolve_library's called as well.
+
+[18:14] <nine> Apparently geth's down?
+
+[18:46] *** Geth_ joined
+[18:46] *** Geth left
+[18:57] *** Altai-man_ joined
+[18:58] *** sena_kun left
+[19:18] *** Altai-man_ left
+[19:19] *** sena_kun joined
+[20:24] *** domidumont left
+[20:36] <Geth_> ¦ MoarVM: eb13ccad13 | (Stefan Seifert)++ | src/core/nativecall.c
+
+[20:36] <Geth_> ¦ MoarVM: Fix NativeCall body's resolve_lib_name getting outdated on GC
+
+[20:36] <Geth_> ¦ MoarVM:
+
+[20:36] <Geth_> ¦ MoarVM: Need a write barrier on the object when assigning the resolve_lib_name to an
+
+[20:36] <Geth_> ¦ MoarVM: attribute in the NC body.
+
+[20:36] <Geth_> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/eb13ccad13
+
+[20:37] <nine> With this things seem to be quite stable again :)
+
+[20:37] <nine> Would love to see a release now!
+
+[20:40] <sena_kun> nine, can you clarify if https://github.com/rakudo/rakudo/commit/55b3ed5626f4b81fe65f69a6d5f23aec6783337a and https://github.com/rakudo/rakudo/commit/0e4f8351eca4ca7df5cb7561487bc9d3865a2d85 are "fixing" the same issue, as in, should they be a single entry in the changelog?
+
+[20:42] <nine> sena_kun: yes, they are indeed about the same issue. My first attempt at fixing had unwanted side effects
+
+[20:42] <sena_kun> nine, thanks!
+
+[20:43] * sena_kun notes
+
+[20:58] *** travis-ci joined
+[20:58] <travis-ci> MoarVM build errored. Stefan Seifert 'Fix NativeCall body's resolve_lib_name getting outdated on GC
+
+[20:58] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/628187730 https://github.com/MoarVM/MoarVM/compare/357adb45bf83...eb13ccad1395
+
+[20:58] *** travis-ci left
+[21:20] *** Altai-man_ joined
+[21:23] *** sena_kun left
+[21:28] *** zakharyas joined
+[21:45] *** zakharyas left
+[21:46] *** zakharyas joined
+[22:20] *** zakharyas left
+[23:21] *** sena_kun joined
+[23:23] *** Altai-man_ left

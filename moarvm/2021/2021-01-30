@@ -1,0 +1,247 @@
+[00:06] *** lucasb left
+[00:28] *** patrickb left
+[00:57] *** MasterDuke left
+[02:32] *** raku-bridge left
+[02:33] *** raku-bridge joined
+[02:33] *** raku-bridge left
+[02:33] *** raku-bridge joined
+[03:34] *** squashable6 left
+[03:35] *** squashable6 joined
+[08:52] *** patrickb joined
+[09:10] *** domidumont joined
+[10:03] <El_Che> jnthn: documented the build failures as https://github.com/MoarVM/MoarVM/issues/1424 and https://github.com/MoarVM/MoarVM/issues/1425
+
+[10:26] <nine> I may have found a GC issue: NativeCall callbacks use a nested runloop. The callback's result is written to a stack allocated MVMRegister via tc->cur_frame->return_value, but AFICT neither return_value, nor res.o are ever MVMROOTed. So, if between a frame's result getting set and the runloop exiting a GC run can get triggered, we may work with an outdated pointer.
+
+[12:39] *** MasterDuke joined
+[12:40] <MasterDuke> patrickb: do you have any interest in figuring out the windows build of https://github.com/MoarVM/MoarVM/pull/1402 ? or should i try to recruit someone else?
+
+[12:46] *** Kaeipi left
+[12:47] *** Kaeipi joined
+[12:50] *** Kaeipi left
+[12:50] *** Kaeipi joined
+[12:51] *** Kaeipi left
+[12:52] *** Kaeipi joined
+[12:53] *** Kaeipi left
+[12:54] *** Kaeipi joined
+[12:55] *** Kaeipi left
+[12:57] <MasterDuke> anyone want to port https://github.com/fastfloat/fast_float to C? says it's 4x faster than strtod (which we use)
+
+[13:01] <lizmat> maybe an nqp port would make more sense ?
+
+[13:01] <lizmat> as there seemingly is a Rust port already ?
+
+[13:04] <MasterDuke> i suspect it would be dramatically slower. lemire is all about writing extremely fast low-level code. the rust probably looks a lot like the c++
+
+[13:05] <nine> Given that srtod converts some 9 million floats per second according to that page, would it even make a difference given our overhead?
+
+[13:06] *** MasterDuke left
+[13:06] *** MasterDuke joined
+[13:07] <MasterDuke> probably not
+
+[13:08] <MasterDuke> some of his other libraries are probably more useful
+
+[13:11] <MasterDuke> nine: since you're around, think jnthn just means `cand` needs to be MVMROOTed here? https://github.com/MoarVM/MoarVM/pull/1344#discussion_r566052382
+
+[13:15] <jnthn> nine: Normally the return value register is a pointer into a calling frame, and so it gets marked as part of that register set; if there is somehow a way to end up with GC happening as you describe then yes, it'd be vulnerable. Though I'm not sure what we would be allocating after a callback as part of marshalling the result; normally we're unboxing something there?
+
+[13:15] <jnthn> Ah, I guess one case that could happen is if the callback has a LEAVE handler...
+
+[13:18] <jnthn> MasterDuke: Sorry, missed that; commented on the issue just now
+
+[13:20] <nine> jnthn: I got a segfault in MVMContainerSpec const *contspec = STABLE(res.o)->container_spec; which happens even before we unmarshal anything. No LEAVE phasers present in my code. But even if the missing ROOT on res.o did not cause my segfault, it warrants fixing anyway
+
+[13:22] <nine> On the bright side: I got our DBIx::Class using Cro application stable with Inline::Perl5's new threading support even when 10 cores are fully utilized.
+
+[13:22] <nine> Well it did crash eventually after some 10 minutes with a getlex: outer index out of range. But that feels more like a general MoarVM issue
+
+[13:24] <MasterDuke> thanks
+
+[13:24] <nine> Turned out that the problems I still got were only because I missed adding a `use Inline::Perl5 <thread-safe>;` to one module and that Cro doesn't necessarily serialize return values in the same thread they were produced. So I need to ensure no Inline::Perl5::Array or Inline::Perl5::Hash is in there
+
+[13:24] <MasterDuke> and nice re cro/Inline::Perl5/DBIx::Class
+
+[13:26] <lizmat> nine: doesn't that imply that Inline::Perl5 with raku could run a threaded perl program safely without "use threads" overhead, and thus *much* faster then perl itself?
+
+[13:27] <nine> lizmat: well the CAVEAT is still that these threads may not communicate. Which fits Cro's worker thread model, but prohibits things like creating processing pipelines with threads collaborating on a job
+
+[13:28] <patrickb> MasterDuke: It's quite low on my todo list. So it might be worth asking around some more.
+
+[13:28] <lizmat> nine: yeah, ok, so basically anything that does not do "use threads::shared" 
+
+[13:31] <patrickb> IIUC the build of that gmp fork is fundamentally incompatible with our build. (Visual Studio files vs makefiles) The only way forward I see is to write makefiles from scratch or look around if there is another fork that has attempted the same...
+
+[13:32] <patrickb> I hope I'm wrong. But I fear it's not a "figure it out" thing, but a "do it ourself entirely" thing.
+
+[13:33] <jnthn> I guess that or require visual studio as part of our build process
+
+[13:35] <jnthn> Though not sure whether there's free (as in beer) availability of that
+
+[13:36] <jnthn> I'd prefer to keep it at just needing the current set of tools one needs if possible, though.
+
+[13:38] <patrickb> https://en.wikipedia.org/wiki/MSBuild
+
+[13:38] <patrickb> it's even free as in speech
+
+[13:38] <jnthn> Oh!
+
+[13:38] <jnthn> That's a much more reasonable thing to depend on
+
+[13:38] <nine> That does look nice indeed!
+
+[13:39] <nine> patrickb++
+
+[13:57] <nine> Now that I've got it working, I wonder if I've taken the wrong approach from the start. When calling a method on a Perl object, I'm using the current thread's perl interpreter to satisfy the request. I think what I should do is actually to use the object's perl interpreter.
+
+[13:58] <nine> Those should be the same, but if not using the wrong interpreter is catastrophic while using a different thread's can be made safe by the user.
+
+[14:01] <nine> And in some cases it may not even require intervention by the user. In our architecture we create one DBIx::Class schema object (i.e. database connection) per thread and store in in $*THREAD. All objects fetched from the database will belong to that same thread as they're created by calling methods on $schema.
+
+[14:02] <nine> When Cro serializes returned data, it may do so on a different thread. But with this architecture that means that the thread will not be busy running Perl code anyway.
+
+[14:02] <nine> Oh, but multiple threads may be serializing returned data originating in the same thread at the same time
+
+[14:03] <nine> I guess https://bholley.net/images/posts/thistall.jpg still applies
+
+[14:07] *** squashable6 left
+[14:07] *** squashable6 joined
+[14:52] <MasterDuke> jnthn: ok, think i've resolved your comments, just force pushed the latest
+
+[14:52] <MasterDuke> patrickb: interesting
+
+[15:09] *** domidumont left
+[15:23] <MasterDuke> iiuc, msbuild could be used to build the smp fork on windows without requiring visual studio to be installed. so theoretically we'd have some way for our Configure+make invocation to (install and?) call msbuild for the gmp submodule. if that's correct, any reason not to proceed with using the smp fork?
+
+[15:30] <jnthn> MasterDuke: Great, I'll look at it shortly
+
+[15:35] <MasterDuke> cool
+
+[16:03] <patrickb> MasterDuke
+
+[16:05] <patrickb> MasterDuke: That actually sounds like a plan.
+
+[16:07] <patrickb> Does MSBuild include the BuildTools? If yes we might not even have an aditional dependency, just a different one...
+
+[16:09] *** ggoebel_ joined
+[16:10] *** tbrowder left
+[16:10] *** lizmat left
+[16:11] *** lizmat joined
+[16:12] *** tbrowder joined
+[16:12] *** ggoebel left
+[17:04] <MasterDuke> maybe? hard to tell exactly from a quick googling
+
+[17:07] <jnthn> MasterDuke: It looks like there are legit compilation errors reported by the CI on the latest spesh candidate PR
+
+[17:08] <jnthn> I think from moving the describe refs or unmanaged size code
+
+[17:08] <jnthn> Or maybe something moved that shouldn't have been
+
+[17:15] *** MasterDuke left
+[17:19] *** MasterDuke joined
+[17:20] <MasterDuke> arg, bit by the git trickery. prob won't be able to fix until later tonight
+
+[17:27] <jnthn> No hurry
+
+[17:27] <jnthn> Other than that I'm fine with the PR.
+
+[17:27] <jnthn> MasterDuke++
+
+[17:41] <[Coke]> anyone mind i I gently rejec https://github.com/MoarVM/MoarVM/pull/1145 ? (conflicts, old, please resubmit)
+
+[17:44] <nwc10> This might seem unfair, because I'm too busy/tired to do it for a while, but given how long we didn't act on this, it doesn't seem totally fair to reject it. Would be better to fix the issues, apologise for the delay and then accept it. But I'm not with it enough to volunteer.
+
+[17:45] <[Coke]> fair enough. Figured that's why it was still there. Maybe I can deal with it.
+
+[17:51] <jnthn> Well, we did review it, it just didn't get updated in response to that
+
+[17:51] <jnthn> It's probably not that hard to rescue
+
+[17:58] <[Coke]> WBNI there was an easy way to steal his branch into my clone from the commit he forked on so I didn't have to do this by hand.
+
+[17:58] * [Coke] rapidly hits "noFun" and looks for something else easy to resolve. Sorry
+
+[18:00] <nwc10> don't stress. Thanks for bringing that PR to everyone's attention. It looks like it can be rescued. Just not tonight.
+
+[18:01] <nwc10> [Coke]: could I suggest https://github.com/MoarVM/MoarVM/pull/1417 ?
+
+[18:01] <nwc10> Confirming that "It buiilds for me on OS X" would be very useful.
+
+[18:02] <nwc10> (I still seem to be falling asleep here)
+
+[18:34] <[Coke]> nwc10: you had asked about raku brew there, do you just need "does it build from source" ?
+
+[18:35] <[Coke]> or do you want me to try a raku brew build specifically?
+
+[18:38] <[Coke]> oh, right, rakubrew is a binary that mac doesn't like.
+
+[18:39] * [Coke] tries a manual build.
+
+[18:41] *** ggoebel_ left
+[18:43] <[Coke]> configure.pl completes, make dies immediately with: src/moar.h:31:10: fatal error: 'atomic_ops.h' file not found
+
+[18:43] <El_Che> mmm
+
+[18:44] <El_Che> it looks related to this: https://github.com/MoarVM/MoarVM/issues/1425
+
+[18:46] <[Coke]> added the output of git status to the ticket.
+
+[19:12] *** lucasb joined
+[19:12] *** ggoebel_ joined
+[19:24] *** ggoebel_ left
+[19:50] *** ggoebel_ joined
+[20:00] <nwc10> jnthn: plan is now wrong in t/moar/53-dispatch.t
+
+[20:18] <[Coke]> nwc10: so I thought I could cheat rakubrew into working, but even the cheat isn't working.
+
+[20:19] <nwc10> thanks for trying. clearly it hates us all.
+
+[20:19] <nwc10> But I'm still confused as to whether the branch is a regression, or the failure is also present on master.
+
+[20:20] <[Coke]> checking that now
+
+[20:22] <[Coke]> nwc10: ... it was something else entirely. :|
+
+[20:22] <[Coke]> I did a rm 3rdparty/ git checkout . .... and now it's fine
+
+[20:23] <[Coke]> sorry for confusion, will try to build a rakudo and let you know. do you need a spectest, or just 'make test' on rakudo?
+
+[20:23] <[Coke]> or something less?
+
+[20:23] <nwc10> I think - the branch (IIRC) is just Configure/probe stuff
+
+[20:23] <nwc10> I think technically "does MoarVM link" is good enough. But to be sure  - does "NQP build and test?" really proves it
+
+[20:24] <nwc10> I was assuming that what I could get "wrong" was to mess up the compiler or linker flags.
+
+[20:24] <nwc10> (and that was about it)
+
+[20:24] <[Coke]> ok.
+
+[20:25] <[Coke]> src/core/interp.o is sloooooow
+
+[20:42] <[Coke]> nwc10: that moarvm branch is too old for nqp HEAD. which tag of nqp to try?
+
+[20:43] <[Coke]> 2020.12 looks o
+
+[20:43] <[Coke]> k
+
+[20:43] <nwc10> I'd guess that, but I haven't tried
+
+[20:43] <nwc10> and I seem to be falling asleep
+
+[20:44] <[Coke]> night!
+
+[20:44] <[Coke]> sleep well, and dream of big endians.
+
+[20:45] <nwc10> thanks.
+
+[20:48] <jnthn> nwc10: Thanks; remembered to update it in the latest update
+
+[21:45] *** MasterDuke left
+[21:45] *** MasterDuke joined
+[21:51] <MasterDuke> well, that was more annoying than hoped for, but it should be good to go now
+
+[22:08] *** vrurg joined
+[23:13] *** patrickb left
+[23:13] *** Kaeipi joined
+[23:42] *** lucasb left

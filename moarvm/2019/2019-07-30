@@ -1,0 +1,220 @@
+[00:00] *** reportable6 left
+[00:03] *** reportable6 joined
+[00:52] *** pamplemousse left
+[04:04] *** pamplemousse joined
+[04:33] *** pamplemousse left
+[06:00] *** reportable6 left
+[06:04] *** reportable6 joined
+[06:18] *** pamplemousse joined
+[06:28] *** pamplemousse left
+[07:22] *** patrickb joined
+[07:27] *** robertle joined
+[07:40] <Geth> ¦ MoarVM: 4227c7137f | (Stefan Seifert)++ | src/spesh/worker.c
+
+[07:40] <Geth> ¦ MoarVM: Fix possible invalid access to fromspace in spesh worker startup
+
+[07:40] <Geth> ¦ MoarVM:
+
+[07:40] <Geth> ¦ MoarVM: Allocation of previous_static_frames could trigger a GC that moves
+
+[07:40] <Geth> ¦ MoarVM: updated_static_frames
+
+[07:40] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/4227c7137f
+
+[07:50] *** zakharyas joined
+[08:11] *** harrow joined
+[09:06] <nwc10> SEGV in spesh while testing IO::Socket::Async::SSL:ver<0.7.4> --  http://paste.scsys.co.uk/585535 -- sadly not repeatable
+
+[09:06] <nwc10> although, mmm, I don't have any environment variables set in that shell session
+
+[09:08] <nwc10> don't know which of the pointers in these two is the NULL pointer:
+
+[09:08] <nwc10> MVMJitCode *jitcode = f->spesh_cand->jitcode;
+
+[09:08] <nwc10> (this is with MoarVM 4227c7137f)
+
+[09:23] <nwc10> and finally I have network again
+
+[09:23] <nwc10> This is nuts. Because line 74 is this
+
+[09:23] <nwc10>     if (f->spesh_cand && f->spesh_cand->inlines) {
+
+[09:25] <nwc10> and my CFLAGS are this:
+
+[09:25] <nwc10> CFLAGS    = -Werror=declaration-after-statement -Werror=pointer-arith -g3  -D_REENTRANT -D_FILE_OFFSET_BITS=64 -fPIC -fno-omit-frame-pointer -fsanitize=address -DDEBUG_HELPERS -DMVM_TRACING=$(TRACING) -DMVM_CGOTO=$(CGOTO) -DMVM_RDTSCP=$(RDTSCP)
+
+[09:25] <nwc10> so did the compiler really re-order the tests so that this was the first dereference of f?
+
+[09:26] <nwc10> (mmm, strictly, undefined behaviour is undefined)
+
+[09:29] <nwc10> ==15019==ERROR: AddressSanitizer: SEGV on unknown address 0x0000000000a0 (pc 0x7f775d2de771 bp 0x7f774c8682c0 sp 0x7f774c868280 T7)
+
+[09:29] <nwc10> which in struct MVMFrame is this
+
+[09:29] <nwc10>         MVMint32                   spesh_correlation_id; /*   160     4 */
+
+[09:30] <nwc10> so, seems unlikely that this is a NULL pointer dereference. Instead, garbage written in a place where a pointer was expected
+
+[09:55] *** tadzik left
+[09:58] *** evalable6 left
+[09:59] *** tadzik joined
+[10:01] *** evalable6 joined
+[10:40] *** evalable6 left
+[10:44] *** evalable6 joined
+[11:08] *** evalable6 left
+[11:09] *** evalable6 joined
+[11:10] *** evalable6 left
+[11:12] *** evalable6 joined
+[11:19] *** lizmat_ joined
+[11:34] *** lizmat_ is now known as lizmat
+
+[11:40] *** evalable6 left
+[11:43] *** evalable6 joined
+[11:56] <nwc10> nine: *something* remains as a problem with memory allocation, as I can still get this one (after a lot of loops round the test): http://paste.scsys.co.uk/585540
+
+[11:56] <nwc10> that was at 4227c7137f8b9edb25a61a79d59d128a5863fc6b
+
+[12:00] *** reportable6 left
+[12:01] *** reportable6 joined
+[13:29] *** AlexDaniel left
+[13:35] *** Kaiepi joined
+[13:35] *** lucasb joined
+[13:45] <Guest37021> timotimo, nine: what do you make of this? https://gist.github.com/dogbert17/1efaa06662e336d537aa328472d4ea13
+
+[14:11] *** evalable6 left
+[14:11] *** patrickb left
+[14:12] *** evalable6 joined
+[14:14] *** Kaiepi left
+[14:15] *** Kaiepi joined
+[14:17] *** patrickb joined
+[14:59] *** pamplemousse joined
+[15:10] *** robertle left
+[15:26] *** zakharyas left
+[15:56] <nine> nwc10: yes, that's more of a conceptual problem with spesh still doing work for a thread that's already going away.
+
+[15:59] <nine> Guest37021: looks corrupted
+
+[15:59] *** patrickb left
+[16:01] <timotimo> spesh only has a few places where it allows GC to happen, so in theory it could check after every GC spot whether the thread it's doing work for still exists
+
+[16:04] *** robertle joined
+[16:30] *** chloekek joined
+[16:31] *** pamplemousse_ joined
+[16:34] *** pamplemousse left
+[16:56] <nine> How is it possible that cu->body.filename does not get updated when the MVMString it points to gets moved by the GC? https://github.com/MoarVM/MoarVM/blob/master/src/moar.c#L430
+
+[16:56] <nine> Running the deserialize_frame will cause GC, but cu->body.filename stays untouched while the string will have been moved
+
+[16:59] <nine> Oh, we need a write barrier there!
+
+[17:00] <nine> Which means we need one in every place that creates a CU and assigns that filename
+
+[17:08] *** robertle left
+[17:12] <nwc10> nine: because the concept that spesh was built to was that was that thread pool threads stick around (forever (ish)) and this doesn't work with explicit thread termination?
+
+[17:13] <nwc10> and the solution is to send suitable beer to Prague (and maybe also curry ingredients) and wait for them to infuse?
+
+[17:17] <nine> timotimo: how does one recognize those places where GC is allowed?
+
+[17:21] <nine> It's really frustrating how may of these MVMROOT issues are actually caused by the code structure MSVC support is forcing on us
+
+[17:24] <nwc10> specifically no variable declarations other than at the start of blocks?
+
+[17:25] <nine> yes
+
+[17:26] <nwc10> because then everyone has to make the declaration up top, so they also put the initialisation at the same point as the declaration?
+
+[17:26] <nwc10> (which looks tidy)
+
+[17:26] <nine> exactly
+
+[17:26] <nwc10> but the pointer chasing needed for that intialisation doesn't need to actually happen until first use
+
+[17:26] <nine> and between initialization and the actual use there's something that may trigger GC
+
+[17:26] <nwc10> (what I was about to type)
+
+[17:28] <nwc10> afk&
+
+[17:28] <nwc10> (and then the network will drop on me before I come back, because it likes doing that)
+
+[17:28] <Geth> ¦ MoarVM: 2dbf622521 | (Stefan Seifert)++ | 2 files
+
+[17:28] <Geth> ¦ MoarVM: Fix comp units using obsolete pointers to their filename
+
+[17:28] <Geth> ¦ MoarVM:
+
+[17:28] <Geth> ¦ MoarVM: CompUnits are allocated directly in gen2 while the filename that ends up in
+
+[17:28] <Geth> ¦ MoarVM: cu->body.filename usually starts out in the nursery. So in every place we set
+
+[17:28] <Geth> ¦ MoarVM: that filename property we need a write barrier. Otherwise the reference won't
+
+[17:28] <Geth> ¦ MoarVM: get updated when the filename will be moved by the GC.
+
+[17:28] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/2dbf622521
+
+[17:30] <Geth> ¦ MoarVM: 9d6f4493ea | (Stefan Seifert)++ | src/platform/sys.c
+
+[17:30] <Geth> ¦ MoarVM: Fix possible access to fromspace in MVM_platfrom_uname
+
+[17:30] <Geth> ¦ MoarVM:
+
+[17:30] <Geth> ¦ MoarVM: Every MVM_string_utf8_decode may allocate and cause a GC run which in turn may
+
+[17:30] <Geth> ¦ MoarVM: move the strings allocated previously. So instead of decoding every string and
+
+[17:30] <Geth> ¦ MoarVM: pushing them onto the result array later, push them right after decoding so
+
+[17:30] <Geth> ¦ MoarVM: there are no pointers in variables that may become outdated.
+
+[17:30] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/9d6f4493ea
+
+[17:30] *** domidumont joined
+[17:31] <nine> Btw. MoarVM becomes sooo slooow when it collects garbage after every single allocation...
+
+[17:45] * lizmat pictures a traffic jam of garbage trucks outside
+
+[17:49] *** robertle joined
+[18:00] *** reportable6 left
+[18:00] *** reportable6 joined
+[18:10] *** domidumont left
+[18:17] <nwc10> nine: I was never that "brave" when pushing it hard to find the problems a few years ago
+
+[18:58] *** evalable6 left
+[19:00] *** evalable6 joined
+[19:25] *** evalable6 left
+[19:28] *** evalable6 joined
+[20:28] *** evalable6 left
+[20:31] *** pamplemousse_ left
+[20:32] *** evalable6 joined
+[20:52] *** pamplemousse_ joined
+[20:55] <Geth> ¦ MoarVM: f46e5d7e4d | (Stefan Seifert)++ | src/strings/ops.c
+
+[20:55] <Geth> ¦ MoarVM: Fix possible access to fromspace in final_strand_match_with_repetition_count
+
+[20:55] <Geth> ¦ MoarVM:
+
+[20:55] <Geth> ¦ MoarVM: There's no need to MVMROOT the string a because it's only accessed by the very
+
+[20:55] <Geth> ¦ MoarVM: first instruction. However a_strand is vulnerable to GC when the b_strand
+
+[20:55] <Geth> ¦ MoarVM: string is created.
+
+[20:55] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/f46e5d7e4d
+
+[21:06] *** evalable6 left
+[21:09] *** evalable6 joined
+[21:17] <nine> Seems like I need to keep the spectest running over night. 8 cores are not nearly enough when a single test file can take an hour to complete...
+
+[21:18] *** chloekek left
+[21:36] <lizmat> wow
+
+[21:39] <nine> nwc10: the SEGV you wrote about today reminds me a bit of https://github.com/MoarVM/MoarVM/issues/1113
+
+[21:40] *** evalable6 left
+[21:43] *** evalable6 joined
+[22:11] *** sena_kun left
+[22:59] *** leedo joined
+[23:01] *** robertle left
+[23:12] *** pamplemousse_ left

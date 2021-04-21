@@ -1,0 +1,994 @@
+[00:02] <ilmari> diakopter: I noticed some places it uses fields named _offset as the size for memcpy
+
+[00:02] <ilmari> I hope that's just unfortunate naming
+
+[00:11] <ilmari> oops, the gist web ui is possibly not best suited for multimegabyte files
+
+[00:11] <ilmari> anyway: https://gist.github.com/ilmari/3a97aa414eafc95d4553
+
+[00:11] <ilmari> .raw are the raw ones, .uniq are deduplicated by source location
+
+[00:14] <ilmari> I've pushed a new ubsan branch with the serializer fixes
+
+[00:15] <ilmari> src/6model/reprs/MVMStaticFrame.c has one actually detected and a few more potential ones too
+
+[00:15] <ilmari> but now I have to go to bed
+
+[00:15] <ilmari> night, *
+
+[02:05] <dalek> MoarVM: 9fd64bd | hoelzro++ | src/io/asyncsocketudp.c:
+
+[02:05] <dalek> MoarVM: Handle UDP recv with size=0
+
+[02:05] <dalek> MoarVM:
+
+[02:05] <dalek> MoarVM: nread=0 is a valid result from recv; libuv uses it to signal empty
+
+[02:05] <dalek> MoarVM: datagrams or if a buffer is no longer in use
+
+[02:05] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/9fd64bdc6c
+
+[02:25] *** FROGGS_ joined
+[06:14] *** TimToady joined
+[06:14] *** ShimmerFairy joined
+[07:46] *** cognominal joined
+[07:54] *** FROGGS joined
+[09:01] *** FROGGS joined
+[09:12] *** zakharyas joined
+[09:16] *** brrt joined
+[09:16] <brrt> good * #moarvm
+
+[09:19] <nwc10> good *, brrt
+
+[09:58] <brrt> ohhai nwc10
+
+[10:20] <jnthn> morning o/
+
+[10:21] <brrt> morning jnthn
+
+[10:21] <nwc10> correct \o
+
+[10:21] <jnthn> Wow, backlog here today as well as #perl6...
+
+[10:27] <timotimo> good *
+
+[10:40] *** Peter_R joined
+[10:44] *** rurban_ joined
+[10:46] <ilmari> jnthn: gcc 5.2's -fsanitize=undefined (ubsan) is complaining a lot about misaligned accesses in moarvm
+
+[10:48] <jnthn> ilmari: We do platform probes on that stuff
+
+[10:48] <nwc10> ilmari: I think that there's a bunch of #ifdef's or similar set up via the code called by Configure.pl based on the CPU type for "what does the CPU get away with"
+
+[10:48] <jnthn> Look for MVM_CAN_UNALIGNED_
+
+[10:48] <nwc10> so, I assume, that if one undefines all of those, it's possible to get a build which doesn't assume anything naughty
+
+[10:48] <jnthn> Should be, yeah
+
+[10:48] <nwc10> and everything that remains is (hopefully) real, and not noise
+
+[10:49] <jnthn> Maybe if configuring a build for use with ubsan, we should set those flags.
+
+[10:49] <jnthn> Well, set that we *can't* do unaligned
+
+[10:49] <jnthn> And then we will indeed catch the useful things
+
+[10:50] <ilmari> those defines don't cover 16bit accesses, which ubsan also complains about
+
+[10:51] <nwc10> do we have a lot of locations with 16 bit accesses?
+
+[10:51] <ilmari> src/core/interp.c:1015:37: runtime error: load of misaligned address 0xdeadbeef for type 'MVMuint16', which requires 2 byte alignment
+
+[10:52] <nwc10> is it viable to replace all the locations with a clean inline function, which hides the #ifdef mess for the "direct access" vs "memcpy" ?
+
+[10:52] <ilmari> #define GET_REG(pc, idx)    reg_base[*((MVMuint16 *)(pc + idx))]
+
+[10:53] * jnthn is a bit surprised we would be doing any unaligned reads in the *bytecode*
+
+[10:53] <jnthn> That's meant to be 2-byte aligned everywhere
+
+[10:53] <nwc10> oh, interesting.
+
+[10:53] <nwc10> I'm slow here.
+
+[10:53] <jnthn> So something feels off about 2-byte issues in bytecode/validation
+
+[11:02] <ilmari> the validator is allocated on the stack as Validator val[1] in MVM_validate_static_frame
+
+[11:04] <dalek> MoarVM/sized-native-fixes: 7227678 | jnthn++ | / (6 files):
+
+[11:04] <dalek> MoarVM/sized-native-fixes: Ops to introspect type bits/unsignedness.
+
+[11:04] <dalek> MoarVM/sized-native-fixes: review: https://github.com/MoarVM/MoarVM/commit/7227678f1c
+
+[11:04] <ilmari> why is that an array instead of just a scalar?
+
+[11:05] * jnthn has no idea
+
+[11:07] <ilmari> not that changing it changed anything about the errors
+
+[11:13] <ilmari> it was added by Gerhard R in 933b8105daf132e1c3256c3cb98556fc731e6133
+
+[11:14] <timotimo> it's been a long time since i last saw gerd here :(
+
+[11:14] <timotimo> i mean ... not_gerd
+
+[11:14] <timotimo> if he could see us now, would he be proud?
+
+[11:20] <ilmari> hang on. Validator.cur_op is an MVMuint8*, but is being dereferenced as an MVMuint16*
+
+[11:26] <brrt> aye, that makes sense
+
+[11:27] <brrt> a MVM op is 16 bits wide
+
+[11:27] <timotimo> perhaps it's just the offset is in bytes for some reason?
+
+[11:28] <brrt> but the minimum size of any argument is 2 bytes, iirc, so i'd be surprised if there was some way in which we'd get an uneven offset from the start
+
+[11:28] <brrt> so either the start is not 16-bit aligned
+
+[11:28] <brrt> or i'm wrong in my assumption
+
+[11:29] <timotimo> it kind of sounds like we have a fix on our hands
+
+[11:30] <jnthn> At a guess, the start is not aligned
+
+[11:31] <brrt> lunch &
+
+[11:35] * ilmari adds some validation of that
+
+[11:36] <ilmari> *boom*
+
+[11:36] <ilmari> how can I get a stacktrace from the validation failure?
+
+[11:37] <nwc10> run under gdb and breakpoint on the error reporter?
+
+[11:37] <nwc10> I forget how - google usually knows
+
+[11:37] <ilmari> or just gdb and run with --crash
+
+[11:37] <timotimo> then you can "print MVM_dump_backtrace(tc)"
+
+[11:37] <ilmari> which aborts on exceptions
+
+[11:50] <timotimo> um ... huh? Too many positionals passed; expected 3 arguments but got 4
+
+[11:50] <timotimo> at gen/moar/stage1/QAST.nqp:1852  (gen/moar/stage1/QAST.moarvm::0)
+
+[11:51] <timotimo> oh!
+
+[11:51] <timotimo> local changes
+
+[11:53] *** virtualsue joined
+[11:59] *** virtualsue joined
+[12:01] <ilmari> argh, pahole doesn't show unnamed structs, e.g. typedef struct {} Foo;
+
+[12:01] <nwc10> ilmari: give up and have lunch? :-)
+
+[12:02] <nwc10> but, yes, argh
+
+[12:02] <nwc10> and also
+
+[12:02] <nwc10> ilmari++ # using pahole
+
+[12:05] <jnthn> 00002   nan          loc_0_num
+
+[12:05] <jnthn> 00003   trunc_n32    loc_1_num32, loc_0_num
+
+[12:05] <jnthn> 00004   bindlex      lex_Frame_1_$n_num32, loc_1_num32
+
+[12:05] <jnthn> Progress...
+
+[12:05] <stmuk> nan always makes me think of balti :/
+
+[12:05] <jnthn> mmmm
+
+[12:07] * jnthn already finished eating all the jalfrezi he made...
+
+[12:07] <jnthn> Guess it will be something simpler for lunch today
+
+[12:09] <jnthn> Darn, now the code-gen is telling me off for various places I cheated in the past...
+
+[12:12] <timotimo> hah, the past always catches up to you, doesn't it?
+
+[12:17] <dalek> MoarVM/sized-native-fixes: 4ee8436 | jnthn++ | / (6 files):
+
+[12:17] <dalek> MoarVM/sized-native-fixes: Sized local/lexical reference taking ops.
+
+[12:17] <dalek> MoarVM/sized-native-fixes: review: https://github.com/MoarVM/MoarVM/commit/4ee8436080
+
+[12:35] <jnthn> perl6-m -e "my num32 $n; say $n;"
+
+[12:35] <jnthn> NaN
+
+[12:36] <jnthn> phew :)
+
+[12:40] <ilmari> it looks like the bytecode segment in the _file_ is misaligned
+
+[12:40] <jnthn> Ouch
+
+[12:41] <ilmari> in ../nqp/src/vm/moar/stage0/nqp.moarvmq
+
+[12:41] <ilmari> bytecode_seg = 0x7ffff7f3b099
+
+[12:44] <jnthn> lunch, bbiab
+
+[12:44] <jnthn> ilmari: If you want to look into fixing that, then src/mast/compiler.c is the place, btw
+
+[12:44] <ilmari> jnthn: yeah, just found it
+
+[12:44] <jnthn> \o/
+
+[13:04] <ilmari> aha! vm->serialized_size = 301
+
+[13:08] <nwc10> have you earned lunch yet?
+
+[13:12] <diakopter> I'll say
+
+[13:14] *** virtualsue joined
+[13:20] * ilmari is confused by several places that increment foo_size by bar->baz_offset
+
+[13:24] <ilmari> specifically: output_size += writer->stables_data_offset, which is 119, thus misaligning everything after that
+
+[13:25] <nwc10> git blame might reveal the culprit, and if it's a PEBKAC level bug
+
+[13:27] <ilmari> that bit has been unchanged since 2013
+
+[13:28] <ilmari> https://github.com/moarvm/moarvm/commit/a46a62d45bd62fbabc93890f9e0d54ef0124a101#diff-6146ddbd327de003b8c541955ce9efd2R663
+
+[13:33] * ilmari can't see it being initialised on the writer _anywhere_
+
+[13:43] <jnthn> ilmari: It starts off zeroed because MVMSerializationWriter is MVM_calloc'd
+
+[13:43] <jnthn> And is incremented through a level of indirection
+
+[13:43] <jnthn> writer->cur_write_offset = &(writer->stables_data_offset);
+
+[13:44] <ilmari> yeah, I _just_ found that
+
+[13:44] <jnthn> Through things like that.
+
+[13:44] * ilmari gives up single-stepping and sets a watchpoint
+
+[13:45] <diakopter> simple answer is to ensure alignment of those offsets whenever they're finalized
+
+[13:46] <diakopter> (doesn't address whether they shouldn't've become misaligned in the first palace though)
+
+[13:47] <ilmari> ++*(writer->cur_write_offset);
+
+[13:47] <ilmari> in MVM_serialization_write_ref
+
+[13:49] <ilmari> so if there's an odd number of refs, it goes wrong
+
+[13:50] <diakopter> but what's the unit of the pointer?
+
+[13:52] <ilmari> MVMuint32  *cur_write_offset;
+
+[13:52] <diakopter> k
+
+[13:54] <diakopter> (but wouldn't that still keep it aligned on 4 bytes?)
+
+[13:54] <ilmari> no, the offset is in bytes
+
+[13:54] <ilmari> stored in an MVMuint32
+
+[13:54] <diakopter> gotcha
+
+[13:55] <ilmari> the easiest fix for the odd alignment is to make the discriminator an MVMuint16
+
+[13:55] <diakopter> so then ++*(writer->cur_write_offset); isn't incrementing enough?
+
+[13:55] <diakopter> oh, it's only one byte
+
+[13:56] <diakopter> is this the only place it uses bytes?
+
+[13:57] <jnthn> ilmari: It was deliberately made smaller by nwc10 a while back to have a smaller serialization blob
+
+[13:57] <jnthn> If we're talking about the same discriminator, anyway
+
+[13:58] <ilmari> there are three places that increment cur_write_offset by one
+
+[13:58] <jnthn> var_int can increment it by and odd number also, I'd expect
+
+[13:59] <ilmari> instead of fixing it here, we could make sure to align the sections that are going to be directly mmapped
+
+[13:59] <diakopter> I'd say just bump the offset if it's odd before each time it's used in a calculation
+
+[14:00] <diakopter> since it's used in such few places
+
+[14:00] <jnthn> ilmari: Yeah, padding the sections is probably the way to go
+
+[14:01] <diakopter> (is that the same as what I said?)
+
+[14:08] <diakopter> surely it will still warn for things it reads that aren't directly mmapped
+
+[14:14] <ilmari> I think serialization.c:concatenate_outputs just needs to align each table appropriately
+
+[14:14] <ilmari> because the header has the offset and size of each section
+
+[14:15] <diakopter> I thought there were some internal relative references, but maybe not
+
+[14:16] <diakopter> for pointer fixups
+
+[14:16] <diakopter> or maybe that was in some imaginary branch I was working on <evil grin>
+
+[14:18] <ilmari> as far as I can tell (from a skim), each section is serialized independently
+
+[14:18] * ilmari TIAS
+
+[14:18] <ilmari> worst case, it'll segfault horribly
+
+[14:19] <ilmari> do we have an align macro?
+
+[14:19] <diakopter> worst case, it will format your disk and infect your bios
+
+[14:19] <ilmari> that rounds a value up to the nearest multiple of some value
+
+[14:20] <nwc10> there was already some "round up for alignment" code for some sections
+
+[14:21] <ilmari> no mention of round or align in serialization.c
+
+[14:22] <diakopter> jnthn: that last nqp commit might just speed some things up :)
+
+[14:22] <diakopter> jnthn: (at least I recall thinking, "I know this will be terrifically slow" when writing that line)
+
+[14:22] <diakopter> jnthn: (the line that your commit replaced)
+
+[14:22] <ilmari> nwc10: there's some stuff in compiler.c, but not in in serialization.c
+
+[14:22] <nwc10> ilmari: the ones I I'm thinkng of were commented "Add alignment" in src/core/bytecode.c
+
+[14:23] <ilmari> nwc10: the bytcode is fine, it's the VM's other serialization stuff
+
+[14:24] <ilmari> if the result of concatenate_outputs ends up with an odd length, everything after that in the bytecode file ends up misaligned
+
+[14:25] <ilmari> so arguably compiler.c sholud safeguard against that too
+
+[14:25] <nwc10> ah OK
+
+[14:25] <diakopter> https://gist.github.com/ilmari/3a97aa414eafc95d4553 # I'm curious to see how much this gets shortened after this fix
+
+[14:31] <dalek> MoarVM/sized-native-fixes: 6864de7 | jnthn++ | src/core/interp.c:
+
+[14:31] <dalek> MoarVM/sized-native-fixes: Fill out int extend/truncate ops.
+
+[14:31] <dalek> MoarVM/sized-native-fixes: review: https://github.com/MoarVM/MoarVM/commit/6864de7c57
+
+[14:43] <timotimo> diakopter: what nqp commit were you refering to? i don't see anything appropriate in the commit log that could speed anything up :|
+
+[14:44] <diakopter> the commit immediately before my comment? in his branch?
+
+[14:45] <jnthn> Any speedups are welcome, but this is mostly about correctness. :)
+
+[14:45] <jnthn> Our code-gen for sized types has been utterly bogus
+
+[14:45] <diakopter> I was thinking of https://github.com/perl6/nqp/commit/2884c8a651 # but now that I think about it again, mebbe not
+
+[14:46] <timotimo> it doesn't remove the unbox or box, it even adds more code to that
+
+[14:47] <diakopter> well, the calls to coerce (which creates a runtime coercion) could be reduced
+
+[14:51] <timotimo> because of the removal of $got := $MVM_reg_void; ?
+
+[14:51] <ilmari> eek
+
+[14:51] <ilmari> [75516.418439] Killed process 18537 (moar) total-vm:8560752kB, anon-rss:7249592kB, file-rss:0kB
+
+[14:52] <diakopter> \o/
+
+[14:52] <ilmari> guess how much memory my laptop has
+
+[14:52] <diakopter> (at least it killed it)
+
+[14:53] <diakopter> 41 PB
+
+[14:53] <ilmari> after a several-minute swap storm
+
+[14:53] <ilmari> 8GB
+
+[14:53] <timotimo> huh, what made it balloon up like that?
+
+[14:53] <ilmari> and 2GB swap
+
+[14:54] <ilmari> my attempt at aligning the sections in serialization.c:concatenate_outputs
+
+[14:54] <timotimo> oops
+
+[14:54] <diakopter> heh maybe you made it align to 32MB instead
+
+[14:54] <timotimo> maybe something's incrementing and hoping to hit a limit exactly, but goes beyond it?
+
+[15:02] <ilmari> oh, that might be the fault of --debug
+
+[15:03] <timotimo> huh? i always build with --debug=3 --optimize=3
+
+[15:04] <ilmari> is it normal for moar to grow to 2GB when building stage1?
+
+[15:05] <diakopter> last I saw it, resident set was max 1 GB, even building rakudo
+
+[15:16] * ilmari tries with a completely unmodified master moarvm and nqp
+
+[15:16] <ilmari> --ubsan --debug=3 --optimize=3
+
+[15:17] <ilmari> it hit a 4GB ulimit compiling gen/moar/stage1/NQPHLL.moarvm
+
+[15:18] <diakopter> well I suppose it could be 100,000 UBsan guards?
+
+[15:19] <ilmari> but it was working earlier, damnit
+
+[15:19] * ilmari bumps the ulimit to 6G
+
+[15:20] <diakopter> gist your diff? :)
+
+[15:21] *** pyrimidine joined
+[15:21] <ilmari> compiling gen/moar/stage1/nqpmo.nqp took 2G
+
+[15:22] <jnthn> o.O
+
+[15:22] <ilmari> that's with clean master
+
+[15:22] <diakopter> how sure are you it's clean
+
+[15:22] <ilmari> I just did git stash; git clean -xfd
+
+[15:23] <ilmari> and installed into a fresh prefix
+
+[15:23] <diakopter> but for which repo
+
+[15:23] <ilmari> both moar and nqp
+
+[15:23] <ilmari> QRegex took about 2.731g
+
+[15:23] <ilmari> let's see if 6 is enough for NQPHLL
+
+[15:24] <diakopter> but if nqp doesn't think it needs to reconfigure moar, it won't
+
+[15:24] <ilmari> I did git clean in nqp too
+
+[15:24] <[Coke]> "fresh prefix" should handle that.
+
+[15:24] <[Coke]> since there is then no moar for it to find.
+
+[15:24] <ilmari> juust about managed to sneak in under 6G for NQPHLL
+
+[15:26] <diakopter> [Coke]: I've seen it use a moar from outside the install
+
+[15:26] <diakopter> outside the install requestedsuch as, a previous install or path
+
+[15:27] <ilmari> bah, failed at QAST.nqp
+
+[15:27] * ilmari tries without ubsan
+
+[15:32] <ilmari> and now I haven't seen it go over 100m, with a 1s update interval in top
+
+[15:32] <ilmari> ubsan-- # memory hog
+
+[15:32] <timotimo> :(
+
+[15:33] <diakopter> ilmari:  I bet if you do --no-jit it'll be a lot less
+
+[15:33] <diakopter> (I think it instruments all executable memory?)
+
+[15:34] <diakopter> er, lol maybe not.
+
+[15:34] <timotimo> wouldn't that be a bit hard to make work?
+
+[15:35] * diakopter gets more coffee
+
+[15:46] <[Coke]> diakopter: have you seen that recently?
+
+[15:46] <diakopter> not sure
+
+[15:46] <diakopter> not that I remember clearly, no
+
+[15:47] <diakopter> we definitely sacrifice some dependency clarity and simplicity with the convenience of the recursively configuring thingie.
+
+[15:47] <[Coke]> ok. hopefully no longer an issue, but I dunno.
+
+[15:53] <diakopter> I suppose theoretically there's a way to rewrite history to merge two git repos XD (moar into nqp)
+
+[15:55] <hoelzro> you could probably do it with git-filter-branch
+
+[15:55] <diakopter> though I guess if anything would be more logically tied from a user perspective, it's rakudo & nqp
+
+[15:55] <jnthn> But we won't be.
+
+[15:55] <hoelzro> not saying it's a good idea, but...
+
+[15:55] <hoelzro> ;)
+
+[15:57] <diakopter> jnthn: what about making a version of configure that can make a combined Makefile
+
+[15:58] <jnthn> Um...it'd be possible, not sure why we would?
+
+[15:59] <diakopter> well it could at least rule out mysterious dependency issues if they keep cropping up
+
+[16:01] <dalek> MoarVM: ee0afc2 | jnthn++ | src/core/validation.c:
+
+[16:01] <dalek> MoarVM: Validate lexical types properly.
+
+[16:01] <dalek> MoarVM:
+
+[16:01] <dalek> MoarVM: This means that we catch invalid code-gen for storing wrongly sized
+
+[16:01] <dalek> MoarVM: values into lexicals, and vice versa.
+
+[16:01] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ee0afc28ab
+
+[16:01] <dalek> MoarVM: d23cbe2 | jnthn++ | src/core/interp.c:
+
+[16:01] <dalek> MoarVM: Implement truncate/extend ops for num32.
+
+[16:01] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d23cbe23b8
+
+[16:01] <dalek> MoarVM: d6544f5 | jnthn++ | src/core/interp.c:
+
+[16:01] <dalek> MoarVM: Fix cast; JimmyZ++.
+
+[16:01] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d6544f54d9
+
+[16:02] <diakopter> I'm guessing that's a merge
+
+[16:02] <diakopter> dalek--
+
+[16:03] <jnthn> yes
+
+[16:05] <ilmari> is it normal for moarvm file sizes to randomly vary?
+
+[16:06] <diakopter> giggle, :p
+
+[16:06] <ilmari> I was trying to measure alignment overhead, and found that aligning to 4 bytes made the stage0 files 564 bytes smaller overall
+
+[16:06] <diakopter> *boggle*
+
+[16:06] <ilmari> and now I rebuilt it twice with 8 byte alignment, and it varied by 16 bytes betwen those runs
+
+[16:07] <lizmat> ilmari: some hash bucket size / linked list issue ?
+
+[16:07] <ilmari> might be
+
+[16:07] <ilmari> anyway, the overhead of even 8-byte alignment is negligible
+
+[16:07] <lizmat> I mean, on Perl 5 2 successive runs don't generate the same hashes either, do they ?
+
+[16:07] <ilmari> no
+
+[16:07] <diakopter> but hashes aren't serialized that way
+
+[16:09] <diakopter> maybe GC needs to flush the nurseries before serialization
+
+[16:09] <diakopter> dunno
+
+[16:09] <jnthn> serialization is over a live object graph, not just a memory dump
+
+[16:09] <jnthn> So shouldn't be an issue.
+
+[16:10] <ilmari> so, now, with hopefully properly-aligned bytecode files, let's see if ubsan still complains
+
+[16:10] *** dalek joined
+[16:13] <ilmari> being home sick makes me miss my work workstation
+
+[16:14] <ilmari> my laptop is only a dual 2GHz Core i7, at work I have a quad 3.2GHz Xeon
+
+[16:14] <ilmari> 3rdparty/sha1/libsha1.a takes ages to link with ubsan
+
+[16:15] <ilmari> no, it must be something else, that was just the last thing that _started_ linking
+
+[16:21] <ilmari> ubsan.configure.uniq: 4 insertions(+), 658 deletions(-)
+
+[16:26] <ilmari> ubsan.make.uniq: 5 insertions(+), 817 deletions(-)
+
+[16:30] <ilmari> ubsan.test.uniq:  insertions(+), 832 deletions(-)
+
+[16:32] *** domidumont joined
+[16:33] <timotimo> is that 0 insertions?
+
+[16:34] <ilmari> now, that was 6
+
+[16:34] <ilmari> now building without MVM_CAN_UNALIGNED_*
+
+[16:39] <ilmari> ubsan.configure.uniq: 447 deletions(-)
+
+[16:39] <ilmari> 40 left
+
+[16:39] <timotimo> wow, that's nothing!
+
+[16:39] <timotimo> almost
+
+[16:41] <ilmari> https://gist.githubusercontent.com/ilmari/3a97aa414eafc95d4553/raw/2325cac28bac5c189ef355379c6495a2e8cf80c7/ubsan.configure.uniq
+
+[16:42] *** virtualsue joined
+[16:42] <ilmari> the remaining ones are mostly doing GET_I32() on an op argument
+
+[16:43] <ilmari> which may or may not be alined, since ops are variable number of 16bit long
+
+[16:43] <ilmari> s/number/multiple/
+
+[16:44] <ilmari> ubsan.make.uniq down to 52
+
+[16:45] <ilmari> https://gist.githubusercontent.com/ilmari/3a97aa414eafc95d4553/raw/265d39bc1028fac3e6e9810bbe4665980319893d/ubsan.make.uniq
+
+[16:45] <timotimo> do we need a bytecode munging phase that blows it up so that everything we may want to read in isolation is aligned to 32bit?
+
+[16:56] *** domidumont joined
+[17:00] <ilmari> any 32bit literal operand needs to be aligned
+
+[17:01] <jnthn> Not really
+
+[17:01] <jnthn> Or at least, not if you have something that can safely read it anyway
+
+[17:01] <jnthn> Which afaik we do, and that's what the alignment probe is seeing if we need
+
+[17:02] <ilmari> jnthn: even with the alignment probe neutered, there's lots of unaligne reads
+
+[17:03] <jnthn> So, we should probably fix where they're happening
+
+[17:03] <jnthn> Not bloat the bytecode
+
+[17:03] <ilmari> you can move the complexity into the GET_*32 macros instead
+
+[17:04] <jnthn> Yeah, I thought they were paying attention to the alignment probe's results
+
+[17:04] <ilmari> but then you need to copy the value
+
+[17:06] <ilmari> the code only actually respects MVM_CAN_UNALIGNED_(INT|NUM)64
+
+[17:09] <jnthn> Copying the value is OK; on platforms where we really want to invest in performance we'll build JIT support, and then the hot paths won't hit such copies.
+
+[17:10] <ilmari> to support archs that can't do unaligned 32bit reads we'd need eqivalents of MVM_BC_get_[IN]64
+
+[17:11] <ilmari> maybe ubsan should imply no MVM_CAN_UNALIGNED_*, to reduce the noise
+
+[17:11] <jnthn> +1 to both of those
+
+[17:15] <ilmari> jnthn: you forgot to rebase sized-native-fixes before merging
+
+[17:15] <ilmari> so it overlaps my memc(mp|py) branch
+
+[17:15] <ilmari> that might be why dalek got conffused
+
+[17:16] <jnthn> I didn't forget to rebase, I just tend to use the merge workflow when I do things that knowingly have broken points along the way.
+
+[17:16] <jnthn> dalek doesn't really look at the topology at all, though
+
+[17:17] <jnthn> So it's very easily confused.
+
+[17:17] * ilmari prefers rebase + merge --no-ff
+
+[17:17] <ilmari> so you get linear history, but commits grouped by topic
+
+[17:18] <jnthn> That's a nice way to do it.
+
+[17:18] * jnthn will keep that in mind
+
+[17:27] <ilmari> https://gist.githubusercontent.com/ilmari/3a97aa414eafc95d4553/raw/83cc1664c8506a5ce3f5dec10354dd65bc3c6aa3/ubsan.all.uniq
+
+[17:27] <ilmari> that's all the distinct error locations when running nqp configure+make+make test
+
+[17:29] <ilmari> on https://github.com/ilmari/MoarVM/commit/240500729abd737524950bca3d1755686e94d14a with MVM_CAN_UNALIGNED_* undefined
+
+[17:29] <ilmari> the ALIGN macro should probably be centralised
+
+[17:30] <timotimo> everything includes every header anyway, so it can go into some headery place
+
+[17:30] <timotimo> it may want a more mvm-specific name, though
+
+[17:30] <ilmari> ALIGNOF is defined in moar.h, so sticking it next to that
+
+[17:30] <ilmari> MVM_ALIGN_SECTION?
+
+[17:31] <jnthn> Seems reasonable
+
+[17:31] <timotimo> yeah, sounds a bit better
+
+[17:32] <jnthn> Think it's dinner time :)
+
+[17:55] * ilmari gets ready to order pizza
+
+[17:55] <timotimo> mhhh pizza
+
+[18:35] <diakopter> ilmari: that's.... dramatically smaller
+
+[18:35] <diakopter> (list of errors)
+
+[18:35] <ilmari> diakopter: yeah
+
+[18:35] <diakopter> ilmari++
+
+[18:35] * diakopter guesses a speed improvement from alignment too
+
+[18:36] <diakopter> I'm high on the wishful thinking today, apparently
+
+[18:36] <ilmari> depends on the CPU
+
+[18:36] <timotimo> that's *very* wishful thinking
+
+[18:36] <ilmari> I don't think there's any difference on x86
+
+[18:36] <timotimo> especially in deserialization which is mostly sequentially read
+
+[18:36] <timotimo> BBIAB
+
+[18:41] <diakopter> this one's interesting
+
+[18:41] <diakopter> src/core/interp.c:323:65: runtime error: signed integer overflow: 4611686018427387904 + 4611686018427387904 cannot be represented in type 'long int'
+
+[18:41] <diakopter> seems like it couldn't be a pointer value...
+
+[18:46] <ilmari> bah, I've rebased since then, so the line numbers are all out of sync
+
+[18:46] <timotimo> oh
+
+[18:53] *** vendethiel- joined
+[18:58] <dalek> MoarVM: 2c0b70f | timotimo++ | src/spesh/dump.c:
+
+[18:58] <dalek> MoarVM: dump "known to be RW container" flag to speshlog, too.
+
+[18:58] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/2c0b70f595
+
+[19:02] <dalek> MoarVM: 15de300 | (Dagfinn Ilmari Mannsåker)++ | build/probe.pm:
+
+[19:02] <dalek> MoarVM: Disable unaligned reads under UBSAN
+
+[19:02] <dalek> MoarVM:
+
+[19:02] <dalek> MoarVM: We only enable unaligned reads on CPUs we know can handle them, but
+
+[19:02] <dalek> MoarVM: UBSAN flags them up regardless.  This reduces false positive noise (and
+
+[19:02] <dalek> MoarVM: memory consumption) when looking for actually-harmful undefined
+
+[19:02] <dalek> MoarVM: behaviour.
+
+[19:02] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/15de3007ca
+
+[19:02] <dalek> MoarVM: 98d6c9c | (Matthew Wilson)++ | build/probe.pm:
+
+[19:02] <dalek> MoarVM: Merge pull request #313 from ilmari/ubsan-no-unalign
+
+[19:02] <dalek> MoarVM:
+
+[19:02] <dalek> MoarVM: Disable unaligned reads under UBSAN
+
+[19:02] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/98d6c9c6b1
+
+[19:02] <dalek> MoarVM: 758c3fe | (Dagfinn Ilmari Mannsåker)++ | src/ (3 files):
+
+[19:02] <dalek> MoarVM: Align bytecode sections to 8 bytes
+
+[19:02] <dalek> MoarVM:
+
+[19:02] <dalek> MoarVM: The bytecode file gets mmapped, and pointers to larger types inside
+
+[19:02] <dalek> MoarVM: these sections dereferenced directly, so make sure each section starts
+
+[19:02] <dalek> MoarVM: on a maximum alignment boundary.  The internal aligment in each section
+
+[19:02] <dalek> MoarVM: is the responsibility of that section's (de)serializers.
+
+[19:02] <dalek> MoarVM:
+
+[19:02] <dalek> MoarVM: This only increases the size of the NQP stage0 bytecode files by about
+
+[19:02] <diakopter> oh dalek
+
+[19:19] *** FROGGS joined
+[19:19] <ilmari> it's the add_i
+
+[19:19] <ilmari> op
+
+[19:32] <timotimo> i kind of feel like we'd really want to have constants in nqp, so that we don't have to emit getlex for $MVM_reg_* numbers everywhere
+
+[19:33] <timotimo> but our compiler is already somewhat fast ... at least compared to parsing stuff
+
+[19:34] *** vendethiel joined
+[20:12] <jnthn> timotimo: Yeah, adding constants in NQP is one of my todos for after xmas :)
+
+[20:16] <[Coke]> jnthn++ btw
+
+[20:17] <lizmat> TimToady: on the issue of security and visibility, maybe "use nqp" should be something like "use NOT-QUITE-PERL;' ?
+
+[20:18] <jnthn> oh no, not more renaming
+
+[20:18] * jnthn vetos just because he can :P
+
+[20:25] <timotimo> nqp gives you the most dangerous ops
+
+[20:25] <timotimo> but so does nativecall
+
+[20:26] <jnthn> Except...we use all those ops to implement Perl 6 features anyway :P
+
+[20:26] <jnthn> So you can get at 'em already.
+
+[20:27] <timotimo> hehe
+
+[20:36] *** brrt joined
+[20:38] <lizmat> well, we implemented 'use nqp' as a deprecation
+
+[20:38] <lizmat> perhaps we should remove the deprecation before Christmas
+
+[20:39] <lizmat> and simply just disallow unless we have a 'use nqp' in scope
+
+[20:43] <jnthn> yes, should remove the deprecation
+
+[20:44] <timotimo> aye
+
+[20:44] <[Coke]> there should, IMO be no deprecations shipped this month
+
+[20:46] <lizmat> okidoki, will take care
+
+[20:50] <[Coke]> lizmat: you feeling better?
+
+[20:56] <lizmat> sorta, not really 100% yet...
+
+[20:57] <jnthn> A proper flu :(
+
+[20:58] <lizmat> started on the way back from LPW, so probably some fresh virus from people with young kids  :-)
+
+[21:24] <dalek> MoarVM: 1735e2a | jnthn++ | src/core/interp.h:
+
+[21:24] <dalek> MoarVM: Add missing unsigned operand types.
+
+[21:24] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/1735e2a3fd
+
+[21:24] <dalek> MoarVM: 6be6fe8 | jnthn++ | tools/update_ops.p6:
+
+[21:24] <dalek> MoarVM: Teach op build tool about uint*.
+
+[21:24] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/6be6fe8297
+
+[21:29] <ilmari> should I send a pull request for rebootstrapping nqp with the alignment fixes in moar, or does someone fancy just doing it?
+
+[21:30] <jnthn> I'd leave it a bit just in case we have another reason to, given every time we do it the git repo grows a bit
+
+[21:31] <ilmari> okay
+
+[21:33] <timotimo> a noticable bit, yeah
+
+[21:35] <ilmari> is there a disassembler/pretty-printer for moarvm bytecode files?
+
+[21:36] <timotimo> we have moar --dump foobar.moar
+
+[21:36] <jnthn> moar --dump foo.moarvm
+
+[21:41] <timotimo> jnthn: you know how malloc has a function that spits out some information about its "health"? stats and such?
+
+[21:42] <dalek> MoarVM: 71bea81 | jnthn++ | / (5 files):
+
+[21:42] <dalek> MoarVM: Clean up uint ops; implement uint trunc/extend.
+
+[21:42] <dalek> MoarVM:
+
+[21:42] <dalek> MoarVM: None of these are being used yet.
+
+[21:42] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/71bea81cd3
+
+[21:42] <dalek> MoarVM: ecedaec | jnthn++ | src/ (15 files):
+
+[21:42] <dalek> MoarVM: Add box unsigned to REPR boxing API.
+
+[21:42] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ecedaec4b2
+
+[21:42] <dalek> MoarVM: 989506b | jnthn++ | / (6 files):
+
+[21:42] <dalek> MoarVM: A handful of extra unsigned int related ops.
+
+[21:42] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/989506be46
+
+[21:42] <timotimo> i wonder if we'd want to have that output in the profiler, too. like, at every GC run we just put the info into the output and into the html
+
+[21:42] * ilmari writes a moardump script and sets it as textconv for *.moarvm files
+
+[21:45] <jnthn> timotimo: hmm
+
+[21:45] <jnthn> timotimo: Guess we'd have to probe for it
+
+[21:45] <timotimo> probably
+
+[21:45] <timotimo> i even forgot what it's called, but i think hoelzro played around with that before
+
+[21:48] <dalek> MoarVM: 1ac6420 | jnthn++ | src/mast/compiler.c:
+
+[21:48] <dalek> MoarVM: Teach assembler about unsigneds.
+
+[21:48] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/1ac642064b
+
+[21:49] <ilmari> jnthn: did you mean to change the last parameter of MVM_repr_set_int to MVMuint64?
+
+[21:50] <jnthn> No, and the compiler didn't whine at me about the inconsistent signatures either :/
+
+[21:51] <dalek> MoarVM: 9da6022 | jnthn++ | src/6model/reprconv.c:
+
+[21:51] <dalek> MoarVM: Undo accidental change; ilmari++.
+
+[21:51] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/9da602226e
+
+[21:52] <ilmari> mine did
+
+[21:53] <ilmari> but I spotted it while browsing the recent diffs while it was building
+
+[21:53] <jnthn> :)
+
+[21:54] <ilmari> which compiler are you using?
+
+[21:54] <jnthn> MSVC
+
+[21:54] <ilmari> gcc 5.2.1 on linux here
+
+[21:54] <ilmari> src/6model/reprconv.c:553:6: error: conflicting types for ‘MVM_repr_set_int’
+
+[21:55] <jnthn> Nice
+
+[21:55] <jnthn> Fixed now, anyways
+
+[21:55] <ilmari> yeah, I noticed
+
+[21:55] <jnthn> Think that'll be enough for me today. Got some code-gen changes underway also to take advantage of this stuff.
+
+[21:55] <ilmari> cool
+
+[21:56] <ilmari> good night :)
+
+[21:56] <jnthn> 'night
+
+[21:56] <lizmat> good night, jnthn !
+
+[21:57] <ilmari> I converted the ubsan output gist to a proper repo: https://github.com/ilmari/ubsan-moar
+
+[21:59] *** travis-ci joined
+[21:59] <travis-ci> MoarVM build failed. jnthn 'A handful of extra unsigned int related ops.'
+
+[21:59] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/97549391 https://github.com/MoarVM/MoarVM/compare/6be6fe8297b8...989506be4674
+
+[21:59] *** travis-ci left
+[22:14] <ilmari> the time- and pid-based compilation unit IDs are not going to make the reproducible build lot (e.g. debian) happy
+
+[22:15] <dalek> MoarVM: 875d761 | timotimo++ | src/moar.c:
+
+[22:15] <dalek> MoarVM: allow %d to mean pid in MVM_SPESH/JIT/DYNVAR_LOG
+
+[22:15] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/875d761fac
+
+[22:15] <timotimo> yeah :<
+
+[22:17] <ilmari> the instruction streams aren't stable either
+
+[22:17] <ilmari> 00002   getcode      [-loc_9_obj, Frame_37-]{+loc_20_obj, Frame_39+}
+
+[22:17] <ilmari> --word-diff, i.e. [- -] is removal, {+ +} is addition
+
+[22:19] <timotimo> ho-hum. something is being put into a hash?
+
+[22:35] <flussence> argh, I had a perfectly working moarvm .ebuild and today it's complaining about wrong -std= mode in for() syntax...
+
+[22:35] <flussence> ...which is weird because my bash script to build perl6 works fine...
+
+[22:36] * flussence wonders if portage is being really dumb and using the gcc5.3 it just installed, even though I didn't set that as the default system gcc
+
+[22:42] <flussence> er, anyway, the error there suggests either the makefile or code does need a fix:
+
+[22:42] <flussence> «src/moar.c:28:9: error: ‘for’ loop initial declarations are only allowed in C99 or C11 mode»
+
+[22:47] <timotimo> damn, maybe i broke it.
+
+[22:47] <timotimo> it's probably me
+
+[22:47] <timotimo> give me a second, flussence
+
+[22:48] <dalek> MoarVM: 1ea71d4 | timotimo++ | src/moar.c:
+
+[22:48] <dalek> MoarVM: pull declaraiton up front, use bigger vars
+
+[22:48] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/1ea71d4b7e
+
+[22:48] <timotimo> flussence: try now -^
+
+[22:50] <flussence> oh! the stuff I built by hand just uses --gen-moar and not master, of course I wouldn't have seen failures there... trying now
+
+[22:52] <flussence> yep, all good now
+
+[23:17] *** stmuk_ joined
+[23:45] *** rurban_ joined
+[23:45] *** virtualsue joined
+[23:58] *** stmuk joined

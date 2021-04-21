@@ -1,0 +1,1029 @@
+[00:10] <samcv> well, as a pointer to some malloced grapheme iterator i suppose. so we don't have to refind our place every time. since perl 6 or nqp let's say it requests graphemes one after each other, then it colud be faster to save the iterator
+
+[00:25] <MasterDuke> i'm just spouting stuff off the top of my head here, but if MVMStrings have to be immutable, what about creating a small pool of grapheme iterators? maybe accessed by the MVMStringBody's cached_hash_code?
+
+[00:55] <samcv> well i'm going to work on getting it faster to seek to a position
+
+[00:55] <samcv> got from 1.1s to 0.9314294s for 'abcd' x 1000000 using indexic
+
+[00:58] <MasterDuke> cool
+
+[00:59] <samcv> going to test on non-repeat strands though
+
+[01:00] <samcv> nice. from 0.9s to 0.8s :)
+
+[01:00] <samcv> 10 equal length strands ( very long strands btw)
+
+[01:00] <samcv> 3,227,579 chars per strand
+
+[01:01] <samcv> this is for indexic because it still uses get_grapheme_at_nocheck instead of retaining a grapheme iterator
+
+[01:05] <MasterDuke> are short strings/strands also faster?
+
+[01:07] <samcv> yes
+
+[01:07] <samcv> i mean regardless for every grapheme in that 10 strand file, it had to find its place again
+
+[01:07] <samcv> so that means moving 0-9 strands forward
+
+[01:07] <samcv> so it would show similarly for short ones too
+
+[01:08] <MasterDuke> great
+
+[01:12] <samcv> trying to get rid of the loop so that it only goes once
+
+[01:12] <samcv> the second while loop in MVM_string_gi_move_to
+
+[01:31] *** committable6 joined
+[01:31] *** quotable6 joined
+[01:31] *** nativecallable6 joined
+[01:31] *** coverable6 joined
+[01:31] *** bisectable6 joined
+[01:31] *** bloatable6 joined
+[01:31] *** greppable6 joined
+[01:31] *** releasable6 joined
+[01:31] *** evalable6 joined
+[01:31] *** unicodable6 joined
+[01:32] *** benchable6 joined
+[01:32] *** statisfiable6 joined
+[01:32] *** squashable6 joined
+[01:51] *** ilbot3 joined
+[05:21] *** domidumont joined
+[05:21] *** brrt joined
+[05:28] *** domidumont joined
+[05:39] <brrt> good * #moarvm
+
+[06:03] *** KDr2__ joined
+[06:10] *** brrt joined
+[06:41] *** leont joined
+[06:50] *** domidumont joined
+[07:38] *** TimToady joined
+[08:01] *** zakharyas joined
+[08:21] <timotimo> good brrt
+
+[08:21] <timotimo> oh, i'm a bit late
+
+[08:21] <brrt> ohai timotimo
+
+[08:21] <brrt> i'm still awake :-)
+
+[08:43] *** domidumont joined
+[09:13] *** Skarsnik joined
+[09:35] <samcv> good *
+
+[09:36] <samcv> well i successfully got rid of the loop in MVM_string_gi_move_to that moves within a strand (or repeated strand)
+
+[09:36] <samcv> yay speedups
+
+[09:36] <samcv> and reduced the number of operations inside the loop that locates the strand
+
+[09:40] <samcv> https://github.com/MoarVM/MoarVM/compare/master...samcv:gi_move_to?diff=split&name=gi_move_to
+
+[09:41] <samcv> and removed and changed some code, added comments. since it was kind of confusing initially
+
+[10:00] <samcv> hmm i think there's a bug where if we aren't at the first position in specific strand, aka gi->pos != gi->start and it's a repetition, then it could skip too much
+
+[10:00] <samcv> strand_graphs = (gi->end - gi->pos) * (1 + gi->repetitions)
+
+[10:01] <samcv> this is what we have now. but i think it's wrong. strand_graphs is the number of graphs left in the strand and lets us know if we need to go to the next strand, in case we are trying to move further than there are spots in that strand
+
+[10:02] <samcv> so gi->end - gi->pos should give the space left in the current strand. but if we have repetitions, let's say gi->start is 0 and gi->end is 10. we're at 5 and there's 2 reps
+
+[10:03] <samcv> (10 - 5) * (1 + 2) = 15. but i think it should be gi->end - gi->pos + (gi->end - gi->start) * (gi->repetitions)
+
+[10:03] *** zakharyas joined
+[10:03] <samcv> if jnthn is here let me know what you think. i think i'm right but i could be wrong
+
+[10:06] <Geth> ¦ MoarVM: 5bf652edbb | (Jonathan Worthington)++ | src/spesh/log.c
+
+[10:06] <Geth> ¦ MoarVM: Don't decont native refs when spesh logging
+
+[10:06] <Geth> ¦ MoarVM:
+
+[10:06] <Geth> ¦ MoarVM: That will result in the value being boxed. This allocation could make
+
+[10:06] <Geth> ¦ MoarVM: a problem by causing a GC run to happen, but much more importantly it
+
+[10:06] <Geth> ¦ MoarVM: leads to rather misleading spesh stats that could in turn end up with
+
+[10:06] <Geth> ¦ MoarVM: selection of a bogus multi-dispatch candidate during optimization.
+
+[10:06] <Geth> ¦ MoarVM: This thus fixes the mis-specialization that has caused failures in the
+
+[10:06] <Geth> ¦ MoarVM: atomics spectests.
+
+[10:06] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/5bf652edbb
+
+[10:06] <jnthn> samcv: Is this in move_to?
+
+[10:06] <samcv> yep
+
+[10:06] <jnthn> Wasn't the situation a while back that we only ever expected it to be called once?
+
+[10:06] <samcv> yeah
+
+[10:07] <jnthn> I suspect it's a leftover assumption from then
+
+[10:07] <samcv> KMP doesn't skip more than one forward so we are currently okay
+
+[10:07] <samcv> okay as long as what i'm saying sounds right :)
+
+[10:07] <samcv> but i got ignorecase index from 0.9s to 0.8s for a 10 strand string
+
+[10:07] <jnthn> That is, if we weren't going from the start then we'd never be in the middle of a repetition.
+
+[10:07] <jnthn> Nice :)
+
+[10:07] <samcv> 10 copes of tolstoy and repeated some times
+
+[10:08] <samcv> and removed the second loop
+
+[10:08] <samcv> simplified some
+
+[10:08] <samcv> also https://github.com/MoarVM/MoarVM/compare/master...samcv:gi_move_to?diff=split&name=gi_move_to#diff-08b612e1d9eda1284deeaf59150dc0efR96
+
+[10:08] <samcv> can you tell me about this?
+
+[10:08] <samcv> in the original code, we check if gi->repetitions < remaining_reps
+
+[10:09] <samcv> but if the reps is less than remaining_reps, i don't get why we would set remaining_reps to gi->repetitions. that sounds like we should never get in that circumstance
+
+[10:09] <samcv> where there are'nt eneough reps left
+
+[10:09] <samcv> mathematically and practically unless there were corruption or something
+
+[10:10] <samcv> since strand_graphs should calculate there's enough space left
+
+[10:10] <samcv> or strand_graphs or whatever
+
+[10:11] <jnthn> remaining isn't just within this strand
+
+[10:11] <jnthn> So it's just saying "if the place we're going is longer than the number of repetitions, then eat all of them"
+
+[10:12] <jnthn> (But no more)
+
+[10:12] <samcv> that should never happen though?
+
+[10:12] <jnthn> Thus making sure gi->repetitions doesn't go negative
+
+[10:12] <jnthn> Thus ensuring that if (gi->repetitions) { doesn't falsely pass
+
+[10:12] <samcv> because we would be on the strand after it already
+
+[10:13] <samcv> i changed that to if (remaining) instead of if (gi->repetitions)
+
+[10:13] <samcv> since that seemed more reliable to count on
+
+[10:13] <jnthn> ah, you're saying we'd have skipped it above?
+
+[10:13] <samcv> and it should always happen at the same time. at least it never happened running roast
+
+[10:14] <samcv> yeah
+
+[10:14] <jnthn> Yeah, I see that now
+
+[10:14] <samcv> and i also reforatted it so we have no loop below :)
+
+[10:14] <samcv> which is pretty nice
+
+[10:14] <jnthn> Yeah, looks like an aubndance of caution costing us some cycles :)
+
+[10:14] <samcv> yeah no problem :)
+
+[10:14] <samcv> always better safe than sorry tbh
+
+[10:14] <jnthn> But yes, agree it can be simplified :)
+
+[10:14] <samcv> and comments!!
+
+[10:14] <samcv> :)
+
+[10:15] <samcv> nice i get full spectest pass with changes :)
+
+[10:15] <dogbert17> trick question: is there a reason why MoarVM isn't compiled with -Wall ?
+
+[10:16] *** robertle joined
+[10:16] <timotimo> all? why stop there! let's dial it up to -Wextra!
+
+[10:16] <samcv> why wstop wthere? wpreface wall words with w
+
+[10:17] <dogbert17> well reading the discussion above it spits out  warnings like:
+
+[10:17] <dogbert17> src/strings/iter.h:90:23: warning: ‘gi.start’ may be used uninitialized in this function [-Wmaybe-uninitialized]
+
+[10:17] <dogbert17> MVMuint32 rep_graphs     = gi->end - gi->start;
+
+[10:18] <dogbert17> perhaps a false positive but there's quite a lot of stuff like that
+
+[10:19] <brrt> dogbert17: we have that voluntarily, it's called clang :-P
+
+[10:19] <brrt> in seriousness
+
+[10:19] <brrt> i'm not against having that as a configure option
+
+[10:22] * dogbert17 meets a -Wall of resistance :)
+
+[10:39] <Geth> ¦ MoarVM: 6d627da28d | (Jonathan Worthington)++ | src/spesh/stats.c
+
+[10:39] <Geth> ¦ MoarVM: Handle native refs better in spesh stats
+
+[10:39] <Geth> ¦ MoarVM:
+
+[10:39] <Geth> ¦ MoarVM: Previously, we would always consider a type tuple involving one as
+
+[10:39] <Geth> ¦ MoarVM: being incomplete, since a NativeRef is a container but we don't (any
+
+[10:39] <Geth> ¦ MoarVM: more) log the type of its content (and when we did, we got it wrong by
+
+[10:39] <Geth> ¦ MoarVM: logging the boxing of the actually referenced type).
+
+[10:39] <Geth> ¦ MoarVM:
+
+[10:39] <Geth> ¦ MoarVM: This allows for generating observed type specializations of things
+
+[10:39] <Geth> ¦ MoarVM: that get passed native references. It's not enough, however, to see
+
+[10:39] <Geth> ¦ MoarVM: invocations of those be fastinvoke'd or inlined (at least, it not in
+
+[10:39] <Geth> ¦ MoarVM: the multi-dispatch case).
+
+[10:39] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/6d627da28d
+
+[10:50] <jnthn> Hah, yay, seems I got us inlining atomic int loads
+
+[10:51] <jnthn> Presumably (though will check) that means atomic int cas also inlines
+
+[10:54] <nwc10> but first lunch?
+
+[10:54] <jnthn> Well, nodelay/blocking spesh stressing
+
+[10:54] <jnthn> But yeah, it's about lunch time
+
+[10:57] <jnthn> Looking good, spectesting with those stress options while I go for lunch
+
+[11:34] *** domidumont joined
+[12:01] <jnthn> yup, looking good
+
+[12:03] <Geth> ¦ MoarVM: fc75bca3c9 | (Jonathan Worthington)++ | src/6model/reprs/MVMMultiCache.c
+
+[12:03] <Geth> ¦ MoarVM: Support spesh multi resolution involving nativeref
+
+[12:03] <Geth> ¦ MoarVM:
+
+[12:03] <Geth> ¦ MoarVM: This means that we can fastinvoke or inline candidates being passed
+
+[12:03] <Geth> ¦ MoarVM: a native reference. This makes, for example, the load of an atomic
+
+[12:03] <Geth> ¦ MoarVM: int possible to inline, but likely enables a lot of native inlining
+
+[12:03] <Geth> ¦ MoarVM: more generally.
+
+[12:03] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/fc75bca3c9
+
+[12:07] *** committable6 joined
+[12:12] *** Skarsnik_ joined
+[12:12] <jnthn> brrt: The EXPR JIT works at BB level at the moment. I'm wondering if we might not get a lot more bang for buck even with that restriction if we were to make a pass of fusing basic blocks that needn't be basic blocks thanks to the elimination of invokish things and other code...
+
+[12:13] <brrt> yes.
+
+[12:13] <brrt> that would be pretty cool
+
+[12:15] <nine> So much for "no room for improvement" ;)
+
+[12:15] <brrt> but then, we also need 100x more templates :-P
+
+[12:15] <brrt> hehe, it's more like, 'where on earth should we start'
+
+[12:16] <brrt> re, invokish ops
+
+[12:16] <jnthn> nine: heh, there's tons of room for improvement :)
+
+[12:17] <brrt> repr-specific templates, i could imagine replacing an invokish implementation with a noninvokish one
+
+[12:17] <brrt> e.g. for stringification and stuff
+
+[12:17] <jnthn> Hurrah, cas for integers is indeed being inlined
+
+[12:18] <brrt> so i think, a template should carry some flag that indicates it isin't invokish
+
+[12:18] <brrt> which should overrride the per-op flag
+
+[12:18] <brrt> we should porbably keep the per-op flag though
+
+[12:19] <jnthn> Aye
+
+[12:19] <jnthn> Many invokish ops are rewritten to non-invokish during specialization, though
+
+[12:20] <brrt> true
+
+[12:23] <jnthn> Hm, next curiosity: why is the == in `last if cas($value, $orig, $orig + $i) == $orig` being fastinvoked but not inlined...
+
+[12:25] <ilmari> huh, none of the routines in https://docs.perl6.org/type/atomicint appear to be indexed
+
+[12:27] * jnthn wonders why
+
+[12:27] * jnthn has no idea how indexing works, though
+
+[12:27] <jnthn> I figured it went on headings or some such
+
+[12:27] <ilmari> the operators are, though
+
+[12:28] <jnthn> Hm, even more odd
+
+[12:29] <jnthn> Open a docs ticket, mebbe
+
+[12:29] <jnthn> Somebody probably knows :)
+
+[12:30] <jnthn> ok, the == ends up with an assertparamcheck left behind
+
+[12:31] <brrt> and there was another thing with the multiple basic blocks… current expr trees only have a 'forward' CFG, and with multiple BBs, i need to handle backward ones as well, and that is mostly relevant for the live ranges holes finding code
+
+[12:31] <jnthn> ah, yes
+
+[12:31] <jnthn> Think I can see what's going on with the == thing
+
+[12:31] <jnthn> Hmm
+
+[12:31] <jnthn> Guess fixing this will make a lot of code mixing native/non-native integers happy...
+
+[12:33] <ilmari> ah, they're "=head1 Routines \n =head2 foo", instead of "=head1 Methods \n =head2 routine foo", which seems to be the standard
+
+[13:26] <jnthn> Hurrah, the == is inlined there now too
+
+[13:34] <timotimo> wowza, i might just have kicked a mid-life crisis out of the heapanalyzer's "parse snapshot" code
+
+[13:35] <timotimo> gc time went from 25% to 15%
+
+[13:36] <timotimo> suddenly 1000 OSRs more than before
+
+[13:38] <Geth> ¦ MoarVM: ab28683b2f | (Jonathan Worthington)++ | src/spesh/optimize.c
+
+[13:38] <Geth> ¦ MoarVM: Set facts on nativeref deconts.
+
+[13:38] <Geth> ¦ MoarVM:
+
+[13:38] <Geth> ¦ MoarVM: It would, at some point, be nice to have better code-gen for the
+
+[13:38] <Geth> ¦ MoarVM: decont/box itself. But for now, we can get a notable win from setting
+
+[13:38] <Geth> ¦ MoarVM: up the facts on the target of the decont. We know the type of the
+
+[13:38] <Geth> ¦ MoarVM: result and also that it will be concrete, which in turn allows for
+
+[13:38] <Geth> ¦ MoarVM: full elimination of parameter checks in the case infix:<==>(Int, Int)
+
+[13:38] <Geth> ¦ MoarVM: <…commit message has 5 more lines…>
+
+[13:38] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ab28683b2f
+
+[13:38] <jnthn> With that, something like
+
+[13:38] <jnthn> loop {
+
+[13:38] <jnthn> my int $orig = $value;
+
+[13:38] <jnthn> last if cas($value, $orig, $orig + $i) == $orig;
+
+[13:38] <jnthn> }
+
+[13:38] <jnthn> Will be fully inlined
+
+[13:39] <jnthn> (the last, cas, and ==)
+
+[13:39] <brrt> jnthn++
+
+[13:39] <timotimo> i like the sound of this
+
+[13:40] <timotimo> i shall grab latest moarvm and see if it changes things in the heapanalyzer, too
+
+[13:41] <nwc10> in the bigger picture, what does this buy us - less CPU burned doing concurrency?
+
+[13:42] <timotimo> 2x as much inlining, but also 2x as many just-interpreted frames
+
+[13:43] <jnthn> nwc10: Taken together, these help pretty much any code that passes around native references
+
+[13:44] <jnthn> By adding various missing pieces that block inlining (or just cheapening the call by reducing duplicate checks)
+
+[13:45] <jnthn> Code using the atomic ops on native ints gets a particular win though
+
+[13:45] <jnthn> 'cus this is exactly what it does
+
+[14:04] *** zakharyas joined
+[14:07] <timotimo> now collectables are parsing faster than references (in this case there's 456_418 collectables and 1_761_280 references)
+
+[14:07] <timotimo> sadly, the code is full of nqp::shift_i and nqp::push_i
+
+[14:11] <jnthn> Hm, darn. So it seems that I can now have us re-compute the dominance tree before the second pass
+
+[14:12] <timotimo> ooooh
+
+[14:12] <jnthn> However, doing so causes the second pass to start descending into things it never did before. It then manages to mess things up enough to send some code into an infinite loop.
+
+[14:12] <timotimo> did you do the work necessary to put inlines in the "correct" spot?
+
+[14:12] <jnthn> No
+
+[14:12] <timotimo> OK, i see
+
+[14:12] <jnthn> That's a separate task
+
+[14:12] <timotimo> i still have a branch for that that i probably didn't push; it doesn't work properly, but it's a start
+
+[14:20] <samcv> jnthn, i confirmed it
+
+[14:20] <samcv> the old code doesn't work
+
+[14:20] <samcv> if you move the iterator after it's already been moved
+
+[14:22] <samcv> in MVM_string_get_grapheme_at_nocheck i had it randomly move the iterator until it finally gets to the end destination, and i get it iterating too far
+
+[14:22] <timotimo> i find it annoying that weechat decided to make samcv, nwc10, lizmat, and brrt have the same color
+
+[14:22] <samcv> you can probably change it
+
+[14:22] <samcv> to have 256 colors
+
+[14:23] <timotimo> i believe i did
+
+[14:23] <timotimo> there's a faq entry that has the magic incantation
+
+[14:29] * timotimo found another big optimization opportunity
+
+[14:29] <timotimo> my uint64 @result .= new(1, 2, 3, 4, 5); is 2x slower than my uint64 @resulf = 1, 2, 3, 4, 5;
+
+[14:29] <timotimo> is 2x slower than my uint64 @result; nqp::push_i(..., 1); nqp::push_i(..., 2) ...
+
+[14:31] <dogbert17> jnthn: looks as if one of your fixes has nailed RT #130855
+
+[14:31] <synopsebot6> Link:  https://rt.perl.org/rt3/Public/Bug/Display.html?id=130855
+
+[14:33] <jnthn> ooh, interesting
+
+[14:33] <dogbert17> dunno which one though
+
+[14:33] *** brrt joined
+[14:34] <jnthn> Wonder how far back we could be talking :)
+
+[14:35] <ilmari> bisect: sub foo () {$ = 42}; for ^2000000 { $ = foo }
+
+[14:35] <bisectable6> ilmari, On both starting points (old=2015.12 new=4b02b8a) the exit code is 0 and the output is identical as well
+
+[14:35] <bisectable6> ilmari, Output on both points: «»
+
+[14:36] <ilmari> it fails for me on This is Rakudo version 2017.06-198-g58900e7ba built on MoarVM version 2017.06-56-g161ec639
+
+[14:37] <timotimo> 33.92user 0.65system 0:13.36elapsed 258%CPU (0avgtext+0avgdata 848288maxresident)k
+
+[14:37] <timotimo> 119.40user 0.83system 1:27.46elapsed 137%CPU (0avgtext+0avgdata 1188220maxresident)k
+
+[14:37] <Zoffix> bisect: old=58900e7ba,new=HEAD sub foo () {$ = 42}; for ^2000000 { $ = foo }
+
+[14:37] <bisectable6> Zoffix, Bisecting by exit code (old=58900e7 new=4b02b8a). Old exit code: 1
+
+[14:38] <bisectable6> Zoffix, bisect log: https://gist.github.com/1227bf575dca207b9f4d8040ad1e1cb2
+
+[14:38] <bisectable6> Zoffix, (2017-08-11) https://github.com/rakudo/rakudo/commit/76af17a8b1dc79f8923109bbd284afed2e2fe011
+
+[14:39] <ilmari> "af24ab8 Can never inline frames declaring state vars." looks like a likely candidate
+
+[14:41] <timotimo> since it uses so much ram, it perhaps gets a performance penalty from swapping on my laptop
+
+[14:42] <jnthn> ilmari: ah, yes, that'd do it :)
+
+[14:49] * timotimo flips the order of heapsnapshots and shared data around in the heap snapshot format
+
+[14:55] <Geth> ¦ MoarVM/heapsnapshot_binary_format: 6063981424 | (Timo Paulssen)++ | src/profiler/heapsnapshot.c
+
+[14:55] <Geth> ¦ MoarVM/heapsnapshot_binary_format: sprinkle comments and empty lines for readabiltiy
+
+[14:55] <Geth> ¦ MoarVM/heapsnapshot_binary_format: review: https://github.com/MoarVM/MoarVM/commit/6063981424
+
+[14:55] <Geth> ¦ MoarVM/heapsnapshot_binary_format: acbbde09b8 | (Timo Paulssen)++ | src/profiler/heapsnapshot.c
+
+[14:55] <Geth> ¦ MoarVM/heapsnapshot_binary_format: move snapshots to beginning of file
+
+[14:55] <Geth> ¦ MoarVM/heapsnapshot_binary_format:
+
+[14:55] <Geth> ¦ MoarVM/heapsnapshot_binary_format: this way we can stream out the snapshots every time
+
+[14:55] <Geth> ¦ MoarVM/heapsnapshot_binary_format: we GC and then free their memory, then later just finish
+
+[14:55] <Geth> ¦ MoarVM/heapsnapshot_binary_format: it up with the string heap, types, and static frames.
+
+[14:55] <Geth> ¦ MoarVM/heapsnapshot_binary_format: review: https://github.com/MoarVM/MoarVM/commit/acbbde09b8
+
+[14:56] <timotimo> that was easy, wow.
+
+[15:04] *** travis-ci joined
+[15:04] <travis-ci> MoarVM build errored. Jonathan Worthington 'Support spesh multi resolution involving nativeref
+
+[15:04] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/272027364 https://github.com/MoarVM/MoarVM/compare/6d627da28deb...fc75bca3c9a2
+
+[15:04] *** travis-ci left
+[15:05] <timotimo> timed out on one of the mac builds ^
+
+[15:09] * timotimo notices that all of this was just because he wanted to see if the describe functions for the new spesh structures are correct
+
+[15:09] <timotimo> isn't yak shaving fun
+
+[15:14] * Zoffix chuckles that google's result for "wiki Yak Shaving" leads to a page that says "Wikipedia does not have an article with this exact name. Start the Yak shaving article"
+
+[15:14] <jnthn> :P
+
+[15:14] *** zakharyas joined
+[15:23] <japhb> Zoffix: :-D
+
+[15:28] <jnthn> Of course, the place where the set elimination blows up would be in a frame with 14 inlines :P
+
+[15:36] <timotimo> my advice: just throw it out completely
+
+[15:36] <timotimo> have you tried the spesh step-by-step tracing gdb script i built, jnthn?
+
+[15:40] <jnthn> Not yet
+
+[15:47] *** lizmat joined
+[15:57] <jnthn> So the interesting thing about this case is that at the end of an inline we have
+
+[15:58] <jnthn> sp_fastinvoke_o  r204(3),  r205(2), liti16(2)
+
+[15:58] <jnthn> set              r206(2),  r204(3)
+
+[15:58] <jnthn> [Annotation: FH End (12)]
+
+[15:58] <jnthn> set             r123(10),  r206(2)
+
+[15:58] <jnthn> [Annotation: Inline End (5)]
+
+[15:58] <jnthn> goto            BB(1121)
+
+[15:58] <jnthn> Being rewritten into
+
+[15:58] <jnthn> sp_fastinvoke_o r123(10),  r205(2), liti16(2)
+
+[15:58] <jnthn> [Annotation: Inline End (5)]
+
+[15:58] <jnthn> goto            BB(1121)
+
+[15:58] <jnthn> (yes, the FH end moves up above the fastinvoke, it's fine)
+
+[15:58] <jnthn> Where r123(10) is outside of the inline's register set
+
+[15:59] <jnthn> (It's the caller register)
+
+[15:59] <timotimo> right. at first glance that looks like a decent optimization (unless of course it doesn't update the facts properly?)
+
+[15:59] <jnthn> Don't think facts come in to it. This is the only one of the 3 set elimination transforms that actually *doesn't* screw the facts
+
+[16:00] <jnthn> The other two do
+
+[16:00] <timotimo> OK
+
+[16:00] <jnthn> Which will have to be fixed later
+
+[16:00] <timotimo> how does it make things explode?
+
+[16:00] <jnthn> I don't know. My first guess is deopt
+
+[16:00] <timotimo> one of the registers that are being skipped were used post-deopt at that point?
+
+[16:00] <jnthn> The end result is an infinite loop of some sort
+
+[16:01] <timotimo> like, we deopted into the one that would return a value from a register that was no longer being set
+
+[16:05] <jnthn> ah, yeah
+
+[16:05] <jnthn> For the topmost uninlinee we do this:
+
+[16:05] <jnthn> MVMuint16 orig_reg = (MVMuint16)(f->return_value - f->work);
+
+[16:05] <jnthn> MVMuint16 ret_reg  = orig_reg - cand->inlines[i].locals_start;
+
+[16:05] <jnthn> uf->return_value = uf->work + ret_reg;
+
+[16:06] <timotimo> we grab the contents of the register that used to get used for the return in question?
+
+[16:06] <jnthn> Note the substraction
+
+[16:07] <jnthn> orig_reg - cand->inlines[i].locals_start
+
+[16:07] <jnthn> That'll become *negative*
+
+[16:07] <jnthn> And point to...heck knows where
+
+[16:07] <timotimo> oooh, ouch
+
+[16:07] <timotimo> because we changed the register in the op
+
+[16:07] <timotimo> d'ouch
+
+[16:07] <jnthn> Right
+
+[16:08] * jnthn ponders the best way to deal with this
+
+[16:12] <timotimo> i can't believe we didn't have a string constant for "filename" or "path" or something yet
+
+[16:16] <jnthn> I guess any invokish is implicated
+
+[16:16] <jnthn> Oh, maybe not
+
+[16:16] <jnthn> Hmm
+
+[16:16] <jnthn> Yeah, actually it perhaps is.
+
+[16:17] <jnthn> I guess the boring answer is to just not allow a rewrite to the outside of the current inline
+
+[16:18] <timotimo> hm, right
+
+[16:19] <jnthn> Though we don't immediately have the info available to do that
+
+[16:19] <jnthn> (We don't store *which* inline a basic block maps to in a convenient way)
+
+[16:20] <jnthn> Ah well, think I might leave it for tomorrow, getting a tad tired now
+
+[16:20] <timotimo> sure thing
+
+[16:20] <timotimo> good work so far!
+
+[16:20] <timotimo> we can just toss the rewriting opt for now ;)
+
+[16:21] <jnthn> Well, we need 'em in the end, so...
+
+[16:21] <jnthn> The reason I set off trying this was that I wanted to move the exception handler -> goto opt to be post-inline
+
+[16:21] <jnthn> Spotting that it would apply to the cas loop but also to other things
+
+[16:23] <jnthn> But since we didn't have the inlines in the dominator tree, well, we'd not get it
+
+[16:24] <Geth> ¦ MoarVM: 9a5987f030 | (Jonathan Worthington)++ | src/spesh/optimize.c
+
+[16:24] <Geth> ¦ MoarVM: A little refactoring of second optimization pass
+
+[16:24] <Geth> ¦ MoarVM:
+
+[16:24] <Geth> ¦ MoarVM: No functional changes, just preparing it for doing a bit more, and
+
+[16:24] <Geth> ¦ MoarVM: breaking the code into easier to reason about pieces.
+
+[16:24] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/9a5987f030
+
+[16:24] <Geth> ¦ MoarVM: 73bfaf414f | (Jonathan Worthington)++ | src/spesh/optimize.c
+
+[16:24] <Geth> ¦ MoarVM: Remove fact copy we most likely don't now need
+
+[16:24] <Geth> ¦ MoarVM:
+
+[16:24] <Geth> ¦ MoarVM: Since propagating information during the optimize phase is so critical
+
+[16:24] <Geth> ¦ MoarVM: to getting more inlines and so forth, we'll already have done this by
+
+[16:24] <Geth> ¦ MoarVM: the second phase.
+
+[16:24] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/73bfaf414f
+
+[16:24] <Geth> ¦ MoarVM: 3271cd8d51 | (Jonathan Worthington)++ | src/spesh/optimize.c
+
+[16:24] <Geth> ¦ MoarVM: Re-flow and better explain set elimination code
+
+[16:24] <Geth> ¦ MoarVM:
+
+[16:24] <Geth> ¦ MoarVM: Done as part of understanding its shortcomings. Also comment on the
+
+[16:24] <Geth> ¦ MoarVM: places where it needs to be improved to not result in a busted spesh
+
+[16:24] <Geth> ¦ MoarVM: graph.
+
+[16:24] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/3271cd8d51
+
+[16:24] <jnthn> Those are some updates I've done along the way :)
+
+[16:25] <jnthn> Will hold the other bits in reserve until tomorrow, when I figure out how to solve the inline issue.
+
+[16:25] <lizmat> jnthn: does MoarVM / libuv have some knowledge about currently open files?
+
+[16:26] <jnthn> No
+
+[16:26] <lizmat> ok
+
+[16:26] <jnthn> I mean, technically MoarVM can walk the entire heap
+
+[16:26] <jnthn> And find every file handle
+
+[16:26] <jnthn> Which is how the heap profiler and GC do things
+
+[16:27] <lizmat> well, I was more thinking along the line of an array indexed on native-descriptor
+
+[16:27] <jnthn> But there's no other way of tracking things
+
+[16:27] <jnthn> No, there isn't that
+
+[16:27] <lizmat> a .close would clear the entry, on exit it would close all the entries in the list of open filees
+
+[16:28] <lizmat> it still wouldn't close on scope exit like in Perl 5, but at least it would ensure buffered output would not be lost
+
+[16:28] <timotimo> the next step for the heap snapshot format would be to have pieces of strins/types/staticframes before or after every single snapshot, but only containing the difference. that way, even a ctrl-c'd program would give usable & useful data
+
+[16:28] <jnthn> It's just hiding a problem though, which can eventually manifest itself in too many open files.
+
+[16:28] <lizmat> jnthn: which could be important in chasing bugs causing programs to exit
+
+[16:29] <lizmat> jnthn: true
+
+[16:29] <jnthn> If you're writing such a log, just open it with :!buffer
+
+[16:29] <geekosaur> yeh, there's a reason C makes sure stdio filehandles are recorded for atexit() to flush. I'm thinking something similar, at least for buffered handles, would be smart
+
+[16:29] <jnthn> We already are doing it for stdout/stderr
+
+[16:29] <geekosaur> if you are writing a log from a program that crashes, you lose diagnostic information
+
+[16:30] <geekosaur> and disabling buffering makes that logging expensive
+
+[16:30] <jnthn> True
+
+[16:30] <lizmat> jnthn: how is it done for stdout/stderr ?
+
+[16:30] <jnthn> Because those handles are created by the VM and hang off ->instance
+
+[16:31] <jnthn> We can of course keep an array of all open files, and remove stuff fromit
+
+[16:31] <jnthn> So long as you accept that the GC will then *never* close a file for you if you forget, so every opened file hangs around until program exit
+
+[16:31] <geekosaur> if it isreally hard /expensive to do for all handles then maybe a new parameter to add to an autoflush list would be an idea
+
+[16:31] <jnthn> I could live with that trade-off I guess
+
+[16:32] <jnthn> In that it will also make resource-leaky programs fall in a heap faster
+
+[16:32] <geekosaur> but really I think the 'hangs around' issue will likely force action on this at some point
+
+[16:32] <jnthn> geekosaur: 'hangs around' issue?
+
+[16:32] *** travis-ci joined
+[16:32] <travis-ci> MoarVM build passed. Jonathan Worthington 'Set facts on nativeref deconts.
+
+[16:32] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/272058760 https://github.com/MoarVM/MoarVM/compare/fc75bca3c9a2...ab28683b2f2f
+
+[16:32] *** travis-ci left
+[16:33] <geekosaur> doesn't get closed automatically when unreachable
+
+[16:33] <jnthn> geekosaur: Ah, you're saying that if we never do that, then people will be forced to fix their stuff?
+
+[16:33] <jnthn> geekosaur: Or that this would count as a bad behavior?
+
+[16:33] <geekosaur> because if you can't currently do it except by explicit close then things kinda get nasty. I don't think we quite have Haskell's issue there (basically Haskell *must* close stuff when it becomes unreachable, because laziness means you otherwise have no rel control over how many open handles you have)
+
+[16:34] <geekosaur> but if making an expression lazy can cause this then yes, I foresee problems in the future
+
+[16:34] <jnthn> I don't really see, short of the huge yak shave involving implementing weak references, how we can both have close on unreachable *and* keep a list of open things to close at exit.
+
+[16:35] <geekosaur> of course we don't have Haskell's style of lazy I/O either (unsafeInterleaveIO is convenient but has a ton of traps associated with it)
+
+[16:35] <lizmat> my view:
+
+[16:36] <lizmat> 1. you should have something like a my $handle will leave { .close }
+
+[16:37] <geekosaur> basically I am envisioning a situation where some object has a handle embedded deep within it and eventually becomes unreachable. of course that's begging for EMFILE issues anyway, but sometimes it's the best option for doing some things
+
+[16:37] <lizmat> 2. if you don't, you will eat up resources wrt to number of open handles
+
+[16:37] <lizmat> 3. if you exit, MoarVM should properly close all the open file handles before exitin
+
+[16:38] <jnthn> Well, there's the two of you wanting the opposite solution :P
+
+[16:38] <geekosaur> jnthn, actually I am thinking handles could go in a separate gc "bucket" so that at exit only that bucket could be gcd
+
+[16:38] * Zoffix 's most common IO doesn't touch handles at all...
+
+[16:39] <geekosaur> and only gcd for the handles not for general objects, but that may be special casing things a bit too much
+
+[16:39] <jnthn> It is.
+
+[16:40] <jnthn> The GC only has two spaces, nursery and gen2
+
+[16:40] <lizmat> in my opinion, the damage from losing buffered data is much larger than the damage of too many open handles
+
+[16:40] <Zoffix> Make that bucket more generic, so you could have Perl's equivalent of DESTROY that's guaranteed to run on exit
+
+[16:40] <Zoffix> class Foo is Collectable {... }
+
+[16:40] * Zoffix is talking from complete ignorance of GC stuff, mind you :)
+
+[16:41] <jnthn> lizmat: Note that you can implement what you're suggesting in Rakudo
+
+[16:41] <lizmat> jnthn: yes, and I'm tempted  :-)
+
+[16:42] <lizmat> which would solve the issue also for other backends, I guess  :-)
+
+[16:42] <jnthn> Indeed.
+
+[16:42] <jnthn> And means it's more clear for others to see what happens
+
+[16:42] <jnthn> Also
+
+[16:42] <jnthn> If at some point we do get weak references, then we can have our cake and eat it
+
+[16:42] <jnthn> (By making the open handles list be a list of weakrefs, so they won't keep handles alive if nothing else would)
+
+[16:43] <jnthn> If we do it at Perl 6 level we also get the chance to make the feature opt-in at Perl 6 level should we need to in the future.
+
+[16:44] <jnthn> As well as making it easier to build features like "store a stack trace with each open if an env var is set, and at exit show me all the handles I leaked"
+
+[16:46] <lizmat> ok I'll put that on my list
+
+[16:46] <jnthn> Alright
+
+[16:46] <lizmat> meanwhile, I need to decommute&
+
+[16:46] <geekosaur> mrrr. and now I am thinking 'make that resources instead of just handles' :p
+
+[16:46] <jnthn> fwiw, weak refs are possible, just...need notable effort
+
+[16:46] <geekosaur> (ResourceT in Haskell)
+
+[16:47] <jnthn> Step 1 being going to re-read the appropriate chapter of the GC handbook so I do it in a sensible way rather than re-inventing a poor one :)
+
+[16:47] <jnthn> When I may find it's not quite as bad as I fear...
+
+[16:48] <jnthn> But even then we need to figure out how we'll expose it at Perl 6 level, and if we need things like a callback when the thing gets collected
+
+[16:48] <jnthn> (Otherwise, you never reclaim your array slot)
+
+[16:48] <jnthn> And all that fun
+
+[16:49] <jnthn> Probably in the medium term, it's what we want though
+
+[16:56] <[Coke]> jnthn: Looks like 1.0.2 is the latest version in macports of openssl, btw.
+
+[16:57] <jnthn> [Coke]: Yeah, the ALPN love is going to be slowly shared, it seems...
+
+[17:02] <Skarsnik> hm I replaced https://github.com/MoarVM/MoarVM/blob/master/src/core/nativecall.c#L810 with cptr = (void*)((uintptr_t)storage + (uintptr_t)repr_data->struct_offsets[i]);
+
+[17:02] <Skarsnik> and it make efence happier
+
+[17:05] <[Coke]> oops. wrong window, sorry
+
+[17:08] * jnthn wanders home
+
+[17:26] *** zakharyas joined
+[18:22] <timotimo> fun, when a heap snapshot file has been truncated by a ctrl-c'd process, it won't have the index at the end
+
+[18:27] <timotimo> unless i write out a full index after every bit, that would work, because there'd always be an index at the end
+
+[18:29] <geekosaur> and here you see why I mentioned ResourceT earlier :p
+
+[18:48] *** dogbert2 joined
+[19:31] *** zakharyas joined
+[19:46] *** lizmat joined
+[19:58] *** ggoebel joined
+[20:01] *** greppable6 joined
+[20:08] <timotimo> this is C-level :)
+
+[20:55] <Skarsnik> it's me or https://github.com/MoarVM/MoarVM/blob/master/src/core/nativecall.c#L746 and https://github.com/MoarVM/MoarVM/blob/master/src/core/nativecall.c#L795 could probably be merged?
+
+[20:56] <geekosaur> are the masks etc. all guaranteed to be the same?
+
+[20:57] <Skarsnik> I will look at that tommorow x)
+
+[21:28] <Geth> ¦ MoarVM/heapsnapshot_binary_format: a8faddedd7 | (Timo Paulssen)++ | 5 files
+
+[21:28] <Geth> ¦ MoarVM/heapsnapshot_binary_format: WIP on streaming snapshots to file on every gc
+
+[21:28] <Geth> ¦ MoarVM/heapsnapshot_binary_format: review: https://github.com/MoarVM/MoarVM/commit/a8faddedd7
+
+[21:29] <timotimo> (just for transferring to my desktop)
+
+[21:31] <MasterDuke> timotimo: i tested it a tiny bit yesterday. took 25s to `summary` a snapshot of `perl6 -e ''`
+
+[21:31] <yoleaux> 06:19Z <AlexDaniel> MasterDuke: maybe you have some idea. committable.t and benchable.t hang on the first “Did you mean …” test
+
+[21:31] <yoleaux> 06:23Z <AlexDaniel> MasterDuke: sorry, bisectable.t and benchable.t. So https://github.com/perl6/whateverable/blob/3b1f3ca8ffd277367ff9c5c93adf026215d74167/t/bisectable.t#L165 and https://github.com/perl6/whateverable/blob/3b1f3ca8ffd277367ff9c5c93adf026215d74167/t/benchable.t#L142
+
+[21:31] <yoleaux> 06:23Z <AlexDaniel> MasterDuke: it may be associated with Sift4 module, which is problematic by itself… for example, it's still leaking memory.
+
+[21:31] <MasterDuke> which i thought was a long time, so i timed the old heap analyzer, 100s for the same thing
+
+[21:32] <MasterDuke> i just usually go do something else and didn't realize exactly how long it did take before!
+
+[21:33] <timotimo> MasterDuke: how big is the file, how good is the multi-core utilization?
+
+[21:34] <timotimo> also, which commit did you test with? i made things even faster still
+
+[21:34] <MasterDuke> 22mb, don't remember exactly, but think i was seeing ~315% cpu in top
+
+[21:34] <timotimo> that's not so bad
+
+[21:35] <MasterDuke> 16d9c2220187018410ae6a482398920b170e0a07 i think
+
+[21:35] <timotimo> you should be able to check out the last commit before head and try again
+
+[21:36] <MasterDuke> cool, i'll do that sometime this evening
+
+[21:38] <timotimo> nice
+
+[21:39] *** AlexDaniel joined
+[21:39] <timotimo> the next changes i'm making aren't about making things faster, i'm afraid
+
+[21:39] <timotimo> they will make running a program with the heap snapshot profiler active a bit cheaper on memory, though
+
+[21:40] <MasterDuke> that's good too
+
+[21:51] <timotimo> i didn't actually measure yet, though
+
+[21:55] *** travis-ci joined
+[21:55] <travis-ci> MoarVM build passed. Jonathan Worthington 'Re-flow and better explain set elimination code
+
+[21:55] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/272129206 https://github.com/MoarVM/MoarVM/compare/ab28683b2f2f...3271cd8d5158
+
+[21:55] *** travis-ci left
+[21:55] <timotimo> wow, that took ages
+
+[21:56] * timotimo remembers we have moarvm.github.io/coverage
+
+[22:12] <samcv> is this right? an empty string is found after a string, as in
+
+[22:12] <samcv> m: use nqp; nqp::index('hi', '', 2).say
+
+[22:12] <camelia> rakudo-moar c39db8: OUTPUT: «2?»
+
+[22:13] <samcv> m: use nqp; nqp::index('hi', 'i', 0).say
+
+[22:13] <camelia> rakudo-moar c39db8: OUTPUT: «1?»
+
+[22:14] <samcv> that's what perl 5 does at least so i guess it must be right
+
+[22:15] <MasterDuke> m: dd 'a'.split('')
+
+[22:15] <camelia> rakudo-moar c39db8: OUTPUT: «("", "a", "").Seq?»
+
+[22:16] <samcv> ah
+
+[22:17] <MasterDuke> i think there was some chat about this in #perl6 recently
+
+[22:18] <MasterDuke> maybe around here https://irclog.perlgeek.de/perl6/2017-08-29#i_15086059
+
+[22:28] <Geth> ¦ MoarVM: samcv++ created pull request #675: Optimize MVM_string_gi_move_to, fix if not starting at 0
+
+[22:28] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/675
+
+[22:33] <timotimo> getting closer to a working version of the "streaming" heap profiler
+
+[22:33] <timotimo> just threw heap snapshot data dumping out of nqp
+
+[22:35] <timotimo> (and moved generating the filename up front and all that)
+
+[22:38] <timotimo> m( i called it path in one and filename in the other
+
+[22:44] <samcv> using grapheme iterator cached for indexic i go from 1.6s to  0.78 seconds for a 10 strand string
+
+[22:44] <samcv> nice
+
+[22:45] <timotimo> neat
+
+[22:47] <samcv> bringing it in line with the speed for a flat string
+
+[22:52] <MasterDuke> ! nice
+
+[23:05] <timotimo> another rebase coming up
+
+[23:05] <Geth> ¦ MoarVM/heapsnapshot_binary_format: 9 commits pushed by (Timo Paulssen)++
+
+[23:05] <Geth> ¦ MoarVM/heapsnapshot_binary_format: 3416f2c6cc | introduce a binary format for heapsnapshot
+
+[23:05] <Geth> ¦ MoarVM/heapsnapshot_binary_format: dc113f05e7 | WIP gc_describe functions for new spesh datastructures
+
+[23:05] <Geth> ¦ MoarVM/heapsnapshot_binary_format: 805724bc0b | make references variable-length, add halfway to index
+
+[23:05] <Geth> ¦ MoarVM/heapsnapshot_binary_format: 38659c5616 | fix accidental truncation of references values
+
+[23:05] <Geth> ¦ MoarVM/heapsnapshot_binary_format: 64c85404d1 | never store ref kind in more than 8 bit
+
+[23:05] <Geth> ¦ MoarVM/heapsnapshot_binary_format: f6f3abe940 | sprinkle comments and empty lines for readabiltiy
+
+[23:05] <Geth> ¦ MoarVM/heapsnapshot_binary_format: c30ec7e944 | move snapshots to beginning of file
+
+[23:05] <Geth> ¦ MoarVM/heapsnapshot_binary_format: 1bc33a1f21 | keep only one snapshot around, immediately write it to file
+
+[23:05] <Geth> ¦ MoarVM/heapsnapshot_binary_format: bc75679532 | toss old format, make index work again
+
+[23:05] <Geth> ¦ MoarVM/heapsnapshot_binary_format: review: https://github.com/MoarVM/MoarVM/compare/a8faddedd7...bc75679532
+
+[23:19] <timotimo> just tested with multiple snapshots in one file
+
+[23:22] <timotimo> and i *think* i can insert garbage between snapshots so making heap snapshots "recoverable" on crash should be backwards compatible with earlier heapanalyzers
+
+[23:22] <timotimo> hmm, then the size entries for snapshots will be bigger, that'll be weird, but it'd still work
+
+[23:23] <timotimo> i might want to introduce an extra field for that before i go on.
+
+[23:24] <timotimo> but first i'll have some sleep
+
+[23:40] *** eater joined
+[23:45] <samcv> i think i've decided how i'm going to do KMP with really long needles. if it's too long to fit in the pattern, i'll only processs ~8000 needle graphemes, and search for that. if it finds it, i'll do eqat for the remainder of the needle. if it's a match we return the position. if it was false we continue searching
+
+[23:46] <samcv> still not sure if 8000 is the correct length for the jump table or what the best max length is. but that seems sane enough and not too big
+
+[23:49] <samcv> can i add an opcode that will tell you what representation a string is in
+
+[23:51] <samcv> or do we have too many ops already :P
+
+[23:51] <samcv> but it could be useful for people who use moarvm because i don't think they have a way to find out what rep the string is in.

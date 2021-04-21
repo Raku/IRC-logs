@@ -1,0 +1,294 @@
+[01:48] *** ilbot3 joined
+[02:26] <MasterDuke> samcv: if you take a look at the gists i linked here https://github.com/MoarVM/MoarVM/issues/571, there are a lot of `Use of uninitialised value of size 8` or `Conditional jump or move depends on uninitialised value(s)` in unicode stuff
+
+[02:27] <MasterDuke> i can't really tell what's going on
+
+[02:52] <samcv> MasterDuke, and this is reproducable?
+
+[02:53] <samcv> or occasional thing
+
+[02:57] <MasterDuke> every time so far
+
+[02:59] <MasterDuke> well, not the SEGV, but all those errors in valgrind
+
+[03:38] <samcv> ok thanks. will assign myself to it. not sure what causes it but
+
+[03:42] <MasterDuke> i'm not sure if some crazy code inside libssl/libcrypto is just confusing valgrind
+
+[03:44] <samcv> me either yeah. kinda weird
+
+[06:15] *** domidumont joined
+[06:19] *** domidumont joined
+[10:35] *** domidumont joined
+[10:44] *** domidumont joined
+[10:49] <jnthn> MasterDuke: http://www.hardening-consulting.com/en/posts/20140512openssl-and-valgrind.html
+
+[10:50] <jnthn> tl;dr the uninitialized warnings are 'cus openssl uses uninitialzed stack state as a source of entropy
+
+[11:26] <MasterDuke> jnthn: ah, i kind of wondered about that but didn't actually search around to confirm
+
+[11:27] <MasterDuke> and all the errors in moar's unicode functions are just because openssl first confused valgrind with it's craziness?
+
+[11:29] <jnthn> Yeah, almost certainly
+
+[11:29] <jnthn> Because we're proessing data that comes back from openssl
+
+[11:29] <jnthn> And valgrind can track propagation of uninitialized values and things derived from them
+
+[11:30] <MasterDuke> cool, makes sense
+
+[11:32] <MasterDuke> however, i did get a segv the very first time i ran this: perl6-m --profile=heap -I modules/http-useragent/lib/ -e 'use HTTP::UserAgent; my $ua = HTTP::UserAgent.new; my $response = $ua.get("https://perl6.org"); say $response.content.chars'
+
+[11:33] <jnthn> Hmm
+
+[11:33] <jnthn> Is it multi-threaded, 'cus the profiler handles that not too well...
+
+[11:35] <MasterDuke> is there an easy way to check? i obviously didn't do anything explicitly multi-threaded, but don't know what H::UA and its dependencies are doing under the hood
+
+[11:38] <jnthn> Well, if you catch the segv in gdb then you can just info threads
+
+[11:38] <jnthn> And see how many it reports :)
+
+[11:43] <MasterDuke> i'll try to catch it
+
+[11:45] <MasterDuke> jnthn: btw, this change ( https://github.com/sergot/openssl/pull/37 ) created a drastically different heaptrack profile of doing `perl6-m -I modules/http-useragent/lib/,modules/openssl/lib -e 'use HTTP::UserAgent; my $ua = HTTP::UserAgent.new; for ^10 { my $response = $ua.get("https://perl6.org"); say $response.content.chars }'`
+
+[11:47] <MasterDuke> before, heaptrack reported 10Gb total allocated, virtually off of it by `push`, in VMArray.c
+
+[11:47] <MasterDuke> *all of it
+
+[11:47] <MasterDuke> after, it was 268Mb total allocated
+
+[11:54] *** geekosaur joined
+[12:04] <jnthn> Why doesn't it just do buf8.allocate($n) ?
+
+[12:04] <jnthn> m: say buf8.allocate(16)
+
+[12:04] <camelia> rakudo-moar 08a973: OUTPUT: «Buf[uint8]:0x<00 00 00 00 00 00 00 00 00 00 00 00 00 00 00 00>␤»
+
+[12:15] <lizmat> jnthn: maybe the code predates the existences of Buf.allocate ?
+
+[12:15] <lizmat> *existence
+
+[12:16] <jnthn> That's very possible, yes :)
+
+[12:16] <jnthn> But I suspect it'd be quite the speedup :)
+
+[12:19] <lizmat> yeah, Buf.allocate is from Feb 2016
+
+[12:20] <lizmat> m: say buf8.allocate(16,(1,2,3))
+
+[12:20] <camelia> rakudo-moar 08a973: OUTPUT: «Buf[uint8]:0x<01 02 03 01 02 03 01 02 03 01 02 03 01 02 03 01>␤»
+
+[12:20] <lizmat> whee  :-)
+
+[12:21] <MasterDuke> jnthn++, lizmat++, i'll submit a new PR changing to that
+
+[12:22] <MasterDuke> but is the memory use/leakage from the previous way (0 xx $n) expected?
+
+[12:23] <lizmat> what is the exact code?
+
+[12:23] <lizmat> I could double check that, that leakage doesn't feel right  :-)
+
+[12:23] <MasterDuke> this was my previous PR https://github.com/sergot/openssl/pull/37
+
+[12:24] <MasterDuke> inspired by https://github.com/sergot/http-useragent/issues/169
+
+[12:26] <jnthn> Total allocated being higher doesn't convey a leak
+
+[12:27] <jnthn> Just means there was a lot more memory churn
+
+[12:27] <jnthn> And it isn't so surprising in that xx will return a Seq, and then we really have to pull values out of it
+
+[12:27] <jnthn> It's possible of course we could more optimally implement it :)
+
+[12:28] <MasterDuke> yeah, just one get request caused 1million+ calls to push
+
+[12:28] <jnthn> Wow o.O
+
+[12:28] <MasterDuke> yeah, i had to double-check i was reading the number right
+
+[12:29] <lizmat> MasterDuke jnthn : the problem is really in the Blob.new(@a) candidate
+
+[12:29] <lizmat> self!push-list("initializ",nqp::create(self),@values)
+
+[12:30] <MasterDuke> correcting to "initialize" will fix everything? :P
+
+[12:30] <lizmat> eh, it's used for any error messages and then postfixes "ing" I believe
+
+[12:32] <lizmat> and it's taking the generic Seq route, rather than the optimized List route  :-(
+
+[12:34] <MasterDuke> m: my int @i[10]; dd buf8.new(@i)
+
+[12:34] <camelia> rakudo-moar 08a973: OUTPUT: «Buf[uint8].new(0,0,0,0,0,0,0,0,0,0)␤»
+
+[12:35] <lizmat> yeah, that takes the most expensive route
+
+[12:35] <MasterDuke> ^^^ that also uses the slow candidate (Buf.pm:43)
+
+[12:35] <lizmat> yup
+
+[12:35] <MasterDuke> because it's shaped
+
+[12:36] <lizmat> please rakudobug this
+
+[12:36] <lizmat> and I'll have a look at it
+
+[12:36] <MasterDuke> which isn't what i expected (though i don't know native shaped arrays well)
+
+[12:36] <lizmat> that code predates shaped arrays
+
+[12:36] <MasterDuke> will do
+
+[12:42] <MasterDuke> RT #131086
+
+[12:42] <synopsebot6> Link:  https://rt.perl.org/rt3/Public/Bug/Display.html?id=131086
+
+[12:42] <lizmat> thanks!
+
+[12:43] <MasterDuke> np, thanks for looking into it
+
+[13:15] *** domidumont joined
+[14:07] <jnthn> line_coverage.c
+
+[14:07] <jnthn> src\instrument\line_coverage.c(2) : fatal error C1083: Cannot open include file: 'unistd.h': No such file or directory
+
+[14:07] <jnthn> Busted build on Windows :(
+
+[14:07] <timotimo> oh crap! sorry!
+
+[14:07] <timotimo> (why don't we have travis?)
+
+[14:07] <jnthn> We do, but Travis doesn't do Windows :P
+
+[14:08] <timotimo> er
+
+[14:08] <timotimo> i meant appveyor
+
+[14:08] <jnthn> Maybe we need...what's the thingy that does? :)
+
+[14:08] <jnthn> Maybe you could set it up as penance for breaking the build? ;)
+
+[14:08] <timotimo> hah
+
+[14:08] <timotimo> could try that. we do have a bunch of modules that already build their own rakudo to test themselves
+
+[14:09] <timotimo> what did i even use unistd for
+
+[14:09] <timotimo> aha "write"
+
+[14:09] <timotimo> then perhaps i want fputs?
+
+[14:09] <jnthn> mebbe
+
+[14:10] <jnthn> https://msdn.microsoft.com/en-us/library/1570wh78.aspx?f=255&MSPPError=-2147217396
+
+[14:10] <jnthn> It's _write on Windows
+
+[14:10] <jnthn> And comes from io.h
+
+[14:11] <timotimo> not sure what i'd have wanted the length parameter and the write function for
+
+[14:14] <Geth> ¦ MoarVM: 826259d77b | (Timo Paulssen)++ | src/instrument/line_coverage.c
+
+[14:14] <Geth> ¦ MoarVM: don't use unistd + write, use fputs instead.
+
+[14:14] <Geth> ¦ MoarVM:
+
+[14:14] <Geth> ¦ MoarVM: unbusts our build on windows
+
+[14:14] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/826259d77b
+
+[14:34] <geekosaur> if you did need the binary/packet one, try fwrite
+
+[14:35] <timotimo> since my data also already ends with a null byte, i guess fputs would be sufficient?
+
+[14:37] *** leego joined
+[14:42] <Geth> ¦ MoarVM: 5d73bf4b98 | (Timo Paulssen)++ | src/6model/reprs/P6int.c
+
+[14:42] <Geth> ¦ MoarVM: cope with a native type with no nativesize, but signedness
+
+[14:42] <Geth> ¦ MoarVM:
+
+[14:42] <Geth> ¦ MoarVM: by setting default_storage_spec.bits
+
+[14:42] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/5d73bf4b98
+
+[14:50] *** Geth joined
+[15:31] *** zakharyas joined
+[15:59] *** Ven joined
+[16:02] <jnthn> timotimo: Confirm that fixes the build; thanks!
+
+[16:02] <jnthn> c:\consulting\moarvm\src\instrument\line_coverage.c(53) : warning C4700: uninitialized local variable 'last_line_number' used
+
+[16:03] <jnthn> I get that warning, though, fwiw ;)
+
+[16:03] <committable6> jnthn, ¦\consulting\moarvm\src\instrument\line_coverage.c(53): «Cannot find this revision (did you mean “7ddc5f7”?)»
+
+[16:03] <jnthn> haha
+
+[16:03] <jnthn> That's an...interesting suggestion :P
+
+[16:04] <timotimo> the what now? o_O
+
+[16:04] <jnthn> Something starting c: triggers commitable
+
+[16:05] <timotimo> good point, i should set last_line_number and last_filename into invalid values
+
+[16:05] <timotimo> ooooh
+
+[16:05] <timotimo> i was under the impression you pasted that as an output from msvc
+
+[16:05] <jnthn> Yes, the error I pasted was from MSVC
+
+[16:05] <jnthn> Then commitable reacted :)
+
+[16:06] <timotimo> yeah :D
+
+[16:06] * AlexDaniel slaps committable6
+
+[16:06] <AlexDaniel> c:HEAD say 42
+
+[16:06] <committable6> AlexDaniel, ¦HEAD(932b59f): «42»
+
+[16:06] <AlexDaniel> this is not supposed to work…
+
+[16:06] <AlexDaniel> b:say 42
+
+[16:06] <bisectable6> AlexDaniel, On both starting points (old=2015.12 new=932b59f) the exit code is 0 and the output is identical as well
+
+[16:06] <bisectable6> AlexDaniel, Output on both points: «42»
+
+[16:07] <AlexDaniel> or is it? Not even sure now
+
+[17:53] *** camelia joined
+[17:58] *** bartolin joined
+[18:06] *** MasterDuke joined
+[19:39] *** patrickz joined
+[20:05] *** Ven joined
+[21:11] <samcv> hello beautiful people
+
+[21:14] <Zoffix> \o
+
+[21:17] <timotimo> yo
+
+[21:17] <lizmat> samcv /o    # feels honoured
+
+[21:18] <samcv> :-)
+
+[21:18] <samcv> ok so. i am making coverage reports with travis. now where/how to upload them to some site for our viewing
+
+[21:18] <samcv> initially just the overview reports
+
+[21:18] <samcv> paging Zoffix
+
+[21:19] <samcv> i guess for now i'll just have it print it out to travis' output
+
+[21:37] *** zakharyas joined
+[21:49] <Geth> ¦ MoarVM: 21fc7a226a | (Samantha McVey)++ | .gitignore
+
+[21:49] <Geth> ¦ MoarVM: Add more coverage related files to .gitignore
+
+[21:49] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/21fc7a226a
+
+[23:36] *** sivoais joined

@@ -1,0 +1,973 @@
+[00:07] <timotimo> i'll check it out
+
+[00:11] <timotimo> 79.04user 1.04system 1:20.35elapsed 99%CPU (0avgtext+0avgdata 1092980maxresident)k
+
+[00:11] <timotimo> so that's a small part of it
+
+[00:34] <timotimo> 78.69user 1.09system 1:20.09elapsed 99%CPU (0avgtext+0avgdata 1092796maxresident)k
+
+[00:34] <timotimo> another run, a bit better timing apparently
+
+[01:14] *** FROGGS_ joined
+[06:24] *** mj41 joined
+[07:07] <nwc10> jnthn: strange, but I think I'm testing the correct thing. Anyway, the new origin/inline also still happy
+
+[07:26] *** FROGGS[mobile] joined
+[09:15] <jnthn> nwc10: OK, thanks.
+
+[09:21] *** lizmat joined
+[09:46] *** mj41 joined
+[09:57] <dalek> Heuristic branch merge: pushed 95 commits to MoarVM by jnthn
+
+[09:58] <timotimo> inline has been inlined to master? :
+
+[09:58] <timotimo> :)
+
+[09:58] <nwc10> running dumbbench suggests that the allocator makes it about 4% faster than no allocator
+
+[09:59] <nwc10> it's sad that malloc() still doesn't win
+
+[09:59] <timotimo> huh?
+
+[09:59] <jnthn> Yes, merged.
+
+[10:00] <jnthn> Time to get more feedback :)
+
+[10:00] <nwc10> I didn't study jnthn's allocator *too* closely, but it seemed to be a general purpose allocator, not specifically particular sizes
+
+[10:00] <nwc10> so I couldn't see (fundamentally) why it should be faster than malloc
+
+[10:01] <jnthn> nwc10: It stores stuff by size classes and freeing also requires knowing the size allocated.
+
+[10:02] <nwc10> aha. the latter might be part of the win.
+
+[10:02] <nwc10> a malloc could store stuff by size classes. Hence my initial confusion
+
+[10:10] <timotimo> uh
+
+[10:10] <timotimo> did nqp builds use to be that fast?
+
+[10:10] <timotimo> 39.95user 0.95system 0:41.40elapsed 98%CPU (0avgtext+0avgdata 161788maxresident)k
+
+[10:12] <jnthn> Maybe not :)
+
+[10:13] <jnthn> Rakudo build got a bit faster, after all...
+
+[10:14] <nwc10> dumbbench thinks that the setting build is about 2.5% faster
+
+[10:14] <nwc10> but reports vary, depending on how many outliers it threw away
+
+[10:15] <timotimo> without inline, but with CGOTO:
+
+[10:15] <timotimo> 37.75user 0.83system 0:38.75elapsed 99%CPU (0avgtext+0avgdata 120728maxresident)k
+
+[10:15] <jnthn> timotimo: Any reason we can't turn CGOTO on by default if we detect GCC?
+
+[10:16] <jnthn> Also, what happens if we cgoto + inline? :)
+
+[10:16] <timotimo> 36.17user 1.00system 0:37.86elapsed 98%CPU (0avgtext+0avgdata 161856maxresident)k
+
+[10:16] <timotimo> the memory usage increase is a bit worrying, IMO.
+
+[10:17] <jnthn> Yes, I'm curious where that comes from.
+
+[10:17] <timotimo> 36.08user 0.98system 0:37.24elapsed 99%CPU (0avgtext+0avgdata 161892maxresident)k
+
+[10:18] <timotimo> so that's somewhat stable ... ish
+
+[10:18] <nwc10> is the memory use lower on the commit before the custom allocator?
+
+[10:18] <jnthn> Good question.
+
+[10:19] <timotimo> 38.04user 1.00system 0:39.21elapsed 99%CPU (0avgtext+0avgdata 146088maxresident)k
+
+[10:19] <timotimo> that's on 7a52289
+
+[10:19] <nwc10> jnthn: if I understand the source code well enough from skimming it, you're allocating using a bin for objects 1-8, a bin for 9-16, ... 257-264 ... 1017-1024
+
+[10:20] <jnthn> Right.
+
+[10:20] <nwc10> jemalloc isn't using as many bins: http://www.canonware.com/download/jemalloc/jemalloc-latest/doc/jemalloc.html
+
+[10:20] <nwc10> (see "Table 1. Size classes")
+
+[10:21] <nwc10> and, I'm guessing, MoarMV simply isn't allocating stuff in some of the bin sizes
+
+[10:21] <nwc10> and *is* allocating a lot of things of the same size
+
+[10:22] <nwc10> so having lots of bins wins.
+
+[10:22] <jnthn> Also, an unused bin is near-enough free
+
+[10:22] * timotimo doesn't really know the build system stuff, so can't easily turn on cgoto when gcc is found
+
+[10:31] <vendethiel> ooh, inline got merged ?
+
+[10:31] <timotimo> aye
+
+[10:31] <vendethiel> nice ! jnthn++
+
+[10:31] <timotimo> inline got inlined :3
+
+[10:32] <vendethiel> (every else contributing/that has contributed)++
+
+[10:32] <timotimo> that's mostly nwc10
+
+[10:32] <timotimo> i didn't do anything :)
+
+[10:36] <timotimo> jnthn: are there spesh analysis/improvements i could try to build that would benefit greatly from inlined stuff?
+
+[10:37] <jnthn> timotimo: Maybe; one other thing you might like to try, looking at my profile output here, is to look at nqp_nfa_run
+
+[10:38] <jnthn> timotimo: And see about using the fixed size allocator instead of malloc/free in there
+
+[10:38] <timotimo> is that c-level or nqp-level?
+
+[10:38] <jnthn> C level
+
+[10:38] <timotimo> ah
+
+[10:38] <jnthn> Apparently 1.1% of setting build time goes on that malloc/free pair.
+
+[10:39] <timotimo> that doesn't immediately sound like a huge deal; don't we do lots and lots of nfa during setting compilation?
+
+[10:41] <jnthn> A potential 1% saving for a few lines tweaking is quite a bit.
+
+[10:41] <timotimo> that's 1% if you can make it 10x faster :)
+
+[10:45] <timotimo> haven't run an actual profile in a long time
+
+[10:45] <timotimo> a c-level profile, that is
+
+[10:46] <jnthn> Ah, found some memory management fail.
+
+[10:47] <timotimo> that's good :)
+
+[10:47] <dalek> MoarVM: 9d440a3 | jnthn++ | src/core/fixedsizealloc.c:
+
+[10:47] <dalek> MoarVM: Add mechanism for debugging fixed size alloc/free.
+
+[10:47] <dalek> MoarVM:
+
+[10:47] <dalek> MoarVM: Can set a flag where it checks the allocated and freed sizes match up,
+
+[10:47] <dalek> MoarVM: and panics if they fail to.
+
+[10:47] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/9d440a3676
+
+[10:48] <jnthn> We fail that check, and it seems it happens if we deopt.
+
+[10:49] <nwc10> jnthn: one thing I was wondering was whether the outermost level of the fixed size stuff could be an inline function - the one that decides if it is in a bin or not
+
+[10:49] <nwc10> so that, if one changes the "bin detection" code to "never uses a bin" in a way that the C compiler's optimiser can see
+
+[10:50] <nwc10> then it can generate code that always uses malloc
+
+[10:50] <nwc10> which keeps OpenBSD happy
+
+[10:53] <timotimo> iiuc this is about very short-lived objects, which would benefit from having an all-at-once free step
+
+[10:54] <timotimo> there's no way to do this on the stack, aye?
+
+[10:54] <timotimo> at least for the nfa?
+
+[10:56] <jnthn> nwc10: On MSVC at least, considering I couldn't breakpoint an optimized build inside of that outermost one, it already was doing an inline there.
+
+[10:57] <jnthn> timotimo: Well, it *is* possible we could allocate one big chunk of memory for the NFA processing and then free it.
+
+[10:58] <jnthn> Yes, it's short lived.
+
+[10:58] <timotimo> jnthn: that's not what's going on with the fixed size allocator?
+
+[10:58] <timotimo> is that allocator itself long-lived?
+
+[11:00] <jnthn> The allocator lives for the whole process
+
+[11:00] <timotimo> ah, ok
+
+[11:00] <timotimo> in that case, yeah, the nfa could possibly benefit from a short-lived allocator
+
+[11:01] <jnthn> Not really
+
+[11:01] <timotimo> OK, what do i know :)
+
+[11:01] <jnthn> It's just that it makes 4 calls to malloc/free when it could do 2, and then it could use the fixed size allocator which seems to be cheaper than malloc.
+
+[11:03] <timotimo> that does sound like a win, aye
+
+[11:04] <timotimo> i wonder how many serious security-related bugs lie hidden in moarvm's code
+
+[11:05] <nwc10> only 1 known use-after-free
+
+[11:05] <nwc10> not tried using valgrind to find uninit warnings
+
+[11:05] <dalek> MoarVM: 3bf1aa7 | jnthn++ | src/core/frame. (2 files):
+
+[11:05] <dalek> MoarVM: Fix freeing of frame memory to correct bucket.
+
+[11:05] <dalek> MoarVM:
+
+[11:05] <dalek> MoarVM: Before we sometimes ended up putting it back in the wrong one, if we
+
+[11:05] <dalek> MoarVM: deoptimized. This corrects that issue, hopefully improving memory use.
+
+[11:05] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/3bf1aa782f
+
+[11:05] <jnthn> timotimo: Plesae try with that, but it seems to help here.
+
+[11:05] <timotimo> sure
+
+[11:07] <timotimo> 37.11user 1.17system 0:38.66elapsed 99%CPU (0avgtext+0avgdata 144480maxresident)k
+
+[11:07] <timotimo> that's a bit better than before you put the fixed size allocator in
+
+[11:10] <jnthn> ah, good
+
+[11:10] <jnthn> So it was that.
+
+[11:10] <timotimo> still 20mb more than before we had inline at all
+
+[11:10] <timotimo> does that seem like a sane amount of ram usage for inlining things?
+
+[11:11] <jnthn> A little higher than I'd expect
+
+[11:12] <timotimo> i'm generally in favor of having much less ram usage in moarvm, but that's not connected to any particular "work item"
+
+[11:12] <jnthn> Well, also I don't know to what degree it's a VM-level issue and to what degree we need to be more frugal with memory at a higher level.
+
+[11:13] <timotimo> fair enough
+
+[11:13] <timotimo> there's still the issue with strings being stored many, many times in ram
+
+[11:13] <jnthn> It's like QAST node construction.
+
+[11:13] <jnthn> We've been optimizing all kinds, but the way QAST nodes get created is basically performance hostile.
+
+[11:14] <timotimo> is that still the case?
+
+[11:14] <jnthn> Yes.
+
+[11:14] <timotimo> ah, that's where we iterate over names and call methods to set attributes?
+
+[11:14] <jnthn> Right, meaning that every single one of those method calls is a late-bound lookup
+
+[11:14] <timotimo> yeah, ouch!
+
+[11:15] <jnthn> And it's a megamorphic callsite, so there's basically nothing the optimizer can do.
+
+[11:15] <timotimo> can we perhaps get that to use nqp::bindattr directly?
+
+[11:15] <timotimo> instead of the methods?
+
+[11:15] <jnthn> Well, having constructors that are more specialized to the nodes may also help
+
+[11:15] <jnthn> Additionally, not all nodes have children.
+
+[11:15] <timotimo> mhm. lots more typing, but better performance for all backends i suspect
+
+[11:15] <jnthn> But every single SVal, NVal, WVal, etc. currently has an array allocated for them.
+
+[11:15] <timotimo> right, SVal, IVal, WVal, NVal wouldn't have children
+
+[11:16] <timotimo> the same treatment annotations got might not be that helpful for children lists, right?
+
+[11:16] <timotimo> because we really do want to keep the positional_delegate
+
+[11:16] <jnthn> yeah, we want that for API reasons too
+
+[11:17] <timotimo> should we have a QAST::ChildlessNode as the top of the class hierarchy and then derive one with a children array?
+
+[11:17] <jnthn> No
+
+[11:17] <jnthn> I'd be more inclined to write a role
+
+[11:17] <timotimo> mhm
+
+[11:17] <jnthn> And it's composed by the node classes that have children.
+
+[11:17] <timotimo> another idea would be to bind nqp::null to the children list?
+
+[11:18] <timotimo> oh, that'll be problematic if we iterate over nodes without knowing if they'll have children or not
+
+[11:18] <jnthn> Also we waste the 8 bytes for the pointer we don't need.
+
+[11:19] <timotimo> what we could do is bind the same empty list to all childless nodes
+
+[11:19] <timotimo> how does that sound?
+
+[11:19] <jnthn> No, we should do the role thing I'm suggesting.
+
+[11:19] <timotimo> how does that interact with trying to iterate over nodes?
+
+[11:20] <timotimo> will we get a .list method call emitted for all places that would be problematic?
+
+[11:20] <timotimo> in that case we could return a global empty list object from that and otherwise have the role provide the list
+
+[11:20] <jnthn> I think we can do it transparently to the current usage
+
+[11:21] <jnthn> That is, this can be done as an internal refactor to the QAST nodes without breaking anything.
+
+[11:21] <timotimo> that would be nice indeed
+
+[11:22] <timotimo> only very few qast nodes survive past the compilation stage of a program's lifetime, right?
+
+[11:22] <timotimo> there's the qast nodes that survive to make inlining in the optimizer possible, do they survive past the last compilation stage?
+
+[11:23] <timotimo> well, to be fair, the maxrss in building is surely dominated by the compilation phases, as there's very little code being run there
+
+[11:25] <jnthn> Yeah, we serialize the QAST tree for things taht we view as inlineable, yes
+
+[11:25] <jnthn> Though it's quite restricted.
+
+[11:26] <timotimo> aye, i recall that
+
+[11:32] *** JimmyZ_ joined
+[12:14] *** vendethiel joined
+[12:49] <dalek> Heuristic branch merge: pushed 117 commits to MoarVM/moar-jit by bdw
+
+[12:50] <jnthn> That's some catch-up :)
+
+[12:50] <nwc10> jnthn: does your compiler do link time optimisation? In that, can it inline the non-static functions that are used for the allocator? (just curious)
+
+[12:51] *** cognominal joined
+[12:51] <jnthn> Yes.
+
+[12:51] <jnthn> With the default MoarVM build options, anyway.
+
+[12:51] <nwc10> Ah OK. So I guess that that makes those functions behave pretty much like they were static
+
+[12:52] <nwc10> anyway, this is all possibly premature optimsation (and therefore wrong). You've already made it easy to disable the functionality, and always use the system malloc (or the malloc replacing tool)
+
+[12:59] <nwc10> ./perl6-m t/spec/S17-promise/allof.t
+
+[12:59] <nwc10> ;==8851==ERROR: AddressSanitizer: SEGV on unknown address 0x000000000000 (pc 0x7fd93c1a9272 sp 0x7fffe15273b0 bp 0x7fffe15273f0 T0)
+
+[12:59] <nwc10> oh, that's supposed to be red.
+
+[12:59] <nwc10> anyway, ungood.
+
+[12:59] <nwc10> master/master/nom
+
+[13:02] <lizmat> fwiw, I see that test failing intermittently in the spectest
+
+[13:03] <lizmat> over on #perl6 I was just handwaving about a static .WHICH for an object
+
+[13:03] <lizmat> I think we're getting to the point that the current non-constant nature of .WHICH is starting to cause problems
+
+[13:04] <jnthn> WHICH really wants a re-visit in many ways.
+
+[13:04] <jnthn> The current implementation is doomed to be slow also.
+
+[13:04] <jnthn> And I doubt it has good entropy.
+
+[13:11] <lizmat> so how bad is the idea of a per-thread simple int64 counter ?
+
+[13:12] <jnthn> Well, but where to store it?
+
+[13:12] <jnthn> We don't want to make very object 8 bytes bigger...
+
+[13:13] <jnthn> And for, say, Int, the identity is tied up in the value
+
+[13:13] <nwc10> 8 bytes bigger is >2% more peak memory
+
+[13:13] <nwc10> it's 2% just usng 8 bytes per P6Opaque
+
+[13:16] <lizmat> do we want to start playing variable struct size tricks like in P5 ?
+
+[13:16] <nwc10> bugger. t/spec/S17-promise/allof.t passes first time under valgrind
+
+[13:17] <nwc10> lizmat: probably not. Because if thread 2 can change the size of a structure (And move it) than every *read* in thread 1 needs to grab a mutex to prevent thread 2 from doing that at the wrong time.
+
+[13:18] <nwc10> and, if reads need mutexes, deadlock becomes much easier.
+
+[13:18] <nwc10> (oh, that's second order)
+
+[13:19] <nwc10> reads become much slower
+
+[13:19] <lizmat> yeah, so it makes much more sense to just add it to the struct ?
+
+[13:19] <nwc10> what, add a "which" to the object header?
+
+[13:20] <lizmat> isn't that what we're talking about ?
+
+[13:20] <nwc10> yes. that also sucks, because memory usage will increase by (maybe) 5%
+
+[13:20] <lizmat> however, in this case it doesn't seem needed:
+
+[13:20] <lizmat> $ 6 'say 42.REPR; say 42.WHICH'
+
+[13:20] <lizmat> P6opaque
+
+[13:20] <lizmat> Int|42
+
+[13:21] <lizmat> so maybe we need a P6opaquevalue ?
+
+[13:21] <lizmat> that wouldn't need the .which in the struct ?
+
+[13:23] <lizmat> or maybe treat anything that needs a non-value based .WHICH differently wrt to allocating ?
+
+[13:24] <jnthn> Well, thing is that *most* objects don't ever have .WHICH called on them
+
+[13:24] <jnthn> We should associate the cost with using the feature.
+
+[13:24] *** zakharyas joined
+[13:26] <lizmat> are you talking CPU or memory cost ?
+
+[13:27] <jnthn> Both
+
+[13:27] <lizmat> I'm assuming code depends on the fixed length of an P6opaque?
+
+[13:27] <jnthn> More generally, I'm thinking about having the storage of WHICH values be more like a hash table arrangement.
+
+[13:27] <lizmat> what would be the key?
+
+[13:28] <lizmat> and would you clean it up when an object gets destroyed?
+
+[13:28] <jnthn> The object - the trickiness here being it needs to be VM-supported.
+
+[13:28] <jnthn> Right.
+
+[13:28] *** brrt joined
+[13:29] <lizmat> and that hash would be per thread, I assume ?
+
+[13:29] <lizmat> otherwise we get serious locking issues, no?
+
+[13:29] <jnthn> Probably needs to be
+
+[13:29] <jnthn> otoh, then we get different issues
+
+[13:30] * jnthn doesn't see any particularly easy solutions
+
+[13:32] <lizmat> would the simple approach maybe not be best?
+
+[13:33] <jnthn> No.
+
+[13:33] <lizmat> take the 8byte per Opaque hit, only set it when actually asked for?
+
+[13:33] <lizmat> at least until we think of something better ?
+
+[13:33] <jnthn> No, we should work out the better thing, not pile up technical debt.
+
+[13:34] *** mj41 joined
+[13:35] <jnthn> It woulda been nice if the spec had been so lenient as Java's .hashCode() spec, which can change over an object's lifetime...
+
+[13:35] <lizmat> well, then maybe we need to pick this up at a higher level?
+
+[13:35] <jnthn> But it's not, which is a Tricky Problem. But a big memory usage increase on everything isn't a great answer.
+
+[13:37] <lizmat> or maybe only assign some .WHICH when it gets moved out of the nursery (and *then* add the extra 8 bytes)
+
+[13:37] <lizmat> and if a .WHICH is called on something not in the nursery, move it out?
+
+[13:37] <lizmat> *in the nursery rather
+
+[13:38] <jnthn> You can't "just move it out", but one idea TimToady++ hinted at that can be feasible is using the gen2 address if it's already there, or pre-allocating a gen2 slot for the object if we are asked for its WHICH and keeping a table of nursery objects => WHICH values.
+
+[13:38] <jnthn> And we remove those entries at GC time, due to collection or movement.
+
+[13:40] * lizmat is trying to serve as a catalyst  :-)
+
+[13:40] <brrt> oh, i wanted to mention, creating a 'move / copy' node for the jit runs into the register selection explosion problem again, so i'm not doing that (yet)
+
+[13:41] <nwc10> I like TimToady's suggestion. I think it could work well.
+
+[13:42] <nwc10> can do that without more RAM by (ab)using the union in the object header, but would need another flag to say that it's being done, and slow SC access
+
+[13:42] <nwc10> (you'd put the real SC pointer into the pre-allocated gen2 space)
+
+[13:44] <dalek> MoarVM: 22773f2 | jnthn++ | src/spesh/args.c:
+
+[13:44] <dalek> MoarVM: Don't refuse to spesh if we've a slurpy positional
+
+[13:44] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/22773f2330
+
+[13:54] <jnthn> timotimo: Feel free to give qast_refactor branches in NQP and Rakudo a spin.
+
+[14:03] <timotimo> 36.30user 0.95system 0:37.52elapsed 99%CPU (0avgtext+0avgdata 142724maxresident)k
+
+[14:03] <timotimo> 2mb less usage apparently
+
+[14:04] <timotimo> but about 1s less time? could very well be noise.
+
+[14:04] <jnthn> That's NQP build?
+
+[14:04] <timotimo> aye
+
+[14:04] <jnthn> OK. Rakudo one could be interesting too. :)
+
+[14:12] <timotimo> OK
+
+[14:14] <timotimo> refactor'd: 76.05user 0.95system 1:17.56elapsed 99%CPU (0avgtext+0avgdata 820128maxresident)k
+
+[14:15] *** brrt joined
+[14:15] * jnthn tries to find the previous numbers :)
+
+[14:15] <timotimo> i'm making new ones
+
+[14:17] <timotimo> master'd:   76.37user 1.03system 1:17.60elapsed 99%CPU (0avgtext+0avgdata 826456maxresident)k
+
+[14:21] <jnthn> Hmm, a memory win, not so much of a performance one, curiously.
+
+[14:21] <timotimo> beware the noise
+
+[14:21] <timotimo> i didn't shut down all running programs :)
+
+[14:21] <jnthn> ah
+
+[14:39] <jnthn> walk :) And when I'm back, I'll look at the spesh args missing thing where it doesn't know how to handle boxing/unboxing and so bails.
+
+[14:52] *** betterworld joined
+[15:02] *** btyler joined
+[15:08] *** brrt left
+[16:01] <nwc10> jnthn: for those 2 branches, t/spec/S17-scheduler/every.t can fail with a NULL pointer at
+
+[16:01] <nwc10> #0 0x7f1e40b4f0b1 in MVM_fixed_size_alloc src/core/fixedsizealloc.c:121
+
+[16:01] <nwc10> #1 0x7f1e40b4f1b1 in MVM_fixed_size_alloc_zeroed src/core/fixedsizealloc.c:144
+
+[16:01] <nwc10> #2 0x7f1e40adac20 in allocate_frame src/core/frame.c:201
+
+[16:01] <nwc10> but not reliably
+
+[16:02] <nwc10> total fails are: t/spec/S06-macros/opaque-ast.rakudo.moar t/spec/S06-macros/unquoting.rakudo.moar t/spec/S17-lowlevel/lock.rakudo.moar t/spec/S17-scheduler/every.t t/spec/integration/advent2012-day23.t
+
+[16:02] <nwc10> the S17 are ASAN. The other 3 are
+
+[16:02] <nwc10> ===SORRY!===P6opaque: no such attribute '$!position'
+
+[16:02] <jnthn> Hmm, that sounds like "missing a commit"
+
+[16:03] <nwc10> This is nqp version 2014.05-14-g2147886 built on MoarVM version 2014.05-121-g22773f2
+
+[16:03] <nwc10> This is perl6 version 2014.05-193-g6d23540 built on MoarVM version 2014.05-121-g22773f2
+
+[16:03] <jnthn> Yes, I just pushed the missing one. D'oh.
+
+[16:04] <jnthn> Thought the error looked very familiar...
+
+[16:12] <timotimo> how often do we have slurpy positional subroutines/methods in nqp and rakudo source respectively?
+
+[16:14] <timotimo> hm. so a slurpy positional argument will turn into a list. and we know exactly how big that list is at spesh-time. do i smell a specialization opportunity?
+
+[16:14] <timotimo> though, we probably often do things like iterate over these and stuff like that
+
+[16:16] <jnthn> timotimo: Yeah, we can do something there, I suspect
+
+[16:16] <timotimo> a fact flag "KNOWN_ARRAY_SIZE"?
+
+[16:17] <timotimo> probably more like "KNOWN_ELEMENT_COUNT"
+
+[16:17] <jnthn> Oh, I wasn't thinking of even going that far.
+
+[16:17] <timotimo> another thing is that if we have a method that has slurpy positional arguments and we "just pass it on" to another, spesh will see it involves flattening and bail out, won't it?
+
+[16:18] <jnthn> Just potentially using the sp_getarg_ ops to grab the args and put them into the array.
+
+[16:18] <jnthn> Yes
+
+[16:18] <jnthn> Obviously, there's a change to do better there, but not sure how easy it is.
+
+[16:18] <timotimo> if we know we just got these arguments from a slurpy positional, we can probably assume it's safe
+
+[16:19] <timotimo> i'm not sure i know how that sp_getarg_ thing you mentioned would work; will the positionals that'll end up in the slurped array just be available like regular positionals?
+
+[16:19] <jnthn> Well, I think it actually probably wants to go the other way around.
+
+[16:19] <jnthn> As in, "I see I get called with a flattening callsite, and I take a slurpy there"
+
+[16:20] <timotimo> oh, as in: instead of flattening this array and slurping it again, let's just pass the array directly"
+
+[16:20] <timotimo> that seems more sensible, i agree
+
+[16:35] <timotimo> no spesh: 40.23user 0.91system 0:41.37elapsed 99%CPU (0avgtext+0avgdata 118300maxresident)k
+
+[16:35] <timotimo> spesh: 36.37user 0.93system 0:37.52elapsed 99%CPU (0avgtext+0avgdata 144524maxresident)k
+
+[16:35] <timotimo> that's the complete nqp build
+
+[16:39] <timotimo> no spesh: 84.33user 1.02system 1:25.91elapsed 99%CPU (0avgtext+0avgdata 722140maxresident)k
+
+[16:39] <timotimo> spesh: 77.57user 1.07system 1:18.86elapsed 99%CPU (0avgtext+0avgdata 826312maxresident)k
+
+[16:39] <timotimo> that's the complete rakudo build
+
+[16:39] <timotimo> m: say (1 * 60 + 18) / (1 * 60 + 25)
+
+[16:39] <camelia> rakudo-moar 7f22e9: OUTPUT«0.917647␤»
+
+[16:40] <timotimo> this is with inline already; i thought inline would do crazy improvements to the parse time, what with inlining proto regexes and such :/
+
+[16:40] <timotimo> but 9% isn't bad either.
+
+[16:43] <jnthn> Well, remember it's just taking out invocation overhead.
+
+[16:44] <timotimo> that contains argument passing and returning already, right?
+
+[16:44] <timotimo> and cross-invocation-dead-code-elimination and constant-folding?
+
+[16:45] <jnthn> Not the latter two yet really.
+
+[16:45] <jnthn> It's being a bit conservative so as not to ruin the inline annotations.
+
+[16:45] <timotimo> oh
+
+[16:46] <timotimo> huh, what is this. the very first thing that gets spesh'd has a named parameter operation removed, which had BB(3) as its label, but BB(3) is still listed as that block's successor?
+
+[16:46] <timotimo> rather: as one of the successors
+
+[16:49] <timotimo> i wonder if this leads to less dead code elimination than is necessary
+
+[16:49] <timotimo> i wonder if BBs should be merged if they become completely linear during spesh?
+
+[16:49] <timotimo> that's probably not easy to do given the dominance tree and stuff?
+
+[16:49] <jnthn> It's also not wroth it at all.
+
+[16:50] <jnthn> BBs don't correspond to anything at runtime.
+
+[16:50] <jnthn> https://gist.github.com/jnthn/2050e5ed6e8991e24e53 # example of inline making a difference.
+
+[16:50] <timotimo> OK
+
+[16:51] <timotimo> oh, that's not too shabby :)
+
+[16:52] <jnthn> Yeah. It's just that if you look at profiles of CORE.setting compilation and similar, invocation overhead is only so much
+
+[16:53] <timotimo> i s'pose that's fair
+
+[17:02] <dalek> MoarVM: dd80dbf | (Timo Paulssen)++ | src/spesh/optimize.c:
+
+[17:02] <dalek> MoarVM: put in a missing break
+
+[17:02] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/dd80dbfc7b
+
+[17:04] <timotimo> does it sound sensible to spesh coerce_in and coerce_ni?
+
+[17:05] <timotimo> probably not much that can be done, eh?
+
+[17:07] <timotimo> i see at least one const_n + coerce_ni
+
+[17:07] <timotimo> er, actually const_i + coerce_in
+
+[17:08] <timotimo> a whole lot of coerces of those two come directly after smrt_numify
+
+[17:11] <timotimo> hum. these const_i's are all 16bit ints; so replacing the const_i + coerce with a const_n will give us a 64bit num in its place
+
+[17:11] <timotimo> should still be a win, right?
+
+[17:13] <timotimo> would also get rid of a bit of interpretation overhead? i would assume with coerce and const_i, the interpreter overhead is many times what the operation itself takes
+
+[17:15] <jnthn> Well, it's an instruction cheaper, yes.
+
+[17:22] <nwc10> jnthn: ./perl6-m t/spec/S17-scheduler/every.t can SEGV:
+
+[17:22] <nwc10> #0 0x7f421a79b0b1 in MVM_fixed_size_alloc src/core/fixedsizealloc.c:121
+
+[17:22] <nwc10> #1 0x7f421a7fce31 in bind_key src/6model/reprs/MVMHash.c:86
+
+[17:22] <nwc10> ./perl6-m t/spec/S17-promise/allof.t can SEGV
+
+[17:22] <nwc10> #0 0x7f948135a0b1 in MVM_fixed_size_alloc src/core/fixedsizealloc.c:121
+
+[17:22] <nwc10> #1 0x7f94813bbe31 in bind_key src/6model/reprs/MVMHash.c:86
+
+[17:22] <nwc10> so, something isn't quite as threadsafe as it should be.
+
+[17:22] <jnthn> aye
+
+[17:22] <jnthn> Looks like
+
+[17:22] <nwc10> both are NULL pointers
+
+[17:23] <nwc10> threads are hard, let's go asyncing.
+
+[17:23] <timotimo> should we build a smrt_intify? because i see a whole bunch of smrt_numify followed directly by coerce_ni
+
+[17:23] <timotimo> hm, actually ... that wouldn't be much help
+
+[17:24] <timotimo> because we still have to parse the stuff after the . because there could be an E in there
+
+[17:25] <nwc10> or
+
+[17:25] <nwc10> core (noun), plural coredump
+
+[17:26] <jnthn> timotimo: I think it already exists.
+
+[17:27] <timotimo> there's smrt_numify and smrt_strify
+
+[17:27] <timotimo> those are the only ones with smrt_ or ify in their name
+
+[17:36] <jnthn> hm, you're right :)
+
+[17:36] <jnthn> In other news, I just finally managed to get the instrumented profile in VS to work.
+
+[17:36] *** FROGGS joined
+[17:36] <timotimo> it's still kinda questionable if that would really help
+
+[17:36] <timotimo> knowing that the result is going to be intified
+
+[17:36] <FROGGS> o/
+
+[17:36] <timotimo> o/ FROGGS
+
+[17:37] <jnthn> While that runs, I'm going to find some food :)
+
+[17:37] <jnthn> wow, it wrote 18GB so far. Good job it's on something with half a terrabyte to hand...
+
+[17:38] <jnthn> bbiab
+
+[17:46] <timotimo> 76.60user 1.06system 1:17.88elapsed 99%CPU (0avgtext+0avgdata 826528maxresident)k
+
+[17:48] <timotimo> vs
+
+[17:48] <timotimo> 76.11user 1.10system 1:17.41elapsed 99%CPU (0avgtext+0avgdata 826520maxresident)k
+
+[17:49] <timotimo> so the coerce thing isn't worth terribly much. not really surprising
+
+[17:49] <timotimo> (first line is with coerce spesh thingie, second is without)
+
+[17:50] <dalek> MoarVM: 87221ba | (Timo Paulssen)++ | src/spesh/optimize.c:
+
+[17:50] <dalek> MoarVM: can do coerce_in of literals at spesh-time.
+
+[17:50] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/87221ba400
+
+[17:52] <jnthn> lol
+
+[17:52] <jnthn> CORE.setting running with instrumented profiling got done while I was shopping :)
+
+[17:52] <jnthn> 80GB.
+
+[17:54] <FROGGS> not a SSD me thinks
+
+[17:54] <jnthn> No
+
+[17:54] <jnthn> Spinning rust, and boy is it making a racket now as it analyses the data.
+
+[17:55] <FROGGS> that is also a problem of SSDs, they are so fast, when something write stuff to it in an infiniloop you almost can't stop it
+
+[18:38] *** zakharyas joined
+[18:40] *** mj41 joined
+[18:45] *** bcode joined
+[18:55] *** mj41 joined
+[19:59] <timotimo> it's like having an LTE on your phone, but a 1gb data limit
+
+[20:00] <timotimo> so, what's going on now? :)
+
+[20:00] <timotimo> the analysis hopefully is already done? :D
+
+[20:04] <jnthn> Yeah.
+
+[20:04] <jnthn> Took ages :)
+
+[20:04] <jnthn> But it got done while I coked, ate, etc.
+
+[20:04] <jnthn> uh, cooked :)
+
+[20:05] <timotimo> sadly, the spesh_diff tool is broken with the current spesh log format
+
+[20:05] <timotimo> somehow ...
+
+[20:07] <jnthn> Curiously, the instrumented profiler thinks we spend about half as much time in GC as the sampling profile does.
+
+[20:08] <timotimo> huh, that's weird.
+
+[20:11] <jnthn> getattributte is still by some way the most costly thing we do.
+
+[20:11] <jnthn> 'cus, I assume, spesh can't handle most of the getattribute/bindattribute in Cursors.
+
+[20:12] <jnthn> That's a pretty strong indicator that I should work on that in 2014.07. :)
+
+[20:12] <timotimo> that's half a month in the future! :(
+
+[20:14] <timotimo> anything simple i could try to bang my head against in the mean time?
+
+[20:14] <jnthn> No, I mean, for the 2014.07 release
+
+[20:14] <timotimo> ah, ok
+
+[20:14] <jnthn> I don't really want to go optimizing much further at this point.
+
+[20:15] <jnthn> Would rather work on fixes, making sure stuff works well for this week's release.
+
+[20:15] <jnthn> Then after it can get back to opts :)
+
+[20:16] <timotimo> ah ... yeah, that *is* fair
+
+[20:16] <timotimo> we do have some known problems with our async and multithreaded things on moar, for example
+
+[20:19] <jnthn> Well, we know there's problems. :P
+
+[20:21] <jnthn> Anyway, interesting to look through the report.
+
+[20:22] <jnthn> String comp comes up fairly high, but a lot of that is 'cus we're still hitting the attribute access slow path so often.
+
+[20:23] <timotimo> mhm
+
+[20:23] <jnthn> 2.6% is spent in smart_numify. Not such a smart move.
+
+[20:23] <jnthn> 1.3% in smart_stringify
+
+[20:57] <timotimo> i kind of sort of wish we could give Rat a big speed boost
+
+[20:57] <timotimo> it seems likely to me that many people who come to try out p6 are going to be using the / operator and stumbling over the pretty tough performance hit
+
+[20:58] <jnthn> Well, step 1 is to write benchmarks for it in perl6-bench, so we understand the magnitude of the problem and how we can improve it :)
+
+[20:59] <timotimo> oh, of course :)
+
+[20:59] <timotimo> i could have thought of that
+
+[21:07] *** cognominal joined
+[21:08] <dalek> MoarVM/moar-jit: 1b1eac4 | (Bart Wiegmans)++ | / (8 files):
+
+[21:08] <dalek> MoarVM/moar-jit: Configure JIT with environmental variables.
+
+[21:08] <dalek> MoarVM/moar-jit:
+
+[21:08] <dalek> MoarVM/moar-jit: This should make the JIT play more nicely.
+
+[21:08] <dalek> MoarVM/moar-jit: Also supports hello world :-)
+
+[21:08] <dalek> MoarVM/moar-jit: review: https://github.com/MoarVM/MoarVM/commit/1b1eac45eb
+
+[21:08] *** brrt joined
+[21:10] <tadzik> :o
+
+[21:11] <tadzik> brrt: are the generated files being commited to not depend on lua?
+
+[21:11] <brrt> oh.. yes
+
+[21:11] <brrt> oh, good of you to mention that
+
+[21:11] <brrt> i forgot the win32 x64 files
+
+[21:11] <tadzik> :)
+
+[21:12] <dalek> MoarVM/moar-jit: 1537dcd | (Bart Wiegmans)++ | src/jit/emit_win32_x64.c:
+
+[21:12] <dalek> MoarVM/moar-jit: Forgot the win32 x64 dynasm output.
+
+[21:12] <dalek> MoarVM/moar-jit: review: https://github.com/MoarVM/MoarVM/commit/1537dcda78
+
+[21:12] <tadzik> do you have like a commit hook to regen all those files?
+
+[21:13] <tadzik> that might be handy
+
+[21:13] <brrt> not yet
+
+[21:13] <brrt> yep
+
+[21:13] <jnthn> +         MVMString * s = sf->body.cu->body.strings[idx]; +         | mov64 TMP, (uintptr_t)s
+
+[21:13] <jnthn> About that, it assumes gen2 and thus non-moving, which is fine for the string heap, but need to be careful when it comes to, say, spesh slots.
+
+[21:14] <brrt> yes, i know, its hacky, but the alternative was i started up coding a call to MVM_strings_get() which - afaik - doesn't exist yet, and the commit wsa big enough as it is :-)
+
+[21:15] <brrt> i'm somewhat against ripping moarvm interp open and diverging before i've got a chance to merge, is what i mean :-)
+
+[21:16] <jnthn> *nod*
+
+[21:16] <brrt> hmm
+
+[21:17] <brrt> i'm looking at the getlex_** ops, they look tricky (i.e. not really what i want to encode in single a MVMJItCallC node
+
+[21:18] <brrt> in that the return value is a pointer that needs to be dereferenced before i can store it in the register
+
+[21:18] <jnthn> I think for the JIT we can do some case analysis on those.
+
+[21:19] <brrt> case analysis?
+
+[21:19] <jnthn> For example, if outers is 0, then it's just looking directly into ->env
+
+[21:19] <jnthn> For i/n/s.
+
+[21:19] <jnthn> The auto-viv doesn't happen.
+
+[21:19] <brrt> agreed
+
+[21:19] <brrt> not for s, either?
+
+[21:19] <jnthn> For o you can know if it's going to auto-viv
+
+[21:20] <jnthn> No
+
+[21:21] <brrt> ok, seems fair
+
+[21:21] <brrt> fwiw, getlex isn't really the problem, getlex_n. are :-)
+
+[21:22] <jnthn> Oh...how so?
+
+[21:22] <jnthn> Those are the named forms
+
+[21:22] <jnthn> And so not so hot
+
+[21:22] <jnthn> As they handle the (less common) late-bound cases.
+
+[21:23] *** donaldh joined
+[21:26] <jnthn> brrt: The if file handle then fprintf thing will get tiresome, I suspect; I suggest an MVM_INLINE function.
+
+[21:27] <brrt> yes, it does get tiresome, but how do i pass varargs through to printf?
+
+[21:27] <brrt> jnthn - because they return a pointer
+
+[21:27] <brrt> long story short
+
+[21:27] <brrt> i call function
+
+[21:27] <brrt> pointer is stored in %rax
+
+[21:27] <brrt> pointer is to be dereferenced into some temporrary register
+
+[21:28] <brrt> temporary register is to be copied into moarvm register space
+
+[21:28] <brrt> thats... annoying
+
+[21:28] <brrt> especially considering what happens if value-of-pointer happens to be a float
+
+[21:28] <jnthn> brrt: See MVM_exception_throw_adhoc or MVM_panic for example of vararg-hanlding functions
+
+[21:29] <brrt> ok, i'll do that :-)
+
+[21:29] <jnthn> They pass to sprintf, but it should be abou tth esame trick.
+
+[21:29] <jnthn> wow, so typing
+
+[21:29] <jnthn> What makes it annoying in the float case?
+
+[21:31] <brrt> oh,  isee
+
+[21:31] <brrt> floats are 80 bits wide on x86_64
+
+[21:31] <brrt> my guess is they still are when you return them as MVMnum64
+
+[21:32] <brrt> that is a guess, though
+
+[21:32] <jnthn> Hm, I was sure MVMRegister - the union with that in it - came out as 8 bytes wide
+
+[21:32] <brrt> then... i hope i'm wrong
+
+[21:33] <brrt> i'm just not sure what happens when you stash them in a integer register - obviously you can't do math on them :-) but if the bits come out ok, then it still should be ok
+
+[21:33] <brrt> b
+
+[21:34] <brrt> oops
+
+[21:46] <dalek> MoarVM/moar-jit: 9e8e69b | (Bart Wiegmans)++ | / (5 files):
+
+[21:46] <dalek> MoarVM/moar-jit: More low-hanging fruit opcodes.
+
+[21:46] <dalek> MoarVM/moar-jit: review: https://github.com/MoarVM/MoarVM/commit/9e8e69b8e0
+
+[21:46] * brrt off for tonight
+
+[21:46] *** brrt left
+[22:32] <jnthn> sleep &
+
+[22:33] <FROGGS> gnight jnthn
+
+[22:34] <lizmat> gnight jnthn
+
+[22:36] <timotimo> gnite jnthn :)
+
+[23:43] *** daxim joined

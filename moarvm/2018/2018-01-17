@@ -1,0 +1,440 @@
+[00:25] <AlexDaniel> releasable6: next
+
+[00:25] <releasable6> AlexDaniel, Next release in 3 days and ≈18 hours. Blockers: https://github.com/rakudo/rakudo/issues?q=is:issue+is:open+label:%22%E2%9A%A0+blocker+%E2%9A%A0%22. Unknown changelog format
+
+[01:17] *** unicodable6 joined
+[01:17] *** quotable6 joined
+[02:57] *** ilbot3 joined
+[03:41] *** Kaiepi joined
+[03:57] *** bloatable6 joined
+[04:32] *** Kaiepi joined
+[06:45] *** domidumont joined
+[07:13] *** domidumont joined
+[08:02] *** zakharyas joined
+[08:10] *** domidumont joined
+[08:39] <nine> YES!!
+
+[08:42] <nine> MVM_frame_find_contextual_by_name has a similar issue like uninline: if (ret_offset >= cand->inlines[i].start && ret_offset < cand->inlines[i].end)
+
+[08:42] *** brrt joined
+[08:42] <nine> There's that off-by-one again in the bounds check. Fixing that fixes the remaining issue at least when the JIT is turned off.
+
+[08:43] <nine> So all that's left is finding out why the JITed code path is wrong, too. That one does if (return_label >= labels[inls[i].start_label] && return_label <= labels[inls[i].end_label])
+
+[08:47] <brrt> ohai… ehm.
+
+[08:48] <brrt> maybe that needs to be return_label < labels[inls[i].end_label]
+
+[08:48] <brrt> but
+
+[08:48] <brrt> it interacts with how we fetch the label in the JIT currently, which i intend to change to stack-walking
+
+[08:48] <brrt> (still intend to change)
+
+[08:59] <nine> brrt: but that looks exactly like the broken non-JITed path then :)
+
+[09:02] <brrt> i'm still not 100% sure I can conclusively tell you what is or isn't a good idea
+
+[09:04] <brrt> i keep forgetting where the inline end label is placed on
+
+[09:05] <brrt> or: we're using these labels to assert a property of the current code that is executing with regards to the inline structure of that code
+
+[09:05] <brrt> which is to say, 'our current position in code is within this inline'
+
+[09:08] <brrt> now, for the lego jit, we insert a label *after* any and all code that we compiled for the instruction; this means that if we loaded a dynamic label it must've been before the end of that instruction (and after it's begin)
+
+[09:08] <brrt> sorry for the english grammar fail, it's bad today
+
+[09:08] <nine> Yes:             MVMint32 label = MVM_jit_label_after_ins(tc, jg, bb, ins);
+
+[09:08] <nine> jg_append_label(tc, jg, label);
+
+[09:08] <nine> jg->inlines[ann->data.inline_idx].end_label = label;
+
+[09:10] <nine> So the inline check looks ok. Curiously the frame handler end label is put _before_ the instruction with the FH_END annotation. Even though I think the bounds check should include that instruction.
+
+[09:11] <nine> At least JITed and non-JITed code are similar in that regard
+
+[09:11] <brrt> in the expr JIT, we also get a label after the current instruction, and we insert an after-label (if necessary) for the graph as well. so it is pretty much equivalent
+
+[09:11] <brrt> the frame handler end label should be placed *after*… that's what I believed it was doing anyway
+
+[09:12] <nine> The JIT places the label before the instruction and checks with <=, while the non-JITed code records the offset of the instruction itself and checks with <
+
+[09:17] *** brrt joined
+[09:18] <brrt> no, that really shouldn't be what's happening, and that's also not what the expr JIT does (it appends the root for the after label *after* having appended the root for the instruction)
+
+[09:18] <brrt> if it does then there is a screwup in some lower level
+
+[09:23] *** zakharyas1 joined
+[09:24] <nine> Huh? I've now run tests and spectests again with enabled JIT but can't reproduce any errors anymore
+
+[09:26] <nine> That said, I'm not sure anymore if I checked if the JITed code is faulty at all. Considering how large the broken function is, it could just be that it is never JITed at all, thus it always hit the faulty non-JIT code path.
+
+[09:27] <brrt> hmm, fair enough
+
+[09:27] <nine> Could also explain why the bug did not hit us anywhere else
+
+[10:12] *** Kaiepi joined
+[10:19] *** jnthn joined
+[11:08] <Geth> ¦ MoarVM: 20a4a7976c | (Stefan Seifert)++ | src/core/frame.c
+
+[11:08] <Geth> ¦ MoarVM: Fix off-by-one error when checking inline boundaries in MVM_frame_find_contextual_by_name
+
+[11:08] <Geth> ¦ MoarVM:
+
+[11:08] <Geth> ¦ MoarVM: The INLINE_END annotation is on the last instruction of the inlined code, so
+
+[11:08] <Geth> ¦ MoarVM: the bounds check needs to include the boundary.
+
+[11:08] <Geth> ¦ MoarVM:
+
+[11:08] <Geth> ¦ MoarVM: Same as commit 7ea08024edfe1cb85c6925be1229324c349dd2c9
+
+[11:08] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/20a4a7976c
+
+[11:11] <brrt> nine++
+
+[11:12] <brrt> I suggest that we move the whole 'position-within-inline' thing into a separate function
+
+[11:12] <brrt> e.g MVM_spesh_candidate_find_inline_by_code_position(MVMThreadContext*,MVMSpeshCandidate,MVMint32 code_offset);
+
+[11:13] <brrt> and an equivalend MVM_spesh_candidate_find_inline_by_code_position_for_jit(MVMThreadContext*,MVMSpeshCandidate*,void*position);
+
+[11:15] <jnthn> nine++ # good find
+
+[11:15] <jnthn> brrt: Yes, that would likely be sensible :)
+
+[11:16] <brrt> (or find_inline_by_jitcode_position)
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: 189468e213 | (Timo Paulssen)++ (committed by Stefan Seifert) | 4 files
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: Put inlined blocks between their caller and its succ
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place:
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: Previously inlined callees were added to the end of the basic block list.
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: We now put the inlined blocks into the list at the position of the invoke op.
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: However we cannot yet get rid of the goto ops entering and exiting the inlined
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: code as that would lead to odd bugs possibly related to the annotations on
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: these ops.
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: review: https://github.com/MoarVM/MoarVM/commit/189468e213
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: caa306d237 | (Stefan Seifert)++ | src/spesh/optimize.c
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: Turn inline_end annotated pointless gotos into no_ops
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place:
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: We can't remove them completely as that causes weird deopt issues. But turning
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: them into no_ops should give almost the same benefits without the cost.
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: review: https://github.com/MoarVM/MoarVM/commit/caa306d237
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: fbdf707c0b | (Stefan Seifert)++ | src/spesh/inline.c
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: Move inlinee's handlers to front instead of duplicating inliner's
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place:
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: Previously active handlers at the point of the invoke were copied and the
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: inlinee's code surrounded by annotations pointing at those copies. Instead
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: we now move the inlinee's handlers to the top of the table so they will be
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: searched first. This means we have to adjust the indexes of the inliner's
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: annotations but that's actually simpler than the whole copying business.
+
+[11:29] <Geth> ¦ MoarVM/inline_in_place: review: https://github.com/MoarVM/MoarVM/commit/fbdf707c0b
+
+[11:30] <Geth> ¦ MoarVM/inline_in_place: c4e6a35d5f | (Stefan Seifert)++ | 3 files
+
+[11:30] <Geth> ¦ MoarVM/inline_in_place: Remove the pointless goto at the end of an inlined function.
+
+[11:30] <Geth> ¦ MoarVM/inline_in_place: review: https://github.com/MoarVM/MoarVM/commit/c4e6a35d5f
+
+[11:31] <brrt> (this is a rebase, I think?)
+
+[11:32] <nine> Except that last commit
+
+[11:32] <nine> That was the last 100 hours of debugging :D
+
+[11:32] *** brrt1 joined
+[11:32] <nine> I guess in terms of performance improvement per invested hour this is the most epic fail ever ;)
+
+[11:33] <brrt1> nah, the expression JIT can compete with that still
+
+[11:33] *** domidumont joined
+[11:46] *** committable6 joined
+[11:50] <nine> brrt: there's a rather confusing comment in src/jit/graph.c:646 consdering our discussion this morning
+
+[11:52] <brrt> oh, which one?
+
+[11:52] *** AlexDani` joined
+[11:53] <nine> brrt: https://github.com/MoarVM/MoarVM/blob/master/src/jit/graph.c#L646
+
+[11:53] <jnthn> It seems that there's funds for me to apply for another 200 hour extension of my reliability/performance grant.
+
+[11:54] <jnthn> I've some ideas what I'd like to focus on, but am open to any suggestions. :)
+
+[11:54] <brrt> ehm, let me think if i know anything off hand
+
+[11:55] <brrt> what would be your own ideas?
+
+[11:55] <lizmat> jnthn: I would like to see the work on the JIT come to more fruition
+
+[11:55] <brrt> nine: note that that's a frame handler label
+
+[11:56] <brrt> so the FH_END instruction notes the first instruction that is beyond the scope of the frame handler
+
+[11:56] <brrt> (at least, that is how the JIT does it)
+
+[11:57] <nine> brrt: ah, then that is different from interpreted code, where the FH_END is _on_ the last instruction, therefore including.
+
+[11:57] <brrt> … really…
+
+[11:57] <brrt> that is very probably a bug, then
+
+[11:57] <brrt> but one that has been in there for ages
+
+[11:58] <brrt> hmmm
+
+[11:58] <brrt> are you sure about that?
+
+[12:00] <jnthn> lizmat: Are you talking about the machine codegen part in particular, or JIT as taking in the whole dynamic optimization stuff?
+
+[12:00] <brrt> lunch &
+
+[12:00] <lizmat> I think about the machine codegen part, as that's still mostly not "filled in", right ?
+
+[12:02] <jnthn> There's a bunch more templates to be written there, though I think it's also limited in how good a job it can do by us not fusing basic blocks that had their potential control flow eliminated
+
+[12:03] <lizmat> ok, so you're saying we still need to do some / a lot of prerequisite work before the codegen will really deliver >
+
+[12:03] <lizmat> ?
+
+[12:03] <nine> Fusing basic blocks doesn't sound that hard, does it?
+
+[12:03] <jnthn> nine: No
+
+[12:04] <jnthn> Should be an easy way to a win
+
+[12:04] <nine> Sounds to me like if a BB has only one predecessor and is entered via fall through, we'd just have to move its instructions to the predecessor and fix up the indexes.
+
+[12:05] <nine> BB indexes that is. If it's actually necessary, that they are consecutive
+
+[12:05] <jnthn> nine: Well, yes and no; if it ends with an instruction that is invokish still, for example, it needs to be there
+
+[12:05] <jnthn> But yeah, those kinds of thing aside
+
+[12:05] <jnthn> It's not hard
+
+[12:06] <jnthn> (Those cases aren't hard either really)
+
+[12:06] <jnthn> lizmat: There's still certain common things that we just don't specialize in a way that makes it possible to JIT them into something particularly nice
+
+[12:06] <jnthn> lizmat: Assignment is the big one
+
+[12:07] <lizmat> that also sounds like a target then  :-)
+
+[12:07] <jnthn> Yeah, that's one that I had in mind
+
+[12:07] <jnthn> Also getting rid of the lexical auto-viv
+
+[12:07] <lizmat> lexical auto-viv ?
+
+[12:07] <jnthn> Since that costs us a branch and some code on every lexical read
+
+[12:07] <lizmat> ah, ok
+
+[12:07] <jnthn> Yeah, a while back we started to allocate Scalar containers on first touch
+
+[12:08] <lizmat> also, there's still the elephant in the room wrt finding out in which version your caller is running
+
+[12:08] <lizmat> it feels to me we need something like $/ and friends
+
+[12:08] <jnthn> I don't think that falls much under performance/reliability though :)
+
+[12:09] <lizmat> true, but it *is* an elephant  :-)
+
+[12:10] <jnthn> Anyway, the lexical-auto-viv made it so that while every sub may well have a $/ and $! and $_, we didn't need to allocate Scalar containers for those
+
+[12:10] <jnthn> Unless they were actually used
+
+[12:10] <lizmat> and you want to get rid of that again ?
+
+[12:10] <lizmat> in favour of spesh clearing things up at run time ?
+
+[12:10] <jnthn> Considering that, yes, in that it'd make every lexical access cheaper
+
+[12:11] <lizmat> what was the reason for putting in auto-viv in the first place ?
+
+[12:11] <jnthn> It gave a big speed-up
+
+[12:11] <jnthn> Note that back then, there wasn't spesh/inlining
+
+[12:11] <lizmat> ah, ok
+
+[12:12] <lizmat> so you could argue we've shown that premature optimization is bad  :-)
+
+[12:12] <jnthn> Depends.
+
+[12:12] <lizmat> yeah, I know
+
+[12:12] <lizmat> sometimes you need to put in scaffolding to make other things possible faster
+
+[12:13] <jnthn> It's like the nqp:: stuff in CORE.setting
+
+[12:13] <lizmat> right
+
+[12:13] <jnthn> It's not ideal, but it's something that can be done now that gets a win
+
+[12:13] <lizmat> indeed
+
+[12:13] * lizmat is looking forward to removing all the nqp stuff from the core
+
+[12:13] <jnthn> And that was the case with the lazy Scalar viv
+
+[12:14] <jnthn> It was achievable in a reasonable amount of time and gave a big win
+
+[12:14] <jnthn> And the cost of everything else was still pretty high so the extra branching was just noise
+
+[12:15] <jnthn> Whereas now, instead of a lexical lookup JITting into a few instructions, it JITs into that plus a NULL check and a C function call
+
+[12:15] <jnthn> brrt can probably estimate better than me the cost of that, but I'd guess it makes the size of the machine code 3-4 times bigger
+
+[12:16] <jnthn> And takes a slot in the CPU branch predictor, and means we can fit less machine code into the instruction cache
+
+[12:21] <lizmat> jnthn: if I understand correctly, you're saying that your work would reduce the size to 33% - 25% of the current size ?
+
+[12:21] <jnthn> For lexical accesses, yes. Note that I'd also want to spend time doing more lexical to local lowering, which could reduce it even further
+
+[12:22] <lizmat> sounds like a plan to me then  :-)   would that also include the basic block fusing ?
+
+[12:22] <jnthn> If I'm not beaten to it, I could do it :)
+
+[12:57] *** domidumont joined
+[12:58] *** zakharyas joined
+[13:19] *** zakharyas joined
+[13:41] *** zakharyas joined
+[13:42] * lizmat clickbaits https://www.perl.com/article/an-open-letter-to-the-perl-community/
+
+[13:43] *** leedo joined
+[13:44] <timotimo> jnthn: since we have control flow information built into spesh, we can figure out for any given place if any given lexical has definitely been accessed just now and in that case optimize to an op that doesn't do a check
+
+[13:45] <jnthn> timotimo: Perhaps yes
+
+[13:50] <timotimo> if we only keep $_, $/ and $! lazy and eagerly vivify all others, that could still work perhaps? maybe even put in a dummy getlex at the beginning of every function to tell the rest of spesh that they aren't supposed to be lazy? kind of like we do the null removal at the beginning of frames for locals
+
+[14:11] *** squashable6 joined
+[14:14] *** bisectable6 joined
+[14:39] *** releasable6 joined
+[14:39] *** greppable6 joined
+[14:39] *** statisfiable6 joined
+[15:02] *** dogbert2 joined
+[15:02] <dogbert2> jnthn: how about squashing https://github.com/rakudo/rakudo/issues/1202
+
+[15:35] <dogbert2> there's also the leaks/crashes in the whateverables
+
+[15:52] <dogbert2> there's also the odd GC problem remaining, anyway congratulations for the grant extension :-)
+
+[15:57] <jnthn> Well, no grant extension granted yet. :) Just that I can apply for it. :)
+
+[16:00] <dogbert2> let's hope you get it
+
+[16:01] <dogbert2> https://github.com/MoarVM/MoarVM/issues/680 is an interesting case as well
+
+[16:01] * dogbert2 is on a roll :-)
+
+[16:03] <dogbert2> moving two variable in MasterDuke's code example lessens memory strain by 300 megs on a 54 bit system
+
+[16:03] <dogbert2> *64
+
+[16:08] *** brrt joined
+[17:01] *** Kaiepi joined
+[17:23] *** coverable6 joined
+[17:23] *** benchable6 joined
+[18:26] <nine> What exactly is the purpose of DEOPT_ALL_INS annotations?
+
+[18:41] *** reportable6 joined
+[18:41] *** nativecallable6 joined
+[18:51] <nine> Looks like most gotos entering an inline can also be eliminated. In the first crashing test case it's just a single goto of 292 that causes us to fail
+
+[18:57] <nine> Intriguing...it breaks when uninlining creates a frame, when it shouldn't
+
+[18:59] *** domidumont joined
+[19:02] *** Ven`` joined
+[19:05] <nine> Possibly another off-by-one error in deciding whether we are in an inline or not. This time though it seems to be a false positive in offset >= cand->inlines[i].start
+
+[19:43] <nine> Yep, with this changed to offset > cand->inlines[i].start we pass all tests and spectests. But this time I don't understand, why this would be correct.
+
+[19:43] <Geth> ¦ MoarVM/inline_in_place: ce466f9874 | (Stefan Seifert)++ | src/spesh/deopt.c
+
+[19:43] <Geth> ¦ MoarVM/inline_in_place: Fix another off-by-one in uninline
+
+[19:43] <Geth> ¦ MoarVM/inline_in_place: review: https://github.com/MoarVM/MoarVM/commit/ce466f9874
+
+[19:43] <Geth> ¦ MoarVM/inline_in_place: f672ee95b1 | (Stefan Seifert)++ | src/spesh/optimize.c
+
+[19:43] <Geth> ¦ MoarVM/inline_in_place: Remove pointless goto for entering an inline
+
+[19:43] <Geth> ¦ MoarVM/inline_in_place: review: https://github.com/MoarVM/MoarVM/commit/f672ee95b1
+
+[19:44] <nine> Kept the fix in the branch as I don't understand why it works. But this is basically it. Inlines are now put in place of the call in the spesh graph and we successfully remove both the goto jumping into the inlined code and the one jumping out :)
+
+[19:44] <jnthn> \o/
+
+[19:44] <jnthn> nine++
+
+[19:45] <jnthn> Not sure I understand it either...hm
+
+[19:48] <lizmat> Last time I had something like this, it turned out to be a bug in the C-compiler
+
+[19:48] <lizmat> but that's well over 30 years ago now  :-)
+
+[19:52] <nine> jnthn: all the calls to MVM_spesh_deopt_* happen _after_ advancing cur_op in MVM_interp_run. So the instruction causing the deop is immediately before the one pointed to by offset, isn't it?
+
+[20:04] <jnthn> Ah, yes
+
+[20:05] *** Ven`` joined
+[20:05] <nine> Doens't that also mean that the end boundary check was off by 2 and is still off by 1?
+
+[20:13] *** domidumont joined
+[20:14] *** Kaiepi joined
+[20:17] *** zakharyas joined
+[20:17] <jnthn> nine: I'd think if the instruction has to be > the start address of the inline, and the previous instruction's end falls on the address of the inline, then the > (not >=) should cut it
+
+[20:17] <jnthn> All this said
+
+[20:18] <jnthn> A while back I started always passing in the index of the deopt point
+
+[20:18] <jnthn> I wonder if this would be more robust if we kept a map of which deopt points are in which inline
+
+[20:18] <jnthn> And identified the things to uninline that way
+
+[20:19] <jnthn> (Absolutely not a requirement for merging your branch, of course, just an idea that might be more robust in the future)
+
+[20:33] *** travis-ci joined
+[20:33] <travis-ci> MoarVM build errored. Stefan Seifert 'Fix off-by-one error when checking inline boundaries in MVM_frame_find_contextual_by_name
+
+[20:33] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/329822315 https://github.com/MoarVM/MoarVM/compare/27dc010db5c9...20a4a7976c5d
+
+[20:33] *** travis-ci left
+[20:43] <dogbert17> libuv 1.19 is out, https://github.com/libuv/libuv/blob/v1.x/ChangeLog
+
+[20:51] *** evalable6 joined
+[21:00] *** Kaiepi joined
+[21:07] *** Kaiepi joined
+[21:20] *** zakharyas joined
+[21:36] *** klapperl joined
+[21:41] *** Kaiepi joined
+[22:02] *** Ven`` joined
+[22:09] *** leedo joined

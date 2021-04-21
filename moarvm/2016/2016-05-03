@@ -1,0 +1,392 @@
+[01:47] *** ilbot3 joined
+[01:59] *** diakopter______ joined
+[02:28] *** colomon joined
+[03:17] *** cognominal joined
+[03:18] *** synopsebot6 joined
+[04:19] *** zostay joined
+[04:19] *** geekosaur joined
+[05:40] *** domidumont joined
+[05:42] *** domidumont joined
+[05:45] *** domidumont joined
+[06:10] *** domidumont joined
+[07:04] *** zakharyas joined
+[07:46] *** domidumont joined
+[07:58] *** dalek joined
+[07:59] *** retup__ joined
+[07:59] *** hoelzro joined
+[07:59] *** zostay joined
+[08:00] *** harrow joined
+[08:01] *** geekosaur joined
+[08:13] *** khagan joined
+[09:21] <psch> i've got this https://gist.github.com/peschwa/32ef0f291c9fa2c9eecfa7bb82b06b65 from running the first example here https://github.com/Perl6-Noise-Gang/perl6-Audio-MIDI-Note
+
+[09:21] <psch> is that sufficient for any kind of hint re: specific diagnostics? :)
+
+[09:28] <jnthn> psch: Well, there's the usual "did you try it under valgrind" hint :-)
+
+[09:29] <psch> okay, i'll do that
+
+[09:29] <jnthn> psch: But it looks like a SEGV inside of the native code called from Perl 6, which almost always means it's mis-use of NativeCall rather than a bug in MoarVM/NativeCall itself.
+
+[09:30] <psch> jnthn: well, i don't really know C, but "mem move" sounds like something that could interfere with moars allocations, from here... :)
+
+[09:30] <jnthn> (Passing an undersized buffer, or the wrong struct, or something)
+
+[09:30] <psch> but yeah, if that's not something it does...
+
+[09:34] <psch> also, did valgrind gets miraculously faster..? 'cause running the script with perl6-valgrind-m didn't take noticeably longer than with perl6-m...
+
+[09:35] <psch> i've added the output to a second file in the gist
+
+[09:36] <jnthn> Lots of C libraries use memcpy/memmove internally, but they also generally play nice with with things the outside world gave them :)
+
+[09:37] <psch> another thing of note might be that Audio::MIDI::Note uses Audio::PortMIDI with (potentially) a lot of 'start { }'s
+
+[09:38] <psch> using Audio::PortMIDI without any async works fine for long times (like, an hour or so maybe), but using Audio::MIDI::Note often SEGVs in less than a minute or so
+
+[09:40] <jnthn> Those are some incredibly confused stack traces, probably partly things to non-debug builds :)
+
+[09:40] <jnthn> The second problem is probably a good clue though
+
+[09:40] <jnthn> A buffer allocated by Pm_Initialize is overrun by Pm_WriteShort
+
+[09:41] <jnthn> As in, the latter tries to read past the end
+
+[09:43] <psch> ...not sure how i'd get debug builds for all the libs involved.  well, or if that's really necessary even
+
+[09:43] <psch> probably would have to build them manually i guess
+
+[09:43] <psch> or is a debug enabled moar good enough?  that i can do quickly :)
+
+[09:45] <jnthn> psch: IMO I'd start by taking a careful audit of how you're calling Pm_Initialize and Pm_WriteShort
+
+[09:45] <jnthn> Before looking more more elaborate ways to hunt the problem
+
+[09:46] <jnthn> Since it looks like a classic "putting too much into a buffer" problem
+
+[09:47] <psch> Pm_Initialize takes no args
+
+[09:47] <psch> and it gets called exactly once in both applications that use the lib
+
+[09:49] <jnthn> Hm
+
+[09:50] <jnthn> Is the library threadsafe?
+
+[09:50] <jnthn> If you're using it from multiple?
+
+[09:50] <psch> ah, no, it isn't :)
+
+[09:50] <jnthn> Ah
+
+[09:50] <psch> that's probably it then i assume?
+
+[09:51] <jnthn> Then it's maybe something like, threads competing to fill a buffer creates a data race on updating the amount of the buffer that's been used or some such.
+
+[09:51] <jnthn> Could well be. Do you structure things carefully so you only ever have a single thread interacting with the library?
+
+[09:52] <psch> i didn't make an effort to, no
+
+[09:52] <jnthn> Ah, so they you may well have multiple threads trampling on each other's use of the library
+
+[09:53] <psch> yeah, i'd assume so.  the example usage has the equivalent of < start { Pm_WriteShort(...) }; Pm_WriteShort > all over itself
+
+[09:54] <psch> well, plus omitted arg list for the second call too :)
+
+[09:54] <psch> that'd also easily explain different failure modes i guess
+
+[09:55] <psch> 'cause multiple threads using a non-thread safe library doesn't always fail the same time
+
+[09:55] <jnthn> Right
+
+[09:55] <jnthn> Yeah, threading failures are horrible that way
+
+[09:56] <jnthn> Does Pm_WriteShort do a lot of work, ooc?
+
+[09:56] * jnthn has no idea about the library :)
+
+[09:56] <jnthn> I'm guessing so if you put it in a start...
+
+[09:56] <jnthn> I can think of a couple of design options that'd work for this
+
+[09:57] <jnthn> One is to use a channel, and have one thread that calls Pm_WriteShort whenever it receives something to write.
+
+[09:57] <jnthn> And the others just send what to write in the channel.
+
+[09:58] <jnthn> The other is to use a supplier, and emit into that, and have something reacting to it that calls Pm_WriteShort
+
+[09:58] <psch> Pm_WriteShort calls Pm_Write: http://portmedia.sourceforge.net/portmidi/doxygen/group__grp__io.html#g9257b8cddc72ae5a1e142dc0ab478ae6
+
+[09:58] <psch> high-level i understand it as "shove the buffer over the midi port"
+
+[09:58] <psch> +plus a bit of parsing what kind of midi message it is
+
+[10:00] <jnthn> Ah, so it's doing I/O
+
+[10:00] <jnthn> Does the sender then await the start?
+
+[10:00] <jnthn> Does anything? :)
+
+[10:00] <psch> nope :S
+
+[10:01] <psch> that'd also break the intended interface
+
+[10:01] <jnthn> Then you probably want the channel approach
+
+[10:02] <jnthn> Since send on a channel won't block
+
+[10:02] <jnthn> So you can get rid of the whole un-awaited start
+
+[10:02] <psch> well, every time the user wants to send an event we have to send a corresponding off-event later
+
+[10:02] <psch> that is, playing a note always plays it for a given amount of time
+
+[10:02] <jnthn> Where "later" is scheduled using something like Promise.in?
+
+[10:03] <psch> no, the start { } calls wraps a sub that calls Pm_WriteShort(on-event); sleep $duration; Pm_WriteShort(off-event)
+
+[10:03] <jnthn> ah
+
+[10:04] <jnthn> sleep inside a start is a little less than ideal, 'cus sleep is a real call down to sleep, and so blocks a real thread in the pool up
+
+[10:05] <jnthn> With my channel suggestion, and avoiding the sleep, you'd do something like: $chan.send($on-event); Promise.in($duration).then({ $chan.send($off-event) });
+
+[10:05] <psch> so that should turn into Promise.in($dur).then({ $chan.send(off-event) }) i guess?
+
+[10:05] <jnthn> heh, you got it :)
+
+[10:05] <psch> alright, thanks for the help :)
+
+[10:06] <jnthn> :)
+
+[10:32] *** zakharyas joined
+[11:27] *** TimToady joined
+[12:39] *** domidumont joined
+[12:41] *** domidumont1 joined
+[14:03] *** domidumont joined
+[17:05] *** domidumont joined
+[17:06] *** lizmat joined
+[19:15] *** zakharyas joined
+[19:34] *** hoelzro joined
+[19:36] <nine_> In oplist, what are those two arguments? loadbytecode        w(str) r(str)
+
+[19:36] <nine_> nqp::loadbytecode only takes a file name?
+
+[19:38] <jnthn> urgh
+
+[19:38] <jnthn> I'd not replicate that
+
+[19:38] <jnthn> I suspect it just evaluates to the name of the loaded file
+
+[19:39] <jnthn> Which is done for most void ops that might evaluate to something in the QAST -> MAST phase, but a few got mis-ported from the JVM implementation a while back and I apparently missed changing that one. :(
+
+[19:40] <nine_> It's been that way since it was added apparently
+
+[19:41] <nine_> Ah, now I see it: GET_REG(cur_op, 0).s = filename;
+
+[19:42] <jnthn> Yeah. Just have no w registers in your op :)
+
+[19:42] <jnthn> Oh...
+
+[19:42] <jnthn> There is one downside to all of this :(
+
+[19:42] <jnthn> Which is pretty bad.
+
+[19:43] <jnthn> We currently mmap bytecode files, meaning they're shared between VM instances.
+
+[19:43] <jnthn> Which is a really nice memory win for precompiled files.
+
+[19:43] <nine_> but?
+
+[19:44] <nine_> Oh you mean, we'll lose that memory win
+
+[19:44] <jnthn> But if you slurp the file into memory in a buffer and then pass part of it off to something to decode it, then we've got it privately.
+
+[19:44] <jnthn> Yes :(
+
+[19:44] <jnthn> Which would be quite a pity
+
+[19:45] <nine_> Do we mmap files open()ed by Perl 6 code?
+
+[19:45] <jnthn> Doesn't stop us having an op that No
+
+[19:45] <jnthn> oops
+
+[19:45] <jnthn> No
+
+[19:45] <jnthn> Doesn't stop us having an op that takes an offset to start looking for bytecode in
+
+[19:46] <nine_> That's what I was aiming at
+
+[19:46] <jnthn> That is, filename + offset
+
+[19:46] <jnthn> Though
+
+[19:46] <nine_> Then we'd have the race condition again :/ The file could have been replaced between reading the dependency info and the mbc data
+
+[19:46] <jnthn> Yeah
+
+[19:46] <jnthn> Hmm
+
+[19:47] <nwc10> My understanding (and I am not a security expert here) is that if you want to be secure, you need to be using file handles (or file descriptirs)
+
+[19:47] <jnthn> Wonder if we can expose mmap itself
+
+[19:47] <nwc10> descriptors
+
+[19:47] <nine_> Would have been cool if all files were mmaped and I could have just passed a pointer to the byte code loader
+
+[19:47] <nwc10> never file names
+
+[19:47] <nwc10> because what the name points to can change
+
+[19:48] <jnthn> So we map it once in Perl 6 space into a file handle
+
+[19:48] <jnthn> And then pass that file handle off to the op, having read what we want.
+
+[19:48] <jnthn> And it can figure out what to do from there.
+
+[19:48] <timotimo> the good thing is that basically everything can be a file descriptor these days
+
+[19:48] <jnthn> nwc10: Yeah, which means not opening by name twice :)
+
+[19:49] <jnthn> nine_: If you're up fro the moderate yak shave then you could add an nqp::mmap :)
+
+[19:49] <nine_> Looks like I'm already shaving away anyway...
+
+[19:49] <jnthn> (And a loadbytecodefh or so that takes a file handle...)
+
+[19:50] <nine_> What would nqp::mmap return? I.e. how could I then access the file's contents?
+
+[19:51] *** cognominal joined
+[19:51] *** Brock joined
+[19:51] *** mtj_ joined
+[19:51] *** lizmat joined
+[19:51] *** colomon joined
+[19:51] *** Unavowed_ joined
+[19:51] *** JimmyZ joined
+[19:51] *** masak joined
+[19:51] *** vendethiel joined
+[19:51] *** psch joined
+[19:52] <jnthn> nine_: A file handle
+
+[19:52] <jnthn> Like nqp::open
+
+[19:53] <nine_> Ok...I'll try to implement loadbytecodebuffer first to get warmed up
+
+[19:53] <jnthn> :-)
+
+[19:53] <jnthn> Sure
+
+[19:53] <jnthn> walk; bbl
+
+[20:13] <nine_> Should I be concerned about perl6 now segfaulting?
+
+[20:19] <timotimo> just mildly
+
+[20:20] <nine_> I guess I'm missing a step after adding my op?
+
+[20:20] <jnthn> nine_: Where'd you add it?
+
+[20:20] <jnthn> Before spesh ops?
+
+[20:20] <nine_> yep
+
+[20:20] <jnthn> Also did you rebuild perl6_ops.c ?
+
+[20:21] <jnthn> (In Rakudo)
+
+[20:21] <nine_> no
+
+[20:21] <jnthn> Ah, then it'd be that.
+
+[20:21] <jnthn> We've a github issue already for fixing the thing that makes that step necesary.
+
+[20:22] <nine_> I was misled by oplist claiming backwards compatibility :)
+
+[20:22] <jnthn> It's actually 'cus perl6_ops.c references spesh ops directly
+
+[20:22] <jnthn> Which are VM internal
+
+[20:23] <jnthn> It really needs to resolve them by name or some such
+
+[20:23] <nine_> So MoarVM tries, but rakudo cheats
+
+[20:23] <jnthn> Yeah. NQP suffers no such issues.
+
+[20:23] <jnthn> And Rakudo only cheats 'cus we didn't get around to providing a non-cheating way.
+
+[20:27] <nine_> Ok, first test run
+
+[20:30] <nine_> Meh...forgot to map the op
+
+[20:36] <nine_> And it even sort of works. Except for the occasional Serialization Error: Unimplemented case of read_ref
+
+[20:43] <nine_> Well I'll just claim this to be a nice start and continue another day. Good night :)
+
+[20:43] <jnthn> 'night, nine_++
+
+[21:03] <timotimo> gnite nine :)
+
+[21:34] *** patrickz joined
+[21:38] *** brrt joined
+[21:40] <brrt> good *, #moarvm
+
+[21:41] <timotimo> yo brrt
+
+[21:41] <timotimo> how are you tonight?
+
+[21:41] <brrt> \o timotimo
+
+[21:41] <brrt> sort of tired, long day
+
+[21:41] <timotimo> i'm also quite tired, as i've got a mild case of the flu
+
+[21:42] <brrt> have enough brain space left to gather hypotheses for why reframe-jit breaks in pretty much all perl6 code
+
+[21:42] <timotimo> cool! :)
+
+[21:42] <brrt> ok, so, bring ''m on
+
+[21:42] <brrt> what typically happens in perl6 code that doesn't happen in nqp code
+
+[21:43] <brrt> (GC if you're not torturing things)
+
+[21:43] <brrt> i've... not really proven that extops are the thing, but it is unlikely, since i did write a fix
+
+[21:43] <timotimo> taking continuations doesn't happen in nqp at all, does it?
+
+[21:44] <brrt> eh, oh
+
+[21:44] <brrt> hmmm
+
+[21:44] <brrt> that is a point
+
+[21:45] <brrt> damnit, emacs not working with gnome zoom functionality
+
+[21:45] <timotimo> hum
+
+[21:46] <timotimo> there's some zooming feature in xfce that's really just zooming into a portion of the screen
+
+[21:48] <brrt> yeah, and these things are supposed to follow the cursor
+
+[21:48] <brrt> which they do
+
+[21:48] <brrt> but not in emacs
+
+[21:48] <timotimo> oh, but not a typing cursor
+
+[21:48] <timotimo> fair enough; the one xfce has only follows the mouse cursor i believe
+
+[21:49] <brrt> oh well
+
+[21:50] <timotimo> accessibility is such a slow-moving, hardly-advanced topic :\
+
+[21:50] <brrt> aye
+
+[21:53] <brrt> oh, some signatures changed
+
+[21:53] <brrt> will check that out tomorrow
+
+[22:42] *** Unavowed joined
+[23:38] *** Unavowed_ joined
+[23:58] *** flaviusb left

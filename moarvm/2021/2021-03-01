@@ -1,0 +1,169 @@
+[03:19] *** leont left
+[04:25] *** greppable6 left
+[04:25] *** bloatable6 left
+[04:25] *** linkable6 left
+[04:25] *** squashable6 left
+[04:25] *** notable6 left
+[04:25] *** quotable6 left
+[04:25] *** statisfiable6 left
+[04:25] *** bisectable6 left
+[04:25] *** tellable6 left
+[04:25] *** unicodable6 left
+[04:25] *** shareable6 left
+[04:25] *** sourceable6 left
+[04:25] *** nativecallable6 left
+[04:25] *** benchable6 left
+[04:25] *** evalable6 left
+[04:25] *** committable6 left
+[04:25] *** coverable6 left
+[04:25] *** releasable6 left
+[04:25] *** releasable6 joined
+[04:26] *** greppable6 joined
+[04:26] *** tellable6 joined
+[04:26] *** shareable6 joined
+[04:26] *** bloatable6 joined
+[04:26] *** linkable6 joined
+[04:27] *** sourceable6 joined
+[04:27] *** nativecallable6 joined
+[04:27] *** squashable6 joined
+[04:27] *** committable6 joined
+[04:27] *** evalable6 joined
+[04:27] *** statisfiable6 joined
+[04:27] *** unicodable6 joined
+[04:27] *** benchable6 joined
+[04:27] *** notable6 joined
+[04:28] *** coverable6 joined
+[04:28] *** quotable6 joined
+[04:28] *** bisectable6 joined
+[07:30] *** domidumont joined
+[08:26] *** patrickbkr[m] left
+[08:42] *** zakharyas joined
+[09:03] *** MasterDuke left
+[09:06] *** MasterDuke joined
+[09:54] *** sena_kun left
+[09:56] *** leont joined
+[09:57] *** sena_kun joined
+[09:58] <MasterDuke> argh! no wonder heaptrack was (correctly) reporting such a difference in temporary allocations between my remove branch and master. i forgot FSA_DEBUG was set on my branch, which unconditionally turns every MVM_fixed_size_alloc into an MVM_malloc
+
+[10:04] <MasterDuke> oh, and now valgrind is throwing a fit about that MVM_fixed_size_safepoint i added right before the MVM_fixed_size_destroy in MVM_vm_destroy_instance
+
+[10:09] <MasterDuke> right, just need to move it before the MVM_tc_destroy and everything seems to be fine again
+
+[10:16] <MasterDuke> ah ha. and now my branch is *not* a bunch slower than master! damn you past self for turning on FSA_DEBUG
+
+[10:22] <jnthn> oops
+
+[10:31] <MasterDuke> it now seems a little bit slower in some cases and a little bit faster in others. anybody have a suggestion for a really good test case? that decont stats problem and the fix (which is included on my branch) throws off my previous example
+
+[10:41] <jnthn> MasterDuke: my $v = -1; sub bar() { $v }; sub foo() { my $i = 0; for ^1_000_000 { $i += $v.abs } }; foo(); $v = -1.5; foo()
+
+[10:41] <jnthn> That deopts a million times on faster
+
+[10:41] <jnthn> *master
+
+[10:45] <MasterDuke> huh. much faster on master (1.9s vs 2.9s), same number of deopts on both
+
+[10:51] <MasterDuke> and there are no removals in a spesh log. maybe it happened too fast? but i was running with MVM_SPESH_BLOCKING=1
+
+[10:56] <jnthn> Hm, I'd expect enough time for removal
+
+[10:57] <jnthn> I think that's about as synthetic a case as we're going to get, though, so it's worth looking into why it's not doing a good job of that
+
+[10:57] <MasterDuke> i see the spesh_cand->body.deopt_count increasing. 0, 78, 190, ..., 992776
+
+[10:58] <MasterDuke> and the threshold is currently only 100 to trigger a remove plan...
+
+[11:00] <MasterDuke> yeah, the `if (cand->body.deopt_count > 100) {` is never true in plan.c...
+
+[11:03] <MasterDuke> so it's incremented in stats.c, but none of the candidates in the frame in plan.c have a count > 100
+
+[11:08] <nine> jnthn: seems like tellable6 was awol: https://colabti.org/irclogger/irclogger_log/moarvm?date=2021-02-28#l10
+
+[11:31] <MasterDuke> hm, guess i should revert that decont stats change on my branch for more of an apples-to-apples comparison. or should i add it to master when testing there, assuming some version of https://github.com/MoarVM/MoarVM/pull/1438 will get merged once nine++ figures out the mis-spesh problem?
+
+[11:38] <MasterDuke> ohhh, cherry-picking that change to master slows it down to about the same as my branch. but still need to figure out why my branch isn't removing the opt and replacing it
+
+[11:40] *** zakharyas left
+[12:18] *** dogbert17 joined
+[12:18] *** dogbert11 left
+[12:55] <MasterDuke> huh. if i stick `if (e->deopt.spesh_cand->body.deopt_count > 100  && e->deopt.spesh_cand->body.deopt_count < 500) fprintf(stderr, "stats: frame == %p, cand == %p\n", e->entry.sf, e->deopt.spesh_cand);` in stat.c at `case MVM_SPESH_LOG_DEOPT`, and also print the sf and cands in plan_for_deopt, the frame from stats never shows up in plan_for_deopt
+
+[13:21] <MasterDuke> hm, not in this example, but when building nqp there are cases where https://github.com/MoarVM/MoarVM/pull/1426/files#diff-8125fd602ee7efb8edd7f77910bb0f73e2d593b53af91e4cefef42fa287556e0R153 is false because there is no spesh log
+
+[13:21] <MasterDuke> why would that be? MVM_spesh_log_entry is the only other MVM_spesh_log_* function that checks that
+
+[13:29] <MasterDuke> and why wouldn't/couldn't we have  `MVMSpeshLog *sl = tc->spesh_log ? tc->spesh_log : MVM_spesh_log_create(tc, tc->thread_obj);`?
+
+[13:30] <MasterDuke> i guess it could race with whatever else creates it?
+
+[13:35] *** zakharyas joined
+[13:38] <MasterDuke> so the frame with the problem candidate does go through plan_for_deopt once, but at that point the deopt_count is only 78
+
+[13:40] <MasterDuke> and sometime after that it quickly goes to 992776. plans are run while the deopt_count for that candidate is incremented, but never again for the frame holding it
+
+[13:43] <MasterDuke> that frame is only added to sf_updated once
+
+[13:45] <MasterDuke> so somehow there isn't another `case MVM_SPESH_LOG_ENTRY`?  that's the only place where it's added to sf_updated
+
+[13:49] *** lizmat_ joined
+[13:50] *** lizmat__ joined
+[13:52] *** lizmat left
+[13:53] *** lizmat_ left
+[13:54] <MasterDuke> ok, so added https://github.com/MoarVM/MoarVM/blob/master/src/spesh/stats.c#L559-L568 to the MVM_SPESH_LOG_DEOPT case and now it's faster than before (2.2s vs 2.9s) and only ~200 deopts
+
+[13:54] <MasterDuke> however it is still slower than master without the decont stat logging change
+
+[13:57] *** lizmat joined
+[13:57] <MasterDuke> if i revert that change on my branch it speeds up to 1.9s (same as current, stock master) and gets rid of the deopts
+
+[13:58] <MasterDuke> surprising thing i've learned through all this...deopts aren't all that expensive. or, the cost of fixing them works out to roughly the same as the cost of running them
+
+[14:00] *** lizmat__ left
+[14:28] <MasterDuke> to sum up the changes (with some rough numbers):
+
+[14:28] <MasterDuke> master                                                     : 1.9s, 1m deopts
+
+[14:28] <MasterDuke> master w/ decont logging change: 3.0s, 1m deopts
+
+[14:28] <MasterDuke> branch                                                     : 1.9s, 100 deopts
+
+[14:28] <MasterDuke> branch w/ decont logging change: 2.2s, 100 deopts
+
+[14:30] *** leont left
+[14:30] *** leont joined
+[14:32] <nine> 2.2 sounds better than 3?
+
+[14:35] <MasterDuke> yep
+
+[14:41] <MasterDuke> https://github.com/MoarVM/MoarVM/pull/1426 now updated
+
+[14:58] *** domidumont left
+[17:01] <MasterDuke> jnthn: https://colabti.org/irclogger/irclogger_log/raku-dev?date=2021-03-01#l105
+
+[17:30] *** MasterDuke left
+[17:39] *** domidumont joined
+[17:45] *** MasterDuke joined
+[17:50] *** domidumont left
+[17:52] *** MasterDuke left
+[18:12] <lizmat> and yet another Rakudo Weekly News hits the Net: https://rakudoweekly.blog/2021/03/01/2021-09-best-of-raku/
+
+[18:44] *** vrurg left
+[18:49] *** vrurg joined
+[18:53] *** vrurg left
+[18:54] *** zakharyas left
+[20:16] *** MasterDuke joined
+[20:22] *** vrurg joined
+[20:32] *** zakharyas joined
+[20:58] *** linkable6 left
+[20:59] *** linkable6 joined
+[21:01] *** linkable6 left
+[21:02] *** vrurg left
+[21:03] *** linkable6 joined
+[21:41] *** zakharyas left
+[22:00] *** sena_kun left
+[22:03] *** sena_kun joined
+[22:50] *** dogbert11 joined
+[22:53] *** dogbert17 left
+[23:40] *** MasterDuke left
+[23:40] *** sortiz joined
+[23:42] *** MasterDuke joined

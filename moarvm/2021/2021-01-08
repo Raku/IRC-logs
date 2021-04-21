@@ -1,0 +1,277 @@
+[00:25] *** frost-lab joined
+[00:44] *** frost-lab left
+[00:56] *** frost-lab joined
+[02:04] *** Kaeipi joined
+[04:11] *** MasterDuke left
+[07:09] *** harrow joined
+[07:09] *** moon-child left
+[07:09] *** earenndil joined
+[07:11] *** earenndil is now known as moon-child
+
+[07:25] <nwc10> good *, #moarvm
+
+[07:26] <nwc10> .tell brrt even better, raku is a gateway drug to Perl. :-)
+
+[07:26] <tellable6> nwc10, I'll pass your message to brrt
+
+[07:29] *** squashable6 left
+[07:30] *** squashable6 joined
+[07:54] *** domidumont joined
+[08:02] *** Altai-man joined
+[08:25] <nine> Good Friday!
+
+[08:42] <nine> timotimo: when the profiler encounters multiple top level nodes (like enter, exit, enter, exit) it only dumps the data of the first subgraph. Is that intentional?
+
+[08:47] <timotimo> you're not Supposed To Do That :) :) :)
+
+[08:47] <timotimo> do you have a use case?
+
+[08:48] <nine> Well for one, that's exactly what happens here: https://github.com/MoarVM/MoarVM/blob/master/src/profiler/profile.c#L18
+
+[08:48] <nine> But even a completely simple rakudo --profile=profile.html -e '' will do it
+
+[08:50] <timotimo> oh? huh!
+
+[08:51] <timotimo> aah
+
+[08:51] <timotimo> that's the calibration step
+
+[08:51] <timotimo> before that it's trying to discard the data tho, does that not work?
+
+[08:51] <timotimo> below that*
+
+[08:53] <nine> It discards the generated data, not the actually collected call nodes. But that's not too bad. I've already implemented cleanup of those. But having multiple non-connected graphs when the code clearly expects just a single one hurts
+
+[08:54] <nine> Add this fprintf(stderr, "make_new_pcn(%p) call_graph %p current_call %p -> %p\n", ptd, ptd->call_graph, current_call, pcn); to src/profiler/log.c:32 to see how it happens
+
+[08:55] <nine> The additional graphs seem to come from END blocks. Since we set ptd->call_graph only once and the new nodes are not connected to that (empty current_call) there's no way to find them and free() them at the end
+
+[08:56] *** zakharyas joined
+[09:03] <nine> It makes total sense actually. run_profiled will start the profiler and then run the compiled code: https://github.com/Raku/nqp/blob/master/src/vm/moar/HLL/Backend.nqp#L176
+
+[09:04] <nine> Ending the profiler is pushed as an END phasers. But those are not executed as part of $what(). They are run when Rakudo's main.nqp runs $THE_END: https://github.com/rakudo/rakudo/blob/master/src/main.nqp#L61
+
+[09:05] <nine> https://github.com/rakudo/rakudo/blob/master/src/core.c/Rakudo/Internals.pm6#L1712
+
+[09:06] <nine> So we do leave the first top level node before entering the sub graphs for processing END nodes
+
+[09:06] <nine> Along the way we may even enter a couple more frames.
+
+[09:07] <nine> I find it actually a bit surprising that this doesn't cause a "Profiler lost sequence" exception. But we may just be lucky there
+
+[09:09] <nine> Ah, of course. It's not luck. It's just that the compiler itself is not compiled with active profiling, so its code doesn't contain the profenter/profexit ops.
+
+[09:09] <nine> The END blocks will though
+
+[09:35] <timotimo> mhh
+
+[09:35] <timotimo> not a great situation
+
+[09:35] <timotimo> the profiler is unhappy when exit is used
+
+[09:42] *** sena_kun joined
+[09:44] <nine> Not surprising. But also not hard to fix.
+
+[09:44] *** Altai-man left
+[09:58] <nine> timotimo: what do you think about doing a manual MVM_profile_log_enter in MVM_profile_start and a corresponding MVM_profile_log_exit in MVM_profile_end? This would create an artificial root node for the graph and not only fix the memory issue but also get the END blocks included in the profile
+
+[09:59] <timotimo> hm, that could be a good idea, it'll change what our profiles look like, but the nqp code could just toss it again
+
+[10:02] <nine> The profile doesn't look bad at all. It just gets one additional call frame on top which besides the <anon> that contains <unit-outer> also contains the call to the code running the END phasers. Frankly, I'd just leave it like that.
+
+[10:07] <Geth> ¦ MoarVM/asan_fixes: 85de9851bb | (Stefan Seifert)++ | 3 files
+
+[10:07] <Geth> ¦ MoarVM/asan_fixes: Fixup: "Properly clean up profiling data with --full-cleanup"
+
+[10:07] <Geth> ¦ MoarVM/asan_fixes: review: https://github.com/MoarVM/MoarVM/commit/85de9851bb
+
+[10:08] *** squashable6 left
+[10:08] <timotimo> oh, perhaps, yeah
+
+[10:09] *** squashable6 joined
+[10:30] <jnthn> Question if any external tools make assumptions about the top call frame of the profile output (I don't know off hand)
+
+[10:30] <jnthn> *is if
+
+[10:31] <sena_kun> jnthn, what assumptions? Like ID or?
+
+[10:31] <sena_kun> Comma starts to introspect graph starting from a frame with ID 0.
+
+[10:32] <sena_kun> That's what I know.
+
+[10:33] <nine> Huh...silencing a compiler warning by introducing a buffer overflow: https://github.com/MoarVM/MoarVM/commit/9294cbfcf5
+
+[10:34] <nine> The buffer overflow happens when name is actually shorter than 8 bytes
+
+[10:34] <jnthn> sena_kun: Guess you've looked at it recently; it doesn't do any assumptions about the top frame being unit-outer and discarding it or some such?
+
+[10:35] <nine> jnthn: the top frame was not <unit-outer> before anyway
+
+[10:35] <nine> it was some <anon>
+
+[10:37] <Geth> ¦ MoarVM/asan_fixes: 3171bdbb08 | (Stefan Seifert)++ | src/profiler/heapsnapshot.c
+
+[10:37] <Geth> ¦ MoarVM/asan_fixes: Revert "Use memcpy instead of strncpy"
+
+[10:37] <Geth> ¦ MoarVM/asan_fixes: 
+
+[10:37] <Geth> ¦ MoarVM/asan_fixes: This reverts commit 9294cbfcf55eec4250b0daeae29a3e21431aae33.
+
+[10:37] <Geth> ¦ MoarVM/asan_fixes: 
+
+[10:37] <Geth> ¦ MoarVM/asan_fixes: memcpy can lead to a buffer overflow if name is shorter than 8 bytes. The
+
+[10:37] <Geth> ¦ MoarVM/asan_fixes: compiler warning aside, strncpy seems like exactly the right tool for the job
+
+[10:37] <Geth> ¦ MoarVM/asan_fixes: as we want at most 8 bytes and don't care for any trailing \0, but are OK with
+
+[10:37] <Geth> ¦ MoarVM/asan_fixes: zero padding at the end.
+
+[10:38] <Geth> ¦ MoarVM/asan_fixes: review: https://github.com/MoarVM/MoarVM/commit/3171bdbb08
+
+[10:43] <sena_kun> jnthn, it discards the 0 frame to avoid a cycle, iirc.
+
+[10:44] <sena_kun> jnthn, I think it has itself as its parent, which is a no-no, so yes, that happens.
+
+[10:44] <nine> sena_kun: that would be true for any top level frame, so adding another one doesn't change things
+
+[10:48] <jnthn> OK, so sounds like no likely impact
+
+[10:55] <nine> Huh.... comp unit strings created during finish_gc seem to leak their buffers. Now why would that happen?
+
+[11:00] <nine> I'd understand if it were the other way and those strings would get collected while still in use. After all they are created between the mark and sweep phases.
+
+[11:02] <nine> Which is why directly below the MVM_cu_string call, there's code for marking it MVM_CF_GEN2_LIVE...
+
+[11:02] <nine> Accompanied by a long comment explaining exactly that
+
+[11:29] <Geth> ¦ MoarVM/asan_fixes: 66b5bf85d0 | (Stefan Seifert)++ | src/profiler/heapsnapshot.c
+
+[11:29] <Geth> ¦ MoarVM/asan_fixes: Fix some memory leaks in heap profiler
+
+[11:29] <Geth> ¦ MoarVM/asan_fixes: review: https://github.com/MoarVM/MoarVM/commit/66b5bf85d0
+
+[11:29] <nine> The heap profiler was already much better behaved than the instrumented one :) Now there's only those string leaks left in it.
+
+[11:34] <jnthn> The heap profiler knew it was walking on memory management eggshells, I guess :)
+
+[11:34] <jnthn> nine++ for fixing so many things
+
+[12:43] *** zakharyas left
+[13:35] <nine> Oh, we leak those string buffers because we don't do a gen2 collection anymore before exit.
+
+[13:38] <nine> But even MVM_gc_global_destruction is supposed to run gc_free of the freed objects. So why is it not doing this for these strings?
+
+[13:41] *** Altai-man joined
+[13:44] *** sena_kun left
+[13:57] <nine> Of course! We must only set the MVM_CF_GEN2_LIVE if we're actually doing a full collection run. Otherwise, gen2 cleanup during global destruction will find that flag still set and not clear those objects.
+
+[14:02] <Geth> ¦ MoarVM/asan_fixes: c6f28112fb | (Stefan Seifert)++ | src/profiler/heapsnapshot.c
+
+[14:02] <Geth> ¦ MoarVM/asan_fixes: Clean up CU strings created by heap snapshot profiler
+
+[14:02] <Geth> ¦ MoarVM/asan_fixes: 
+
+[14:02] <Geth> ¦ MoarVM/asan_fixes: Since heap snapshot are taken as part of GC runs between the mark and sweep
+
+[14:02] <Geth> ¦ MoarVM/asan_fixes: phases, the profiler takes care to not have the string objects it creates
+
+[14:02] <Geth> ¦ MoarVM/asan_fixes: get collected as they were not present during the mark phase. However since
+
+[14:02] <Geth> ¦ MoarVM/asan_fixes: CU strings are allocated in gen2, the MVM_CF_GEN2_LIVE would only be cleared
+
+[14:02] <Geth> ¦ MoarVM/asan_fixes: if a full gen2 collection follows. Strings created during a normal nursery
+
+[14:02] <Geth> ¦ MoarVM/asan_fixes: collection could still carry that flag during the GC's global destruction,
+
+[14:02] <Geth> ¦ MoarVM/asan_fixes: preventing their gc_free from being called. So only set that flag in full
+
+[14:02] <Geth> ¦ MoarVM/asan_fixes: GC runs.
+
+[14:02] <Geth> ¦ MoarVM/asan_fixes: review: https://github.com/MoarVM/MoarVM/commit/c6f28112fb
+
+[14:03] <nine> With this, t/09-moar/01-profilers.t is ASAN safe as well :)
+
+[14:32] <Geth> ¦ MoarVM/asan_fixes: 221339fb97 | (Stefan Seifert)++ | src/6model/6model.c
+
+[14:32] <Geth> ¦ MoarVM/asan_fixes: Fix leaking find_method's special return data on unwind
+
+[14:32] <Geth> ¦ MoarVM/asan_fixes: review: https://github.com/MoarVM/MoarVM/commit/221339fb97
+
+[14:42] *** frost-lab left
+[14:48] <nine> jnthn: there are a lot more issues like ^^^. Do you think it'd be OK for remove_one_frame to MVM_free any special_return_data on unwind if e->special_unwind is NULL?
+
+[14:54] <jnthn> I'd prefer there's an explicit unwind function to free it, I think
+
+[14:54] <nine> ok
+
+[14:54] <jnthn> As there may be more to do that just free it
+
+[14:54] <jnthn> *than
+
+[14:55] <jnthn> That said
+
+[14:55] *** domidumont left
+[14:55] <jnthn> I was pondering a revisit of special unwinds with in the new stack layout we have in new-disp
+
+[14:55] *** domidumont joined
+[14:55] <jnthn> So that they'd be a kind of call stack record of their own
+
+[14:56] <jnthn> And then the memory to go with them could be part of that record, and thus not need malloc/free at all
+
+[14:56] <nine> That'd be nice
+
+[15:08] <Geth> ¦ MoarVM/asan_fixes: 10d30a75cb | (Stefan Seifert)++ | src/6model/6model.c
+
+[15:08] <Geth> ¦ MoarVM/asan_fixes: Fix leaking special return data if istype handler throws
+
+[15:08] <Geth> ¦ MoarVM/asan_fixes: review: https://github.com/MoarVM/MoarVM/commit/10d30a75cb
+
+[15:08] <Geth> ¦ MoarVM/asan_fixes: e10110d19a | (Stefan Seifert)++ | src/6model/parametric.c
+
+[15:08] <Geth> ¦ MoarVM/asan_fixes: Fix leaking special return data if parameterizer throws
+
+[15:08] <Geth> ¦ MoarVM/asan_fixes: review: https://github.com/MoarVM/MoarVM/commit/e10110d19a
+
+[15:08] <Geth> ¦ MoarVM/asan_fixes: f20f96e52a | (Stefan Seifert)++ | src/core/coerce.c
+
+[15:08] <Geth> ¦ MoarVM/asan_fixes: Fix leaking special return data if boolification handler throws
+
+[15:08] <Geth> ¦ MoarVM/asan_fixes: review: https://github.com/MoarVM/MoarVM/commit/f20f96e52a
+
+[15:09] <nine> Wasn't that bad after all
+
+[15:09] <nine> And the indiscriminate MVM_free would have been dead wrong. Sometimes the pointer of the return register is used as special return data
+
+[15:12] <jnthn> Ah, yes :)
+
+[15:14] <nine> Huh? Suddenly make test doesn't complain anymore about the non-zero exit status of leaking tests
+
+[15:15] <jnthn> Maybe you fixed them all? :)
+
+[15:16] <nine> If only.... well make test is actually clean except for the NativeCall issues caused by our lack of API. But make test is fine with even those while when run individually, ASAN complains loudly and $? is 1
+
+[15:21] *** patrickb joined
+[16:15] *** hungrydonkey joined
+[16:17] *** hungryd32 joined
+[16:17] *** hungrydonkey left
+[16:24] *** hungryd32 left
+[16:24] *** hungrydonkey joined
+[16:56] *** hungrydonkey left
+[17:42] *** sena_kun joined
+[17:43] *** Altai-man left
+[17:44] *** domidumont left
+[17:46] *** lucasb joined
+[19:35] *** MasterDuke joined
+[20:51] *** brrt joined
+[20:51] <brrt> \o
+
+[20:52] <tellable6> 2021-01-08T07:26:54Z #moarvm <nwc10> brrt even better, raku is a gateway drug to Perl. :-)
+
+[20:52] <nwc10> o/
+
+[21:35] *** brrt left
+[21:41] *** Altai-man joined
+[21:43] *** sena_kun left
+[22:00] *** patrickb left
+[22:03] *** Altai-man left

@@ -1,0 +1,217 @@
+[00:51] *** leont left
+[03:05] *** MasterDuke left
+[05:23] *** Altai-man joined
+[06:56] *** Kaeipi left
+[07:13] *** Kaiepi joined
+[07:26] *** MasterDuke joined
+[07:41] <nwc10> good *, #moarvm 
+
+[07:51] <MasterDuke> ahoy
+
+[07:57] <nine> Good weekend!
+
+[07:58] <nine> So....let's see if today I can find out the exact reasons and requirements for when a parameterized type may be written to that interns table
+
+[07:59] <nwc10> you have sufficient coffee in hand?
+
+[07:59] <nwc10> (figuratively and literally? ha!)
+
+[07:59] <nine> I think I do
+
+[08:22] *** domidumont joined
+[08:43] <MasterDuke> i'm kind of at a pause with the gmp branch, but the other thing i was working on (making MVMSpeshCandidate a REPR) was giving jnthn trouble, so not sure i want to tackle it right now...
+
+[08:45] *** domidumont left
+[08:49] <nine> The thing is: we only add types to that intern table that came from a different SC, i.e. we do not add types that were created during the current compilation. I guess the rationale is that if we created that parameterization, there's can't be a type from elsewhere to resolve it with.
+
+[08:51] <nine> Apparently the whole existing code comes from 2 commits from 2015. The commit message explicitly mentions that it's not enough to pass that spec test and whether that's because of a bug in this code or something else is yet to be determined. Seems like I've picked up on half finished code...
+
+[08:53] <nine> Which means that everything this code currently does may be wrong or based on wrong assumptions. Like that one about parameterizations we created. Because the test case has two compilation units creating the same parameterization. And in the program that uses both modules, we need to resolve them, despite each one thinking it has invented the thing.
+
+[08:54] <nine> Now removing that "did we create it ourselves" check actually fixes the golfed spec test, but breaks pretty much everything else. And that's my riddle for today
+
+[08:55] <MasterDuke> how does rverything else break?
+
+[08:57] <nine> STable Stash does not exist in serialization context
+
+[08:58] <nine> e.g. when compiling the RESTRICTED setting
+
+[09:01] <MasterDuke> huh
+
+[09:02] <nine> I have already determined that it is not actually the presence of more types in that param intern table. Even if I completely disable param intern resolving, the same error occurs
+
+[09:05] <nine> That makes it look like the breakage is caused by some side effect of adding types to that table
+
+[09:21] *** sena_kun joined
+[09:23] *** Altai-man left
+[09:59] *** leont joined
+[11:40] <nine> Apparently Stash's STable is missing from the CORE.c SC. Which does makes sense, given that its origin is in gen/moar/BOOTSTRAP/v6c.nqp
+
+[11:42] <lizmat> wouldn't that apply for more classes made in the bootstrap then ?
+
+[11:42] <lizmat> *to
+
+[11:46] <nine> To make things more weird: even without the patch disabling the internability check, Stash:D is added to the param interns table, since Stash is from the BOOTSTRAP and Definite is from the Metamodel. So with regards to Stash nothing should have changed!
+
+[11:48] * lizmat continues to be rubberducked
+
+[12:01] <nine> Stash could just be the first it hits, but yes, the issue may apply to others as well
+
+[12:03] <lizmat> how would one check ?
+
+[12:08] <nine> I don't know. But as long as I can get new data from the Stash case, looking at the others is not necessary.
+
+[12:09] <lizmat> ack
+
+[12:09] <nine> So in both the working and the non-working case, the Stash STable claims to be from CORE.c. The difference is that in the working case it also has a valid sc.idx, so we don't even look through the SC's root_stables. In the non-working case the sc.idx is -1 (undef) and we look through root_stables and don't find it
+
+[12:15] <nine> Turns out, in the non-working case there is actually an STable for Stash in the CORE.c SC at the same index as in the working case. But it's a different object (pointer)
+
+[13:20] *** Altai-man joined
+[13:22] *** sena_kun left
+[13:34] <nine> Oooh...apparently I was wrong and it _is_ Stash's presence in the param intern table that causes the regression. Just not due to any parametric type being interned. Looks more like a side effect of deserialization triggered when reading the intern table
+
+[13:53] <nine> The surprising solution? Move resolving the param intern table until after processing repossessions.
+
+[13:54] <nine> Which come to think of it...makes a whole lot of sense: after all Stash _will_ get repossessed into CORE.c, as it's modified during the setting compilation.
+
+[13:54] <nine> So doing parametric interning first would cause us to deserialize a not-yet-repossessed STable.
+
+[13:56] <timotimo> oh damn, that does make sense
+
+[14:14] <Geth_> ¦ MoarVM: b6d064a698 | (Stefan Seifert)++ | src/6model/serialization.c
+
+[14:14] <Geth_> ¦ MoarVM: Fix interning of parametric types in precompilation
+
+[14:14] <Geth_> ¦ MoarVM: 
+
+[14:14] <Geth_> ¦ MoarVM: When the same parametric type gets created by multiple, different compilation
+
+[14:14] <Geth_> ¦ MoarVM: units, we need to unify them, when loading those units. Otherwise a Foo[Bar]
+
+[14:14] <Geth_> ¦ MoarVM: created in one unit would not match a Foo[Bar] created in another. This
+
+[14:14] <Geth_> ¦ MoarVM: unification is called interning.
+
+[14:14] <Geth_> ¦ MoarVM: 
+
+[14:14] <Geth_> ¦ MoarVM: <…commit message has 16 more lines…>
+
+[14:14] <Geth_> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/b6d064a698
+
+[14:14] <nine> With this we pass that todo'd spec test that I've always wondert what it's actually about :)
+
+[14:17] <nine> Oh, I guess I should have actually PRed it
+
+[14:17] <timotimo> splendid
+
+[14:40] <nine> I still get spec test errors in precomp-single-process like "Hash[Hash[Str]] istype across module seam". But...that test is trivial to trip up on master, too. Just add a my constant T = Hash[Hash[Str]]; before the use RT129215; in t/spec/S11-modules/export.t
+
+[15:27] <lizmat> perhaps a good idea to bump MoarVM
+
+[15:27] <lizmat> ?
+
+[15:27] <lizmat> nine ^^
+
+[15:41] <lizmat> nine: looking at https://github.com/MoarVM/MoarVM/commit/b6d064a698  I can't help but wonder why that logic isn't written in nqp ?
+
+[15:44] <nine> what logic?
+
+[15:47] *** zakharyas joined
+[15:47] <lizmat> the serialization logic ?
+
+[15:48] <lizmat> in any case, should I bump MoarVM, to get more exposure 1 week before the 2020.10 release?
+
+[15:48] <timotimo> i would think so
+
+[15:49] <nine> yes, please!
+
+[15:49] <timotimo> i'm not sure if writing the logic for the intern cache and repossession can safely be written in nqp, because you've got another bootstrapping problem there maybe?
+
+[15:51] <nine> Besides the bootstrap issues, When serializing objects, one needs to know their memory layout. And things like repossession or interning of parametrics need to write internal fields and deal with pointers, too
+
+[15:53] <lizmat> ok, so there *is* a good reason  :-)
+
+[15:58] <lizmat> hmmm..rakudo doesn't build with an NQP bump  :(
+
+[15:58] <lizmat> dinner&
+
+[16:04] <nine> lizmat: how's it failing?
+
+[16:17] *** zakharyas1 joined
+[16:17] <lizmat> https://gist.github.com/lizmat/d58411a34efa1560840fe2668ea47d5b
+
+[16:17] <lizmat> nine ^^
+
+[16:18] <lizmat> nuking install/bin/nqp-m apparently fixes it  :-(
+
+[16:19] *** zakharyas left
+[16:35] <Altai-man> lizmat, your best bet is preserving exact reproduce steps in an issue.
+
+[16:36] <Altai-man> I think it might be a consequence of https://github.com/rakudo/rakudo/pull/3939
+
+[16:36] <Altai-man> ?
+
+[16:36] <lizmat> possibly, but then, how is that going to work otherwise?  I updated tools/build/NQP_REVISION and did a configure
+
+[16:37] <lizmat> that has *always* worked before
+
+[17:21] *** sena_kun joined
+[17:23] *** Altai-man left
+[17:36] <nine> Did you do a Configure.pl on MoarVM, too?
+
+[17:36] <lizmat> nine: since when is that needed to do a rakudo build ?
+
+[17:37] <nine> It's needed for MoarVM to actually report the updated version. Has been that way for pretty long if not forever.
+
+[17:37] <nine> Has bitten me plenty of times
+
+[17:37] <nine> nqp being more lenient with the version requirement was a blessing. Is that gone now?
+
+[17:44] <lizmat> nine: so the git describe of MoarVM is not enough?
+
+[17:45] <lizmat> anyways, I've ran a Configure.pl in MoarVM, and the git describe didn't change
+
+[17:48] <timotimo> the git describe doesn't change, but what you get from moar --version will
+
+[17:48] <timotimo> since it goes via the config.h file into the binary itself
+
+[17:51] <lizmat> still I don't understand how running a Configure.pl, that doesn't change anything repo wise, could affect how things get built later ?
+
+[17:53] <timotimo> "git describe" only changes when you commit or checkout
+
+[17:54] <timotimo> https://gist.github.com/timo/9a999fa16e6624d9c4504a472bef6b41
+
+[17:54] <timotimo> check it
+
+[17:58] <lizmat> ok, so now I am confused: for bumpiing, I should not just test and build nqp, but also MoarVM?
+
+[17:59] <lizmat> this *is* news to me  :-(
+
+[18:02] <timotimo> well, there's no tests for moarvm
+
+[18:03] <timotimo> you only need to rebuild moar after a bump if you haven't run Configure.pl since checking out a new-enough commit (according to the bump)
+
+[18:04] <timotimo> nqp refusing to run its Configure.pl if the installed moarvm doesn't report a new enough commit is old, i think
+
+[18:04] <timotimo> but rakudo not running at all if the version nqp reports is too old is new
+
+[18:04] <lizmat> ok, so my question: is the bump that I did good or not?
+
+[18:05] <lizmat> because if it isn't, I'm no longer sure how to do it correctly :-(
+
+[18:13] <timotimo> why wouldn't it be good?
+
+[18:13] <timotimo> from the error you pasted, i can't say that the bump would be bad
+
+[18:27] <lizmat> I did *not* do a MoarVM configure, which I was just told I should have done ?
+
+[18:36] <nine> it's good
+
+[18:37] <nine> Configure is not needed to get a correct git describe. It's needed so MoarVM actually reports the same version as git describe does.
+
+[19:15] *** lucasb joined
+[20:53] *** sena_kun left
+[21:30] *** patrickb joined
+[21:38] *** patrickb left
+[21:39] *** zakharyas1 left

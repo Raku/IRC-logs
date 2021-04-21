@@ -1,0 +1,143 @@
+[01:48] *** ilbot3 joined
+[06:37] *** leedo joined
+[07:48] *** zakharyas joined
+[12:51] *** zakharyas joined
+[16:34] <dalek> MoarVM/wrong_run_merge: 2f6a057 | timotimo++ | src/io/procops. (2 files):
+
+[16:34] <dalek> MoarVM/wrong_run_merge: wrong attempt to make :merge work properly.
+
+[16:34] <dalek> MoarVM/wrong_run_merge: review: https://github.com/MoarVM/MoarVM/commit/2f6a0576e0
+
+[16:34] <timotimo> i didn't realize i hadn't pushed that WIP stuff
+
+[16:35] <timotimo> (it also doesn't compile, i don't think)
+
+[18:28] *** FROGGS joined
+[20:20] *** zakharyas joined
+[20:52] <timotimo> i believe .VAR is only an actual operation if you directly call a method on the result, right?
+
+[20:53] <moritz> m: say (my $x).VAR ~~ Scalar
+
+[20:53] <camelia> rakudo-moar 02fdcf: OUTPUT«True␤»
+
+[20:53] <moritz> m: say (my $x) ~~ Scalar
+
+[20:53] <camelia> rakudo-moar 02fdcf: OUTPUT«False␤»
+
+[20:53] <moritz> disproven by example
+
+[20:53] <timotimo> ah, hmm.
+
+[20:54] <timotimo> zefram is giving me a hard time; i think i should explain to him that assignment will automatically decont the RHS
+
+[20:54] <timotimo> but maybe $a = $b.VAR should be a special case that doesn't decont before assigning?
+
+[20:56] <moritz> and what would the semantics be?
+
+[20:56] <moritz> binding?
+
+[20:57] <timotimo> nah
+
+[20:57] <timotimo> put a scalar in your scalar
+
+[20:57] <timotimo> zefram seems to want that for some reason
+
+[20:58] <moritz> that sounds like a Bad Idea
+
+[20:58] <moritz> because automatic decont only goes one level deep
+
+[20:58] <timotimo> m: my $a = 3; sub ss1($s, $nv) { say $s.VAR.DUMP }; ss1($a.VAR, 7)
+
+[20:58] <camelia> rakudo-moar 02fdcf: OUTPUT«▶▶3␤»
+
+[20:59] <moritz> and so decont stops being idempotent with such values
+
+[20:59] <geekosaur> zefram is looking for perl 5's $y = \$x; $$y = 4
+
+[20:59] <moritz> $y := $x; $y = 4
+
+[20:59] <geekosaur> this does not strike me as the right way to do that
+
+[21:05] <timotimo> feel free to contribute to the discussion, please
+
+[21:05] <timotimo> #128842 is the ticket this is being discussed under
+
+[21:05] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=128842
+
+[21:06] <geekosaur> my problem with that one, btw, is it feels a lot like the old perl 4 hack for "references" where you assigned a glob to a `local`
+
+[21:07] <geekosaur> and, more generally, Scalar seems to be a second class citizen of sorts, or maybe an implementation detail that should not be exposed because it's not complete enough to be used outside of the implementation
+
+[21:07] <geekosaur> see also recent discussion of how you "undo" a bind, which would be easy if you could bind to a new Scalar, but creating a new Scalar requires delving into NQP-land
+
+[21:08] <geekosaur> (also it strikes me this doesn't really belong in #moarvm...)
+
+[21:10] <timotimo> you undo a bind by doing <>, don't you?
+
+[21:10] <timotimo> sorry, i mis-channed this here
+
+[21:11] <geekosaur> no, I mean once you have done my $a := $b; how do you make $a refer to an independent Scalar later
+
+[21:12] <timotimo> oh
+
+[21:12] <timotimo> $a := Scalar.new()
+
+[21:12] <timotimo> or $a := (my $)
+
+[21:13] <geekosaur> the latter was the hack I came up with. the former throws; Scalar.new is not designed to be used from Perl 6
+
+[21:13] <timotimo> hm
+
+[21:13] <timotimo> Proxy is, though. interestingly.
+
+[21:13] <geekosaur> you need to set a bunchg of bootattrs in NQP
+
+[21:13] <timotimo> oh, huh.
+
+[21:13] <jnthn> The answer really is "we'd really rather you don't meddle with that, and it's no accident we're not nailed it down very strongly in 6.c"
+
+[21:13] <jnthn> *we've
+
+[21:13] <geekosaur> or rather, ise NQP to create the attrs and they are then mandatory parameters to Scalar.new
+
+[21:18] <jnthn> We currently implement .VAR by just wrapping the thing in an extra layer of Scalar-ness
+
+[21:18] <geekosaur> yes, that's hat Zefram spotted
+
+[21:18] <geekosaur> *what
+
+[21:18] <jnthn> And that means that anything that decontainerizes twice will get you back to the value.
+
+[21:19] <jnthn> Yes. Zefram loves details. :)
+
+[21:19] <jnthn> I don't know that this approach will survive for the long run. For now, it's "good enough".
+
+[21:20] <jnthn> And so far as I know we've not spectested ourselves into a corner on the issue.
+
+[21:20] <geekosaur> no, and I get the impression Zefram's trying to force it to be nailed down
+
+[21:20] <jnthn> Then he's going to have to wait. :)
+
+[21:21] <jnthn> I don't disagree it wants to be, but you can't prioritize everything at the same time.
+
+[21:25] <jnthn> And the trick will be figuring out a solution that doesn't just involve sticking more flags to check on every code path that touches an item.
+
+[21:25] <jnthn> Or at least, only doing that once we're really happy we can get rid of the checks again later.
+
+[21:26] <jnthn> It may be that we instead want to solve it by wrapping it up in some object with an interesting meta-object.
+
+[21:27] <jnthn> But that'd get a tad interesting once we start hitting .WHAT
+
+[21:29] <jnthn> m: my $a := 42; $a := my $; $a = 100; say $a
+
+[21:29] <camelia> rakudo-moar 02fdcf: OUTPUT«100␤»
+
+[21:29] <jnthn> That's how you can easily get a fresh Scalar btw. No Scalar.new required.
+
+[21:49] <lizmat> https://github.com/rakudo/rakudo/commit/552d9cb6b6
+
+[21:49] <lizmat> good night, #moarvm  :-)
+
+[21:50] <jnthn> :)
+
+[21:50] <jnthn> 'night

@@ -1,0 +1,332 @@
+[08:06] *** zakharyas joined
+[08:14] *** AlexDaniel left
+[08:27] *** AlexDaniel joined
+[08:27] *** AlexDaniel left
+[08:27] *** AlexDaniel joined
+[08:32] *** Kaeipi left
+[08:33] *** Kaiepi joined
+[09:26] *** squashable6 left
+[09:27] *** squashable6 joined
+[09:28] <MasterDuke> is there a reason ctxouter isn't jitted? the implementation in interp.c looks pretty simple https://github.com/MoarVM/MoarVM/blob/master/src/core/interp.c#L3356-L3364
+
+[09:30] *** sena_kun joined
+[09:31] <MasterDuke> hm. https://colabti.org/irclogger/irclogger_log/moarvm?date=2019-03-03#l102 "18:37 	brrt 	I don't recall the exact reason, but there was a reason ctxouter didn't work."
+
+[09:32] <MasterDuke> that was a year ago, not sure that a lot has been done to the jit in the meantime, so whatever reason probably still holds?
+
+[09:50] <lizmat> yeah, fraid so, altough it might be worth pinging brrt 
+
+[09:50] <lizmat> .seen brrt
+
+[09:50] <tellable6> lizmat, I saw brrt 2020-04-08T11:33:08Z in #moarvm: <brrt> \o
+
+[09:50] * lizmat hopes brrt is doing ok
+
+[10:04] <sena_kun> lizmat, I saw his messages an hour ago or so in another place.
+
+[10:04] <lizmat> ok, good to hear!
+
+[10:56] *** Altai-man_ joined
+[10:58] *** sena_kun left
+[11:24] *** zakharyas left
+[11:45] *** pamplemousse joined
+[11:57] *** MasterDuke left
+[12:17] *** MasterDuke joined
+[12:57] *** sena_kun joined
+[12:58] *** Altai-man_ left
+[13:07] *** pamplemousse left
+[13:09] *** pamplemousse joined
+[13:37] *** farcas1982regreg joined
+[14:06] *** robertle joined
+[14:09] <MasterDuke> yep, this patch https://gist.github.com/MasterDuke17/40d529c968e489b4b3576144a9477cc3 causes `Frame has no lexical with name '$?PACKAGE'   at gen/moar/stage2/NQPHLL.nqp:1499  (/home/dan/Source/perl6/install/share/nqp/lib/NQPHLL.moarvm:SET_BLOCK_OUTER_CTX)` when running install-core-dist.raku after successfully building rakudo
+
+[14:10] <MasterDuke> and lots of rakudo's tests fail
+
+[14:43] *** robertle left
+[14:56] *** Altai-man_ joined
+[14:58] *** sena_kun left
+[15:56] <MasterDuke> hm. v2 of the patch https://gist.github.com/MasterDuke17/40d529c968e489b4b3576144a9477cc3#file-ctxouter_v2-patch has a very similar failure `Frame has no lexical with name '::?CLASS'`
+
+[16:09] <MasterDuke> i don't have any bash history for jit-bisect anymore, anybody remember how it's supposed to be run?
+
+[16:16] <nine> MasterDuke: are there any other JIT implementations of ops that use contexts and/or the framewalker?
+
+[16:16] <nine> Could be that MVM_context_apply_traversal relies on some book keeping data that's just not set up by the JIT
+
+[16:17] <MasterDuke> nine: i copied the implementation of ctxcallerskipthunks (it's interp.c implementation is identical except for the literal passed to MVM_context_apply_traversal)
+
+[16:18] <MasterDuke> https://github.com/MoarVM/MoarVM/blob/master/src/jit/x64/emit.dasc#L1027-L1048 and https://github.com/MoarVM/MoarVM/blob/master/src/core/interp.c#L4241-L4250
+
+[16:20] <MasterDuke> a bisect is currently running
+
+[16:22] <MasterDuke> `JIT Broken Frame/BB: 1 / 91===SORRY!===Frame has no lexical with name '$_'`
+
+[16:23] <nine> Ah, I see. Then I'd guess that the error is actually in another JITed op and implemeting ctxouter just unlocks that
+
+[16:24] <MasterDuke> nine: care to see the log the jit bisect produced? i've never really understood them enough to find anything in them that points out where to look
+
+[16:25] <nine> can take a look
+
+[16:26] <MasterDuke> https://gist.github.com/MasterDuke17/40d529c968e489b4b3576144a9477cc3 has it
+
+[16:26] <jnthn> So working on dispatch has led me to our calling conventions.
+
+[16:27] <MasterDuke> they need changing?
+
+[16:28] <jnthn> And looking at how we can efficiently implement the whole capture tweakery thing
+
+[16:28] <jnthn> Because the naive approach - well, also what we'd do when evaluating a dispatcher to record a guard/transform chain - is just to produce new MVMCaptures each time
+
+[16:29] <nine> So...you're gonna tell us that it will be a lot faster to pass on arguments in the future?
+
+[16:29] <jnthn> But we don't want to do that for the real guard chain walk.
+
+[16:30] <jnthn> Anyway, focusing back on what we do today for a moment
+
+[16:31] <jnthn> prepargs <callsite> - OK, so the callsite contains the argument register kinds, and also now the named argument names
+
+[16:31] <jnthn> arg_o 0, r(0)
+
+[16:31] <jnthn> arg_o 1, r(2)
+
+[16:31] <jnthn> The integer in the middle there writes into the args buffer. But we always, afaik, emit those in order. That's pretty redundant.
+
+[16:32] <jnthn> But wait, the information that it's an object argument is redundant too, 'cus that's in the callsite
+
+[16:33] <jnthn> And in fact, why do we even have an args buffer at all? It means we have to copy twice.
+
+[16:33] <jnthn> First, register to args buffer
+
+[16:33] <jnthn> Then in binding, args buffer to parameter
+
+[16:38] <nine> Couldn't the callsite contain the list of work registers that contain the args? They are determined at compile time anyway
+
+[16:41] <jnthn> I don't think it should contain the actual work register indices
+
+[16:41] <jnthn> Because we can't intern callsites so widely then
+
+[16:42] <jnthn> But I think it could contain constants
+
+[16:42] <jnthn> So then we have
+
+[16:42] <jnthn> prepargs <callsite>
+
+[16:42] <jnthn> [list of 16-bit integers identifying registers]
+
+[16:42] <jnthn> dispatch ...
+
+[16:43] <jnthn> That way, every arg is 2 bytes instead of 6 bytes today (or 2 bytes instead of 14 bytes for named args)
+
+[16:43] <timotimo> list of integers, like, literally where we'd normally have bytecode?
+
+[16:44] <jnthn> Yes
+
+[16:44] <jnthn> They're effectively "varargs" to the prepargs
+
+[16:44] <nine> Basically a prepargs OP with a variable number of arguments
+
+[16:44] <jnthn> hah!
+
+[16:45] <jnthn> And what if we take it even further?
+
+[16:45] <jnthn> dispatch_o r(0), <callsite>, 'dispatcher-name'
+
+[16:46] <jnthn> And then followed by the list of 16-bit integers
+
+[16:47] <jnthn> So instead of a 2-argument call today being prepargs (2 + 4 bytes), 2 arg_o instructions (2 * 6 bytes) and one invoke instruction (2 + 2 + 2 bytes), for a total of 24 bytes *and* 4 instructions to interpret
+
+[16:48] <jnthn> It'd be 2 (dispatch_o instruction code) + 2 (result register) + 4 (callsite) + 4 (dispatcher name) + 3 * 2 registers (one register is the invokee) = 18 bytes
+
+[16:49] <jnthn> 1 instruction to interpret
+
+[16:49] <jnthn> And no copying into an arg buffer
+
+[16:49] <jnthn> No arg buffer for the GC to have to collect
+
+[16:49] <jnthn> In fact, no arg buffer to allocate at all
+
+[16:49] <jnthn> So every frame takes less ->work too
+
+[16:51] <jnthn> The other thing I'm thinking to do is move flattening up front
+
+[16:52] <jnthn> So we do it at the callsite
+
+[16:52] <jnthn> And for cases where we have, say, up to N positional args flattened in, we resolve it to an interned callsite
+
+[16:52] <jnthn> Maybe some rule for named ones too
+
+[16:52] <jnthn> (Need to be careful that a malicious program doesn't explode the memory use :))
+
+[16:57] *** sena_kun joined
+[16:58] <jnthn> And if I hang this new way of doing things off the new `dispatch` instruction, I've got a gradual migration path for implementing this. :)
+
+[16:59] *** Altai-man_ left
+[17:04] <jnthn> Ok, home time
+
+[17:05] * jnthn hopes the time invested in the design work will mean he has an easier/shorter time of the impl work :)
+
+[17:25] *** zakharyas joined
+[18:50] <MasterDuke> nine: guess nothing jumped out at you in that bisect log?
+
+[18:56] *** Altai-man_ joined
+[18:57] *** zakharyas left
+[18:58] *** sena_kun left
+[19:00] <nwc10> jnthn: er, hangon, currently each *call* causes allocation? Or "each call site on first call"?
+
+[19:12] <timotimo> which allocation are you refering to?
+
+[19:13] *** zakharyas joined
+[19:13] <nwc10> 17:49 < jnthn> No arg buffer for the GC to have to collect
+
+[19:13] <timotimo> that's more a "have a couple pointers that have to be put into a worklist" thing
+
+[19:13] <nwc10> timotimo: I'm not familiar (at all) with the MoarVM calling convention, so I can't easily follow from jnthn's long description what is "plan he can rule out now" versus "current"
+
+[19:14] <nwc10> (sort of clear what "future" is intended to be, but of course "no plan survives contact with the enemy")
+
+[19:14] <timotimo> arg_buffer is actually a pointer into *work, eh? so maybe we're currently just allocating it at the end of the registers area or something?
+
+[19:17] <lizmat> also, will these plans affect the JIT in any way ?
+
+[19:17] <lizmat> will new ops need to be JIIted
+
+[19:17] <lizmat> I assume so
+
+[19:56] <jnthn> nwc10: Currently the registers area for a frame has an area known as the "args buffer"; we keep a pointer into it also.
+
+[19:57] <jnthn> nwc10: The GC needs to walk these registers based on the callsite describing which ones are objects/strings
+
+[19:57] <jnthn> It's not a big amount of work, but every little helps.
+
+[19:58] <nwc10> ah OK thanks
+
+[19:58] <jnthn> lizmat: Remains to be seen exactly how it works out, but it's unlikely that the op the interpreter uses will be JITted directly.
+
+[19:59] <lizmat> yeah, figured as much
+
+[19:59] <lizmat> by having the ops do more, wouldn't that make it harder to JIT ?
+
+[20:00] <jnthn> We'll be able to do things from inlining (op disappears) through specialization linking and so turning it into a fastinvoke of a specialization and fall back to at least a variant that avoids some of the overheads.
+
+[20:01] <jnthn> lizmat: Only if we ever let the JIT see it. :)
+
+[20:01] <lizmat> ok, so you're saying the JIT is going to have simpler targets ?
+
+[20:03] <jnthn> Well, in the inlining case it's got no op, in the linked specialization case it's a lot like today. That covers the monomorphic majority without really needing any changes. But yeah, a nicer fallback form for the JIT is possible, perhaps even including JITting the guard tree as it exists at the point we produce the specialization.
+
+[20:04] *** MasterDuke left
+[20:06] <jnthn> tbh, I'm mostly worried at this point about how badly we'll behave on the megamorphic minority, 'cus as it stands the design hasn't got a great answer to that.
+
+[20:07] <nwc10> "Doctor doctor, it hurts when I do this" "Well, don't do that then"
+
+[20:07] <nwc10> one of the two English meta-jokes that I'm aware of
+
+[20:07] <nwc10> the other being
+
+[20:07] <nwc10> "Two Irishmen sitting on the floor. One fell off"
+
+[20:08] <lizmat> megamorphic as "method raku" existing on many types in a single dispatch chain?
+
+[20:08] <nwc10> These will make no sense unless you are aware of various stereotype and set-piece English jokes
+
+[20:09] <jnthn> lizmat: Yes, if you have one particular callsite that encounters many different types, for example.
+
+[20:10] <jnthn> I was always fond of the one where they saw an advert saying "tree fellers wanted" and were like, "darn, there's only two of us"... :)
+
+[20:11] <jnthn> lizmat: Though the other variant is stable type but many method names (the current factoring of how we invoke action methods looks this way)
+
+[20:12] <jnthn> And the worst would be $so-many-types."$so-many-names"() :)
+
+[20:12] *** MasterDuke joined
+[20:14] <lizmat> couldn't a guard be something like "type seen"?
+
+[20:15] <jnthn> Well, normally you'd see a type and a method name and they won't change much, so the approach of "guard on type and name" (if name ain't already a constant) works out fine.
+
+[20:16] <jnthn> But if you see 100 types and 100 method names, you don't want to build a tree of 10,000 entries
+
+[20:17] <jnthn> At some point you're better off with having a per-target-type hash
+
+[20:17] <lizmat> so why not start out with one?
+
+[20:17] <jnthn> ?
+
+[20:17] <lizmat> a per-target hash ?
+
+[20:18] <lizmat> or a per-target list ?
+
+[20:19] <jnthn> We do that today.
+
+[20:19] <jnthn> $ perl6 -e 'say X::AdHoc.^methods(:all).elems'
+
+[20:19] <jnthn> 165
+
+[20:20] <jnthn> $ cat src/core.c/Exception.pm6 | grep class | wc -l
+
+[20:20] <jnthn> 322
+
+[20:20] <jnthn> m: say 165 * 322
+
+[20:20] <camelia> rakudo-moar 5610416c8: OUTPUT: «53130␤»
+
+[20:20] <jnthn> Just for that one file, there's 53,000 serialized hash entries in CORE.setting's precomp thanks to this.
+
+[20:22] <jnthn> Even if we assume we manage to do it compact enough that there's 2 bytes each for the key and hash (it'll be wrose in a big comp unit like CORE.setting), that's 200KB.
+
+[20:22] <jnthn> That's *before* you use the type and we deserialize the per-type method cache hash.
+
+[20:24] <lizmat> I wonder if X::AdHoc needs that many methods
+
+[20:24] <lizmat> maybe Exception should be made outside of Any ?
+
+[20:24] <jnthn> Was just doing the calculation, and I reckon it's 40 bytes just for the hash bucket storage once expanded... 
+
+[20:25] <jnthn> m: say 165 * 40
+
+[20:25] <camelia> rakudo-moar 5610416c8: OUTPUT: «6600␤»
+
+[20:25] <jnthn> This only happens for the types you use, but still...
+
+[20:26] <jnthn> lizmat: It's not really to do with exceptions, it's everything. I just picked it as a file that illustrates that Raku code is quite class-dense.
+
+[20:26] <jnthn> Or at least, can be.
+
+[20:26] <lizmat> yeah, but this was really outside of this discussion :-)
+
+[20:26] <jnthn> Especially given they have safety/performance benefits over hashes.
+
+[20:27] <jnthn> Anyway, no, I don't really think Exceptions not being Any would help matters. :)
+
+[20:27] <lizmat> it doesn't break the build, but it does break installing core modules
+
+[20:27] <jnthn> I'm just noting why the pre-calculation of a method cache for every type is costly now we have the size of standard library and people running the size of applications they do :)
+
+[20:28] <jnthn> And why I'm keen to move away from it as part of this set of changes, so we at least only build it for the cases that really need it.
+
+[20:32] <jnthn> (The other part of the story here is that I relied on this pre-calc to resolve a bootstrap loop also, and will probably have to find another way to circularity saw that too...)
+
+[20:33] * nwc10 wonders if the circularity saw is related to [Tux]'s chainsaw. (This is probably a far to cross-channel in joke. Don't cross the streams)
+
+[20:34] <lizmat> yeah, I got it  :-)
+
+[20:35] <lizmat> on p5p, [Tux] would always be ready to rip out code that had become obsolete and removable
+
+[20:36] <nwc10> and I smile, because formats never met *his* view of these criteria :-)
+
+[20:36] <lizmat> well, they may have been obsolete, but definitely not removable ?
+
+[20:38] <nwc10> my opinion (I stress both of these) is that removing the *implementation* gains little, as it is (relatively) bug fre and self contained. But optionally disabling it lexically would allow all the "magic" variables to be disabld, which would "free up" a lot of "syntax space"
+
+[20:38] <nwc10> all the things like (IIRC) $= $; $-
+
+[20:38] <nwc10> needing to be treated as scalars
+
+[20:41] * jnthn wanders away for a bit to do homework
+
+[20:42] <nwc10> I should wander away to do sleep
+
+[20:56] *** pamplemousse left
+[20:57] *** sena_kun joined
+[20:58] *** Altai-man_ left
+[21:19] *** zakharyas left
+[22:01] *** sena_kun left
+[22:30] *** farcas1982regreg left

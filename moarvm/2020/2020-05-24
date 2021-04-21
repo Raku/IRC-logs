@@ -1,0 +1,298 @@
+[00:26] *** Altai-man_ joined
+[00:29] *** sena_kun left
+[00:36] *** lucasb left
+[00:51] *** konvertex left
+[02:27] *** sena_kun joined
+[02:29] *** Altai-man_ left
+[03:21] *** gugod joined
+[04:26] *** Altai-man_ joined
+[04:29] *** sena_kun left
+[06:27] *** sena_kun joined
+[06:30] *** Altai-man_ left
+[07:30] *** evalable6 left
+[07:30] *** linkable6 left
+[07:30] *** linkable6 joined
+[07:32] *** evalable6 joined
+[07:37] *** konvertex joined
+[08:26] *** Altai-man_ joined
+[08:29] *** sena_kun left
+[09:26] <MasterDuke> this exception here https://github.com/MoarVM/MoarVM/blob/master/src/core/bytecode.c#L280 , should it also be freeing the `cu_body->*` stuff? and then setting them to NULL? or maybe realloc them down to only the ones that have already successfully been set?
+
+[09:29] <timotimo> i'd say coordiate with what gc_free does to an MVMCompUnit
+
+[09:31] <MasterDuke> it frees those things
+
+[09:32] <MasterDuke> but that makes sense when being GCed, right? because it's only GCed if nothing is holding on to it? but what if something catches the exception and is still holding on to the compunit?
+
+[09:33] <timotimo> exception_throw_adhoc can't be resumed, and we don't catch mvm exceptions in C code
+
+[09:34] <timotimo> would have to look closer at where bytecode_unpack is called and such
+
+[09:37] <timotimo> if it's non-explosive to free the things there, it's probably all right to do
+
+[09:37] <timotimo> ah, yes, scs, scs_to_resolve and sc_handle_idxs are not zero-initialized
+
+[09:38] <timotimo> so if they are blindly read somewhere that could cause trouble. not sure if it's possible, but we're on an error path here anyway, so can spend a little more time on cleanups i guess
+
+[10:15] <nine> I wonder why those are catchable exceptions anyway. In what case does it make sense to continue in the face of corrupted bytecode?
+
+[10:16] <timotimo> why not, iterate through all files on your disk and see which files are valid moarvm bytecode files %)
+
+[10:27] *** sena_kun joined
+[10:29] *** Altai-man_ left
+[12:26] *** Altai-man_ joined
+[12:29] *** sena_kun left
+[13:02] *** domidumont joined
+[13:27] *** kawaii left
+[13:30] *** kawaii joined
+[14:27] *** sena_kun joined
+[14:28] *** domidumont left
+[14:29] *** Altai-man_ left
+[15:31] *** lucasb joined
+[16:26] *** Altai-man_ joined
+[16:29] *** sena_kun left
+[16:37] *** konvertex left
+[16:41] *** konvertex joined
+[17:05] *** discoD joined
+[17:20] <discoD> I'm working on a patch for a slight security issue (UAF), but it requires a change to rakudo that I don't know how to implement. Is there anybody here that understands mvm guts and the compiler? 
+
+[17:22] <nine> discoD: yes
+
+[17:23] <discoD> I've fixed the uaf in mvm, but it'll break everything without a patch to rakudo
+
+[17:23] <discoD> cool
+
+[17:36] <MasterDuke> for someplace like https://github.com/MoarVM/MoarVM/blob/master/src/core/bytecode.c#L798 should i just free the current `callsites[i]->arg_flags` and `callsites[i]` and `callsites` itself? or loop through how far we've made it through the loop and free all the entries alloced so far??
+
+[17:45] <timotimo> every go around the loop calls MVM_callsite_try_intern, which can replace the pointer with one to an already existing callsite
+
+[17:46] <timotimo> so when cleaning up you definitely mustn't delete callsites that have been interned (there's a flag inside the callsite)
+
+[17:46] <timotimo> and also, i notice that the arg_flags array is malloced even though it's most probably often very small
+
+[17:47] <timotimo> so using the FSA for this pointer could be interesting. just gotta make it either everywhere, or have a flag for whether fsa or malloc was used
+
+[17:47] <timotimo> OTOH, who knows how few callsites we have deserialized in any given raku program
+
+[17:48] <timotimo> i'll go have a little look at how deserialize_callsites behaves
+
+[17:51] <MasterDuke> huh. added a print of elems in deserialize_callsites and it never happens when compiling CORE.c
+
+[17:51] <MasterDuke> oh wait, may not have installed the new moar
+
+[17:53] <MasterDuke> https://gist.github.com/MasterDuke17/659df5583f85f67f6491ec79c25b88ce
+
+[17:54] <timotimo> perl6 -e '' gets one with almost 500 callsites, one with almost 200, all the others are below 150
+
+[17:56] <timotimo> you'll want to subtract those that are interned, since they will be shared across compunits
+
+[17:57] <timotimo> the smallest callsites are also the most likely to be interned, since there's only relatively few different ones you can build from them
+
+[17:58] *** zakharyas joined
+[17:59] <timotimo> i put a comment
+
+[18:00] <MasterDuke> sounds like there's some potential for optimization
+
+[18:01] <MasterDuke> however, for the immediate purpose of cleaning up before a throw, you think i should loop up until the current value and free as i go, unless it's been interned?
+
+[18:02] <timotimo> assuming allocations get expanded to at least 16 byte (a total random guess) what could we save here ...
+
+[18:04] <timotimo> m: say (160 + 130 + 127 + 110 + 90 + 86 + 40 + 36 + 28 + 27) * (16 - 4)
+
+[18:04] <camelia> rakudo-moar a059373e7: OUTPUT: «10008␤»
+
+[18:04] <timotimo> that's for callsites that get a 4 bytes big entry rather than the 16 bytes that i just made up
+
+[18:10] <timotimo> m: say (58 + 54 + 52 + 41 + 33 + 32 + 20 + 16 + 16 + 16 + 9 + 7 + 6 + 5 + 5 + 5 + 4 + 4 + 4) * (16 - 8)
+
+[18:10] <camelia> rakudo-moar a059373e7: OUTPUT: «3096␤»
+
+[18:11] <timotimo> if the FSA bins even go 4, 8, ...
+
+[18:11] <MasterDuke> in the bytecode?
+
+[18:11] <timotimo> nah, in memory when running
+
+[18:12] <timotimo> fwiw, for flag arrays smaller than or equal to 8 we could even store the flags in the pointer value rather than at its target, as long as we can flag it
+
+[18:12] <timotimo> m: (160 + 130 + 127 + 110 + 90 + 86 + 40 + 36 + 28 + 27) * 16 + (58 + 54 + 52 + 41 + 33 + 32 + 20 + 16 + 16 + 16 + 9 + 7 + 6 + 5 + 5 + 5 + 4 + 4 + 4) * 16
+
+[18:12] <camelia> rakudo-moar 6f9901700: OUTPUT: «WARNINGS for <tmp>:␤Useless use of "+" in expression "* 16 + (58 + 54 + 52 + 41 + 33 + 32 + 20 + 16 + 16 + 16 + 9 + 7 + 6 + 5 + 5 + 5 + 4 + 4 + 4) *" in sink context (line 1)␤»
+
+[18:13] <timotimo> m: say (160 + 130 + 127 + 110 + 90 + 86 + 40 + 36 + 28 + 27) * 16 + (58 + 54 + 52 + 41 + 33 + 32 + 20 + 16 + 16 + 16 + 9 + 7 + 6 + 5 + 5 + 5 + 4 + 4 + 4) * 16
+
+[18:13] <camelia> rakudo-moar 6f9901700: OUTPUT: «19536␤»
+
+[18:13] <MasterDuke> that's most of them
+
+[18:13] <timotimo> that would be about the amount of ram saved by that when running an empty perl6 program
+
+[18:13] <MasterDuke> not bad
+
+[18:14] <timotimo> i feel like i've built this optimization before, but it didn't work out for some reason
+
+[18:15] <timotimo> linkable6: optimize_callsite_memory
+
+[18:15] <timotimo> linkable6: 4b54e3508 dd599f7c6
+
+[18:16] <timotimo> that's not how the bot works?
+
+[18:16] <timotimo> linkable6: help
+
+[18:16] <linkable6> timotimo, Like this: R#1946 D#1234 MOAR#768 NQP#509 SPEC#242 RT#126800 S09:320 524f98cdc # See wiki for more examples: https://github.com/Raku/whateverable/wiki/Linkable
+
+[18:16] <timotimo> linkable6: dd599f7c6
+
+[18:16] <timotimo> i don't need to address the bot, just put dd599f7c6 in the message somewhere
+
+[18:18] <timotimo> https://github.com/MoarVM/MoarVM/commit/dd599f7c6 and parent commits
+
+[18:21] <MasterDuke> merged?
+
+[18:21] <timotimo> no
+
+[18:22] <MasterDuke> well, looks like you made a bunch of progress
+
+[18:22] <timotimo> who knows what stopped me :)
+
+[18:23] <timotimo> 2016-10-17 20:50:08     timotimo        rakudo needs a tiny bit of change because of the callsite format now
+
+[18:23] <timotimo> i wonder what that was about
+
+[18:23] <timotimo> probably some callsites in ops.c or container.c
+
+[18:24] <timotimo> 2016-10-18 00:15:29     timotimo        diakopter: i have this branch you see here, and a branch of the same name in rakudo. it runs all the way until it hits compiling the core setting. then it crashes with "illegal flag value" (or something) when trying to handle some arguments
+
+[18:25] <MasterDuke> afk for a bit
+
+[18:27] *** sena_kun joined
+[18:28] <timotimo> i actually had two changes there. one puts up to 8 bytes of flags into where the pointer lives, another points the arg flags pointer at the serialized file itself instead of copying it out
+
+[18:28] <timotimo> ownership of buffers was the tricky part, i gather
+
+[18:29] *** Altai-man_ left
+[19:11] <nwc10> .tell jnthn  spesh fail on master/master/master for t/02-rakudo/15-gh_1202.t -- http://paste.scsys.co.uk/589038
+
+[19:11] <tellable6> nwc10, I'll pass your message to jnthn
+
+[19:35] <timotimo> is that your real prompt? :D
+
+[19:37] <timotimo> nwc10: i wonder if anything much changes if you put a sleep at the end, but nodelay + blocking should prevent that from making a difference
+
+[19:42] <nwc10> sleep at the end of what? Although I might myself go to sleep soon
+
+[19:45] <timotimo> the test file
+
+[19:46] <nwc10> OK. Trying that, but I forget how long this thing takes to run/fail
+
+[19:47] <timotimo> uh on :)
+
+[20:00] <nwc10> timotimo: still failes, but shell prompt comes at the end. I don't see that "Failed to write bytes to filehandle: Broken pipe" 3 line stanza
+
+[20:00] <nwc10> so presumably something (sleeping) was alive long enough for the child process to write somethign to it
+
+[20:01] <nwc10> I guess it's now time to use strace and see if anything there shows up.
+
+[20:01] <nwc10> But that might be for tomorrow morning
+
+[20:01] <timotimo> i wonder if it's from one of the subprocesses or the main process
+
+[20:02] <nwc10> I was assuming a subprocess, but I'm not giogn to check that tonight
+
+[20:02] <timotimo> i'll throw an strace at it
+
+[20:03] <timotimo> it didn't trip the 10 minutes timeout, did it?
+
+[20:04] <nwc10> no, was faster than that
+
+[20:09] *** konvertex left
+[20:26] *** Altai-man_ joined
+[20:29] *** sena_kun left
+[20:47] <Geth> ¦ MoarVM: ddlws++ created pull request #1293: Fixarrays
+
+[20:47] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1293
+
+[21:17] <vrurg> lizmat: It doesn't feel right to me. Revision is a property of the language. Thus Raku is about the right place for this.
+
+[21:17] <tellable6> 2020-05-24T20:45:16Z #raku-dev <lizmat> vrurg perhaps it makes more sense to put the "at-revision" method on pseudo=stash ?
+
+[21:21] <lizmat> hmmm... isn't it really conceptually an attribute of every scope ?
+
+[21:23] <vrurg> lizmat: We now talk of different things, I think. A scope is compiled used a language which has a revision.
+
+[21:23] <lizmat> right
+
+[21:23] <lizmat> so conceptually, that scope has a $!revision attribute
+
+[21:24] <vrurg> lizmat: we can say so. Moreover, for performance I'd be glad to see this information attached to a frame.
+
+[21:25] <vrurg> Which, perhaps, brings me back to the idea of a universal per-frame storage...
+
+[21:26] <lizmat> we'd only need a few bits for it, and it would be compile time, right ?
+
+[21:26] <lizmat> I guess 8 bits if you want to store the letter :-)
+
+[21:26] <vrurg> lizmat: right. BTW, I don't know what switched me over into this channel, but I'm going back to raku-dev
+
+[21:27] <lizmat> ah, ok  :-)
+
+[21:29] *** discoD left
+[21:40] *** zakharyas left
+[21:43] <jnthn> nwc10: oh, interesting...thanks for that. I've seen it occasionally fail in new-disp and figured I'd busted it there, but if it's busted in master to...
+
+[21:43] <tellable6> 2020-05-24T19:11:51Z #moarvm <nwc10> jnthn  spesh fail on master/master/master for t/02-rakudo/15-gh_1202.t -- http://paste.scsys.co.uk/589038
+
+[21:44] <jnthn> timotimo, MasterDuke If you are looking at optimizing callsite handling, could I encourage you to work against new-disp, or at least to make sure you aren't in conflict with the callsite changes going on in there
+
+[21:46] <timotimo> right
+
+[21:46] *** Altai-man_ left
+[21:47] <timotimo> we shall disp anew
+
+[21:52] <jnthn> I suspect we could do with a way to cache transformation mappings
+
+[21:52] <jnthn> e.g. internted capture + inserted obj arg at 0 = this other interned capture
+
+[21:58] <timotimo> does the interned capture hold actual values or just a shape?
+
+[22:06] <jnthn> captures aren't interned
+
+[22:06] <jnthn> callsites are
+
+[22:06] <jnthn> And callsites are just shapes
+
+[22:07] <timotimo> you did say "internted capture" in that line tho
+
+[22:07] <jnthn> oops :)
+
+[22:07] <jnthn> I meant callsite.
+
+[22:08] <timotimo> we do have the "with invocant" thing already for callsites, so we'd beef that up a little?
+
+[22:09] <jnthn> Maybe, though that won't be needed any more in new-disp 
+
+[22:10] <jnthn> Well, once it's done
+
+[22:10] <jnthn> So I guess either expanding that or building its replacement alongside it both work
+
+[22:15] *** Altai-man_ joined
+[22:16] <timotimo> i wonder which transformations will be there to intern. apart from adding any kind (obj, str, int, num) to the start or end, and dropping one from start and/or end
+
+[22:21] <jnthn> That will be overwhelmingly the most common case
+
+[22:21] <jnthn> Well, insert isn't start or end
+
+[22:21] <jnthn> You can insert at any point
+
+[22:21] <jnthn> Though the common case is at the start
+
+[22:21] *** Altai-man_ left
+[22:22] <jnthn> But optimizing FALLBACK nicely will probably result in an insert str that is not at the start, for example
+
+[22:22] <jnthn> drop at the end is also probably unusual in reality, 'cus the overall design rewards putting your manipulatables at the start
+
+[22:36] *** lucasb left
+[22:52] <Geth> ¦ MoarVM: ddlws++ created pull request #1294: Inlined CArray issues
+
+[22:52] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1294
+

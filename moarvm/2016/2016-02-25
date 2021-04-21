@@ -1,0 +1,155 @@
+[00:02] *** vendethiel joined
+[01:16] *** vendethiel joined
+[02:33] *** vendethiel joined
+[06:22] *** vendethiel joined
+[06:48] *** vendethiel joined
+[07:25] *** FROGGS joined
+[07:31] *** domidumont joined
+[07:37] *** domidumont joined
+[08:07] *** domidumont joined
+[08:08] *** vendethiel joined
+[08:19] *** zakharyas joined
+[09:00] *** vendethiel joined
+[09:03] *** nine joined
+[09:05] *** camelia joined
+[09:33] *** kjs_ joined
+[09:46] *** donaldh joined
+[09:47] *** leont joined
+[11:04] *** vendethiel joined
+[11:58] *** vendethiel joined
+[12:46] *** vendethiel joined
+[13:28] *** kjs_ joined
+[14:45] *** dalek joined
+[14:52] *** dalek joined
+[15:08] *** vendethiel joined
+[15:27] *** camelia joined
+[15:40] *** kjs_ joined
+[15:56] *** ggoebel16 joined
+[16:25] *** ggoebel16 joined
+[16:32] *** kjs_ joined
+[16:56] *** kjs_ joined
+[17:08] *** vendethiel joined
+[17:23] *** ggoebel16 joined
+[17:48] *** TimToady joined
+[17:57] *** vendethiel joined
+[18:16] *** FROGGS joined
+[18:18] <FROGGS> o/
+
+[18:18] <timotimo> o/
+
+[19:10] <FROGGS> don't we have to MVMROOT something when this function call allocates? https://github.com/MoarVM/MoarVM/blob/master/src/6model/reprs/CStruct.c#L408
+
+[19:17] *** leont joined
+[19:20] <timotimo> hm. wasn't there a rule "reprops never invoke or allocate?
+
+[19:21] * nwc10 can't remember
+
+[19:21] <timotimo> it's worth pointing out that those lines are practically the last thing in the function
+
+[19:21] <timotimo> so if you root stuff, you're not going to look at the value of the stuff you've rooted before you return out of the function
+
+[19:22] <timotimo> though it'd be interesting to know what exactly calls that function and if any of those places need MVMROOTing applied?
+
+[19:22] <nwc10> actually, more accurately - my brain has already gone to bed, and the rest of me should follow it
+
+[19:23] <timotimo> many of the reprs/*.c files actually have MVMROOT in them, but i haven't checked any to see if those are in repr ops or just in helper functions that are exposed as API directly
+
+[19:27] <FROGGS> okay, there seems to be no case where a GCable is used after such a call...
+
+[19:27] <timotimo> in that case a little comment for future code-readers may be in order
+
+[19:27] <FROGGS> was just surprised it seems
+
+[19:34] *** Ven joined
+[19:51] *** kjs_ joined
+[19:57] *** zakharyas joined
+[20:00] <FROGGS> damn, inlined CArrays arnt that easy
+
+[20:01] <jnthn> What's fiddly about 'em?
+
+[20:04] <FROGGS> well, it is about CStructs holding inlined CArrays with a shape
+
+[20:04] <FROGGS> so I initialize these CArrays when the CStruct gets initialized
+
+[20:04] <FROGGS> and now I found out that something calls bind_attribute, and scribbles over my attributes
+
+[20:05] <FROGGS> err, over my already initialized CArrays
+
+[20:08] <FROGGS> and later on when I call get_attribute the child_objs list contains only NULLs (when it should not) and it autovivs CArrays
+
+[20:14] <jnthn> Oh...well...sounds like some offsets table is hosed up
+
+[20:25] <FROGGS> hmmm
+
+[20:29] *** ggoebel16 joined
+[20:29] <FROGGS> jnthn: what offset tables ooc?
+
+[20:30] <FROGGS> the offset tables about the structure of the C struct seems to be alright
+
+[20:31] <FROGGS> must be something VM specific that's borken to cause these issues
+
+[20:34] <FROGGS> and something infiniloops in gdb
+
+[20:35] <FROGGS> ohh, that's something:
+
+[20:35] <FROGGS> ==6729== Invalid read of size 4
+
+[20:35] <FROGGS> ==6729==    at 0x4FE2D04: get_num (P6num.c:59)
+
+[20:35] <FROGGS> ==6729==    by 0x4FEE7D4: get_attribute (CStruct.c:604)
+
+[20:35] <jnthn> FROGGS: Well, I was thinking the one that says where to put stuff in the CStruct...
+
+[20:36] <jnthn> If valgrind finds it then it's probably in something you malloc'd
+
+[20:54] <timotimo> maybe we're speshing access wrong?
+
+[20:54] <timotimo> just a random thought
+
+[20:56] <jnthn> I don't *think* CStruct implements any spesh funcs
+
+[20:58] <timotimo> OK
+
+[21:06] <FROGGS> that's le code fwiw: https://gist.github.com/FROGGS/027719c37ee1baee64f0
+
+[21:09] <jnthn> FROGGS: I'm confused by it ;)
+
+[21:10] <jnthn> MVMint64   shape = 0;
+
+[21:10] <jnthn> Later
+
+[21:10] <jnthn> +                    else {
+
+[21:10] <jnthn> +                        bits  = carray_repr_data->elem_size * 8 * shape;
+
+[21:10] <jnthn> +                        //~ align = spec->align;
+
+[21:10] <jnthn> +                    }
+
+[21:10] <jnthn> That's the non-inlined branch
+
+[21:10] <jnthn> But that means it'll be a pointer...so we should allocate that, not 0?
+
+[21:11] <jnthn> *allocate space for that
+
+[21:11] <FROGGS> in between is: shape = MVM_repr_at_pos_i(tc, shape_val, 0);
+
+[21:11] <jnthn> In an if statement?
+
+[21:11] <FROGGS> yes
+
+[21:12] <FROGGS> well, but that condition is met in my case :o)
+
+[21:12] <jnthn> hm, ok
+
+[21:13] <FROGGS> but I fixed it so it cant be zero ever
+
+[21:15] <FROGGS> I also MVMROOTed stuff in P6Opaque->initialize just in case
+
+[21:15] <FROGGS> because that something allocates in ->initialize if probably new
+
+[21:16] <FROGGS> is*
+
+[21:40] <FROGGS> I'll continue tomorrow...
+
+[21:40] <FROGGS> gnight

@@ -1,0 +1,200 @@
+[00:15] *** sena_kun joined
+[00:16] *** Altai-man_ left
+[01:23] *** lucasb left
+[02:13] *** Altai-man_ joined
+[02:16] *** sena_kun left
+[04:09] *** leont joined
+[04:14] *** sena_kun joined
+[04:15] *** sivoais_ left
+[04:15] *** sivoais joined
+[04:16] *** Altai-man_ left
+[06:13] *** Altai-man_ joined
+[06:16] *** sena_kun left
+[08:14] *** sena_kun joined
+[08:16] *** Altai-man_ left
+[09:13] *** MasterDuke joined
+[10:13] *** Altai-man_ joined
+[10:16] *** sena_kun left
+[12:14] *** sena_kun joined
+[12:17] *** Altai-man_ left
+[12:47] *** Ven`` joined
+[12:59] *** sena_kun1 joined
+[14:05] *** sena_kun1 left
+[14:14] *** Altai-man_ joined
+[14:16] *** sena_kun left
+[15:45] *** Voldenet left
+[15:57] *** Voldenet joined
+[15:57] *** Voldenet left
+[15:57] *** Voldenet joined
+[16:15] *** sena_kun joined
+[16:16] *** Altai-man_ left
+[16:26] *** zakharyas joined
+[17:18] *** Ven`` left
+[17:36] *** Ven`` joined
+[18:14] *** Altai-man_ joined
+[18:16] *** sena_kun left
+[20:15] *** sena_kun joined
+[20:17] *** Altai-man_ left
+[20:51] *** zakharyas left
+[21:03] *** Kaeipi joined
+[21:03] *** Kaiepi left
+[21:12] <timotimo> i wonder if the internal structure of NFA should be changed a bit
+
+[21:12] <timotimo> currently we have an array of arrays for the state infos
+
+[21:13] <timotimo> i.e. the "kind of edge", the target state, and the parameters, like what grapheme or some such
+
+[21:13] <MasterDuke> array of classes instead?
+
+[21:13] <timotimo> hm?
+
+[21:14] <MasterDuke> didn't jnthn say recently that accessing class attributes was even faster than arrays?
+
+[21:15] <timotimo> i'm talking about C code right now
+
+[21:16] *** leont left
+[21:18] <timotimo> my thought is to put all the MVMNFAStateInfo entries in one long array and instead of having an array with "how many edges does each state have" we'd have "at what index do this state's edges start?" in one array, and one last entry for where the total array ends
+
+[21:19] <timotimo> whenever we're "at" a state, we go through all the outgoing edges, checking what their "act" is to see how the check should work, then the "extra data" for whatever kind of check it is, and only when the check is successful do we use the "to" value
+
+[21:20] <timotimo> i think that the percentage of successful checks can be relatively small in general
+
+[21:20] <timotimo> and hopefully there's also cases where none of the checks succeed
+
+[21:20] <timotimo> so my thinking is, if the "to" values live in a separate array, there would be fewer accesses to that array, and going through the rest of the data could be faster
+
+[21:21] <timotimo> in other words, the stuff we always need to look at should be the only stuff that gets fetched always
+
+[21:22] <timotimo> and an array of arrays could very well become a little fragmented in memory
+
+[21:22] <timotimo> plus, for states that have only one or two outgoing edges anyway, the allocation overhead of malloc (or do we use the fixed size allocator already here?) could add up?
+
+[21:24] <timotimo> OK, we're already using the fixed size allocator
+
+[21:25] <MasterDuke> interesting
+
+[21:27] <timotimo> MVMNFAStateInfo is 24 bytes big already
+
+[21:28] <timotimo> moving the "to" out of it will drop that down to 16, which i imagine is a lovely tiny win
+
+[21:31] <MasterDuke> how many of them are there?
+
+[21:31] <timotimo> also, to is 64bit, but since it's an index into the states array, having 32bit could be enough
+
+[21:32] <MasterDuke> are there ever more than 65k states?
+
+[21:34] <timotimo> https://gist.github.com/timo/308debec42f59d60f13395796c5e545e - here's a little excerpt from the beginning of compiling the core setting
+
+[21:34] <timotimo> not all nfas are deserialized from the very beginning, of course
+
+[21:35] <MasterDuke> so maybe 16bit would be sufficient?
+
+[21:35] <timotimo> seems like we already reach the 20k every now and then
+
+[21:36] <timotimo> to be totally safe, unsigned 32bit integer should definitely be fine
+
+[21:39] *** Ven`` left
+[21:39] <timotimo> mhhh ... huh? NFA's deserialize function isn't being called?
+
+[21:43] <timotimo> updated the gist with what nfa_from_statelist creates
+
+[21:53] <MasterDuke> hm. yeah, 16 might be too small
+
+[22:04] *** Kaeipi left
+[22:04] <timotimo> at some point we could generate some mvm bytecode for extremely small nfas
+
+[22:05] <timotimo> i'm not sure if there would be any significant winnings, though
+
+[22:08] <timotimo> aaaaaanyway, if we have a big one like the 37k edges over 21.8k states, we'd have up to 21.8k calls to fixed_size_free to free it up, as well as the same amount of calls to fixed_size_alloc t create these arrays in the first place
+
+[22:09] <timotimo> if it all goes into one big flat array, that'd just be one call, that i guess often hits malloc directly because it's too big for even the biggest fsa bins
+
+[22:10] <MasterDuke> tradeoffs
+
+[22:10] <timotimo> not sure there's a downside here :)
+
+[22:10] <timotimo> one big malloc is better than a hundred small fsa's
+
+[22:11] <MasterDuke> yeah, probably
+
+[22:15] *** Altai-man_ joined
+[22:16] *** sena_kun left
+[22:17] <timotimo> some of the arguments are just an MVMGrapheme32, other times it's a MVMString *, an MVMint64, or two MVMGrapheme32
+
+[22:17] <timotimo> i wonder how often it's the 32bit one, because that'd be a waste of 32bits every time
+
+[22:22] <timotimo> https://gist.github.com/timo/308debec42f59d60f13395796c5e545e
+
+[22:23] <timotimo> at the expense of one number per state, a "buffer" of mixed 64bit and 32bit values could be indexed, and then traversed one-by-one, since we're going through all edges anyway; there's a binary search optimization in there, though, which may make this a bit mre difficult
+
+[22:33] *** Kaiepi joined
+[22:49] <timotimo> oh, hmm, doing the binary search thing adds edges in the middle of the nfa, though
+
+[22:49] <timotimo> so i'd have to memmove a bunch of stuff ...
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: 1f182b48cf | (Timo Paulssen)++ | Configure.pl
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: new Configure.pl flag: --dtrace
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: 
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: When this is turned on, we can put DTrace points in
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: different places in the code.
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: 
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: These DTrace trace points show up as just a single nop
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: in the resulting binary, but an additional section in
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: the ELF lists the available trace points along with how
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: to get at whatever is in the arguments.
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: review: https://github.com/MoarVM/MoarVM/commit/1f182b48cf
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: 60edb07c81 | (Timo Paulssen)++ | 2 files
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: WIP on getting nfa to use a flat state array
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: 
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: instead of having one array per state that has arrays
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: for each state's outgoing edges in it, we store the
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: index into the array where the first edge lives, and
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: use the next number in that array to calculate the
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: amount.
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: <…commit message has 7 more lines…>
+
+[22:53] <Geth> ¦ MoarVM/nfa_flat_statelist: review: https://github.com/MoarVM/MoarVM/commit/60edb07c81
+
+[22:54] <timotimo> oh, that other commit belongs to master actually
+
+[23:30] <Geth> ¦ MoarVM: 1f182b48cf | (Timo Paulssen)++ | Configure.pl
+
+[23:30] <Geth> ¦ MoarVM: new Configure.pl flag: --dtrace
+
+[23:30] <Geth> ¦ MoarVM: 
+
+[23:30] <Geth> ¦ MoarVM: When this is turned on, we can put DTrace points in
+
+[23:30] <Geth> ¦ MoarVM: different places in the code.
+
+[23:30] <Geth> ¦ MoarVM: 
+
+[23:30] <Geth> ¦ MoarVM: These DTrace trace points show up as just a single nop
+
+[23:30] <Geth> ¦ MoarVM: in the resulting binary, but an additional section in
+
+[23:30] <Geth> ¦ MoarVM: the ELF lists the available trace points along with how
+
+[23:30] <Geth> ¦ MoarVM: to get at whatever is in the arguments.
+
+[23:30] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/1f182b48cf
+

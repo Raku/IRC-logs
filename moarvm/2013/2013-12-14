@@ -1,0 +1,475 @@
+[02:47] *** _ilbot joined
+[04:17] *** flussence joined
+[07:46] *** camelia joined
+[08:19] *** camelia joined
+[12:01] *** tgt joined
+[13:15] <nwc10> What would this be telling me?
+
+[13:15] <nwc10> (gdb) p item
+
+[13:15] <nwc10> $1 = (MVMCollectable *) 0x4000300400001
+
+[13:25] <jnthn> That the pointer is bogus, given the 1 at the end...
+
+[13:26] <jnthn> Just out of knowing alignment, I think we can safely say that's not a valid pointer.
+
+[13:46] *** FROGGS joined
+[14:07] *** jnap joined
+[14:10] *** jnap joined
+[15:17] <nwc10> Oh, I though the 0x40030040001 pattern might have been a tell-tale about why
+
+[15:17] <nwc10> anyway, you too can probably have this SEGV if you do this:
+
+[15:18] <nwc10> http://paste.scsys.co.uk/285027
+
+[15:18] <nwc10> basically I made MoarVM run a nursery collection on every allocation
+
+[15:18] <nwc10> that's a SEGV in ..bin/moar --libpath=src/vm/moar/stage0 src/vm/moar/stage0/nqp.moarvm --bootstrap --setting=NULL --no-regex-lib --target=mbc  --output=gen/moar/stage1/nqpmo.moarvm gen/moar/stage1/nqpmo.nqp
+
+[15:19] <nwc10> so, presumably (at least) one thing is not rooted
+
+[15:19] <nwc10> it is, of course, bloody slow
+
+[15:19] <nwc10> but probbly the fix for that is to redo how often full GC runs happen
+
+[15:21] *** ggoebel115 joined
+[15:21] <jnthn> Ooh
+
+[15:23] <nwc10> if you naively always do a nursery run, then it goes SEGV because tc->thread_obj is NULL
+
+[15:23] <nwc10> if you just check for that, it goes SEGV fairly early. Not *sure* if that is a bug, or an assumption about how far bootstrap needs to be before the GC can run at all
+
+[15:23] <nwc10> hence the hack in that patch to wait until the first real nursery run before going all agressive
+
+[15:23] <jnthn> Yeah, it's an assumption that we have space in the nursery to bootstrap
+
+[15:23] <nwc10> but really, I think that it would be better to assert or panic if the GC tries to run too early
+
+[15:24] *** jnap joined
+[15:24] <jnthn> Well, there's a better answer
+
+[15:24] <jnthn> There's a way to make the GC do directly gen2 allocation
+
+[15:24] <nwc10> anyway, with the hack, it takes bloody ages but it does crash way earlier than the Rakudo setting
+
+[15:24] <jnthn> So we can maybe use that to make sure the bootstrap all allocates directly in gen2 and we start with a really empty nursery.
+
+[15:25] <nwc10> I suspect that "Bloody ages" could be reduced if I tracked how much is allocated, and avoided second stage GC until ten-times a full nursery had run. Given that the ten times is assuming that it's 10 full nurserys
+
+[15:26] <nwc10> does nearly all the bootstrap survive? The loading process doesn't make temporary objects?
+
+[15:26] <nwc10> anyway, it's a tuning detail
+
+[15:26] <jnthn> No temporaries really
+
+[15:26] <nwc10> the hack shows up (at least) one bug
+
+[15:26] <jnthn> It's tuning, but likely wroth it...
+
+[15:27] <jnthn> Yeah. Nice hack. :) If you don't find the actual bug, I can certainly use that to help reproduce/find it.
+
+[15:27] <nwc10> I don't know if I know enough to find the bug
+
+[15:27] <nwc10> anyway, need tea, and the shops shut soonish
+
+[15:27] <nwc10> and don't open tomorrow
+
+[15:28] <jnthn> ok :)
+
+[15:28] <jnthn> In the meantime, I may have a patch that gives some amount of pain relief with setting compile time.
+
+[15:36] <dalek> MoarVM: cecf572 | jnthn++ | src/core/ (3 files):
+
+[15:36] <dalek> MoarVM: Can clean up ->caller more quickly in many cases.
+
+[15:36] <dalek> MoarVM:
+
+[15:36] <dalek> MoarVM: This greatly alleviates the missing closure handling optimizations in
+
+[15:36] <dalek> MoarVM: the GC so far; CORE.setting compiles in 73% of the time it previously
+
+[15:36] <dalek> MoarVM: did with this.
+
+[15:36] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/cecf5729f9
+
+[15:37] <timotimo> oh sweet!
+
+[15:44] <dalek> MoarVM: d1a0aec | jnthn++ | src/moar.c:
+
+[15:44] <dalek> MoarVM: Bootstrap object system directly into gen2.
+
+[15:44] <dalek> MoarVM:
+
+[15:44] <dalek> MoarVM: nwc10++ for analysis that led to this.
+
+[15:44] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d1a0aec8e3
+
+[15:47] <nwc10> jnthn: do food shops open on Sundays in Slovakia?
+
+[15:50] <jnthn> nwc10: I'm fairly sure the big tesco I lived near in the center opened for some hours on a Sunday
+
+[15:51] <nwc10> ah OK. Was curious.
+
+[15:51] <jnthn> Maybe just until 4pm or so...
+
+[15:51] <nwc10> However, I'm not missing Tesco
+
+[15:51] <jnthn> Forget exactly...it was 4 years ago :)
+
+[15:55] <timotimo> jnthn: did you measure what benefit the last commit gave?
+
+[16:00] <jnthn> timotimo: I'm not sure they'll be measurable...
+
+[16:00] <jnthn> timotimo: make test in NQP ended up coming in at 23s on the run rather than 24s before but that's likely noise
+
+[16:01] <jnthn> Um, though the run I just did now came in at 22s. What. :)
+
+[16:02] <jnthn> Reliably get 22s now. Used to get 25s reliably. I am pretty sure most of that came from the big win in cecf572 rather than the small one in d1a0aec
+
+[16:17] <timotimo> :)
+
+[16:18] <timotimo> fair enough
+
+[16:41] <timotimo> well, when trying to build rakudo, i get the pointer to old fromspace thingie :\
+
+[16:42] <jnthn> Yeah, I didn't hunt that one down jus tyet.
+
+[16:42] <FROGGS> timotimo: can you check your Moar Makefile for the -On flag?
+
+[16:43] <timotimo> sure
+
+[16:44] <timotimo> -O1 -g2
+
+[16:44] <timotimo> er
+
+[16:44] <timotimo> -O1 -g3
+
+[16:44] <FROGGS> damn
+
+[16:45] <FROGGS> seems only my box does build using -O1
+
+[16:45] <jnthn> oh holy crap
+
+[16:45] <jnthn> NO WONDER stage mast is slow
+
+[16:45] <jnthn> I just went to fix a bug I thought was probably the multi-dispatch cache's fault (not knowing about containers)
+
+[16:46] <jnthn> ...and discovered there's no multi-dispatch cache in place at all.
+
+[16:47] <jnthn> That means we've been putting up with longer compiles of everything.
+
+[16:49] * jnthn deals with this now, since it'll make working on everything else faster...
+
+[16:51] <FROGGS> \o/
+
+[16:51] <FROGGS> NO CRAP! HOLY WONDER!
+
+[17:08] *** grondilu joined
+[17:13] <TimToady> (dumping core faster)++  ;)
+
+[17:15] <tadzik> haha
+
+[17:16] <timotimo> :D
+
+[17:19] <moritz> hipsters were yesterday, today we have (core) dumpsters!
+
+[17:19] <timotimo> i dumped core before i compiled Cool.
+
+[17:20] <TimToady> Dumpster Dance!
+
+[17:37] <moritz> now my rakudo/moar-support also segfaults during setting compilation
+
+[17:37] <moritz> after stage mbc
+
+[17:38] <jnthn> moritz: Does it actually write out the CORE.setting.moarvm?
+
+[17:39] <dalek> MoarVM: ba44826 | jnthn++ | src/6model/containers. (2 files):
+
+[17:39] <dalek> MoarVM: Allow containers to indicate non-invoking fetch.
+
+[17:39] <dalek> MoarVM:
+
+[17:39] <dalek> MoarVM: Will use it in implementing the multi-dispatch cache; will also need
+
+[17:39] <dalek> MoarVM: it for various other optimization related things in the future.
+
+[17:39] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ba44826247
+
+[17:39] <dalek> MoarVM: 484a088 | jnthn++ | / (6 files):
+
+[17:39] <dalek> MoarVM: Stub in multi-cache storage, layout, etc.
+
+[17:39] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/484a088bd7
+
+[17:40] <moritz> jnthn: 11MB of it written, yes
+
+[17:40] <jnthn> OK, so it's an exit crash...
+
+[17:48] <moritz> succeeded in gdb
+
+[17:49] <jnthn> tssk
+
+[17:49] <jnthn> FROGGS: I guess that known file handle issue remains unfixed, though?
+
+[17:51] <timotimo> does the multi-method cache improve the run speed of nqp-moar as well?
+
+[17:55] <jnthn> Sure, given it's NQP run-speed that determines how long phase mast takes, given that's all NQP code.
+
+[17:55] <timotimo> ah, of course, that one does do multi-dispatch
+
+[17:56] <timotimo> you even said so above
+
+[17:56] <jnthn> And the dispatcher is written in NQP, which is fine if you only hit that slower path occasionally.
+
+[18:08] *** _ilbot joined
+[18:57] <FROGGS[mobile]> jnthn: yes, because I did not really understood the suggested fix
+
+[18:58] <FROGGS[mobile]> :o(
+
+[19:03] *** lizmat joined
+[21:26] <jnthn> multi cache seems to be a win
+
+[21:33] <timotimo> what a surprise! :)
+
+[21:35] <jnthn> NQP test suite here is down to 19s now, from 22s after earlier work.
+
+[21:36] <timotimo> oh nice :)
+
+[21:37] <timotimo> there, fudged it
+
+[21:39] <dalek> MoarVM: 8e20077 | jnthn++ | src/ (4 files):
+
+[21:39] <dalek> MoarVM: Give each type a unique ID for use in caching.
+
+[21:39] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/8e200778e8
+
+[21:39] <dalek> MoarVM: fd7c070 | jnthn++ | src/ (6 files):
+
+[21:39] <dalek> MoarVM: Finish up multi-dispatch cache implementation.
+
+[21:39] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/fd7c0707eb
+
+[21:41] <jnthn> Hm, with --jobs=12 I can get the NQP test suite down to 7s now...
+
+[21:41] <jnthn> :)
+
+[21:46] <jnthn> Good win for CORE.setting compilation too
+
+[21:46] <FROGGS> hehe, that sounds nice :o)
+
+[21:46] <FROGGS> jnthn++
+
+[21:47] <jnthn> Here's the key numbers as things stood before my work today:
+
+[21:47] <jnthn> Stage parse      : 141.805
+
+[21:47] <jnthn> Stage optimize   :  20.628
+
+[21:47] <jnthn> Stage mast       : 179.440
+
+[21:47] <jnthn> Here's how those are now
+
+[21:47] <jnthn> Stage parse      :  81.131
+
+[21:47] <jnthn> Stage optimize   :   9.668
+
+[21:47] <jnthn> Stage mast       :  56.230
+
+[21:48] <jnthn> 148s per build vs 343s before.
+
+[21:48] <nwc10> so you've more than halved the time. Not bad.
+
+[21:49] <nwc10> Not at all bad.
+
+[21:49] <nwc10> beer?
+
+[21:49] <jnthn> ;)
+
+[21:50] <nwc10> How does it compare to the JVM numbers for those stages on the same machine?
+
+[21:51] <jnthn> I'm recalling them off the top of my head here, but I think parse is around 43s, optimize is around 4s, and jast is around 26s
+
+[21:51] <nwc10> OK, so only twice as fast.
+
+[21:51] <jnthn> Yeah, JVM is currently about twice as fast.
+
+[21:52] <jnthn> But Moar doesn't have any clever optimization stuff in it yet.
+
+[21:54] <timotimo> ooooooh yeah
+
+[21:54] <timotimo> and the parrot times?
+
+[21:55] <timotimo> parrot takes 100s for stage parse on my machine
+
+[21:55] <jnthn> timotimo: Don't recall those
+
+[21:56] <jnthn> I seem to remember Parrot was more than that for parse.
+
+[21:57] <timotimo> that's great! :)
+
+[21:57] <timotimo> though there's parts missing from the core setting for moar, no?
+
+[21:57] <jnthn> Not much.
+
+[21:57] <jnthn> It's missing...concurrency stuff, so it's not a quite fair comparison with JVM.
+
+[21:57] <timotimo> very nice :)
+
+[21:57] <timotimo> now all that's left to do is for it to not explode during building :D
+
+[21:57] <jnthn> I think sockets are the only thing left out and that's not that much code.
+
+[21:57] <jnthn> Yeah...I didn't really have the concentration to make GC bug hunting a worthwhile thing today.
+
+[21:57] <timotimo> didn't we remove some dynamic var stuff from the setting, too?
+
+[21:57] <timotimo> probably doesn't account fo rmuch
+
+[21:57] <timotimo> well, i'm happy :)
+
+[21:57] <timotimo> finding the lack of caching was a good catch
+
+[21:58] <jnthn> Yeah, I didn't realize we'd not got that implemented already :)
+
+[21:58] <timotimo> so, what do you feel like doing next?
+
+[21:58] <timotimo> or rather, when's the next tuitful day?
+
+[21:59] <jnthn> Well, I may have some time tomorrow, but gotta go to Goteborg
+
+[21:59] <jnthn> Will be teaching my final class of the year Mon/Tue
+
+[22:00] <jnthn> Then got Wed/Thu free for Perl 6 things, but should also do some Christmas shopping and prep for trip to UK to see family.
+
+[22:00] <timotimo> that still sounds good :)
+
+[22:01] <timotimo> do you have anything that you can delegate to me perhaps? something not too complicated? :P
+
+[22:01] <timotimo> (you know my (lack of) capability)
+
+[22:12] <jnthn> timotimo: Well, I'm seeing if I can get sanity tests to run at all, which may help point out things we need to work on.
+
+[22:25] <dalek> MoarVM: 3545bd2 | jnthn++ | src/core/frame.c:
+
+[22:25] <dalek> MoarVM: Avoid premature collection of contvar clones.
+
+[22:25] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/3545bd2771
+
+[22:29] *** colomon joined
+[22:36] <dalek> MoarVM: 5ea206f | jnthn++ | src/core/frame.c:
+
+[22:36] <dalek> MoarVM: Don't spew state var warning.
+
+[22:36] <dalek> MoarVM:
+
+[22:36] <dalek> MoarVM: Tests will show up their not-done-yet well enough.
+
+[22:36] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/5ea206fbee
+
+[22:36] <jnthn> timotimo: OK, so...hmm
+
+[22:37] <jnthn> timotimo: If you run a bunch of the tests in t/00-parrot and t/01-sanity, they pass. Not all, but many.
+
+[22:37] <jnthn> timotimo: But prove --exec=perl6-m t/00-parrot t/01-sanity always reports "No plan found in TAP output" :(
+
+[22:38] <jnthn> timotimo: Feel free to look into that, also to look into any of the test failures
+
+[22:41] <jnthn> FROGGS: You may also have some ideas on the prove issue...could be something specific to a certain kind of handle?
+
+[22:41] <timotimo> i can look, but right now i've had a few drinks :)
+
+[22:43] <jnthn> np, doesn't have to be now :)
+
+[22:44] <timotimo> i'm running an unoptimized moar now, i get until trying to build Test.pm
+
+[22:44] <timotimo> i just got the last version related commit and will try rebuilding
+
+[22:44] <timotimo> i couldn't run any of the sanity tests yet
+
+[22:46] <jnthn> yeah, you can't "make test" but you can perl6-m t/00-parrot/01-...
+
+[22:47] <timotimo> yes, i was trying that
+
+[22:47] <timotimo> i got an error that seemed like it should have been a warning
+
+[22:47] <timotimo> use of blah in numeric context mumble mumble
+
+[22:47] <timotimo> i'll try again in a minute
+
+[22:47] * FROGGS compiles
+
+[22:48] <jnthn> Yeah
+
+[22:48] <jnthn> Warnigns somehow end up as errors
+
+[22:48] <jnthn> Not sure why
+
+[22:49] <timotimo> ah, good. now i can run the sanity tests
+
+[22:49] <timotimo> i also can't make m-test because m-install doesn't run to completion :)
+
+[22:51] <timotimo> t/01-sanity/01-tap.t .. ok
+
+[22:52] <timotimo> All tests successful.
+
+[22:52] <timotimo> i can do that with prove -e './perl6-m' t/01-sanity/01-tap.t'
+
+[22:52] <timotimo> but it sometimes fails
+
+[22:52] <jnthn> Hm, odd...
+
+[22:52] <jnthn> It always fails here
+
+[22:53] <timotimo> tried it with -v?
+
+[22:53] <jnthn> t\00-parrot\02-op-math.t ..
+
+[22:53] <jnthn> Éƒ┐
+
+[22:53] <jnthn> No subtests run
+
+[22:53] <jnthn> ...
+
+[23:05] <FROGGS> when we run under prove, then stdout/stderr is piped rather than a tty, right?
+
+[23:06] <FROGGS> prove perl6-m t/01-sanity/01-tap.t
+
+[23:06] <FROGGS> perl6-m ............... > Failed to seek in filehandle: 9
+
+[23:06] <FROGGS> ohh, -e missing
+
+[23:07] <FROGGS> ahh, all subtests pass, but nonzero exit status
+
+[23:17] <FROGGS> 104s stage parse.... I like it :o)
+
+[23:17] <FROGGS> parrot needs at least 10s more here
+
+[23:39] <FROGGS> I think that this could cause problems: https://gist.github.com/FROGGS/422a82ea138d3fe14833
+
+[23:40] <FROGGS> dunno how to fix it though
+
+[23:43] <dalek> MoarVM: 3940115 | jnthn++ | src/core/frame.c:
+
+[23:43] <dalek> MoarVM: Avoid looking at uninitialized memory.
+
+[23:43] <dalek> MoarVM:
+
+[23:43] <dalek> MoarVM: FROGGS++ for reporting.
+
+[23:43] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/3940115cb5
+
+[23:43] <FROGGS> umm, that was quick
+
+[23:44] <FROGGS> ohh, the error message has changed!
+
+[23:45] <FROGGS> before, it just said: Unhandled exception: Cannot invoke this object
+
+[23:45] <FROGGS> now: Unhandled exception: Cannot invoke this object (REPR: Uninstantiable, cs = 0)
+
+[23:45] <FROGGS> and valgrind is clean
+
+[23:48] <jnthn> Oops, didn't mean to commit that extra debugging info in the patch...
+
+[23:48] <jnthn> Ah well, does no harm.
+
+[23:48] <FROGGS> correct  :o)

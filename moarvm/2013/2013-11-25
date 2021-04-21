@@ -1,0 +1,497 @@
+[00:02] *** Ben_Goldberg joined
+[00:04] *** arnsholt_ joined
+[00:21] *** dalek joined
+[01:06] *** cognominal__ joined
+[01:08] *** moritz joined
+[01:09] *** rurban1 joined
+[01:10] *** rurban2 joined
+[02:05] *** rurban1 joined
+[03:16] *** FROGGS joined
+[04:20] *** ssutch joined
+[05:15] *** FROGGS joined
+[05:26] *** FROGGS joined
+[05:26] *** ssutch joined
+[06:13] *** FROGGS joined
+[06:50] *** FROGGS joined
+[07:37] *** lizmat joined
+[07:45] *** woolfy left
+[07:48] *** FROGGS joined
+[09:41] *** ssutch joined
+[09:56] <FROGGS> FYI:
+
+[09:56] <FROGGS> stage parse rakudo@parrot:  197.062s
+
+[09:56] <FROGGS> stage parse rakudo@moar: 359.375s
+
+[09:56] <FROGGS> stage parse rakudo@optimized moar: 197.516s
+
+[09:56] <FROGGS> that is on a Windows 7 x64
+
+[09:56] <FROGGS> (since I am unable to use an optimized moar on linux for rakudo atm)
+
+[10:03] <nwc10> FROGGS: what goes wrong with an optimised Moar on Linux?
+
+[10:04] <nwc10> and that's 197s both for optimised parrot and optimised Moar on Win7 x86_64? ie they are currently the same speed?
+
+[10:04] <FROGGS> nwc10: yes, optimized parrot
+
+[10:05] <FROGGS> nwc10: there seems to be a gc bug that is showing up
+
+[10:08] <FROGGS> I tried to hunt it down, but without any luck
+
+[10:15] *** lizmat joined
+[10:16] <jnthn> FROGGS: You're saying that optimized Moar does stage parse in same time as optimized Parrot? When I've still got some obvious performance bugs showing up in the profile? Nice :)
+
+[10:17] <jnthn> And that's *before* doing the nice type specialization stuff :)
+
+[10:17] <FROGGS> yes, I actually looked twice to confirm that it bailed out afterwards about something.moarvm :o)
+
+[10:18] <FROGGS> jnthn: any advice how I should try to hunt down the gc bug?
+
+[10:23] <jnthn> FROGGS: Look down the stack trace and see what we had just done before calling process_worklist
+
+[10:23] <jnthn> That is, did we just push temp roots and are working on thsoe? Or something else? etc.
+
+[10:23] <jnthn> That *may* help
+
+[10:24] <jnthn> You can also set a breakpoint on the fromspace check panic and see what kind of thing it is
+
+[10:24] <FROGGS> k, thanks
+
+[10:25] <jnthn> back to teachign &
+
+[10:40] *** tgt joined
+[11:15] <nwc10> another really intensive way to nail these sort of things is to rebuild each C object file (in this case of moarvm) in turn with optimisaiton, and see which one causes the GC bug to appear
+
+[11:15] <nwc10> and then spit it apart, and build function by function with optimisation
+
+[11:16] <FROGGS> hmmm, that is a nice idea
+
+[11:16] <nwc10> but that's really only the fallback when "try to be smart" hasn't worked
+
+[11:16] <nwc10> and it may be that more than one needs to be built optimised
+
+[11:16] <FROGGS> true
+
+[11:30] <nwc10> I see this (hope the paste isn't messed up):
+
+[11:30] <nwc10> Stage start      :   0.000
+
+[11:30] <nwc10> Stage parse      : 235.331Stage syntaxcheck:   0.000Stage ast        :   0.000Bytecode validation error at offset 254, instruction 35:extension op 'p6trialbind' not registered
+
+[11:31] <nwc10> oh, yes, so it is
+
+[11:31] <nwc10> that's with gcc (GCC) 4.4.7 20120313 (Red Hat 4.4.7-3)
+
+[11:31] <nwc10> at (I think) -O3
+
+[11:39] *** cognominal__ joined
+[12:51] *** benabik joined
+[13:01] <FROGGS> gah, I can't even set breakpoints using the optimized build :o(
+
+[13:02] <arnsholt> Have you checked that it's built with debugging info?
+
+[13:03] <arnsholt> -g should be in the CFLAGS
+
+[13:03] <FROGGS> ahh!
+
+[13:03] <FROGGS> arnsholt: thanks! I'll try
+
+[13:04] <FROGGS> arnsholt++
+
+[13:04] <FROGGS> \o/
+
+[13:07] <FROGGS> p *item
+
+[13:07] <FROGGS> $6 = {owner = 0, flags = 0, size = 56, forwarder = 0x0, sc = 0x0}
+
+[13:09] <arnsholt> If you're using GCC, I recommend using -g3
+
+[13:09] <FROGGS> k, what does this do?
+
+[13:09] <arnsholt> Then macros are stored in the debugging info
+
+[13:09] <FROGGS> k
+
+[13:10] <arnsholt> So that GDB understands what macros mean
+
+[13:10] <arnsholt> In macroheavy code, it's really nice
+
+[13:10] <FROGGS> yeah, absolutely
+
+[13:11] <FROGGS> but... what should I do now? I had thought that this item keeps a pointer to an MVMObject or so...
+
+[13:15] <arnsholt> That's harder =)
+
+[13:15] <arnsholt> But it looks like it's not fully initialised, given the owner and sc being NULL
+
+[13:16] <FROGGS> "ownder is 0 if there is no held mutex"
+
+[13:16] <FROGGS> owner*
+
+[13:16] <FROGGS> /* Pointer to the serialization context this collectable lives in, if any. */
+
+[13:16] <FROGGS> MVMSerializationContext *sc;
+
+[13:16] <FROGGS> so, seems valid
+
+[13:17] <FROGGS> can I dump these 56 bytes somehow?
+
+[13:18] <FROGGS> ohh, I think I know
+
+[13:20] <FROGGS> hmmm, not very helpful
+
+[13:22] <jnthn> 0 for owner and SC is fine
+
+[13:22] <jnthn> The flags are more interesting
+
+[13:22] <FROGGS> so it is an mvmobject?
+
+[13:22] <jnthn> 0 is actually a valid flag value.
+
+[13:22] <jnthn> And yeah, it would be if that's really right
+
+[13:22] <FROGGS> yeah
+
+[13:22] <jnthn> so you can try casting to (MVMObject *)
+
+[13:22] <jnthn> And looking at ->st
+
+[13:22] <FROGGS> ohh
+
+[13:23] <jnthn> If that is valid, look under REPR and you can see what kind of representation the object has.
+
+[13:23] <FROGGS> p *(*(MVMObject *)item)->st
+
+[13:23] <FROGGS> $10 = {header = {owner = 0, flags = 42, size = 168, forwarder = 0x1a8ad80, sc = 0x1eddf10}, REPR = 0x7ffff7dd1060 <this_repr>, REPR_data = 0x4f121e0, size = 56, HOW = 0x20b4330,
+
+[13:23] <FROGGS> WHAT = 0x1aa03a0, method_cache = 0x0, vtable = 0x0, type_check_cache = 0x0, vtable_length = 0, type_check_cache_length = 0, mode_flags = 0, type_cache_id = 0,
+
+[13:23] <FROGGS> invoke = 0x7ffff7a19bd0 <MVM_6model_invoke_default>, container_spec = 0x0, container_data = 0x0, invocation_spec = 0x0, boolification_spec = 0x1fc1f00, WHO = 0x7ffff6a323b0,
+
+[13:23] <FROGGS> hll_owner = 0x1eb2540, hll_role = 0}
+
+[13:24] <FROGGS> name = 0x7ffff7a60dad "P6opaque"
+
+[13:24] <FROGGS> ID = 5
+
+[13:56] <FROGGS> jnthn: what is MVMuint16 mi; ?
+
+[13:57] *** colomon joined
+[14:09] <FROGGS> can I peek&poke it somehow else to get more information?
+
+[14:10] <timotimo> good day, mister! i can tell you're in need of anticipation and conjecture at extremely affordable prices!
+
+[14:11] <timotimo> FROGGS: can i interest you in the desire to find out what is in this struct?
+
+[14:11] <timotimo> so long as you never find out, it could be anything!
+
+[14:11] <timotimo> we guarantee that whatever you expect to be in the struct is probably more interesting than what is actually inside.
+
+[14:17] <FROGGS> huh?
+
+[14:24] <FROGGS> ohh dear, when I insert say statements in m-BOOTSTRAP.nqp, the error goes away >.<
+
+[14:25] <hoelzro> I had a bug of that variety last week!
+
+[14:26] <hoelzro> turns out I was reading from a socket with O_NONBLOCK on and no data was coming through
+
+[14:26] <FROGGS> well, I hope that is not the case here :o)
+
+[14:27] <hoelzro> indeed
+
+[14:42] <jnthn> FROGGS: mi = multiple inheritance
+
+[14:42] <FROGGS> ahh, it is true btw
+
+[14:42] <hoelzro> what is?
+
+[14:43] <FROGGS> mi of that object which explodes in the gc
+
+[14:44] <jnthn> oh...
+
+[14:44] <jnthn> wtf, where do we use MI in NQP...
+
+[14:44] <jnthn> Or bootstrap...
+
+[14:44] <FROGGS> I think it happens in the huge begin block in m-BOOTSRAP.nqp, line 569 to 2229
+
+[14:45] <FROGGS> because I can say() something to the last line of that block, but the say() right outside of it explodes
+
+[14:45] <FROGGS> (weirdly)
+
+[14:45] <jnthn> FROGGS: Well, you've done enough changes by then to throw off all kinds...
+
+[14:45] <jnthn> FROGGS: Anyway, look down the stack
+
+[14:46] <jnthn> You should see a call to process_worklist?
+
+[14:46] <FROGGS> I see my shoes
+
+[14:46] <FROGGS> hold on
+
+[14:47] <FROGGS> yes
+
+[14:47] <FROGGS> #3
+
+[14:49] <FROGGS> and I see MVM_args_get_pos_obj, for MoarVM's HEAD^ there showed up MVM_args_slurpy_positional
+
+[14:49] <FROGGS> so I guess it has something to do with positional args
+
+[14:50] <jnthn> Well, what is immediately above process_worklist?
+
+[14:50] <FROGGS> #2 MVM_panic
+
+[14:51] <FROGGS> or do you mean #4?
+
+[14:51] <jnthn> no, that's below :P
+
+[14:51] <FROGGS> MVM_gc_collect
+
+[14:51] <FROGGS> :o)
+
+[14:51] <jnthn> Right, taht one :)
+
+[14:51] <jnthn> If you have a line number for where you are in there, take a look
+
+[14:51] <jnthn> It calls process_worklist many times...
+
+[14:51] <jnthn> And there's a comment above each saying what it's doing
+
+[14:52] <jnthn> What comment is above where it fails for you?
+
+[14:52] <FROGGS> lie 73
+
+[14:52] <jnthn> cake 73
+
+[14:52] <FROGGS> /* Add permanent roots and process them; only one thread will do
+
+[14:52] <FROGGS> * this, since they are instance-wide. */
+
+[14:52] <jnthn> o.O
+
+[14:52] *** jnap joined
+[14:53] <jnthn> OK, another question
+
+[14:53] <jnthn> look at tc->gc_seq_number or similar
+
+[14:53] <jnthn> Can you see a conditional breakpoint at the start of MVM_gc_collect that will be hit on that number - 1?
+
+[14:53] <jnthn> And get the stack trace for the *previous* GC run?
+
+[14:57] <FROGGS> do you mean tc->gc_work_count by any chance?
+
+[14:58] <jnthn> no
+
+[14:58] <FROGGS> ahh
+
+[14:58] <jnthn> should be some kind of sequence number...
+
+[14:58] <FROGGS> it hangs of ->instance
+
+[14:58] <jnthn> oh
+
+[14:58] <jnthn> right, it's not thread-specific
+
+[14:58] <FROGGS> 170
+
+[14:58] <FROGGS> okay...
+
+[14:59] <jnthn> :)
+
+[15:01] <FROGGS> break /home/froggs/dev/MoarVM/src/gc/collect.c:72 if tc->instance->gc_seq_number == 169
+
+[15:01] <FROGGS> hit that now
+
+[15:01] <FROGGS> and I see the bt
+
+[15:02] <jnthn> what's le bt?
+
+[15:02] <FROGGS> https://gist.github.com/FROGGS/d21a4bdc2753deff984e
+
+[15:07] * jnthn wonders what's at interp.c:2289
+
+[15:07] * jnthn looks on github...
+
+[15:07] <jnthn> (on classrom computer..> :))
+
+[15:08] <FROGGS> MVMObject *box  = REPR(type)->allocate(tc, STABLE(type));
+
+[15:08] <FROGGS> in box_s
+
+[15:08] <FROGGS> it should MVMROOT type, right?
+
+[15:08] <FROGGS> same for box_i and _n
+
+[15:09] <timotimo> you fixed it? :)
+
+[15:09] <FROGGS> let's see if that helps :o)
+
+[15:10] <jnthn> no, 'cus it never mentions type again after the call that can allocate
+
+[15:10] <FROGGS> meh
+
+[15:11] <jnthn> If box_s was to blame, I kinda suspect we'd be seeing a lot more issues too...
+
+[15:12] <jnthn> The fact it comes from a perm root is very odd though
+
+[15:12] <jnthn> Antoher idea
+
+[15:12] <jnthn> Breakpoint it like you did
+
+[15:12] <jnthn> Once it fires, set a breakpoint in the roots.c function to add a perm root
+
+[15:12] <jnthn> And see if any get added
+
+[15:12] <jnthn> (and why)
+
+[15:13] <FROGGS> it compiled the setting btw
+
+[15:14] *** jnap1 joined
+[15:14] <FROGGS> but reverted, and will now add the breakpoint
+
+[15:15] <jnthn> The MVMROOT helped? o.O
+
+[15:16] <FROGGS> yes
+
+[15:16] <jnthn> wtf
+
+[15:16] <FROGGS> maybe just hides the problem
+
+[15:16] <jnthn> I'd guess so
+
+[15:18] <FROGGS> it does not hit the breakpoint MVM_gc_root_add_permanent
+
+[15:19] <jnthn> ok
+
+[15:19] <jnthn> Hmmmm
+
+[15:19] <FROGGS> I'll try MVM_gc_root_add_permanents_to_worklist
+
+[15:20] <jnthn> well, that is hit int he gc
+
+[15:20] <FROGGS> k
+
+[15:28] *** jnap joined
+[15:40] <FROGGS> jnthn: I think `type` needs to be temp_push'd in MVM_args_slurpy_named like in MVM_args_slurpy_positional
+
+[15:49] <FROGGS> jnthn: btw, I don't think that my changes to interp.c helped, I just guess the m-BOOTSTRAP.moarvm was still in place from a successful build
+
+[15:50] <FROGGS> but good to know that can build in 176s after that :o)
+
+[16:14] <jnthn> FROGGS: ah, ok
+
+[16:14] <jnthn> decommute now; bbiab
+
+[16:16] *** jnap joined
+[16:17] *** benabik joined
+[16:21] <FROGGS> jnthn: I really think that this patch is valid: https://gist.github.com/FROGGS/32d36a468e592eb0885e
+
+[16:22] <FROGGS> does not help though
+
+[16:26] *** jnap joined
+[16:27] *** jnap joined
+[16:37] *** BenGoldberg joined
+[16:39] *** FROGGS[mobile] joined
+[16:47] *** jnap joined
+[16:50] *** colomon joined
+[17:00] <jnthn> FROGGS[mobile]: You'd really hope so...but... :/
+
+[17:01] <jnthn> Look at what box_slurpy_named does :/
+
+[17:01] <jnthn> It just uses type for its own means :/
+
+[17:19] *** benabik joined
+[17:20] <FROGGS[mobile]> ahh, that explains it
+
+[17:36] <FROGGS[mobile]> jnthn: if you feel like reviewing, there is a branch about labels in nqp *cough* :o)
+
+[17:37] <jnthn> hmm
+
+[17:37] <jnthn> Maybe later...
+
+[17:37] * jnthn found teaching rather tiring
+
+[17:37] <jnthn> Dinner will either make me awaker or give me a food coma... :)
+
+[17:38] <FROGGS[mobile]> hehe
+
+[17:38] * jnthn ponders what to nom
+
+[17:39] <FROGGS[mobile]> I'll have ham&eggs with onions and bread
+
+[17:54] *** lizmat joined
+[17:55] *** ssutch joined
+[18:14] *** tgt joined
+[18:15] *** FROGGS joined
+[18:18] *** colomon joined
+[18:36] *** benabik joined
+[18:58] *** jnap joined
+[19:11] *** BenGoldberg joined
+[19:16] *** jnap joined
+[19:23] <FROGGS> jnthn: is that correct that I can dump 336 bytes from 0x20b4330? https://gist.github.com/FROGGS/fcc7d25640eb12ec46fa
+
+[19:24] <FROGGS> jnthn: if that is the case: the dump contains "$!positional_delegate"
+
+[19:24] <FROGGS> which would be rakudo/src/gen/m-BOOTSTRAP.nqp:606:    Attribute.HOW.add_attribute(Attribute, BOOTSTRAPATTR.new(:name<$!positional_delegate>, :type(int), :package(Attribute)));
+
+[19:25] <FROGGS> ohh, or it is the line about: nqp::bindattr_i($attr, Attribute, '$!positional_delegate', $positional_delegate);
+
+[19:48] <FROGGS> I guess I am reading junk
+
+[19:50] <diakopter> o_O
+
+[20:02] * jnthn back from Indisk and a nice walk in -1 :)
+
+[20:27] *** jnap joined
+[20:36] *** eternaleye joined
+[20:40] *** colomon joined
+[21:04] *** FROGGS joined
+[22:19] *** colomon joined
+[22:36] *** jnap joined
+[22:37] <timotimo> FROGGS: you didn't find out what was causing the trouble yet?
+
+[22:48] <FROGGS> timotimo: no
+
+[22:49] * timotimo builds stuff
+
+[22:55] <jnthn> We get a bit further into the optimize, then hit something null...
+
+[22:55] <jnthn> (after thing I pushed a moment ago)
+
+[22:55] <jnthn> need to sleep now though
+
+[22:55] <jnthn> &
+
+[22:55] <timotimo> gnite jnthn :)
+
+[23:01] <timotimo> Object does not exist in serialization context  -  that's not the error i should be getting?
+
+[23:02] <timotimo> trying to build src/gen/m-BOOTSTRAP.nqp
+
+[23:08] <timotimo> Internal error: invalid thread ID in GC work pass  -  huh?
+
+[23:16] <timotimo> currently trying to rebuild with an unoptimized moar
+
+[23:16] <timotimo> i wonder how far we get if we do --optimize=off
+
+[23:17] <timotimo> if i even get to stage parse this time
+
+[23:17] <timotimo> yes, i get to stage parse this time
+
+[23:19] <timotimo> shouldn't i be seeing at least two moar threads? isn't our gc multi-threaded?
+
+[23:19] <timotimo> or is that only the case in the gcorch branch?
+
+[23:25] <timotimo> Segmentation fault (core dumped)
+
+[23:25] <timotimo> there's an atpos_o whose object register is apparently a null pointer, so that's probably what jnthn was seeing
+
+[23:31] * timotimo not sure how to debug
+
+[23:36] *** colomon joined
+[23:38] <timotimo> Error while compiling op replace: No registered operation handler for 'replace'  -  maybe i could do this? :3
+
+[23:44] *** lizmat joined
+[23:48] *** woolfy joined
+[23:51] *** d4l3k_ joined

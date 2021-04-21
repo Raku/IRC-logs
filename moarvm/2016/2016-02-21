@@ -1,0 +1,292 @@
+[01:53] <timotimo> it looks like we're discarding facts when inlining stuff
+
+[01:53] <timotimo> that way my innermost loop creates an Int object because binding to the CArray returns the bound value
+
+[01:54] <timotimo> and that seems to cause one GC run per frame, on average
+
+[01:54] <timotimo> and it seems like every third frame there isn't a GC run, which makes that frame a whole bunch faster
+
+[01:55] <timotimo> hm. the flags from the facts are gone, but the usages aren't
+
+[01:57] <timotimo> but right now i'm feeling too tired to dig into this more
+
+[02:05] <timotimo> uh... huh?
+
+[02:05] <timotimo> REPR(repr_data->elem_type)->box_funcs.set_int(...) for binding an int value into a CArray ...
+
+[02:05] <timotimo> this must be about different sizes, right?
+
+[02:06] <timotimo> could this indirection be really expensive, i wonder?
+
+[02:10] <timotimo> i'll probably find out more about that if i use a Buf[int32] instead of the CArray[int32] and seeing how that changes things
+
+[02:12] <timotimo> Type check failed in assignment to ; expected int32 but got Int (4294967295)
+
+[02:12] <timotimo> :\
+
+[02:13] <timotimo> oh, duh
+
+[02:14] <timotimo> OK, so with a my int32 @pixdata instead of the CArray it doesn't get much faster
+
+[02:14] <timotimo> hardly at all, actually
+
+[02:18] <timotimo> i'm out of smart ideas. apart from the "properly eliminate the returned value and remove a boxing in the process" i don't know how to make this noticably faster ;_;
+
+[02:18] <timotimo> but i'm rather glad that both postcircumfix:<[ ]> and ASSIGN-POS are properly inlined here
+
+[02:48] *** ilbot3 joined
+[02:52] <timotimo> m: say 320 * 240
+
+[02:52] <camelia> rakudo-moar 8fdaad: OUTPUT«76800␤»
+
+[02:53] <timotimo> 76k 32bit values per frame, hmm.
+
+[02:53] <timotimo> m: say (320 * 240 * 4) / 1024
+
+[02:53] <camelia> rakudo-moar 8fdaad: OUTPUT«300␤»
+
+[02:53] <timotimo> 300 kB of data, eh?
+
+[02:54] <timotimo> i don't have a good frame of reference to know if ~15 frames per second setting 300 kilobytes of memory to one of two values is ridiculously slow or just quite slow
+
+[02:55] <timotimo> m: say 15 * (320 * 240 * 4) / 1024
+
+[02:55] <camelia> rakudo-moar 8fdaad: OUTPUT«4500␤»
+
+[02:55] <timotimo> 4 megabytes per second? is that right-ish?
+
+[04:34] *** cognominal joined
+[04:58] *** vendethiel joined
+[09:12] *** psch joined
+[09:51] *** vendethiel joined
+[10:27] *** q0tw4 joined
+[11:32] *** domidumont joined
+[11:39] *** vendethiel joined
+[12:15] *** vendethiel joined
+[12:19] *** FROGGS joined
+[12:53] *** FROGGS joined
+[13:40] *** vendethiel joined
+[13:54] <FROGGS> timotimo: remember me saying that I've got a mutator method on a CStruct and that it doesnt mutate it?
+
+[13:54] <FROGGS> well, the problem seems to be about multi methods where one method is native, and the other isnt
+
+[13:58] <FROGGS> and the multi methods are a workaround for this:
+
+[13:58] <FROGGS> m: sub foo(num32()) { * }; foo 42
+
+[13:58] <camelia> rakudo-moar 7010f3: OUTPUT«Method 'num32' not found for invocant of class 'Int'␤  in sub foo at /tmp/G106f0f0Bg line 1␤  in block <unit> at /tmp/G106f0f0Bg line 1␤␤»
+
+[13:58] <FROGGS> m: use NativeCall; sub foo(num32()) is native { * }; foo 42
+
+[13:58] <camelia> rakudo-moar 7010f3: OUTPUT«Potential difficulties:␤    In 'foo' routine declaration - Not an accepted NativeCall type for parameter [1]  : Any␤     --> For Numerical type, use the appropriate int32/int64/num64...␤    at /tmp/j0VnKY0qTb:1␤    ------> veCall; sub foo(num32()…»
+
+[14:18] <FROGGS> jnthn: do you agree that both lines are valid?
+
+[14:18] <FROGGS> (the code, not the output)
+
+[14:40] *** vendethiel joined
+[15:19] *** vendethiel joined
+[15:28] *** zakharyas joined
+[16:07] *** dalek joined
+[16:54] <FROGGS> and if I have this:
+
+[16:54] <FROGGS> multi method mutate1() { self.mutate1(self) }
+
+[16:54] <FROGGS> multi method mutate1(StructIntStruct) is symbol('MutateStructIntStruct') is native('./06-struct') { * }
+
+[16:54] <FROGGS> I get:
+
+[16:54] <FROGGS> Cannot invoke object with invocation handler in this context
+
+[17:15] <jnthn> I'm not especially inclined to support coercion types in NativeCall
+
+[17:17] <jnthn> I suspect it'll complicate the efforts to more efficiently compile them
+
+[17:18] <arnsholt> I'm not sure a method with is native would work even if it weren't multi?
+
+[17:28] *** domidumont joined
+[17:44] <FROGGS> arnsholt: ohh, it does
+
+[17:45] <FROGGS> arnsholt: the invocant is just a fancy first argument
+
+[17:45] <arnsholt> Oh, neat!
+
+[17:45] <FROGGS> jnthn: so any clue why my last example explodes like that?
+
+[17:46] <FROGGS> hmm, maybe I can call a sub as a workaround
+
+[17:48] <timotimo> i often put "my sub" inside classes when building NativeCall stuff
+
+[17:48] <FROGGS> I can't :o(
+
+[17:49] <FROGGS> because methods are getting mangled differently than subs
+
+[17:49] <timotimo> damn. we might need a trait for that
+
+[17:50] <FROGGS> no, I just create a private method with another name (to not have a multi)
+
+[17:50] <FROGGS> or can it have the same name? I guess so
+
+[17:51] <FROGGS> that works!! \o/
+
+[17:51] <FROGGS> method !SetAsBox(num32 $hx, num32 $hy) is symbol<b2PolygonShape::SetAsBox> is native<Box2D> { * }
+
+[17:51] <FROGGS> method SetAsBox($hx, $hy) { self!SetAsBox: $hx.Num, $hy.Num }
+
+[17:51] <FROGGS> I dont even need the 'is symbol' trait here
+
+[17:52] <FROGGS> nice
+
+[17:52] <timotimo> oh, that's surprising
+
+[18:42] *** ilbot3 joined
+[20:24] <FROGGS> jnthn: then we need to error out nicely
+
+[20:38] <jnthn> FROGGS: I'd rather try and fix that particular one :)
+
+[20:39] <FROGGS> then I misunderstood :o)
+
+[20:40] <jnthn> Well, I wasn't clear either :)
+
+[20:41] <jnthn> It boils down to a limitation in MoarVM, which I think we can lift with some thought. I forget the exact details.
+
+[20:41] <jnthn> But will be looking carefully at invocation soon anyways.
+
+[21:14] <FROGGS> I believe this is a thinko: https://github.com/MoarVM/MoarVM/blob/master/src/6model/reprs/CStruct.c#L351
+
+[21:15] <FROGGS> the last argument to initialize is the body of the attr in question
+
+[21:15] <FROGGS> and this body cannot be inlined in the structs memory
+
+[21:18] <FROGGS> otoh, I need such a mechanism to do inlined stuff correctly
+
+[21:18] <FROGGS> currently an inlined something still allocates, which is wrong
+
+[21:19] <jnthn> Note that not all attributes are in initialized_slots
+
+[21:19] <jnthn> iirc, those that are references (non-inlined) won't be in there at all
+
+[21:19] <FROGGS> only bigints might make it in there
+
+[21:20] <jnthn> Not in the CStruct case
+
+[21:20] <jnthn> But in P6opaque, yeah
+
+[21:20] <jnthn> But we also use it to make sure num fields get initialized to NaN
+
+[21:20] <FROGGS> P6int and P6num dont have initialize, so these dont make it in there too
+
+[21:20] <jnthn> Oh?
+
+[21:20] <jnthn> I thought P6num did
+
+[21:20] <FROGGS> /home/froggs/dev/MoarVM/src/6model/reprs/P6int.c:207:    NULL, /* initialize */
+
+[21:20] <FROGGS> /home/froggs/dev/MoarVM/src/6model/reprs/P6num.c:157:    NULL, /* initialize */
+
+[21:21] <jnthn> Hm, interesting, it doesn't
+
+[21:21] <jnthn> m: class A { has num $.b }; say A.b
+
+[21:21] <camelia> rakudo-moar 7010f3: OUTPUT«Invocant requires an instance of type A, but a type object was passed.  Did you forget a .new?␤  in block <unit> at /tmp/VapoOAEI2M line 1␤␤»
+
+[21:21] <jnthn> m: class A { has num $.b }; say A.new.b
+
+[21:21] <camelia> rakudo-moar 7010f3: OUTPUT«0␤»
+
+[21:21] <jnthn> oops
+
+[21:21] <jnthn> m: my num $a; say $a;
+
+[21:21] <camelia> rakudo-moar 7010f3: OUTPUT«NaN␤»
+
+[21:21] <FROGGS> and even if they had, passing the memory of the CStruct (plus offset) as the OBJ_BODY() of a num is wrong too
+
+[21:21] <jnthn> Should be that...
+
+[21:22] <jnthn> Yeah, I suspect that code is lifted straight from P6opaque
+
+[21:22] <jnthn> Where it would be the right thing to do
+
+[21:22] <FROGGS> yeah
+
+[21:23] <FROGGS> I wonder what we should do here... passing the real storage to initialize (or something similar called) is what I could need
+
+[21:24] <jnthn> Something like that, yeah.
+
+[21:24] <jnthn> Though interesting...I guess maybe the "shadow" storage also needs to be considered...
+
+[21:24] <jnthn> (for wrappers)
+
+[21:28] <FROGGS> can I just add initialize_native?
+
+[21:28] <FROGGS> or is that the Wring Approach™?
+
+[21:28] <FROGGS> Wrong*
+
+[21:29] <jnthn> Sounds odd
+
+[21:29] <FROGGS> *g*
+
+[21:29] <FROGGS> just the name or the approach?
+
+[21:30] <jnthn> It may be that CStruct simply wants to know about/recognize embeddings of CArray/CStruct and specially handle them
+
+[21:30] <FROGGS> yes exactly
+
+[21:30] <jnthn> I don't think there's a combinatoric explosion here
+
+[21:31] <jnthn> So I don't know we need to define an extra bit of REPR API
+
+[21:31] <jnthn> Not unless we see we really need it
+
+[21:31] <FROGGS> CStruct, CPPStruct, CUnion and CArray
+
+[21:31] <FROGGS> ohh
+
+[21:32] <jnthn> Hm, forgot we had CPPStruct too :)
+
+[21:32] <FROGGS> I could let the ->cstruct of the attr point to the right place and then call initialize (for inlined CStructs)
+
+[21:32] <FROGGS> and then dont malloc
+
+[21:35] <jnthn> I *think* that seems workable, but what about child_objs handling?
+
+[21:36] <FROGGS> what do you mean?
+
+[21:38] <jnthn> Well, I guess I don't know how that is handled at all for inlined structs... :)
+
+[21:38] <jnthn> But guess it must be
+
+[21:39] <jnthn> ah, I think I see how it works, looking at the code :)
+
+[21:39] <jnthn> So, no worries
+
+[21:40] <FROGGS> phew :o)
+
+[21:40] <FROGGS> so I continue plaing around
+
+[21:40] <FROGGS> playing*
+
+[21:40] <jnthn> :)
+
+[21:40] <jnthn> FROGGS++
+
+[21:40] * jnthn looks forward to playing around with things a good bit more again soon :)
+
+[22:36] *** q0tw4 left
+[23:35] <japhb> jnthn++  # Lots more leak fixes
+
+[23:45] <timotimo> i'm briefly looking at DWARF and the tools that exist to handle it (dwarfdump, dwgrep, libzwerg)
+
+[23:45] <timotimo> that'd probably be easier than parsing the C source to figure out how structs and such work
+
+[23:45] <timotimo> especially because of things like aligning that you'd have to implement some algorithms for, afte rall
+
+[23:46] <timotimo> https://developerblog.redhat.com/2015/01/22/querying-dwarf-for-fun-and-profit/
+
+[23:50] <timotimo> in any case, dwarfdump spits out struct names and sizes and members with their "DW_AT_data_member_location"
+
+[23:51] <timotimo> so for a heap explorer, this stuff can be quite helpful i imagine
+
+[23:51] <timotimo> anyway, towards bed. hoping to get better 'til tomorrow

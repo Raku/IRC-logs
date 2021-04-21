@@ -1,0 +1,371 @@
+[00:05] <MasterDuke> but: [dan@alexandria p6]$ p6 -e 'my $a = class :: { has uint64 $.foo is rw }.new; $a.foo = -1; say $a.foo' -1
+
+[00:07] <MasterDuke> timotimo: that first one i did in the new if Mu.BUILDALL: nqp::if(%attrinit.AT-KEY(nqp::p6box_s(nqp::atpos($task,2))) < 0, nqp::die("native unsigned integers can't be negative"), nqp::bindattr_u(self, ...
+
+[00:25] <MasterDuke> wow, that wasn't explained well at all. i added a new plan type in create_BUILDPLAN in src/Perl6/Metamodel/BUILDPLAN.nqp and handle it in BUILDALL in src/core/Mu.pm by copying the case for native int attributes and just call bindattr_u instead of bindattr_i
+
+[00:26] <MasterDuke> but what i just added was the above nqp::if right before the bindattr_u
+
+[00:32] *** matiaslina joined
+[00:37] *** matiasli1a joined
+[00:52] *** matiaslina joined
+[01:53] *** geekosaur joined
+[05:22] *** domidumont joined
+[05:33] *** spebern joined
+[05:35] *** domidumont joined
+[05:41] *** TimToady joined
+[06:15] *** domidumont joined
+[06:29] *** spebern joined
+[06:43] *** domidumont joined
+[06:46] *** brrt joined
+[07:45] *** zakharyas joined
+[08:52] *** dogbert17 joined
+[08:57] *** domidumont joined
+[09:42] *** domidumont1 joined
+[09:52] <brrt> good * #moarvm
+
+[10:26] *** MasterDuke joined
+[10:43] <nwc10> good *, brrt
+
+[10:43] <jnthn> o/ all
+
+[10:46] <brrt> \o jnthn, nwc10
+
+[10:46] <brrt> so, have we discussed rewriting MoarVM in a memory-safe language
+
+[10:47] <brrt> because the current state of computer security is just unacceptable
+
+[10:47] <jnthn> Well, to the degree that we're gradually planning to write more of it in NQP with time... :)
+
+[10:47] <brrt> … okay, i'm not serious
+
+[10:47] <brrt> :-P
+
+[10:48] <brrt> it's 2 days too late for april's fools,
+
+[10:48] <jnthn> :P
+
+[10:48] <jnthn> "C is dying!" :P
+
+[10:48] <brrt> i did seriously start reading the rust documentation. it does not, so far, agree with me
+
+[10:48] <brrt> although
+
+[10:49] <brrt> it did make me think about my own obsession with pre-computing the maximum bounds
+
+[11:25] <brrt> and part of the nonagreeingness, has to do with the style / tone
+
+[11:26] <brrt> 'rust will fail if you put a semicolon after the final expression, cuz statements don't yield values, never used a expression-based-language before, huh sucker'
+
+[11:27] <brrt> anyway, on to business
+
+[11:31] <Voldenet> jnthn: C is dying for 40 years now, but it's very slow and painful death
+
+[11:32] <brrt> in the sense that everybody starts dying at birth, maybe
+
+[11:32] <Voldenet> that's incredibly deep
+
+[11:32] <brrt> in any of the useful population dynamics senses of 'dying' (rather: going extinct), not at all
+
+[11:33] <Voldenet> in fact, C89 did die, but C's offsprings (C99) are for some reason named C
+
+[11:33] <jnthn> lol, tell that to MSVC :P
+
+[11:34] <jnthn> (Which stuck with C89, 'cus of course nobody uses C any more, so all efforts should go on C++ support...)
+
+[11:34] <Voldenet> :-)
+
+[11:36] <brrt> anyway. I'd been working out a way to 'auto-unconditionalize' a varialbe computation
+
+[11:36] <brrt> in the expr jit
+
+[11:36] <brrt> i've been thinking a bit more about it
+
+[11:37] <brrt> and i realized that there's been a number of things i've been missing
+
+[11:38] <brrt> the problem is basically this: (if (test …) $foo (derive $foo))
+
+[11:38] <brrt> if it so happens that the first branch of the if is the first to compute $foo, the tiler will not insert the code to recompute it in the second branch
+
+[11:38] <brrt> so in that case we should have the computation of $foo be moved prior to the if
+
+[11:39] <brrt> (because it will be used either way)
+
+[11:39] <brrt> this case is pretty simple, but,
+
+[11:39] <brrt> we can have very complex chains of short-circuiting ALL and ANY
+
+[11:40] <brrt> so the concept that i've been missing is the 'unconditional scope of definition'
+
+[11:41] <brrt> i.e. the full set of code paths that follow a definition
+
+[11:42] <brrt> the second concept is reorderability; as in, is it even safe to reorder this operation? (It may be protected by an ALL)
+
+[11:54] <jnthn> Was gonna say, lifting such things ain't always safe :)
+
+[11:56] <brrt> indeed
+
+[11:57] <brrt> so that makes me wonder if it is worthwhile
+
+[11:58] <jnthn> Well, as a later optimization perhaps :)
+
+[12:01] <brrt> well, the point is to make stuff correct 'automatically' as it where
+
+[12:01] <brrt> it's a correctness issue
+
+[12:01] <brrt> currently we can resolve that by 'let-rooting'
+
+[12:02] <brrt> i.e. if you have a template: (let (($foo (copy $bar))) (if (test ..) $foo (derive $foo)); then the template inserter will ensure that the (copy $bar) will be ordered prior to the if
+
+[12:02] <brrt> but that doesn't work in a nested way
+
+[12:04] <jnthn> What does derive do?
+
+[12:07] <brrt> derive is just some made-up thing, the point is that it often happens that if we have a check of a field, then different uses of the same value in the two branches, is a quite common pattern
+
+[12:09] <jnthn> aha, ok
+
+[12:16] <brrt> however, that uses a global ordering; and that's still pretty rough
+
+[12:32] *** zakharyas joined
+[13:03] <timotimo> jnthn: i'd like to bounce an idea off of you that i had last night before falling asleep: what if we log the flattening results of callsites we couldn't intern, and then generate a quick check if the flattening would be the same as we logged and call the function with a static callsite, otherwise call it with the flattening one?
+
+[13:03] <timotimo> then we could spesh calls that use flattening, but that tend to have the same nameds and number-of-positionals each time
+
+[13:05] <jnthn> Maybe...perhaps another option would be to try and intern the results of common flattenings...
+
+[13:05] <jnthn> So we map them to interned callsites in some case
+
+[13:05] <jnthn> *cases
+
+[13:05] <jnthn> Then I think the rest would just fall out, maybe
+
+[13:06] <jnthn> Would need to be hugely careful about concurrency control, though
+
+[13:08] <timotimo> i think we do have a lock on the intern-callsite-operation
+
+[13:08] <timotimo> i'm not all too familiar with the argument passing code - neither forwards nor backwards; how do we map the callsite to something common in a way that spesh would understand?
+
+[13:08] <timotimo> or would it just use that to figure out if there's already a candidate and just dynamically call that?
+
+[13:09] <timotimo> instead of making it possible to inline it via spesh?
+
+[13:09] <timotimo> i think i understand how you meant that
+
+[13:10] <jnthn> iirc, we use callsite address as a specialization key
+
+[13:10] <jnthn> I'm not sure we'll get the point of being able to inline it especially easily
+
+[13:11] <timotimo> not without some logging step, i believe
+
+[13:11] <jnthn> But we could at least manage to call into a specialized form
+
+[13:11] <timotimo> right
+
+[13:12] <timotimo> how would we count "common" flattenings without having a hash that has every single flattening result in it? :)
+
+[13:12] <timotimo> i.e. if we for "aaa".."zzz" { mysub(|%($_ => 1)) }, how do we not asplode memory usage there?
+
+[13:14] <timotimo> i suppose we can easily have a limit of 32 (random-number) callsites we're considering and when we put one more in, we just throw a random one out
+
+[13:14] <timotimo> er
+
+[13:14] <timotimo> a random one that has the lowest score
+
+[13:19] <timotimo> actually, if we only throw out a random lowest-scored one, we can still be gamed
+
+[13:19] <timotimo> but how often does an attacker have control over keys that get flattened into function calls ...
+
+[13:20] <timotimo> maybe a web framework that puts headers into user functions via flattening rather than just as a hash?!
+
+[13:21] <nwc10> I think that one needs not to forget "Build something that is fool proof and they will build a better fool."
+
+[13:22] <nwc10> in that, if it's possible for some code to hit paths that go pathalogical
+
+[13:22] <nwc10> than someone is going to write code that ends up doing that given someone else's crap (or malicious) input
+
+[13:29] <timotimo> well, even if we get attacked, it doesn't have a big impact
+
+[13:29] <timotimo> just means fewer routines get speshed and jitted
+
+[13:29] <timotimo> if a function that gets called with flattening arguments calls other functions without flattening in turn, then those can still be speshed and jitted, of course
+
+[13:34] *** brrt joined
+[13:44] <Zoffix> Voldenet: there is a case where a multi will choke, 'cause we have IntStr type
+
+[13:44] <Zoffix> m: multi foo (Int) { say "Int" }; multi foo (Str) { say "Str" }; foo <42>
+
+[13:44] <camelia> rakudo-moar 224e40: OUTPUT: «Ambiguous call to 'foo'; these signatures all match:␤:(Int $)␤:(Str $)␤  in block <unit> at <tmp> line 1␤␤»
+
+[13:45] <Zoffix> m: multi foo (Int) is default { say "Int" }; multi foo (Str) { say "Str" }; foo <42>   # easy to fix tho
+
+[13:45] <camelia> rakudo-moar 224e40: OUTPUT: «Int␤»
+
+[13:45] <jnthn> Zoffix: Wrong chan?
+
+[13:45] <Zoffix> jnthn: I'm not in that chan, just spotted while backlogging a bit :)
+
+[13:45] <jnthn> Oh :)
+
+[13:46] <timotimo> pff, perl6ers! coming to #moarvm all the time, demanding we fix some serious bugs or something!
+
+[13:46] <Voldenet> s/demanding/asking kindly/ ;)
+
+[13:46] <jnthn> You'd think we built the VM for Perl 6 or something :P
+
+[13:48] <timotimo> so is that what "build it and they will come" means?
+
+[14:02] *** geekosaur joined
+[14:04] *** geekosaur joined
+[14:17] *** brrt joined
+[15:06] *** brrt joined
+[15:23] *** zakharyas joined
+[15:33] *** AlexDaniel joined
+[16:50] *** domidumont joined
+[17:34] *** zakharyas joined
+[18:41] *** dalek joined
+[19:07] <samcv> nice just got quad core cpu in the mail :)
+
+[19:07] <samcv> Moar cores yay
+
+[19:07] <timotimo> nice nice
+
+[19:07] <timotimo> compiling moar benefits immediately from more cores
+
+[19:07] <timotimo> the rest of moar ... not so much, sadly
+
+[19:08] <samcv> yeah
+
+[19:08] <samcv> need to put it in. but just got it in the mail
+
+[19:08] <timotimo> right
+
+[19:08] <timotimo> i hope it comes with some heat-conducting glue
+
+[19:08] <samcv> also can run tests faster
+
+[19:08] <samcv> glue?
+
+[19:09] <samcv> literally glue or do you mean the heat conducting goop
+
+[19:09] <timotimo> the goop
+
+[19:10] <timotimo> the german name is "wärmeleitpaste", literally "warmth conducting paste"
+
+[19:10] <timotimo> but for some reason i was thinking "heißkleber", which is "hot glue" like you'd put into a hot glue pistol
+
+[19:18] <samcv> wow this is fascinating https://www.dropbox.com/sh/p9vga1dc2t02pqw/AAASCE0hXiBsfEzjw1Ig__ZFa/n4793-chessboard.pdf?dl=0 Unicode proposal for chess pieces to allow chess pieces on black backrnound or on white background
+
+[19:18] <samcv> since apparently nobody uses the unicode ones, and uses all these weird fonts with different mappings
+
+[19:18] <samcv> seems somewhat compelling after redaing it. and kind of neat
+
+[19:32] *** brrt joined
+[19:32] <brrt> good *, #moarvm
+
+[19:33] <brrt> i
+
+[19:33] <brrt> i've been doing some more thinking about the issue i was mentioning earlier today
+
+[19:33] <brrt> i.e. the automatic correctness-ensuring ordering
+
+[19:34] <brrt> part of the problem, if you will, is that the current solution executes any let-statements prior to the expression
+
+[19:34] <brrt> so you can't do nested LET
+
+[19:35] <brrt> or you can, but it doesn't make sense; it's not guarded against any IF statements etc
+
+[19:35] <brrt> that's too strong
+
+[19:42] <brrt> so what would be better is if we'd automatically translate the LET to a DO (or DOV); that would let the programmer solve the ordering problem, but locally
+
+[19:42] <brrt> a potential optimizer can still do reorderings, but then it's no longer a correctness problem
+
+[19:47] *** agentzh joined
+[21:35] *** agentzh joined
+[21:37] *** agentzh_ joined
+[22:17] *** agentzh joined
+[22:19] <lizmat> and another Perl 6 Weekly hits the Net: https://p6weekly.wordpress.com/2017/04/03/2017-14-the-io-front-advances/
+
+[22:21] <timotimo> lizmat: huh, was FCO the one to do the signedness fix? am i confusing that with the work masterduke and me did?
+
+[22:22] <lizmat> argh, right
+
+[22:22] <lizmat> no, I'm confused
+
+[22:23] <timotimo> i just want masterduke's contributions to not go unmentioned :3
+
+[22:24] <lizmat> updated
+
+[22:24] <lizmat> timotimo++
+
+[22:38] *** mtj_ joined
+[22:42] <Geth> ¦ MoarVM: 83715b4d73 | (Timo Paulssen)++ | .appveyor.yml
+
+[22:42] <Geth> ¦ MoarVM: first attempt at an appveyor config.
+
+[22:42] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/83715b4d73
+
+[22:43] <timotimo> jnthn: looks like you'd have to flip the switch on github's side to get the builds to automatically start when we push commits
+
+[22:45] <timotimo> 'make' is not recognized as an internal or external command,
+
+[22:45] <timotimo> gaaaah windows
+
+[22:45] <timotimo> it's nmake that i'm supposed to use, right?
+
+[22:46] <Geth> ¦ MoarVM: 28c108bf84 | (Timo Paulssen)++ | .appveyor.yml
+
+[22:46] <Geth> ¦ MoarVM: windows has nmake rather than make.
+
+[22:46] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/28c108bf84
+
+[22:50] <Geth> ¦ MoarVM: 53c1220414 | (Timo Paulssen)++ | .appveyor.yml
+
+[22:50] <Geth> ¦ MoarVM: of course windows can't use multiple processors.
+
+[22:50] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/53c1220414
+
+[22:52] <samcv> yeah https://msdn.microsoft.com/en-us/library/afyyse50.aspx totally not in this list i think
+
+[22:53] <timotimo> maybe you have to launch two nmake processes at the same time and hope they'll somehow prevent each other from running the same part of the job at the same time
+
+[22:53] <timotimo> like, i bet windows devs have developed this elaborate technique for working around the fact that windows' make can't parallelize
+
+[22:53] <timotimo> "well, you measure exactly how long the first part of the build takes, and after that delay you launch nmake a second time!"
+
+[22:54] <timotimo> or even better
+
+[22:54] <samcv> LOL
+
+[22:54] <timotimo> "you write one makefile with one half of all .c files, and the other with the other half. and then a third to link the final binary."
+
+[22:54] <samcv> of course
+
+[22:54] <samcv> heh
+
+[22:54] <timotimo> "here we've even got this in-house tool that figures out how best to distribute .c files across the two makefiles to make it go as fast as possible!"
+
+[22:54] <samcv> brilliant
+
+[22:55] <timotimo> it's now cloning nqp
+
+[22:55] <timotimo> it's getting exciting
+
+[22:58] <Geth> ¦ MoarVM: cc03eac5ad | (Timo Paulssen)++ | .appveyor.yml
+
+[22:58] <Geth> ¦ MoarVM: this is surely the last problem before it all works!
+
+[22:58] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/cc03eac5ad
+
+[22:58] <timotimo> i'll AFK for like 10 minutes, i don't want to look at it while it's trying to do its thing
+
+[22:59] <samcv> surely!
+
+[23:01] <timotimo> i almost forgot to press "new build" before going!
+
+[23:51] <Geth> ¦ MoarVM: 7209145641 | (Timo Paulssen)++ | .appveyor.yml
+
+[23:51] <Geth> ¦ MoarVM: tell the harness to not hide output from us
+
+[23:51] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/7209145641

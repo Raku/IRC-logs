@@ -1,0 +1,288 @@
+[01:12] <samcv> icc does seem to be faster
+
+[01:23] <samcv> .tell brrt i'm getting lots of integer truncation and failing some integer tests in nqp using the ICC
+
+[01:23] <yoleaux> samcv: I'll pass your message to brrt.
+
+[01:24] <samcv> may or may not be related
+
+[01:25] <samcv> these are the errors https://gist.github.com/samcv/daf1b850727aadc4d091a964b10cf471
+
+[01:25] <samcv> s/errors/warnings
+
+[01:27] <samcv> not ok 1 - denormal 5e-324 is recognized and is not 0;  not ok 7 - denormal 5e-324 is recognized and is not 0 (Uni) in t/nqp/115-nums.t
+
+[01:27] <samcv> not ok 98 - super small result from div_In work in t/nqp/060-bigint.t
+
+[01:33] <Geth> ¦ MoarVM: 42d5d0220c | (Samantha McVey)++ | build/setup.pm
+
+[01:33] <Geth> ¦ MoarVM: Add Intel C Compiler as an option to Configure.pl
+
+[01:33] <Geth> ¦ MoarVM:
+
+[01:33] <Geth> ¦ MoarVM: This is a copy of gcc except with -wd858 which supresses a warning that
+
+[01:33] <Geth> ¦ MoarVM: const on a return type is meaningless (warning doesn't show up on other
+
+[01:33] <Geth> ¦ MoarVM: compilers).
+
+[01:33] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/42d5d0220c
+
+[01:39] *** bisectable6 joined
+[01:45] <japhb> samcv: But is icc's warning *correct*?
+
+[01:45] <japhb> Meaning, should we fix the codebase rather than silencing the warning?
+
+[01:48] <geekosaur> const on a return type means something different in gcc, iirc
+
+[01:50] <geekosaur> actually, no. seems it's both meaningful and useful, but only relatively recently. I was thinking of __attribute__ (const)
+
+[01:51] <samcv> japhb: i'm not sure
+
+[01:52] <geekosaur> https://stackoverflow.com/questions/8716330/purpose-of-returning-by-const-value# (links to a duplicate which doesn't include all of the discussion)
+
+[01:52] <samcv> though i'm more concerned with the warning in the gist https://gist.github.com/samcv/daf1b850727aadc4d091a964b10cf471
+
+[01:52] <samcv> and that it fails some tests :\ though that could be unrelated
+
+[01:53] <geekosaur> warning seems correct on 64-bit, unless you're doing the mixed-model thing a pointer is 64 bits, not 32
+
+[01:54] <geekosaur> oh, sorry, code actually expects that
+
+[01:54] <geekosaur> so warning is correct but truncation is wanted there
+
+[01:56] <samcv> i'm guessing maybe something Zoffix did make it not portable or something
+
+[01:56] <samcv> gonna run a full rakudo spectest now
+
+[01:56] <geekosaur> no, it's portable, and it's being done appropriately and explicitly
+
+[01:57] <samcv> no i mean other code
+
+[01:57] <geekosaur> well, technically you;d mask off the high bits I guess just to be completely clear, but that's a bit wasteful
+
+[01:57] <samcv> not the one i linked about the warning, but the changes zoffix made to fix denormals, i'm guessing it may not work for all compilers. i'm not sure
+
+[01:57] <samcv> yeah
+
+[01:57] <geekosaur> the denormals may be a different issue I was going to comment on next
+
+[01:57] <samcv> ok :)
+
+[01:57] <geekosaur> gcc etc. these days assume you want full internal precision from floating point
+
+[01:58] <geekosaur> icc may not
+
+[01:59] <geekosaur> there;s some gcc options that will disable full precision, which may help with diagnosis; I'm trying to dig them up
+
+[02:00] <samcv> looking at the manpage. there's      Set internal FPU precision to 24 bit significand, and 53 bit or 64 bit
+
+[02:00] <samcv> ^ talking about ICC
+
+[02:03] <geekosaur> huh. maybe icc also uses full precision by default
+
+[02:03] <geekosaur> and in fact it looks like gc may still not do so; I thought that had changed, but sse2 and later more or less force it anyway. -ffast-math would get you 870 bit precision in that case
+
+[02:04] <samcv> hmm so it passes spectest
+
+[02:04] <geekosaur> which you might try with gcc to see if it then has the same or similar test failures. (might also need to disable -msse2 or whatever)
+
+[02:04] <geekosaur> er, 80 bit precision
+
+[02:04] *** Merfont joined
+[02:06] <geekosaur> some discussion about floating point https://stackoverflow.com/questions/7295861/enabling-strict-floating-point-mode-in-gcc
+
+[02:06] <samcv> also it could be due to it using icc's math libraries
+
+[02:06] <samcv> which i think it uses
+
+[02:07] <samcv> i'm gonna try the -pc80 flag to icc and see if that changes anything
+
+[02:08] <samcv> nope. still the same
+
+[02:09] <samcv> 5e-324 is 0 though so maybe something is weird
+
+[02:10] <geekosaur> that's using higher precision than gcc does
+
+[02:11] <samcv> well it works fine on clang and gcc with MoarVM's setup
+
+[02:11] <geekosaur> but it looks like higher precision in the exponent, not the mantissa
+
+[02:11] <samcv> hm
+
+[02:13] <samcv> it could be in strtod maybe?
+
+[02:14] <geekosaur> conceivable but I'd say it's a fairly severe bug because 5e-324 shouldn't even be possible with (double)
+
+[02:14] <samcv> so the test is maybe wrong?
+
+[02:14] <geekosaur> at least I think it's not; not sure where float limits are in gcc
+
+[03:33] <samcv> geekosaur: ok it does seem to be strtod that is returning a different result
+
+[04:18] *** evalable6 joined
+[04:30] <samcv> 5e-308 works but higher exponents don't
+
+[04:34] *** Zoffix joined
+[04:34] <Zoffix> 5e-324 is possible. It's a denormal, where portion of mantissa is used for the exponent
+
+[04:34] <Zoffix> https://en.wikipedia.org/wiki/Denormal_number
+
+[04:35] <geekosaur> oh, that would break strtod, yes
+
+[04:35] <geekosaur> if it's not expecting that
+
+[04:36] <Zoffix> "<samcv> you are likely interested in problems with denormal support on the intel c compiler"....
+
+[04:37] <Zoffix> Not really.
+
+[04:37] *** Zoffix left
+[04:39] <samcv> yeah i think that may be correct
+
+[04:49] <samcv> ok it sets errno to ERANGE and i guess we don't check errno
+
+[05:24] *** domidumont joined
+[05:27] <samcv> ok yay i fixed it
+
+[05:30] *** domidumont left
+[05:30] <Geth> ¦ MoarVM: 2052888eba | (Samantha McVey)++ | build/setup.pm
+
+[05:30] <Geth> ¦ MoarVM: Fix handling of denormals for Intel C Compiler
+
+[05:30] <Geth> ¦ MoarVM:
+
+[05:30] <Geth> ¦ MoarVM: Without setting the `-fp-model precise -fp-model source` CFLAGS code
+
+[05:30] <Geth> ¦ MoarVM: isn't compiled to handle denormal floating point values. This caused a
+
+[05:30] <Geth> ¦ MoarVM: few nqp tests for denormals to fail.
+
+[05:30] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/2052888eba
+
+[05:30] *** domidumont joined
+[05:31] <samcv> geekosaur: thanks for the hints and helping me get this solved
+
+[06:22] *** domidumont left
+[06:31] *** lizmat joined
+[06:46] *** lizmat left
+[06:48] *** domidumont joined
+[06:59] *** lizmat joined
+[06:59] *** domidumont left
+[07:35] *** zakharyas joined
+[07:36] *** zakharyas left
+[07:37] *** zakharyas joined
+[07:56] *** zakharyas left
+[07:56] *** zakharyas joined
+[08:00] *** zakharyas1 joined
+[08:01] *** zakharyas left
+[08:15] *** zakharyas1 left
+[08:21] *** zakharyas joined
+[08:26] *** zakharyas left
+[08:32] *** zakharyas joined
+[09:11] *** zakharyas left
+[09:37] *** Redfoxmoon joined
+[09:48] *** zakharyas joined
+[10:44] *** brrt joined
+[10:44] <brrt> \o
+
+[10:45] <nwc10> o/
+
+[10:47] *** robertle joined
+[10:54] <brrt> what's up with the integer truncation business
+
+[11:24] <lizmat> looks like Rakudo GH #1905 is more of a moarvm issue
+
+[11:26] *** dogbert2 joined
+[11:46] *** lizmat left
+[12:11] <brrt> .tell samcv that's normal, that's just what dynasm does
+
+[12:11] <yoleaux> brrt: I'll pass your message to samcv.
+
+[13:23] *** ggoebel joined
+[14:05] *** zakharyas left
+[14:05] *** zakharyas joined
+[14:09] *** zakharyas left
+[14:57] *** domidumont joined
+[15:02] *** brrt left
+[15:29] *** brrt joined
+[15:35] *** domidumont left
+[15:54] *** ggoebel left
+[16:00] *** robertle left
+[16:08] *** lizmat joined
+[16:09] *** Redfoxmoon left
+[16:09] *** Redfoxmoon joined
+[16:25] *** ggoebel joined
+[17:01] *** brrt left
+[17:02] *** brrt joined
+[17:03] <samcv> ok cool that's what geekosaur i think said too
+
+[17:03] <yoleaux> 12:11Z <brrt> samcv: that's normal, that's just what dynasm does
+
+[17:08] <brrt> :-)
+
+[17:18] *** brrt left
+[18:07] *** ggoebel left
+[18:23] *** ggoebel joined
+[19:04] *** lizmat left
+[19:04] *** lizmat joined
+[19:12] *** brrt joined
+[19:23] *** lizmat left
+[19:23] *** lizmat joined
+[19:40] <brrt> i'm going to humbly request attention to my PR: https://github.com/MoarVM/MoarVM/pull/868
+
+[20:17] <timotimo> i've only read the description, but i say :+1: :P
+
+[20:19] <brrt> :-)
+
+[20:20] <timotimo> what's with the whitespace change in Configure.pl's line 371
+
+[20:20] <timotimo> looks like the : is supposed to go in the same column as the ? above it
+
+[20:20] <timotimo> ... and the : on the line before that is also too far to the left?
+
+[20:21] <brrt> i dunno, that may have been cperls' work
+
+[20:26] *** zakharyas joined
+[20:29] *** lizmat left
+[20:37] *** brrt left
+[21:24] <samcv> .tell brrt it seems slower by the testing i've done
+
+[21:24] <yoleaux> samcv: I'll pass your message to brrt.
+
+[21:25] *** zakharyas left
+[21:32] <samcv> 4.54 before after 4.60 for this thing
+
+[21:32] <samcv> dd if=/dev/urandom bs=100 count=800000 | base64 > /tmp/stuff;  perl6 -e 'use nqp; my $hash := nqp::hash(); my @file = "/tmp/stuff".IO.slurp.lines; my $t1 = now; for @file { nqp::bindkey($hash, $_, 1) };my $t2 = now; for @file { nqp::atkey($hash, $_) }; '
+
+[22:45] <MasterDuke> we should get that moarvm benchmark page up and running again
+
+[23:07] <MasterDuke> ...which i can never remember the address of
+
+[23:23] <MasterDuke> huggable: bench
+
+[23:23] <huggable> MasterDuke, https://github.com/japhb/perl6-bench
+
+[23:41] <MasterDuke> japhb: ping
+
+[23:46] <japhb> Pong
+
+[23:47] <japhb> You wanted to know something about perl6-bench?
+
+[23:47] <japhb> I wrote the code there; for a while jnthn was running it daily on one of his servers and posting the results, but I've not done that.
+
+[23:49] <japhb> Note that many perl6-bench tests -- especially the microbenchmarks -- are probably wildly out of date WRT to the current state of Rakudo optimization (or lack thereof, as the case may be).
+
+[23:54] <MasterDuke> so far i've had to add a .cache on line ~75 of bench
+
+[23:54] <MasterDuke> but things seem to be running otherwise
+
+[23:55] <MasterDuke> i also removed most entries from components.json, but that's just because i only wanted to run it for moarvm and perl5
+
+[23:58] <MasterDuke> hm, bunch of Configure.pl errors, might be i need some perl5 module installed though...
+
+[23:58] <japhb> Yeah, that I would believe.
+
+[23:59] <MasterDuke> build::setup isn't a core module?
+
+[23:59] <japhb> BTW, you don't *have* to remove things from components, the driver script is relatively forgiving in different ways to indicate you only want to work with a subset of available engines/builds.
+

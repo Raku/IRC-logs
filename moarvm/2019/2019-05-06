@@ -1,0 +1,444 @@
+[01:52] <MasterDuke> huh. an extra 390m instructions compiling rakudo when moarvm was built with -flto
+
+[01:52] <MasterDuke> according to callgrind
+
+[05:38] *** Util left
+[05:51] *** Util joined
+[06:07] *** domidumont joined
+[06:09] *** Kaiepi left
+[06:10] *** Kaiepi joined
+[06:45] *** sena_kun joined
+[07:19] *** patrickb joined
+[07:38] <nwc10> SEGV in libuv during nqp's make install - I can't reproduce this - http://paste.scsys.co.uk/584367
+
+[07:50] <nwc10> er, wait, that was rakduo make install
+
+[07:51] <nwc10> I'm very confused. but it was really a SEGV and I really can't reproduce it
+
+[07:51] <nwc10> I fear that the problem is that the coffee machine at work isn't working well
+
+[08:32] *** brrt joined
+[08:32] <brrt> \o
+
+[08:33] <timotimo> o/
+
+[08:33] <timotimo> brrt: how do you suggest i put this into the jit: pass an object body + an offset as an argument to a C function?
+
+[08:35] <brrt> you want two arguments?
+
+[08:35] <timotimo> pretty much
+
+[08:36] <brrt> you want the body + offset as a pointer, or the offset as an integer
+
+[08:37] <timotimo> one way i've considered was to have a "just take TMP5's contents" and another node that calculates a p6o's object body offset
+
+[08:37] <timotimo> (including the real_data pointer)
+
+[08:37] <timotimo> the body + offset as a pointer
+
+[08:37] <timotimo> gimme a sec
+
+[08:38] <timotimo> https://github.com/MoarVM/MoarVM/blob/master/src/6model/reprs/P6opaque.c#L490 - basically this
+
+[08:38] <timotimo> the last argument is what normally has the OBJECT_BODY, but in this particular function it already got the OBJECT_BODY as the void *data pointer
+
+[08:38] <timotimo> (but also it had to do the p6opaque_real_data thing itself)
+
+[08:40] <timotimo> wait, i think what i'm actually after is https://github.com/MoarVM/MoarVM/blob/master/src/6model/reprs/P6opaque.c#L1357
+
+[08:40] <timotimo> hum, is that different to just using getattr_o and then atkey_o?
+
+[08:44] *** zakharyas joined
+[08:47] <timotimo> now which one did i actually want :|
+
+[08:48] <timotimo> if it's actually just getattr (well, p6oget_o really) plus the original thing, that'd go into spesh instead
+
+[08:48] <timotimo> so the only difficult part is with the unboxing ops that have to go pick out a pointer from inside, but only use it for the void *data argument, so that has to be in the jit
+
+[08:49] <timotimo> anyway, please excuse me, i kind of woke up quite recently
+
+[09:16] <brrt> oh, you want a dynamic offset
+
+[09:16] <brrt> I se
+
+[09:16] <brrt> *see
+
+[09:16] <brrt> I kind of don't want the old style function invocation to be overloaded further
+
+[09:16] <brrt> but
+
+[09:16] <brrt> meh
+
+[09:18] <timotimo> it's not actually dynamic, it's known at jit time
+
+[09:18] <timotimo> would the "this argument shall just take TMP5's value" thing be okay?
+
+[09:39] *** brrt left
+[09:45] *** domidumont left
+[10:25] *** brrt joined
+[10:51] *** zakharyas left
+[11:29] <brrt> timotimo: that seems very, very brittle
+
+[11:31] <timotimo> oh
+
+[11:31] <timotimo> should i use stack-relative values instead?
+
+[11:54] *** domidumont joined
+[11:56] *** domidumont1 joined
+[11:59] *** domidumont left
+[11:59] <brrt> maybe, but, if it's a constant at JIT time... can't you just laod that constant?
+
+[12:00] <brrt> oh, I think I get the problem now
+
+[12:00] <brrt> you want to inline that calculation in the JIT
+
+[12:00] <timotimo> yes
+
+[12:00] <timotimo> because there's a double offset, more or less
+
+[12:01] <timotimo> first i have to get the real_data pointer and check if it's to be followed
+
+[12:01] <timotimo> then i have to add the jit-time-constant offset onto that
+
+[12:06] <brrt> just for my curiosity... why do we *need* the real-data pointer?
+
+[12:07] <brrt> (I kind of think jnthn knwos the answer to that)
+
+[12:08] <timotimo> it's for mixins
+
+[12:08] <timotimo> adding attributes is hard if something else has its header right after your data pointer :)
+
+[12:09] <timotimo> er, your body i mean
+
+[12:09] <timotimo> so when an object grows due to mixins, we copy the data away and hide it behind one layer of indirection
+
+[12:13] *** Geth left
+[12:13] *** Geth joined
+[12:19] <brrt> oh, right, got it
+
+[12:20] <brrt> hmm, and I guess we can't patch up all possible references
+
+[12:24] <timotimo> we should be able to do better when doing a nursery copy or nursery to gen2
+
+[12:24] <timotimo> i don't think we've done this yet
+
+[12:43] *** reportable6 left
+[12:47] *** reportable6 joined
+[12:50] <brrt> Do you mean, maybe act as if the object is concurrently moved to a new location by the GC?
+
+[12:51] <brrt> that's possible... but expensive, too :-D
+
+[12:56] <timotimo> oh, no, i mean whenever the object moves naturally we grow it at the target site and put the "real data" back in place
+
+[13:02] <brrt> well, we should at least do that, I think..
+
+[13:13] <timotimo> there's also a possibility for spesh here; if we can tell with relative certainty that an object is going to be mixed in very soon after creation, we can already allocate it with the "future" size and have a mixin op that doesn't do the "copy away and use real_data pointer" thing
+
+[13:13] <timotimo> also, i think we're currently paying one pointer of memory in every p6opaque object ever?
+
+[13:14] <timotimo> not sure if we can perhaps put a flag in the header; gotta make sure it won't interfere with inlined objects; P6opaque don't get embedded inside p6opaque, right? and p6opaque doesn't get embedded in anything else?
+
+[13:21] <brrt> I don't think p6opaque's get embedded
+
+[13:21] <brrt> but..... I'd argue that having a forwarding pointer always in p6opaque, is in hindsight premature optimization maybe
+
+[13:22] <timotimo> oh, you mean always having the pointer there makes things faster because we don't have to go look somewhere else for a flag?
+
+[13:32] <brrt> no... I mean that we try to fit all objects into a fixed format by default, and then have to fit an overflow pointer for when that won't work
+
+[13:33] <brrt> contrast this with v8 hidden classes; all objects start of as extensible maps, and when v8 speculates that the object structure is really fixed, that's when a fixed format is applied
+
+[13:33] <brrt> in hindsight, I mean, augmenting a class or object is an obvious deoptimization opportunity
+
+[13:34] <brrt> hence, the optimized code should not have to consider that case
+
+[13:34] <brrt> I know that when this was designed that way, a runtime optimizer wasn't part of moar yet
+
+[13:35] <timotimo> but objects coming in can already have been augmented
+
+[13:36] *** zakharyas joined
+[13:45] <brrt> the point is that if you default to an open map structure (as in python, perl5, etc) then that doesn't cost you
+
+[13:45] <brrt> or at least, not extra
+
+[13:45] <brrt> currently, even our best optimized code still has to deal with this
+
+[13:46] <timotimo> do note that augmenting also changes the st
+
+[13:46] <brrt> yes
+
+[13:48] <timotimo> but augmenting is very rare in perl6 compared to js and python
+
+[13:49] <timotimo> we're more or less equivalent to python with __slots__ arrays i guess?
+
+[14:00] *** lucasb joined
+[14:02] <brrt> i think python with the __slots__ array prohibits augmentation, is the thing
+
+[14:05] *** brrt left
+[14:06] <timotimo> anyway, just because we're "still" in optimized code doesn't mean we won't encounter an object that has a valid forwarding pointer in it
+
+[14:07] <timotimo> though we do use variants of ops that don't look at the forwarding pointer in code that only just allocated some object
+
+[14:31] *** domidumont joined
+[14:33] *** domidumont1 left
+[14:46] *** zakharyas left
+[14:55] *** patrickb left
+[15:18] *** domidumont left
+[15:24] <lizmat> and another Perl 6 Weekly hits the Net: https://p6weekly.wordpress.com/2019/05/06/2019-17-18-three-months-to-riga/
+
+[16:06] *** domidumont joined
+[16:56] <samcv> kawaii, just got some. so should finish up the rest of the things for release in a bit
+
+[16:58] <kawaii> samcv: great, thanks!
+
+[17:00] *** domidumont left
+[17:05] *** robertle joined
+[17:54] *** zakharyas joined
+[18:41] <samcv> kawaii, moarvm should be released in about 30 min
+
+[19:00] *** lucasb left
+[19:00] *** brrt joined
+[19:00] <brrt> \o
+
+[19:01] <samcv> hey brrt
+
+[19:03] <timotimo> o/
+
+[19:05] <brrt> hey samcv, timotimo
+
+[19:05] <brrt> can we start publicly celebarting that TPF got $ GSoC students this year?
+
+[19:06] <samcv> yes!
+
+[19:06] <brrt> \o/
+
+[19:06] <samcv> 4!
+
+[19:06] <timotimo> great!
+
+[19:06] <brrt> Not so bad, hey
+
+[19:06] <samcv> last year was zero >_>
+
+[19:06] <timotimo> 2 of them are p6, right?
+
+[19:06] <brrt> Yes, I think samcv and I are both mentors
+
+[19:08] <tadzik> \o/
+
+[19:08] <tadzik> awesome :)
+
+[19:08] <tadzik> so it's official now?
+
+[19:08] <brrt> I think so... official publication date was may 6th, 18:00 UTC, and that hour has passed
+
+[19:13] <samcv> So this, is not temporary anymore? https://github.com/MoarVM/MoarVM/commit/0e94d75a
+
+[19:13] <samcv> or is it still "temporary" as far as mentionable in changelog
+
+[19:15] <timotimo> we don't have the proper fix for that yet
+
+[19:15] <samcv> ok. i'll leave the changelog entry as it being temporary
+
+[19:15] <brrt> what's the bug that it fixes?
+
+[19:15] <timotimo> immediate crashes on bsd
+
+[19:15] <timotimo> as soon as the jit returns anywhere
+
+[19:16] <brrt> (or, what did OpenBSD break that we need to work around)
+
+[19:16] <brrt> oh, I see
+
+[19:16] <brrt> lol
+
+[19:16] <timotimo> it's protecting against malicious code
+
+[19:16] <timotimo> you know, the code that the jit spits out
+
+[19:16] <brrt> :-D
+
+[19:17] <brrt> but, I can help there...
+
+[19:17] <brrt> what if, on OpenBSD, we use a setjmp/longjmp pair
+
+[19:17] <samcv> kawaii, is this 2019.05 or 2019.04
+
+[19:17] <kawaii> samcv: 2019.05 :)
+
+[19:17] <samcv> ook :)
+
+[19:18] <brrt> it'd be annoying, but it could probably be made to work
+
+[19:18] <brrt> thing is, with the current method, we can update the return address anywhere in the call stack, and it'll work, and cleanup, too
+
+[19:18] <brrt> setjmp/longjmp will screw with that
+
+[19:18] <timotimo> we can't properly implement return protection support in the jit?
+
+[19:18] <timotimo> i don't know how it's implemented
+
+[19:21] <Woodi> I read lastly, that W^X disabling helps python and others on OpenBSD
+
+[19:24] <Woodi> slides from here: https://lteo.net/blog/2019/04/27/carolinacon-15-writing-exploit-resistant-code-with-openbsd/
+
+[19:26] <Woodi> OB have W^X disabled on /usr/local
+
+[19:37] <Kaiepi> i have W^X disabled where i have perl6 installed but the trace traps still happened
+
+[19:38] <timotimo> can the trace trap be caught by moar and the PC checked for a sensible location inside of jit code?
+
+[19:38] <timotimo> like, is it a signal like sigsegv that a handler can sensibly be written for?
+
+[19:39] *** Geth_ left
+[19:40] <samcv> timotimo, want to look at the changelog and see if there's any issues
+
+[19:40] <samcv> then i'll do the release
+
+[19:40] <timotimo> ok, link please?
+
+[19:40] <samcv> oh i guess it didn't print it
+
+[19:40] <timotimo> yeah, new geths need github hooks to be changed a bit
+
+[19:40] <Kaiepi> i'll test it out timotimo
+
+[19:41] <samcv> i pushed but there was no channel message
+
+[19:41] <samcv> timotimo, https://github.com/MoarVM/MoarVM/blob/master/docs/ChangeLog
+
+[19:41] <timotimo> we can get rid of the very first one, that was an earlier commit being wrong that got fixed later
+
+[19:42] <timotimo> i wonder if we shouldn't have some kind of convention for commits like that
+
+[19:43] <timotimo> many changes were inspired by fuzzing, but only one (or so?) changes actually have "fuzzing:" in front; should we put fuzzing in all of them, or none?
+
+[19:44] <timotimo> and i think the "max inline size per HLL" line should be shortened? there's a few very long lines and i'm not terribly fond of those, but that's a question of style/preference that we may want to just have a decision for
+
+[19:46] <timotimo> i think the commit about sp_getvt_o and sp_getvc_o could perhaps fit into the spesh section better
+
+[19:48] <timotimo> deallocatedsplit ← typo
+
+[19:49] <timotimo> Also call optimize_bb for unspecialized inlines seems duplicated
+
+[19:49] <timotimo> Lliberalize typo's an l too many (unless this is spanish? :D)
+
+[19:50] <nine> As a packager I say less is more. Most of my time packaging rakudo goes into summarizing changelogs so they fit into the line limit of the Open Build Service
+
+[19:50] <timotimo> i'd probably change the toolchain/macOS one to read "check for mixed toolchain", that's probably easier to understand without following the link
+
+[19:52] <timotimo> i hope that didn't come across as too negative %)
+
+[19:52] <timotimo> the changelog is good, and your work is very much appreciated samcv
+
+[19:53] <samcv> <timotimo> i think the commit about sp_getvt_o and sp_getvc_o could perhaps fit into the spesh section better
+
+[19:53] <samcv> so what change do i need to take?
+
+[19:53] <timotimo> for that comment, or for all the comments?
+
+[19:53] <samcv> just that one for now
+
+[19:54] <timotimo> ah. i'd say just cut&paste it from Core: to Spesh:
+
+[19:55] <samcv> ah cool
+
+[19:59] <samcv> timotimo, "being deallocated, split" so typo because it's not in separate words?
+
+[19:59] <timotimo> yeah
+
+[19:59] <timotimo> but i'd possibly change the whole line to something shorter
+
+[20:00] <timotimo> "count deallocated objects categorized by life time"?
+
+[20:05] <samcv> and "Improve check for used toolchain on macOS" to "check for mixed toolchain on MacOS"
+
+[20:06] <samcv> timotimo, change which whole line?
+
+[20:06] <timotimo> yeah
+
+[20:06] <brrt> "deallocate objects by life choices"
+
+[20:06] <timotimo> and yes
+
+[20:06] <timotimo> pffft :D
+
+[20:06] <samcv> also what
+
+[20:06] <samcv> hahaha
+
+[20:06] <samcv> needs to be more specific
+
+[20:06] <samcv> XD
+
+[20:08] <brrt> timotimo: how it works, is that when the interpreter would effect a control flow change (throwing an exception, for instance, or a nonlocal return), this is effected in the JIT by updating the return address to the correct code position
+
+[20:08] <brrt> so this quite directly violates a check that tries to ensure that you don't
+
+[20:09] <brrt> or, that malicious code  can't
+
+[20:09] <samcv> brrt, ok so what do i change to what :)
+
+[20:10] <samcv> you mean this + [95094ae2] Count objects being deallocated, split this statistic into "deleted while in nursery and not seen before", "deleted while in nursery, but seen in a previous GC run", and "deleted while in the gen 2".
+
+[20:10] <samcv> ah oops i forgot to combine the two commits
+
+[20:10] <samcv> looks like a bug in my changelog updater
+
+[20:10] <samcv> gonna have to fix the behavior when i combine commits.
+
+[20:11] <samcv> err. or maybe not. not sure.it looks like it but maybe that was the whole title
+
+[20:11] <brrt> samcv: idk, I was kidding :-)
+
+[20:11] <samcv> yeah looks like the later
+
+[20:11] <samcv> well just tell me what to change it to so i can release :-))
+
+[20:12] <timotimo> i don't know what it's like now
+
+[20:12] <timotimo> do you have a suggestion for putting "fuzzing" on many, or just the one commit message?
+
+[20:13] <samcv> can put it on as many or as few as you think is fine
+
+[20:13] <Kaiepi> <timotimo> like, is it a signal like sigsegv that a handler can sensibly be written for?
+
+[20:13] <Kaiepi> you can catch SIGTRAP, yes
+
+[20:13] <samcv> i maybe removed it from some since it wasn't needed to understand the message (at least from my opinion at the time)
+
+[20:14] <timotimo> well, catch, sure. how do you properly react? if you think the thing was legit, just return, otherwise just kill your own process with the same signal again?
+
+[20:14] <timotimo> or exit(1) or whatever
+
+[20:16] <Kaiepi> i'm a bit uncomfortable with the idea of trying to determine whether or not what the kernel's doing is justified
+
+[20:16] <samcv> brrt, though seriously what do i change: + [95094ae2] Count objects being deallocated, split this statistic into "deleted while in nursery and not seen before", "deleted while in nursery, but seen in a previous GC run", and "deleted while in the gen 2".
+
+[20:16] <samcv> into
+
+[20:17] <samcv> then i can release :-)
+
+[20:17] <timotimo> count deallocated objects categorized by life time
+
+[20:17] <timotimo> any comment on the other things i pointed out?
+
+[20:28] * brrt sleep
+
+[20:28] *** brrt left
+[20:38] *** lucasb joined
+[20:49] <samcv> kawaii, ok moarvm is released
+
+[20:49] <kawaii> samcv: amazing, thanks! :)
+
+[20:50] <kawaii> not sure there is time for me to bump nqp and rakudo tonight, but tomorrow could work
+
+[20:50] <samcv> no problem :)
+
+[20:50] <samcv> thanks for doing the rakudo side
+
+[20:53] <timotimo> samcv: you kept "lliberalize" :D
+
+[21:03] *** zakharyas left
+[21:21] *** sena_kun left
+[22:40] *** lucasb left

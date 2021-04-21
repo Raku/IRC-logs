@@ -1,0 +1,792 @@
+[00:11] *** geekosaur joined
+[01:48] *** ilbot3 joined
+[06:07] *** domidumont joined
+[06:46] *** domidumont joined
+[07:12] *** domidumont joined
+[07:15] *** zakharyas joined
+[08:24] *** FROGGS joined
+[10:25] <timotimo> CID 54957 (#1 of 1): Sizeof not portable (SIZEOF_MISMATCH)
+
+[10:25] <timotimo> suspicious_sizeof: Passing argument tc->gen2roots of type MVMCollectable ** and argument 8UL /* sizeof (MVMCollectable **) */ * tc->alloc_gen2roots to function MVM_realloc is suspicious. In this case, sizeof (MVMCollectable **) is equal to sizeof (MVMCollectable *), but this is not a portable assumption.
+
+[10:25] <timotimo> this being roots.c line 250 and 251
+
+[10:27] <dalek> MoarVM: a4992d4 | timotimo++ | src/core/bytecode.c:
+
+[10:27] <dalek> MoarVM: fix a sizeof arg, allocated a much-too-big buffer
+
+[10:27] <dalek> MoarVM:
+
+[10:27] <dalek> MoarVM: Fixes Coverity CID 54960
+
+[10:27] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/a4992d4867
+
+[10:27] <dalek> MoarVM: 793efac | timotimo++ | src/6model/reprs/MVMString.c:
+
+[10:27] <dalek> MoarVM: missing breaks in MVMString's copy_to
+
+[10:27] <dalek> MoarVM:
+
+[10:27] <dalek> MoarVM: Fixes Coverity CID 54931
+
+[10:27] <dalek> MoarVM: Fixes Coverity CID 54933
+
+[10:27] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/793efac032
+
+[10:53] *** lizmat joined
+[11:10] <timotimo> that much-too-big buffer was 48 bytes instead of 8 bytes (on 64bit) or 4 bytes (on 32bit), so 6x bigger than necessary
+
+[11:15] <timotimo> huh, that commit may actually have broken things
+
+[11:19] <timotimo> might not have been that commit, actually
+
+[11:24] <timotimo> hm. just a fluke
+
+[11:27] <timotimo> a little run of just perl6-m -e '' allocated about 85200 bytes that weren't going to be used
+
+[11:27] <timotimo> over 1090 callsites
+
+[11:28] <timotimo> malloc overhead is, of course, a big contributor to memory "wasted" for these buffers, since many of them only have one or two arguments
+
+[11:35] <timotimo> ("1" => 514, "2" => 307, "3" => 163, "4" => 64, "5" => 24, "6" => 9, "7" => 3, "8" => 3, "9" => 2, "20" => 1)
+
+[11:35] <timotimo> that's the distribution of nameds in callsites loaded by perl6 -e ''
+
+[11:36] <timotimo> the sum is 1090, so we have almost 50% callsites with only a single named argument (out of only the callsites that have arguments)
+
+[11:36] <timotimo> in those cases, we could totally use the space for the pointer to the buffer to point at the string instead :3
+
+[11:37] <timotimo> (another 480 callsites have 0 named args)
+
+[11:37] <arnsholt> Wow, 20 named arguments!
+
+[11:38] <arnsholt> timotimo: You *could* do that, but would you really want to? =)
+
+[11:38] <timotimo> i think it'd be fine
+
+[11:39] <arnsholt> Requires a little bit of care though
+
+[11:39] <timotimo> not terribly many occurences of arg_names, and if i make it a named union, gcc'll scream at me if i forget to change one
+
+[11:39] <arnsholt> Yeah, I was about to suggest exactly that
+
+[11:39] <timotimo> we don't allow non-named unions anyway
+
+[11:40] <timotimo> and i wasn't going to put casts everywhere to get from MVMString* to MVMString** ;)
+
+[11:40] <arnsholt> Making it a union makes saves you the casting shenanigans, and makes it very clear what's going on
+
+[11:40] <timotimo> yup
+
+[11:41] <arnsholt> In that case, http://imgur.com/gallery/dVDJiez
+
+[11:42] <timotimo> currently MVMCallsite is 20 bytes big. i could go so far as to make it a union between MVMString ** and MVMString[2]
+
+[11:42] <timotimo> but that'll make code ugly again, i think
+
+[11:43] <arnsholt> MVMString[2] would be bigger than a MVMString**, no?
+
+[11:43] <timotimo> yup
+
+[11:43] <arnsholt> But less than 20 bytes, I guess
+
+[11:50] <timotimo> there's a trade-off
+
+[11:50] <timotimo> if we were mallocing individual MVMCallsites, we could perhaps slip the second named argument into the padding malloc may put there; i don't know if it does, though
+
+[11:50] <timotimo> but we're usually mallocing big bunches of MVMCallsites
+
+[11:51] <timotimo> so we're definitely going to be wasting those 8 bytes for each entry
+
+[11:52] <timotimo> probably not actually worth it.
+
+[11:53] <timotimo> oh, hehe, the condition for whether or not the union will have its single or multiple entry is nontrivial
+
+[11:55] <timotimo> oh, yikes, it's *highly* nontrivial
+
+[11:56] <timotimo> forget this, then. i'll go ahead and allocate a big buffer and put pointers into that buffer into the callsites instead
+
+[12:09] <timotimo> hmm. we don't have intptr_t in moar, do we? it's in C99 as an optional type apparently
+
+[12:10] <arnsholt> At a guess, not in MSVC =)
+
+[12:10] <arnsholt> Tell me which header defines it, and I can check
+
+[12:11] <timotimo> stdint.h
+
+[12:11] <timotimo> uintptr_t
+
+[12:11] <timotimo> is the one you have to look for
+
+[12:11] <timotimo> i'm not sure intptr_t exists
+
+[12:13] <arnsholt> Looks like both intptr_t and uintptr_t are defined, actually!
+
+[12:13] <timotimo> wow
+
+[12:14] <arnsholt> But that's in the most recent VS
+
+[12:14] <arnsholt> Dunno if it's only been added recently
+
+[12:14] <arnsholt> jnthn: You might know more about this?
+
+[12:15] <timotimo> we need an automated "could jnthn compile this?" check somehow :)
+
+[12:15] <arnsholt> Quite
+
+[12:15] <arnsholt> If only VS worked on Linux =D
+
+[12:16] <arnsholt> As an aside, I'm pleasantly surprised by VS
+
+[12:16] <arnsholt> It's pretty nice to work with. Far nicer than my memories of Eclipse
+
+[12:16] <arnsholt> Eclipse is admittedly a pretty low standard, though
+
+[12:16] <timotimo> yeah, eclipse is really not very good
+
+[12:17] <timotimo> have you ever tried CLion? i wonder how good that is. jetbrains IDEs are very good in general
+
+[12:18] <arnsholt> Never. But IntelliJ looks pretty nice, I agree
+
+[12:18] <arnsholt> Haven't really used it though
+
+[12:18] <domidumont> arnsholt: may be you'll like this: https://code.visualstudio.com/docs/setup/linux
+
+[12:18] <timotimo> domidumont: not the same thing at all :)
+
+[12:18] <arnsholt> Yeah, that's basically Atom isn't it?
+
+[12:18] <timotimo> yeah, basically
+
+[12:18] <domidumont> aah. Where is the trade mark police when we need them :-/
+
+[12:19] <timotimo> i don't think microsoft will sue microsoft over this use of the Visual Studio trademark
+
+[12:19] <domidumont> :-p
+
+[12:20] <arnsholt> =D
+
+[12:29] <timotimo> oh crap
+
+[12:29] <timotimo> interning a callsite will inherit the pointer to the nameds instead of copying them over when we store the interned callsite in our intern pool
+
+[12:30] <timotimo> ownership is *always* trouble
+
+[12:32] <timotimo> ouch! try_intern will call MVM_free on the arg_names pointer if interning succeeds
+
+[12:32] <timotimo> well, at least there's an easy solution to my memory management now
+
+[12:33] <timotimo> here's a fun and easy way to completely b0rk a callsite:
+
+[12:33] <timotimo> call try_intern on the same callsite multiple times
+
+[12:34] <timotimo> it'll say "oh, a match!" and MVM_free the flags and nameds buffers :D
+
+[12:42] *** brrt joined
+[12:42] <brrt> good * #moarvm
+
+[12:44] <timotimo> yo brrt
+
+[12:44] <timotimo> i'm off chasing inconsequential memory savings!
+
+[12:45] <brrt> inconsequential memory savings are never inconsequential
+
+[12:45] <brrt> you may be interested in my upcoming blog then
+
+[12:45] <brrt> it's about the memory management method for spesh and the expr jit
+
+[12:45] <timotimo> well, this slab of memory is probably not going to be read from very often
+
+[12:45] <timotimo> and very rarely scanned
+
+[12:46] <brrt> and how the spesh allocator leads to an 'object-graph' program structure, with linked list etc, and how the expr jit uses an 'everything in an array' strategy, and how that leads to a rather different program structure
+
+[12:46] <brrt> and also on why
+
+[12:47] <brrt> interestingly, an observation I made when researching that for a bit
+
+[12:47] <brrt> you may be aware of an article called 'execution in the kingdom of nouns' written over 10 years ago
+
+[12:48] <brrt> now it seems to me that the chain of java FooImplementationFactoryStrategyResolver thingies constructed... those are effectively an explicit form of a lazy evaluation chain
+
+[12:48] <timotimo> yes, i know of that one
+
+[12:48] <timotimo> hm, yeah, kind of
+
+[12:48] <brrt> fast forward 10 years, and everybody uses closures and Promises and whatnot to achieve ultimately the same end
+
+[12:48] <timotimo> hehe
+
+[12:50] <brrt> okay, now, hypothetically, the java architects of 10 years ago, could have said in their defense that 'the explicit form allows runtime inspection and intelligence, and that is lost when using closures, because code is opaque'
+
+[12:50] <brrt> which is basically where we are now, right?
+
+[12:51] <brrt> i mean, in $working-codebase, i can't count the times where I'd have thought 'gee, it'd be nice if I could take $subroutine and transform it somehow'
+
+[12:51] <timotimo> good point, actually
+
+[12:51] <brrt> and that is basically impossible because of our decoupling....
+
+[12:51] <brrt> okay, now two things:
+
+[12:51] <brrt> 'if only we could take the code for this' ==> LISP
+
+[12:52] <brrt> 'and transform it somehow' ==> {tensorflow, spark, etc.}
+
+[12:54] <brrt> okay, I'm going to leave that some time to sink in :-)
+
+[12:54] <brrt> (I personally needed it)
+
+[12:54] <timotimo> i'm not sure my brain will process this to something useful
+
+[12:54] <timotimo> except despair about how history repeats itself over and over again
+
+[12:55] <timotimo> you know how we went from a single machine running code in batch to time-shared systems to multi-user systems to virtual machines and now we have single-program-operating systems running inside virtual machines?
+
+[12:57] * brrt nods..... and cries
+
+[12:57] <timotimo> i feel a similar vibe to this here
+
+[12:58] <timotimo> (because my brain is a pattern-matching machine)
+
+[12:58] <brrt> although, these single-program-operating systems tend to live in clusters
+
+[13:00] <brrt> anyway, this is part of the reason why I'm very, very excited about macros in perl6
+
+[13:00] <timotimo> yay
+
+[13:00] <timotimo> oh btw
+
+[13:00] <brrt> and, admittedly, somewhat less about precompilation, because it may reintroduce that opacity
+
+[13:00] <brrt> i'm listening
+
+[13:01] <timotimo> you know how we have a few "if rs->version > n" in our code?
+
+[13:01] <brrt> i don't know about that, but continue
+
+[13:01] <timotimo> if we turned that into a macro that had a check against MINIMUM_VERSION (or what it's called)
+
+[13:01] <timotimo> we could rely on static code analysis to tell us "dude, this code won't ever run, because your MINIMUM_VERSION has been increased past it!"
+
+[13:01] <brrt> go for it
+
+[13:02] <brrt> (is it hard to do?)
+
+[13:02] <timotimo> probably not
+
+[13:02] <timotimo> just a guess ;)
+
+[13:02] *** kjs_ joined
+[13:02] <brrt> i like the idea
+
+[13:03] <timotimo> me, too
+
+[13:06] <timotimo> whoopsie, now callsite_destroy dies (of course!)
+
+[13:06] <timotimo> because it tries to call free on the arg_names pointer
+
+[13:07] <timotimo> we have an is_interned flag in our MVMCallsite that is currently only 1 or 0
+
+[13:07] <timotimo> we could totally store more flags than that
+
+[13:07] <timotimo> well, really it has 8 bits for has_flattening and 8 more bits for is_interned
+
+[13:08] <timotimo> since it has a pointer coming after it, we can't expect to put all flags into only 8 bits and get more space, but still ...
+
+[13:08] <timotimo> i can use this as a test bed for using bitfield structs
+
+[13:11] <brrt> ..... yes..... go nuts. we can always revert your code :-P
+
+[13:11] <timotimo> or not even merge it in the first place
+
+[13:12] <timotimo> https://scan.coverity.com/projects/paultcochrane-moarvm?tab=overview - can you see these stats?
+
+[13:12] <timotimo> like how our number of outstanding defects has gone down? :D
+
+[13:12] <arnsholt> timotimo: Or you could even expand the two byte fields into a larger integer field with room for even more flags! =)
+
+[13:13] <timotimo> that's what i'm doing
+
+[13:13] <timotimo> but i'm doing it using bitfield struct syntax
+
+[13:13] <brrt> timotimo: can't because coverity hates me
+
+[13:13] <timotimo> you can request access and i'll give it to you ASAP
+
+[13:17] <brrt> request sent
+
+[13:17] <timotimo> approved
+
+[13:17] <timotimo> jnthn: how come callsites_equal doesn't compare has_flattening?
+
+[13:19] <brrt> thx
+
+[13:19] <brrt> oh, cool
+
+[13:22] <jnthn> timotimo: Maybe because it's only used for interning callsites, and iirc we don't intern flattening ones?
+
+[13:23] <timotimo> OK!
+
+[13:23] <timotimo> that makes sense
+
+[13:23] *** kjs_ joined
+[13:26] <jnthn> If you're tempted to change it, I'm fairly sure that spesh takes "this callsite is interned" to mean "there isn't any flattening"
+
+[13:26] <timotimo> ah
+
+[13:27] <timotimo> i might end up putting some comments perhaps
+
+[13:27] <jnthn> So *nod*
+
+[13:27] <jnthn> s/So//
+
+[13:27] <jnthn> oh yays, finally my fluentd thingy does what I want
+
+[13:28] <timotimo> right now i'm hunting a "conditional jump or move depends on uninitialized memory"
+
+[13:29] <timotimo> oh, that's easy
+
+[13:29] <brrt> what is fluendt?
+
+[13:29] <brrt> fluentd
+
+[13:30] *** kjs_ joined
+[13:31] <timotimo> what's the word i'm looking for? "spesh currently assumes is_interned  ***  no has_flattening"
+
+[13:31] <timotimo> that word from logic? that means =>
+
+[13:31] <jnthn> implies
+
+[13:31] <timotimo> ah!
+
+[13:31] <timotimo> yes, that's the one
+
+[13:31] <jnthn> brrt: It's a thingy for collecting logs and shoving them places
+
+[13:31] <jnthn> brrt: In my case, collecting them on all nodes of a kubernetes cluster and shoving them to something that collects them, via a little filtering
+
+[13:32] <brrt> aha....
+
+[13:32] <brrt> probably has raft in there somewhere
+
+[13:33] * jnthn is actually having to do the ops part of devops for once :P
+
+[13:33] <timotimo> so, i've been working on making the strings for arg_names fit into a snug buffer
+
+[13:33] <timotimo> but it's probably even more worth it to collect the flags in a snug buffer!
+
+[13:33] <jnthn> Maybe but
+
+[13:33] <jnthn> Well...for interned ones it's OK I guess
+
+[13:34] <timotimo> embarassingly, i'm currently making it only work for non-interned ones
+
+[13:34] <jnthn> But in general callsites can be collected along with a compunit
+
+[13:34] <jnthn> So be a little careful :)
+
+[13:34] <timotimo> right, i'm creating the shared buffer when the compunit is getting deserialized
+
+[13:34] <timotimo> i was assuming their lifetime to be shared right from the start
+
+[13:34] <jnthn> ah, ok
+
+[13:34] <timotimo> just need to install that buffer on the compunit and free it when it gets destroyed
+
+[13:34] <timotimo> and then my patch shall be good enough for initial review
+
+[13:40] <timotimo> i'm not entirely comfortable giving interned callsites snug buffers for their nameds (and later also args) because that'd require some sort of allocation strategy that'll ideally mean i don't have to go through all callsites and re-adjust pointers into the previous buffer when growing
+
+[13:40] <timotimo> i mean, i could totally abuse the spesh allocator for this, it'd be perfect, actually
+
+[13:43] <brrt> extracting the spesh allocator from spesh has been a refactor target for some time
+
+[13:43] <timotimo> yeah, i seem to recall you (or someone else) talked about that
+
+[13:44] <brrt> the official name is 'region-based-memory management' https://en.wikipedia.org/wiki/Region-based_memory_management
+
+[13:44] <timotimo> ah, neat.
+
+[13:44] <brrt> if you want to do that, go for it as well (I'd suggest not installing a mock wrapper for MVM_spesh_alloc to redirect to the region-allocator)
+
+[13:44] <brrt> eh, s/not//
+
+[13:47] <brrt> .... I could also do it, of course
+
+[13:47] <brrt> eventually, whenever I actually have time
+
+[13:47] <dalek> MoarVM/optimize_callsite_memory: c2c79be | timotimo++ | src/ (11 files):
+
+[13:47] <dalek> MoarVM/optimize_callsite_memory: turn is_interned and has_flattening into bitfield struct
+
+[13:47] <dalek> MoarVM/optimize_callsite_memory: review: https://github.com/MoarVM/MoarVM/commit/c2c79beea2
+
+[13:47] <dalek> MoarVM/optimize_callsite_memory: 463f67d | timotimo++ | src/ (5 files):
+
+[13:47] <dalek> MoarVM/optimize_callsite_memory: callsites now share a buffer for nameds
+
+[13:47] <dalek> MoarVM/optimize_callsite_memory:
+
+[13:47] <dalek> MoarVM/optimize_callsite_memory: it belongs to the compunit and is destroyed along with it.
+
+[13:47] <dalek> MoarVM/optimize_callsite_memory: callsites will also indicate whether they own the nameds
+
+[13:47] <dalek> MoarVM/optimize_callsite_memory: memory with a flag in its props bitfield struct.
+
+[13:47] <dalek> MoarVM/optimize_callsite_memory: review: https://github.com/MoarVM/MoarVM/commit/463f67d998
+
+[13:48] <timotimo> it still outputs warnings for assigning integers to pointers :\
+
+[13:48] <timotimo> and i should probably also #include <stdint.h> at the top of bytecode.c
+
+[13:48] <timotimo> jnthn: can you see if your MSVC will compile that at all?
+
+[13:50] <timotimo> i don't feel very confident about pointer arithmetic, but casting to (uintptr_t) makes it more clear to me what's going on, i think
+
+[13:51] <timotimo> src/core/bytecode.c:873:49: warning: assignment from incompatible pointer type [-Wincompatible-pointer-types]
+
+[13:51] <timotimo> callsites[i]->arg_names = &nameds_buffer;
+
+[13:51] <timotimo> ^
+
+[13:51] <timotimo> src/core/bytecode.c:875:49: warning: assignment makes pointer from integer without a cast [-Wint-conversion]
+
+[13:51] <timotimo> callsites[i]->arg_names = (uintptr_t)(callsites[i]->arg_names) + (uintptr_t)nameds_buffer;
+
+[13:51] <timotimo> the first probably really wants to have its & dropped
+
+[13:53] <dalek> MoarVM/optimize_callsite_memory: d7ba4ba | timotimo++ | src/core/bytecode.c:
+
+[13:53] <dalek> MoarVM/optimize_callsite_memory: fix one wrong and one correct pointer assignment
+
+[13:53] <dalek> MoarVM/optimize_callsite_memory: review: https://github.com/MoarVM/MoarVM/commit/d7ba4bacec
+
+[13:59] <dalek> MoarVM/optimize_callsite_memory: 88cca10 | timotimo++ | src/core/bytecode.c:
+
+[13:59] <dalek> MoarVM/optimize_callsite_memory: required minimum version 5 makes those checks irrelevant
+
+[13:59] <dalek> MoarVM/optimize_callsite_memory: review: https://github.com/MoarVM/MoarVM/commit/88cca1013a
+
+[14:03] <dalek> MoarVM/optimize_callsite_memory: e29987b | timotimo++ | src/core/callsite.c:
+
+[14:03] <dalek> MoarVM/optimize_callsite_memory: a copied callsite actually owns its nameds!
+
+[14:03] <dalek> MoarVM/optimize_callsite_memory: review: https://github.com/MoarVM/MoarVM/commit/e29987bfac
+
+[14:03] <jnthn> timotimo: No
+
+[14:03] <jnthn> bytecode.c
+
+[14:03] <jnthn> src\core\bytecode.c(516) : error C2275: 'MVMint16' : illegal use of this type as an expression src\moar.h(45) : see declaration of 'MVMint16'
+
+[14:03] <jnthn> src\core\bytecode.c(516) : error C2146: syntax error : missing ';' before identifier 'flags'
+
+[14:04] <timotimo> which commit are you on, there?
+
+[14:05] <jnthn> 88cca1013a8e
+
+[14:05] <timotimo> thanks
+
+[14:05] <jnthn> HEAD is just the same, though
+
+[14:05] <timotimo> seems like some kind of earlier parse error?
+
+[14:05] <timotimo> MVMint16 flags = read_int16(pos, 38);
+
+[14:05] <timotimo> because how is this wrong? :(
+
+[14:06] <jnthn> Is there anything before the decl in the block?
+
+[14:06] <timotimo> oooh
+
+[14:06] <timotimo> there is !!
+
+[14:06] <timotimo> damn this god damned f-ing limitation
+
+[14:06] <timotimo> opening braces without any if or so are allowed, right?-
+
+[14:07] <geekosaur> technically yes
+
+[14:07] <dalek> MoarVM/optimize_callsite_memory: 9a083e6 | timotimo++ | src/core/bytecode.c:
+
+[14:07] <dalek> MoarVM/optimize_callsite_memory: fix for C89 limitation (definition after code)
+
+[14:07] <dalek> MoarVM/optimize_callsite_memory: review: https://github.com/MoarVM/MoarVM/commit/9a083e6f31
+
+[14:08] <timotimo> so in jnthn's run it didn't actually encounter uintptr_t yet i believe
+
+[14:22] <timotimo> callsite expects 65535 more positionals
+
+[14:22] <timotimo> fun! :D
+
+[14:35] <brrt> somehow, I think that seems like an overflow
+
+[14:36] <timotimo> yeah, but i'm not sure how i'm doing it exactly
+
+[14:40] <timotimo> ah
+
+[14:41] <timotimo> it's getting a sane amount of positional args from the callsite, then continues to -- for each passed arg it finds in the bytecode
+
+[14:42] <timotimo> that ends up going below 0 in an unsigned number
+
+[14:49] <timotimo> i think i get it %)
+
+[14:51] <timotimo> when using a sentinel value, always make sure the sentinel is not also a valid value by itself
+
+[14:57] <brrt> yeah, that is an issue
+
+[14:57] <brrt> with in-band communication in general
+
+[14:57] <dalek> MoarVM/optimize_callsite_memory: 0a2f2f7 | timotimo++ | src/core/callsite. (2 files):
+
+[14:57] <dalek> MoarVM/optimize_callsite_memory: callsites are now allowed to share flag arrays, too.
+
+[14:57] <dalek> MoarVM/optimize_callsite_memory: review: https://github.com/MoarVM/MoarVM/commit/0a2f2f7aeb
+
+[14:57] <dalek> MoarVM/optimize_callsite_memory: 1c1074c | timotimo++ | src/core/bytecode.c:
+
+[14:57] <dalek> MoarVM/optimize_callsite_memory: saner default values for callsites: owns its arrays
+
+[14:57] <dalek> MoarVM/optimize_callsite_memory: review: https://github.com/MoarVM/MoarVM/commit/1c1074c774
+
+[14:57] <dalek> MoarVM/optimize_callsite_memory: 9ca6054 | timotimo++ | src/ (2 files):
+
+[14:57] <dalek> MoarVM/optimize_callsite_memory: share flag buffers for compunits' callsites
+
+[14:57] <dalek> MoarVM/optimize_callsite_memory: review: https://github.com/MoarVM/MoarVM/commit/9ca6054612
+
+[14:57] <dalek> MoarVM/optimize_callsite_memory: 4b54e35 | timotimo++ | src/6model/reprs/MVMCompUnit.c:
+
+[14:57] <dalek> MoarVM/optimize_callsite_memory: don't forget to clear shared flags buffer of compunit
+
+[14:57] <dalek> MoarVM/optimize_callsite_memory: review: https://github.com/MoarVM/MoarVM/commit/4b54e35089
+
+[14:58] <timotimo> brrt[idle]: brrt is idle and looking for assignments? :P
+
+[14:58] <timotimo> the last sentinel value problem didn't actually need a sentinel at all, since whether a 0 meant "start of the shared buffer" or "doesn't point at anything" in the pointer was signalled by "how many flags does this callsite have?"
+
+[14:59] <timotimo> now i can actually make a measurement how much memory this saves
+
+[14:59] <timotimo> i bet it's more than one kilobyte!
+
+[15:02] <timotimo> 94.4 kbytes on perl6 -e ''
+
+[15:03] <japhb> Nothing to sneeze at.  :-)
+
+[15:03] <yoleaux2> 09:12Z <jnthn> japhb: I haven't knowingly fixed that...agree it'd be nice to deal with.
+
+[15:04] <timotimo> when you normally have 61888kbytes, 94.4 isn't terribly much :\
+
+[15:06] <timotimo> 3.6 kbytes off of nqp-m -e ''; normally the whole thing takes about 14000kbytes
+
+[15:09] <timotimo> considering i spent most of my day on making this work ...
+
+[15:09] <timotimo> well, at least it improves cache locality of arg flags and nameds in callsites, so ... win?
+
+[15:09] <japhb> One of the SQLite releases came with a note that they doubled the speed of the entire product through a series of patches that made barely measurable improvements (barring use of callgrind).
+
+[15:09] <japhb> So, yeah, all for it.
+
+[15:10] <timotimo> right. that just means i'll have to do a thousand more days of work just like this!
+
+[15:15] *** ggoebel joined
+[15:33] <timotimo> i suppose a good next step would be to factor out the spesh allocator and use it for interned callsites
+
+[15:36] <timotimo> oh, oh, oh!
+
+[15:36] <timotimo> flags are 8 bit each ... that means they can be unioned to an MVMCallsiteEntry[8]
+
+[15:36] <timotimo> for *that* we have a clear flag that tells us whether we'll use the small array or the pointer
+
+[15:37] <timotimo> and almost all interned callsites seem to have less than 8 entries
+
+[15:37] <timotimo> i don't see a single one, tbh
+
+[15:38] <timotimo> so that's probably the limit for interning
+
+[15:46] <timotimo> that's a bit more work ...
+
+[16:06] <timotimo> this really wants a few utility functions rather than making the code everywhere more complex
+
+[16:15] <timotimo> may also want to reduce the small-array-optimization to 4 slots instead of 8 when on a 32bit OS
+
+[16:15] <timotimo> #define and sizeof to the rescue!
+
+[17:14] <timotimo> wow, make finished building rakudo
+
+[17:20] <timotimo> hah, i had MVM_CALLSITE_FLAGS_IS_SMALL defined as cs->flag_count > NUM_SMALL_ELEMS
+
+[17:33] <timotimo> uargh, C macros!
+
+[17:33] <timotimo> i forgot to put () around the comparison
+
+[17:33] <timotimo> so !IS_SMALL ended up negating the flag count and comparing that against the number of allowed elements
+
+[17:34] <geekosaur> heh
+
+[17:50] *** domidumont joined
+[18:05] <timotimo> damn, something's b0rking with our autounboxing
+
+[18:05] <timotimo> which is implemented with a little forest of macros
+
+[18:06] <arnsholt> Mmmmm, macros
+
+[18:06] <arnsholt> Did I regale you with how I auto-generated bindings for OpenSSL?
+
+[18:07] <arnsholt> A large chunk of the OpenSSL API being macros >.<
+
+[18:07] <timotimo> i'm not sure
+
+[18:07] <arnsholt> A Python program parsing the header files, generating SmallTalk code (of all things!)
+
+[18:07] <mst> :D
+
+[18:08] <arnsholt> With a special chunk of code taking the AST generated by pycparser and generating ST code from that, for the macros
+
+[18:08] <timotimo> fantastic
+
+[18:08] <mst> that's heinous
+
+[18:08] * mst applauds
+
+[18:08] <mst> (it's openssl, 'heinous but working' is the highest state one can aspire to ;)
+
+[18:09] <arnsholt> Yeah, I called it my mad science project
+
+[18:10] <arnsholt> Python, parsing C, generating SmallTalk. What could possibly go wrong?! =D
+
+[18:11] <arnsholt> Of course, some of the macros are not actually valid C when inserted into the body of a function (which was how I did the conversion)
+
+[18:11] <timotimo> buh.
+
+[18:11] <arnsholt> And other hilarious things
+
+[18:11] <timotimo> it's not one of the first ... 100? ... hits of this line that actually cause explodeys
+
+[18:17] <timotimo> anyone want to look over my code and see if i did things worng? :)
+
+[18:18] <timotimo> m: say 18.base(2);
+
+[18:18] <camelia> rakudo-moar 906719: OUTPUT«10010␤»
+
+[18:18] <timotimo> i'm getting an error that says basically i'm getting a named where i was trying to get a positional
+
+[18:19] <timotimo> anybody want to go over my code see what might be problematic?
+
+[18:22] <timotimo> it's nothing that valgrind would show :\
+
+[18:31] <dalek> MoarVM/callsite_flags_sso: 7c4db84 | timotimo++ | src/ (14 files):
+
+[18:31] <dalek> MoarVM/callsite_flags_sso: callsite: store up to 8 flags inside a pointer
+
+[18:31] <dalek> MoarVM/callsite_flags_sso: review: https://github.com/MoarVM/MoarVM/commit/7c4db84eec
+
+[18:31] <timotimo> arnsholt: could you spare a minute of your valuable time? :)
+
+[18:41] <timotimo> hm, i wonder if the literals for the common callsites have become invalid?
+
+[18:42] <timotimo> https://github.com/MoarVM/MoarVM/blob/callsite_flags_sso/src/core/callsite.c#L18 - all of these
+
+[18:45] <arnsholt> timotimo: Sure!
+
+[18:47] <timotimo> ah!
+
+[18:48] <timotimo> a friend just made me aware of what the problem is
+
+[18:48] <timotimo> these literals all have fewer than 8 entries, so they'll be considered small
+
+[18:48] <timotimo> thus, the address of the literal array will be interpreted as a set of flags
+
+[18:48] <timotimo> which will be memory locations inside of the loaded libmoar.so
+
+[18:54] <timotimo> rakudo needs a tiny bit of change because of the callsite format now
+
+[19:05] <timotimo> cool, i can throw out the inner struct that i thougth i had to create to use bitfields
+
+[20:01] *** vendethiel- joined
+[20:02] *** Ven_ joined
+[20:16] *** Ven_ joined
+[20:33] *** Ven__ joined
+[20:46] <timotimo> it crashed ... but under valgrind it doesn't :\
+
+[20:46] *** geekosaur joined
+[21:02] *** Ven_ joined
+[21:26] <timotimo> i somehow manage to have invalid reads in the gc_mark of MVMCallCapture when it's grabbing the .o of args[i] ... :\
+
+[21:52] <diakopter> timotimo: sounds like that would be missing MVM_omgIforgotTheMacroName
+
+[21:52] <diakopter> er
+
+[21:52] <timotimo> thing is, those flags aren't what i changed when i mucked around with callsite
+
+[21:52] <timotimo> it turns out it actually is reading more flags than the callsite that belongs to the callcapture defines
+
+[21:53] <diakopter> oh, oops
+
+[21:53] <timotimo> my hunch at the moment is that perhaps i'm not twiddling callsites correctly when i put the invocant at the start for that one piece of code that does exactly that
+
+[21:55] <timotimo> aha! yes, i *am* doing it wrong
+
+[21:55] <timotimo> no, i misread
+
+[21:57] <timotimo> but now that i did another little change, i'm getting different behavior ...
+
+[22:02] <timotimo> so, where is this 16 coming from?
+
+[22:03] <timotimo> ah, it's not the same value under valgrind ... but somehow it's not warning about using uninitialized memory
+
+[22:13] * timotimo stares and doesn't really get it
+
+[22:13] <timotimo> diakopter: want to give it a try? ;)
+
+[22:18] <dalek> MoarVM/callsite_flags_sso: 2208599 | timotimo++ | src/6model/reprs/MVMCallCapture.c:
+
+[22:18] <dalek> MoarVM/callsite_flags_sso: explode when gc-marking CallCapture past args array
+
+[22:18] <dalek> MoarVM/callsite_flags_sso: review: https://github.com/MoarVM/MoarVM/commit/22085996b6
+
+[22:18] <dalek> MoarVM/callsite_flags_sso: 7930367 | timotimo++ | src/ (12 files):
+
+[22:18] <dalek> MoarVM/callsite_flags_sso: drop the .props from Callsite again
+
+[22:18] <dalek> MoarVM/callsite_flags_sso:
+
+[22:18] <dalek> MoarVM/callsite_flags_sso: turns out bitfields can be mixed into regular structs
+
+[22:18] <dalek> MoarVM/callsite_flags_sso: review: https://github.com/MoarVM/MoarVM/commit/79303676b0
+
+[22:18] <dalek> MoarVM/callsite_flags_sso: f3a88a2 | timotimo++ | src/core/callsite. (2 files):
+
+[22:18] <dalek> MoarVM/callsite_flags_sso: reorder union content for Callsite literals
+
+[22:18] <dalek> MoarVM/callsite_flags_sso: review: https://github.com/MoarVM/MoarVM/commit/f3a88a2974
+
+[22:18] <dalek> MoarVM/callsite_flags_sso: 5c3cf99 | timotimo++ | src/core/callsite.h:
+
+[22:19] <timotimo> diakopter: i have this branch you see here, and a branch of the same name in rakudo. it runs all the way until it hits compiling the core setting. then it crashes with "illegal flag value" (or something) when trying to handle some arguments
+
+[22:21] *** kjs_ joined
+[22:40] <timotimo> both optimizations cause a 0.3% difference in maxrss for nqp-m -e ''
+
+[22:41] <timotimo> i thought the improvement was bigger before ... !?
+
+[22:42] <timotimo> oh, wow, both optimizations added up make all of it about 8x better than only the very first
+
+[22:42] <timotimo> not sure how much of that is just the sso; will measure again
+
+[22:48] <timotimo> 160 kilobytes difference? that seems a bit extreme ... i'm confused.
+
+[22:48] <timotimo> maybe the added optimization actually regressed something somewhere
+
+[22:50] <timotimo> could just be very noisy :(
+
+[22:51] <timotimo> i did 10 measurements to be sure ...
+
+[23:01] <diakopter> timotimo: maybe investigate whether it makes a difference in the serialization of perl6.moarvm?
+
+[23:06] <timotimo> oh, that's an interesting thought
+
+[23:14] <timotimo> burgh but what .moarvm file has the changes? :\
+
+[23:14] *** kjs_ joined

@@ -1,0 +1,277 @@
+[00:04] *** lucasb left
+[00:24] *** AlexDaniel left
+[00:25] *** AlexDaniel joined
+[00:25] *** AlexDaniel left
+[00:25] *** AlexDaniel joined
+[01:55] *** mst left
+[05:37] *** evalable6 left
+[05:37] *** linkable6 left
+[05:39] *** evalable6 joined
+[05:39] *** linkable6 joined
+[06:15] *** Kaiepi joined
+[07:53] <MasterDuke> hm. has anyone pulled after my merge and run some spectests? i'm getting a bunch of random fails. different test file every time, they all run fine by themselves
+
+[07:54] <MasterDuke> haven't been able to catch anything in gdb, valgrind, etc
+
+[08:04] <MasterDuke> i've seen this before, so i don't think it's 100% caused by my PR. but maybe it exacerbated things?
+
+[08:05] <MasterDuke> oh. just got 'MoarVM panic: Must not GC when in the specializer/JIT' when building rakudo
+
+[08:08] <MasterDuke> ah. i have MVM_GC_DEBUG set to 1
+
+[08:09] <MasterDuke> would explain why building rakudo is so much slower
+
+[08:20] <MasterDuke> hm. the problems are hard to repro, and don't consistently happen in the same place. is there a way for MVM_panic to pause so i can attach gdb? or it just start gdb for me?
+
+[08:27] <MasterDuke> is it not safe to do MVM_repr_at_key_o or MVM_HASH_GET in src/spesh/optimize.c? do they need to be rooted or something like that?
+
+[08:28] <MasterDuke> https://github.com/MoarVM/MoarVM/blob/master/src/spesh/optimize.c#L1328 is where it's MVM_panic'ing
+
+[08:29] <MasterDuke> hm. there aren't any other MVM_gc_mark_thread_blocked() calls in src/spesh/optimize.c...
+
+[08:34] *** sena_kun joined
+[08:43] <MasterDuke> well, if i just remove it i get `MoarVM panic: Invalid owner in item added to GC worklist` instead (with MVM_GC_DEBUG set to 3 i'm now getting these when building nqp, and much more reliably)
+
+[09:01] <nine> And if you then add appropriate rooting?
+
+[09:02] <MasterDuke> working on that now
+
+[09:02] <nine> I seemed to remember something about spesh not being allowed to GC. But then I tried to check this and found a couple of places in spesh that did, so I thought I misremembered
+
+[09:03] <MasterDuke> not sure exactly what needs to be rooted. entry and hash?
+
+[09:05] <MasterDuke> hm. MVM_gc_mark_thread_(un)blocked removed and syms, hll_name, hash, entry all rooted, but same panic about invalid owner
+
+[09:09] <nine> I don't think MVM_repr_at_key_o or MVM_HASH_GET allocate, so there shouldn't be any GC there. Also that would throw the same "Must not GC when in the specializer" error anyway
+
+[09:10] <nine> Also entry is not an MVMCollectable, it won't move
+
+[09:11] <MasterDuke> then the only other call is to uv_mutex_lock ?
+
+[09:11] <nine> Sorry, no idea what would fail here :/ Guess it's a job for rr
+
+[09:12] <MasterDuke> ugh. guess i have to switch to the slow laptop then
+
+[09:24] *** Kaiepi left
+[09:25] *** leont joined
+[09:25] *** Kaiepi joined
+[09:35] *** Altai-man_ joined
+[09:38] *** sena_kun left
+[11:36] *** sena_kun joined
+[11:38] *** Altai-man_ left
+[12:52] <timotimo> there are spots where spesh is allowed to GC, it's only in between places when all our datastructures that may be pointing at stuff have been freed already
+
+[12:53] <timotimo> i wonder if some at_key_o calls will box
+
+[12:53] <timotimo> we don't have native-typed hashes, but maybe contexts or something like that have at_key ops for "native" things
+
+[13:05] <timotimo> MVMContext's at_key is indeed a bit more complicated
+
+[13:06] <timotimo> it uses the frame walker, gets the lexical via MVM_spesh_frame_walker_get_lex, which can vivify lexicals
+
+[13:06] <timotimo> which is an allocating op
+
+[13:06] <lizmat> is that the one that dies is the key cannot be found ?
+
+[13:07] <timotimo> nah, that one returns 0 when nothing was found
+
+[13:07] <lizmat> there's one REPR that does that, and it is very irritating  :-)
+
+[13:08] <timotimo> umm, i think we shouldn't mark the spesh thread blocked actually
+
+[13:09] <timotimo> that would allow GC to kick in, have another thread steal this thread's work, and then gc would run inside of spesh
+
+[13:09] <timotimo> specifically, inside spesh's optimize phase
+
+[13:09] <timotimo> which is a big no-no
+
+[13:10] <timotimo> MasterDuke: would you like to tast my hypothesis by removing the "mark thread blocked"/"unblocked" from spesh's optimize?
+
+[13:25] <Geth_> ¦ MoarVM/master: 5 commits pushed by (Stefan Seifert)++
+
+[13:25] <Geth_> ¦ MoarVM/master: 520c351244 | Allow for explicitly marking the mainline_frame in the bytecode
+
+[13:25] <Geth_> ¦ MoarVM/master: 9c758d5ebd | Fix duplication of lists when MAST::Frames get written to bytecode multiple times
+
+[13:25] <Geth_> ¦ MoarVM/master: a7f9889403 | Add methods WHICH and raku to MAST::Frame for easier debugging
+
+[13:25] <Geth_> ¦ MoarVM/master: 995c70ca85 | Allow for MAST::CompUnit to share its lists with an outer compilation
+
+[13:25] <Geth_> ¦ MoarVM/master: 6c7ee4e8f3 | Add a method for clearing a cached index on a MAST::Frame
+
+[13:25] <Geth_> ¦ MoarVM/master: review: https://github.com/MoarVM/MoarVM/compare/5f0f7919d104...6c7ee4e8f3b6
+
+[13:35] *** Altai-man_ joined
+[13:38] *** sena_kun left
+[13:39] *** travis-ci joined
+[13:39] <travis-ci> MoarVM build failed. Stefan Seifert 'Add a method for clearing a cached index on a MAST::Frame
+
+[13:39] <travis-ci> https://travis-ci.org/MoarVM/MoarVM/builds/695662033 https://github.com/MoarVM/MoarVM/compare/5f0f7919d104...6c7ee4e8f3b6
+
+[13:39] *** travis-ci left
+[14:20] <MasterDuke> timotimo: i tried that. removing the *_(un)block() calls changed the panic from `Must not GC when in the specializer/JIT` to `Invalid owner in item added to GC worklist`
+
+[14:23] <MasterDuke> and assuming it's not a problem to MVMROOT something that doesn't need it, rooting all of syms, hll_name, hash, and entry didn't change anything
+
+[15:05] <dogbert11> Hmm, are things a bit buggy atm? I get MoarVM panics all the time.
+
+[15:08] <dogbert11> it seems to fail in two places, either in 'run_gc' or in 'MVM_spesh_graph_mark'
+
+[15:08] <MasterDuke> dogbert11: yeah, looks like something was wrong in my PR i merged yesterday
+
+[15:09] <dogbert11> ok, any clues?
+
+[15:09] <MasterDuke> been a bit of chat about it today with nine and timotimo
+
+[15:09] <dogbert11> cool
+
+[15:10] <MasterDuke> well, i was calling MVM_gc_mark_thread_(un)blocked(). that's wrong. but removing those still panics and that we haven't figured out
+
+[15:10] <MasterDuke> calling those during spesh optimize
+
+[15:11] <nine> Any luck with rr?
+
+[15:11] <nine> The (un)block calls are definitely wrong
+
+[15:11] <MasterDuke> just starting building stuff on your server now
+
+[15:12] <dogbert11> is it this one? MVM_gc_mark_thread_blocked (tc=0x699790) at src/gc/orchestrate.c:314
+
+[15:12] <MasterDuke> nope, src/spesh/optimize.c:1328
+
+[15:13] <dogbert11> ok, I'll try to remove them as well
+
+[15:13] <MasterDuke> and the associated unblocked at the end of the function
+
+[15:13] <nine> dogbert11: just revert 9b60b37ca9cba24f027183d666343267efa1a172 locally
+
+[15:13] <linkable6> (2020-05-03) https://github.com/MoarVM/MoarVM/commit/9b60b37ca9 Spesh and JIT get(cur)?hllsym
+
+[15:14] <MasterDuke> i wonder why these problems didn't show up while i was initially developing the pr
+
+[15:17] <dogbert11> ok, removing the (un)block seems to have made one of the errors disappear, now I get the 'MVM_spesh_graph_mark' one all the time
+
+[15:19] *** lucasb joined
+[15:29] <MasterDuke> starting an `rr record` now
+
+[15:36] *** sena_kun joined
+[15:38] *** Altai-man_ left
+[15:39] <MasterDuke> apparently i haven't used rr in a while
+
+[15:41] <MasterDuke> i don't seem to have any symbols
+
+[15:51] <MasterDuke> i built moarvm with --debug=3, but i'm getting nothing in my `rr replay`
+
+[15:58] <MasterDuke> afk for a bit
+
+[16:54] *** mst joined
+[16:54] *** ChanServ sets mode: +o mst
+
+[17:21] <MasterDuke> nine: have you used rr on that machine before?
+
+[17:35] *** Altai-man_ joined
+[17:38] *** sena_kun left
+[17:52] *** zakharyas joined
+[18:08] <nine> no, just installed it
+
+[18:09] <nine> MasterDuke: where did you install rakudo to?
+
+[18:12] <MasterDuke> nine: i ran `perl Configure.pl --prefix=/home/masterduke/raku/ --debug=3 --telemeh && make -j12 install` in a moarvm checkout (after some source edits) and `perl Configure.pl --no-silent-build --prefix=/home/masterduke/raku/ --backends=moar && make -j12 install` in an nqp checkout
+
+[18:12] <MasterDuke> and then `rr record '/home/masterduke/raku/bin/moar' --libpath=src/vm/moar/stage0 src/vm/moar/stage0/nqp.moarvm --bootstrap --module-path=gen/moar/stage1 --no-regex-lib --target=mbc --setting=NULL --stable-sc=stage1 --output=gen/moar/stage1/NQPCORE.setting.moarvm gen/moar/stage1/NQPCORE.setting`
+
+[18:12] <[Coke]> tele... meh.
+
+[18:13] <MasterDuke> `rr replay` loads the recording, but a backtrace just shows addresses
+
+[18:14] <nine> MasterDuke: I just started rr replay as your user from your home directory and when I interrupt the program I get very nice backtraces
+
+[18:14] <nine> https://gist.github.com/niner/6184e97f889bc7dcf59671d903133c8a
+
+[18:16] <MasterDuke> huh. continuing does seem to work. but running didn't...
+
+[18:16] <nine> But that's how you use rr :)
+
+[18:16] <nine> It is a recorded program, so you just need to continue
+
+[18:17] <MasterDuke> well, their docs do say you can restart it though
+
+[18:17] <MasterDuke> fwiw, this is what i got https://gist.github.com/MasterDuke17/328a0ec7610c0d817cd91a1b563c8e82
+
+[18:18] <MasterDuke> but yeah, continuing seems to be making progress
+
+[18:21] * MasterDuke did look at the rr docs because /me hadn't used it in a while, but somehow still went wrong
+
+[18:23] <MasterDuke> huh. now i got a sigkill, not a break at MVM_panic
+
+[18:51] <MasterDuke> https://gist.github.com/MasterDuke17/f3c337b724812597533a67cc54a936d9 is the backtrace i get after the sigkill
+
+[19:15] *** mst left
+[19:19] *** mst joined
+[19:19] *** ChanServ sets mode: +o mst
+
+[19:36] *** sena_kun joined
+[19:38] *** Altai-man_ left
+[19:55] <nine> MasterDuke: is the sigkill reproducible? Have you tried a different recording?
+
+[20:07] *** Kaiepi left
+[20:07] *** Kaiepi joined
+[20:16] *** leont_ joined
+[20:17] <MasterDuke> nine: in rr, yes. been very afk, but just started another recording to see if that'll be the same
+
+[20:21] *** leont left
+[20:21] *** zakharyas left
+[20:28] *** zakharyas joined
+[20:30] <MasterDuke> the new recording does the same thing (sigkill) in replay
+
+[20:47] *** zakharyas left
+[21:13] <timotimo> MasterDuke: i bet you're just seeing the abort from the wrong thread
+
+[21:13] <timotimo> because the backtrace is just "spesh worker waiting for work to be submitted from another thread"
+
+[21:17] *** lucasb left
+[21:35] *** Altai-man_ joined
+[21:38] *** sena_kun left
+[21:53] *** rypervenche left
+[21:54] *** rypervenche joined
+[21:54] *** MasterDuke left
+[21:54] *** rypervenche left
+[21:54] *** MasterDuke joined
+[21:55] *** vrurg left
+[21:55] *** [Coke] left
+[21:55] *** vrurg joined
+[21:55] *** [Coke] joined
+[21:55] *** AlexDaniel` left
+[21:56] *** AlexDaniel` joined
+[21:56] *** rypervenche joined
+[21:57] <MasterDuke> hm. info threads only shows one
+
+[21:58] *** nebuchadnezzar left
+[21:58] *** TimToady left
+[21:58] *** colomon_ left
+[21:58] *** nine left
+[21:59] *** nebuchadnezzar joined
+[21:59] *** TimToady joined
+[21:59] *** colomon_ joined
+[21:59] *** nine joined
+[21:59] <MasterDuke> doh, i should restart it
+
+[22:00] *** AlexDaniel` left
+[22:10] *** AlexDaniel left
+[22:13] *** AlexDaniel` joined
+[22:19] <timotimo> why restart instead of going backwards?
+
+[22:21] <timotimo> hm, well, there are situations where it won't let you perhaps?
+
+[22:27] <MasterDuke> well, i don't know what i'm looking for yet
+
+[22:27] <MasterDuke> and why isn't my breakpoint in MVM_panic hitting>
+
+[22:27] <MasterDuke> ?
+
+[22:28] *** AlexDaniel joined
+[22:28] *** AlexDaniel left
+[22:28] *** AlexDaniel joined
+[23:35] *** leont_ left
+[23:36] *** sena_kun joined
+[23:37] *** Altai-man_ left

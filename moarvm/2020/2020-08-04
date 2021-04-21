@@ -1,0 +1,215 @@
+[00:12] *** Altai-man_ joined
+[00:14] *** sena_kun left
+[02:01] *** jnthn left
+[02:12] *** sena_kun joined
+[02:14] *** Altai-man_ left
+[04:04] *** mst left
+[04:12] *** Altai-man_ joined
+[04:15] *** sena_kun left
+[05:50] *** Util left
+[06:09] *** Util joined
+[06:13] *** sena_kun joined
+[06:15] *** Altai-man_ left
+[06:34] *** Geth_ joined
+[06:40] *** Geth left
+[06:43] *** Geth joined
+[06:48] *** Geth left
+[07:16] *** zakharyas joined
+[07:33] *** squashable6 left
+[07:35] *** squashable6 joined
+[09:12] *** Altai-man_ joined
+[09:14] *** domidumont joined
+[09:14] *** sena_kun left
+[09:18] *** raku-bridge1 joined
+[09:18] *** raku-bridge left
+[09:19] *** raku-bridge joined
+[09:20] *** raku-bridge1 left
+[10:27] <nwc10> good *, #moarvm 
+
+[10:27] <nwc10> finally, after something like 24 hours of looping, I can provoke the "oops" on MoarVM master with UT Hash
+
+[10:28] <nwc10> there exists, somehow, a rare race condition whereby tc->instance->mutex_object_ids can already have an entry for obj
+
+[10:28] <nwc10> when MVM_gc_object_id is called
+
+[11:20] *** zakharyas left
+[12:13] *** sena_kun joined
+[12:14] *** Altai-man_ left
+[12:28] *** mst joined
+[12:28] *** ChanServ sets mode: +o mst
+
+[12:28] <nine> nwc10: but, but, but, how?
+
+[12:37] *** zakharyas joined
+[12:56] *** domidumont left
+[13:08] *** dogbert17 joined
+[13:10] <dogbert17> nwc10: have you tried using tsan?
+
+[13:10] <tellable6> 2020-08-03T10:19:58Z #moarvm <nwc10> dogbert17: yes, that was my assumption to. I think that it has to be an existing corner-case bug that I've exposed. So, I've added similar code to MoarVM master, and now I have that one looping until the test fails
+
+[13:17] <dogbert17> according to tsan we have (among other things): SUMMARY: ThreadSanitizer: data race src/gc/objectid.c:29 in MVM_gc_object_id 
+
+[13:54] <nine> is there any more information about that? I just don't see it
+
+[14:02] *** squashable6 left
+[14:04] <dogbert17> nine: my bad, here's an example: https://gist.github.com/dogbert17/7105f17e15a3aee1d589be0bf8ebc7d5
+
+[14:04] *** squashable6 joined
+[14:12] *** Altai-man_ joined
+[14:15] *** sena_kun left
+[14:17] <MasterDuke> huh, https://github.com/MoarVM/MoarVM/blob/master/src/core/interp.c#L6419 appears in both the read and write backtrace. but that looks like a line that really shouldn't be getting hit
+
+[14:22] <dogbert17> hmm, perhaps I should run with --no-optimize
+
+[14:23] <dogbert17> I built MoarVm with 'perl Configure.pl --debug --tsan --prefix=../../install/' which might have been a bit sloppy
+
+[14:24] <nine> Setting an object's header flags that way is reacey!
+
+[14:28] <MasterDuke> what way?
+
+[14:28] *** patrickb joined
+[14:29] <nine> obj->header.flags |= MVM_CF_HAS_OBJECT_ID
+
+[14:30] <MasterDuke> that's done in a couple different places. what should be done instead?
+
+[14:30] *** lucasb joined
+[14:32] <MasterDuke> get flags into a temp variable, update that, then set them to the temp variable?
+
+[14:37] <nine> That's be just the same. What it needs is an atomic CAS
+
+[14:38] <nine> Which is complicated by the fact that those work only on native sized ints while flags is an MVMuint16
+
+[14:39] *** patrickb left
+[14:42] <MasterDuke> so we're forced to pay the cost of making every single object bigger?
+
+[14:42] <nine> No. We're just gonna have to swap more than just those flags
+
+[14:43] <nine> Depending on sizeof(AO_t) it's either flags and size or owner, flags and size
+
+[14:44] <nine> The good thing is that owner and size won't be changing
+
+[14:46] <MasterDuke> heh, this sounds like a problem that someone other than i should fix
+
+[14:52] *** patrickb joined
+[15:25] *** patrickb left
+[15:27] *** Kaiepi left
+[15:27] *** Kaiepi joined
+[16:19] <dogbert17> note the the gist I posted refers to the XXX-A-Better-Hash branch
+
+[16:19] <dogbert17> s/the/that/
+
+[16:45] <nwc10> oh my (Been out for the afternoon)
+
+[16:45] <nwc10> So it's an even deeper bug than I suspect
+
+[16:45] <nwc10> (at the point of going out I was thinking "in my backtrace, why is size 0"?
+
+[16:45] <nwc10> )
+
+[16:45] <nwc10> data race is because some other thread updates flags?
+
+[16:48] <nwc10> data race is because some other thread updates flags?
+
+[16:49] <timotimo> alternatively, we can just??? put a MVM_barrier after the flag update
+
+[16:50] <nine> Yes. MVM_gc_object_id can be called by any thread, not only the owner of the object.
+
+[16:50] <nwc10> and the issue here is that every *other* thread is accessing flags without any sort of write barrier?
+
+[16:51] <nwc10> (in that, MVM_gc_object_id is doing things with a mutex locked, and I *thought* that unlockign a mutex was a write barrier. But this stuff is well beyond my comfort zone)
+
+[16:51] <nine> MVM_gc_write_barrier_hit_by is probably the most likely competitor when writing to those flags
+
+[16:51] <nwc10> anyway, it's a real bug, and it's an existing bug, because I can recreate it on master.
+
+[16:52] <nine> Both MVM_gc_write_barrier_hit_by and MVM_gc_object_id read an object's flags and write them back with an additional bit set. May well happen that this bit gets lost if they compete.
+
+[16:54] <nine> MVM_gc_object_id actually reads it twice, but of course the compiler is allowed to reduce that to just one read
+
+[17:07] <nwc10> "benchmarking might reveal" - it might be faster, but it might just be simpler, to get rid of the flag MVM_CF_HAS_OBJECT_ID and rely totally on hash lookups in tc->instance->object_ids
+
+[17:07] <nwc10> If that way, we don't need to start using atomic ops in the GC write barrier code
+
+[17:11] *** domidumont joined
+[17:11] <nine> True. Write barriers are certainly much hotter than objectid
+
+[17:13] *** sena_kun joined
+[17:15] *** Altai-man_ left
+[17:19] *** patrickb joined
+[17:31] <timotimo> just wait until someone puts every single object in the vm into an object hash
+
+[17:33] <nine> But....writing to a hash triggers a write barrier ;)
+
+[17:37] <nine> Actually MVM_gc_write_barrier_hit_by would only need an atomic op for setting the flag, i.e. the first time the object got git. We can still test for the flag using a normal op
+
+[17:41] <nine> s/got git/got hit/
+
+[17:42] *** raku-bridge left
+[17:42] *** raku-bridge joined
+[17:42] *** raku-bridge left
+[17:42] *** raku-bridge joined
+[17:43] <timotimo> are you suggesting the flag still sticks around even though we rely on the hash, and we'll just use the flag to not have to look at the hash so often?
+
+[17:44] <nine> that's what we currently do
+
+[17:45] *** zakharyas left
+[17:46] <timotimo> ah
+
+[18:01] <nwc10> also, after thinking about this in the bath (but not yet looked at the code) we need MVM_CF_HAS_OBJECT_ID to exist for the GC to be efficient - it needs to know whether to promote an object from the nursery immediately
+
+[18:03] *** domidumont left
+[19:12] *** Altai-man_ joined
+[19:14] *** sena_kun left
+[19:25] *** sena_kun joined
+[19:26] *** Altai-man_ left
+[19:51] *** zakharyas joined
+[20:21] <dogbert17> fun fact, running t/spec/S17-lowlevel/cas.t causes tsan to report ~1800 data race warnings
+
+[20:40] *** zakharyas left
+[21:24] *** Altai-man_ joined
+[21:26] *** sena_kun left
+[21:37] <timotimo> yeah, neither tsan nor coverity understand cas
+
+[21:39] *** Kaeipi joined
+[21:39] *** Kaiepi left
+[21:58] *** linkable6 left
+[22:06] *** bisectable6 left
+[22:06] *** bisectable6 joined
+[22:10] *** bisectable6 left
+[22:34] <timotimo> and/or clang analyze, i think
+
+[22:42] *** linkable6 joined
+[22:47] *** leont left
+[22:55] *** linkable6 left
+[22:55] *** squashable6 left
+[22:55] *** nativecallable6 left
+[22:55] *** notable6 left
+[22:55] *** greppable6 left
+[22:55] *** coverable6 left
+[22:55] *** tellable6 left
+[22:55] *** shareable6 left
+[22:55] *** benchable6 left
+[22:55] *** evalable6 left
+[22:55] *** releasable6 left
+[22:55] *** sourceable6 left
+[22:55] *** guifa2 left
+[22:55] *** leedo left
+[22:55] *** xiaomiao left
+[22:57] *** linkable6 joined
+[22:57] *** squashable6 joined
+[22:57] *** guifa2 joined
+[22:57] *** nativecallable6 joined
+[22:57] *** notable6 joined
+[22:57] *** greppable6 joined
+[22:57] *** coverable6 joined
+[22:57] *** tellable6 joined
+[22:57] *** shareable6 joined
+[22:57] *** benchable6 joined
+[22:57] *** evalable6 joined
+[22:57] *** sourceable6 joined
+[22:57] *** releasable6 joined
+[22:57] *** leedo joined
+[22:57] *** xiaomiao joined
+[23:01] *** bisectable6 joined
+[23:20] *** patrickz joined
+[23:24] *** patrickb left

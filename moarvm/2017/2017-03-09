@@ -1,0 +1,274 @@
+[00:32] *** zakharyas joined
+[01:25] *** zakharyas joined
+[03:44] *** vendethiel joined
+[04:43] *** vendethiel- joined
+[06:08] *** agentzh joined
+[06:33] *** zakharyas joined
+[06:58] *** zakharyas joined
+[07:01] *** domidumont joined
+[07:51] *** nebuchadnezzar joined
+[08:14] *** brrt joined
+[08:20] <brrt> good * #moarvm
+
+[08:20] <brrt> i survived attempts by the national railways to suffocate its travellers once more
+
+[08:20] <brrt> and on the way i realized
+
+[08:21] <brrt> there's only one teeny, tiny bit to fix before the expr JIT can compile c function calls
+
+[08:26] <samcv> hey brrt do you know about MVMROOT
+
+[08:26] <samcv> i would like to learn its magic and how it works :)
+
+[08:27] <samcv> not sure when it is needed vs when it isn't needed, which variables need it etc
+
+[08:29] <brrt> i know something about it
+
+[08:37] <brrt> what it does, iirc, is add its argument as a 'temporary GC root'
+
+[08:37] <brrt> so
+
+[08:38] <brrt> we have a precise garbage collector, right
+
+[08:44] <samcv> ok so it helps out the GC. so why does adding MVMROOT for a variable make it not crash. does it GC those values sometimes?
+
+[08:44] <samcv> and then ruin everything?
+
+[08:45] <samcv> and why doesn't that need to be done for _everything_
+
+[09:21] *** domidumont joined
+[09:26] <brrt> okay, sorry, i was off for a bit
+
+[09:26] <brrt> so
+
+[09:26] <brrt> precise 2 gen garbage collector
+
+[09:26] <brrt> young objects, nursery, bump allocation, two-space
+
+[09:28] *** domidumont joined
+[09:28] <brrt> during collection, collector walks all 'roots', i.e. all active frames and their work space / lexicals
+
+[09:29] <brrt> however, what if you create a new object, and then directly allocate another (during initialization)
+
+[09:29] <brrt> then, prior to assignment to the work space registers, the collector can't find that object, and so would consider it's memory dead
+
+[09:30] <brrt> the garbage collector could move the object out underneath it's pointer
+
+[09:30] <brrt> that's what the MVMROOT thing does
+
+[09:31] <brrt> it pushes the pointer (or rather, i think, a pointer-to-the-pointer), on a temporary stack, and if any GC would happen during the block it covers, it will a): scan that pointer, b): update that pointer if it were moved
+
+[09:53] <brrt> samcv: does the above make sense?
+
+[09:58] *** domidumont joined
+[10:06] <samcv> yeah i think so
+
+[10:07] <samcv> so if you create a value from another one. and the GC applies to only MVM type objects or how does it work
+
+[10:08] <samcv> like MVMString * i know it will do at least. what about just plain integers? that's just on the stack right
+
+[10:10] <jnthn> Yeah, ints and stuff just live on the stack
+
+[10:10] <jnthn> Basically it's anything that's an MVMCollectable
+
+[10:10] <jnthn> So, MVMObject, MVMSTable, etc.
+
+[10:11] <jnthn> And MVMString is just a type of MVMObject
+
+[10:11] <samcv> cool
+
+[10:11] <samcv> well gonna run spectest on this and see how it fares. hopefully doesn't fail anything
+
+[10:11] <jnthn> Lemme know if you want me to take a peek at some patch
+
+[10:12] <samcv> yeah check my PR and you can see the last 2 commits i did
+
+[10:13] <samcv> cause before there was a pretty big flaw as i commented. this way is much nicer anyway. plus less work changing case theoretically
+
+[10:14] <jnthn> Ah...so my tired "what if the chars that changed aren't before the offset" was sorta an on something
+
+[10:14] * jnthn finally got decent sleep and might be more useful today...
+
+[10:15] <samcv> and this doesn't have to deal with any of the possible expansions beforehand, so the start point doesn't ever have to have an offset
+
+[10:20] <samcv> m: say ﬆaa' ~~ m:i/st/
+
+[10:20] <camelia> rakudo-moar cb4147: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Two terms in a row␤at <tmp>:1␤------> say ﬆaa⏏' ~~ m:i/st/␤    expecting any of:␤        infix␤        infix stopper␤        postfix␤        statement end␤        statement modif…»
+
+[10:20] <samcv> m: say 'ﬆaa' ~~ m:i/st/
+
+[10:20] <camelia> rakudo-moar cb4147: OUTPUT: «｢ﬆa｣␤»
+
+[10:20] <samcv> that is not fixed but that's on the nqp or perl6 side
+
+[10:21] <jnthn> Looking at this patch...we fc the whole bunch just to see if we need to do the smarter thing below
+
+[10:22] <samcv> yeah that may get removed and just use the same for both
+
+[10:22] <jnthn> But the smarter thing below would be cheaper
+
+[10:22] <jnthn> Right
+
+[10:22] <jnthn> I'd say it probably should; will be a lot simpler/clearer then
+
+[10:22] <jnthn> Not to mention cheaper
+
+[10:22] <jnthn> And probably allocation-free also
+
+[10:23] <jnthn> Meaning regexes with :i would create less chunk
+
+[10:23] <jnthn> *junk
+
+[10:23] <samcv> yeah
+
+[10:24] <samcv> well we will need needle_fc though
+
+[10:24] <samcv> we will still apply fc to needle always
+
+[10:24] <jnthn> Ah, true
+
+[10:24] <jnthn> Though we could iterate through the graphemes of that fc-ing them also
+
+[10:25] <samcv> so if we don't use needle afterward, then it doesn't have to be in MVMROOT right?
+
+[10:25] <jnthn> Right
+
+[10:25] <jnthn> Which would mean we don't expend effort fc-ing all of needle if smething early on didn't match
+
+[10:25] <samcv> very true
+
+[10:26] <jnthn> Though the needle is usually gonna be much smaller than the haystack, so you're already getting the big saving :-)
+
+[10:29] <samcv> it became much easier when I renamed the variables h and n for haystack and needle rather than a and b
+
+[10:30] <jnthn> :D
+
+[10:31] <jnthn> Yeah, I noticed that in the PR
+
+[11:04] <dogbert17_> o/
+
+[11:04] <samcv> o/ dogbert17_
+
+[11:05] <dogbert17_> any new SEGV's today?
+
+[11:06] <dogbert17_> I have run a bunch of harness6 test runs without any problems, looks very good. jnthn++
+
+[11:06] <dogbert17_> the question though, is lizmat happy :)
+
+[11:08] <jnthn> Nice :)
+
+[11:14] <dogbert17_> we're running out of bugs :)
+
+[11:28] <brrt> well, i'll be soon introducing fresh new ones
+
+[11:28] <brrt> don't worry
+
+[11:44] <samcv> jnthn, added comment to PR curious what you think on this
+
+[11:52] <jnthn> samcv: Lunch now; will look after :)
+
+[11:53] <timotimo> looking forward to all those new bugs
+
+[11:53] <nwc10> don't worry, I'm sure Zefram will find lots
+
+[11:56] <timotimo> zefram is really good at that
+
+[12:03] <jnthn> Bah, forgot I needed to make some rice too
+
+[12:03] * jnthn looks while that cooks
+
+[12:05] <samcv> i'm prolly going to bed now. see you all tomorrow
+
+[12:09] <jnthn> Left a comment
+
+[12:09] <jnthn> Rest well o/
+
+[12:09] <timotimo> gnite samcv
+
+[12:15] * dogbert17_ runs a real stresstest to be sure (nursery = 64k, MVM_GC_DEBUG=2, FSA_SIZE_DEBUG=1 etc)
+
+[12:44] * dogbert17_ no SEGV or panic at least but a couple of extra tests complained
+
+[12:45] <timotimo> nice
+
+[12:45] <timotimo> tests aren't clean on my end either
+
+[12:46] <timotimo> don't know if they should be
+
+[12:48] <dogbert17_> I think a few are expected to fail atm, e.g. t/spec/S11-modules/require.t
+
+[12:49] <jnthn> I thought a fix went in for that one this morning
+
+[12:50] <jnthn> (Only a couple of hours ago)
+
+[12:57] <lizmat> t/spec/S11-modules/require.t is clean for me now
+
+[12:57] <lizmat> m: my $s = 0; ($s++,) Zxx 9; dd $s
+
+[12:57] <camelia> rakudo-moar 030c4c: OUTPUT: «Potential difficulties:␤    Useless use of Zxx in sink context␤    at <tmp>:1␤    ------> my $s = 0; ($s++,) ⏏Zxx 9; dd $s␤Int $s = 9␤»
+
+[12:57] <lizmat> oops
+
+[13:14] <jnthn> m: my $s = 0; $s++ Zxx 9; dd $s
+
+[13:14] <camelia> rakudo-moar 030c4c: OUTPUT: «Potential difficulties:␤    Useless use of Zxx in sink context␤    at <tmp>:1␤    ------> my $s = 0; $s++ ⏏Zxx 9; dd $s␤Int $s = 1␤»
+
+[13:15] <jnthn> Why are the parens needed to make it thunk properly?
+
+[13:16] <jnthn> Oh, wait, maybe the list matters?
+
+[13:18] <jnthn> m: my $s = 0; $s++ xx 9; dd $s
+
+[13:18] <camelia> rakudo-moar 030c4c: OUTPUT: «Int $s = 9␤»
+
+[13:18] <jnthn> Curious that doesn't warn but the Zxx form does
+
+[14:34] *** brrt joined
+[14:37] *** lucasb joined
+[14:39] <lucasb> I just heard about a workshop called MoreVMs 2017 Workshop on Modern Language Runtimes, Ecosystems, and VMs
+
+[14:40] <lucasb> from this: http://2017.programming-conference.org/
+
+[14:40] <lucasb> I'm just sharing because I found the name funny :)
+
+[14:41] <jnthn> haha :)
+
+[14:59] <timotimo> does nqp::ordat ever do anything with ASCII? :\
+
+[14:59] <timotimo> Error encoding ASCII string: could not encode codepoint 773
+
+[14:59] <timotimo> points at
+
+[14:59] <timotimo> if nqp::ordat($text, '"', $pos) == 34 { # "
+
+[14:59] <timotimo> oh wait
+
+[14:59] <timotimo> m)
+
+[14:59] <timotimo> yeah, that wasn't so clever
+
+[14:59] <jnthn> It's a string operation, and strings aren't encoded, so...
+
+[15:00] <timotimo> the problem was it used to be eqat, but i forgot to remove the '"' when i turned it into ordat
+
+[15:00] <timotimo> perl6 --ll-exception -Ilib -MJSON::Fast -e 'say from-json(q{ { "̅haha": "lol" } }).perl'
+
+[15:00] <timotimo> ${"\x[305]haha" => "lol"}
+
+[15:16] <moritz> \o/
+
+[15:17] <timotimo> anyway, i pushed that along with a version bump
+
+[15:18] <timotimo> but now alexdaniel isn't here to test it
+
+[15:23] <timotimo> and the escaping thing with control characters is still missing
+
+[15:36] *** brrt joined
+[16:05] *** brrt joined
+[16:27] *** lizmat joined
+[16:32] *** lizmat joined
+[17:42] *** domidumont joined
+[18:57] *** agentzh joined
+[22:04] *** agentzh joined
+[22:58] *** zakharyas joined
+[23:00] *** agentzh joined

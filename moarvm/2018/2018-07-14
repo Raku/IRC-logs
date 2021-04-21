@@ -1,0 +1,326 @@
+[02:00] *** timotimo left
+[02:07] *** timotimo joined
+[06:00] *** MasterDuke left
+[06:25] *** robertle joined
+[06:55] *** committable6 left
+[06:55] *** bisectable6 left
+[06:55] *** committable6 joined
+[06:56] *** bisectable6 joined
+[06:56] *** evalable6 joined
+[07:13] *** lizmat joined
+[07:19] *** lizmat left
+[07:23] *** lizmat joined
+[07:35] *** lizmat left
+[07:58] *** lizmat joined
+[08:17] <lizmat> .ask jnthn does something Hash-ish need to mutable or not
+
+[08:17] <yoleaux> lizmat: I'll pass your message to jnthn.
+
+[08:32] <samcv> good *
+
+[09:46] <samcv> jnthn: removing the previous pointer gives me almost a 1% speedup on my hash performance test
+
+[09:46] <samcv> not giant but it does have some impact
+
+[10:37] <dogbert11> samcv: are you still awake?
+
+[10:37] <samcv> yep
+
+[10:37] <samcv> i'm in NL right now so it is about noon here
+
+[10:37] <dogbert11> ah, cool
+
+[10:38] <dogbert11> got a MoarVM Panic in t/spec/S15-nfg/concat-stable.t - Collectable in fromspace accessed
+
+[10:39] <dogbert11> could possibly have something to do with arrays
+
+[10:39] <dogbert11> #1  0x00007ffff7680e6c in push (tc=0x604a20, st=<optimized out>, root=0x7ffff2d17598, data=0x7ffff2d175b0, value=..., kind=<optimized out>) at src/6model/reprs/VMArray.c:497
+
+[10:40] <dogbert11> could it have something to do with your recent opts?
+
+[10:41] <samcv> is it reproducable?
+
+[10:41] <samcv> also it could
+
+[10:43] <dogbert11> not 100 percent, you might need to run it a few times with MVM_GC_DEBUG=1
+
+[10:43] <dogbert11> here's a gist - https://gist.github.com/dogbert17/796acab7d7f737deac6f29dff8a2ce93
+
+[10:45] <samcv> dogbert11: that's with the env var MVM_GC_DEBUG or the ifdef?
+
+[10:45] <dogbert11> ifdef in src/gc/debug.h
+
+[10:45] <samcv> ah ok
+
+[10:45] <samcv> i would think that might fix it if it were caused by me
+
+[10:46] <dogbert11> you might be totally innocent :)
+
+[10:50] <samcv> clang gives me warnings with MVM_GC_DEBUG
+
+[10:50] <samcv> about (*item_to_add)->flags & MVM_CF_STABLE == 0 && !STABLE(*(item_to_add))
+
+[10:50] <samcv> because the == is evaluated before the &
+
+[10:51] <samcv> though if i 'fix' it and put parents around item_to_add->flags & MVM_CF_STABLE then it triggers
+
+[10:53] <samcv> dogbert11:
+
+[10:53] <samcv> else if (((*item_to_add)->flags & MVM_CF_STABLE) == 0 && !STABLE(*item_to_add)) \
+
+[10:53] <samcv>                 MVM_panic(1, "NULL STable in item added to GC worklist");
+
+[10:53] <samcv> is ^ what was intended?
+
+[10:56] <dogbert11> good question, I guess jnthn should answer that
+
+[10:57] *** mst left
+[10:57] *** mst joined
+[10:57] *** ChanServ sets mode: +o mst
+
+[10:59] <samcv> i mean it wouldn't make any sense otherwise, but i'm not sure how significant of a bad thing this is
+
+[10:59] <samcv> adding a NULL STable
+
+[10:59] <timotimo> i think it's more that an object without an STABLE is added
+
+[11:00] <timotimo> i wonder if heaped frames are like that
+
+[11:01] <timotimo> then we'd just need an extra check there to see if it's a frame
+
+[11:02] <timotimo> well, gc_allocate_frame doesn't set an STable on it
+
+[11:03] <timotimo> samcv: ^- i think the right fix is to add the parens, but also check that MVM_CF_FRAME is not set
+
+[11:04] <samcv> timotimo: well is that checked on the line above?
+
+[11:04] <samcv> if (*item_to_add)->flags & MVM_CF_FRAME && !((MVMFrame *)(*item_to_add))->static_info
+
+[11:04] <samcv> else (the thing we've been talking about)
+
+[11:04] <samcv> or do you mean only checking that the flags are not set as MVM_CF_FRAME?
+
+[11:04] <samcv> ah i get it, yeah since that's an exception
+
+[11:07] <timotimo> right
+
+[11:08] <samcv> gotcha
+
+[11:11] <dogbert11> cool, we should definitely run som spec/stresstests after this fix
+
+[11:11] <dogbert11> *some
+
+[11:11] <dogbert11> who knows what might turn up
+
+[11:11] <samcv> :)
+
+[11:16] <Geth> ¦ MoarVM: 3e91dc622a | (Samantha McVey)++ | src/gc/worklist.h
+
+[11:16] <Geth> ¦ MoarVM: Fix MVM_GC_DEBUG worklist check for NULL STable
+
+[11:16] <Geth> ¦ MoarVM:
+
+[11:16] <Geth> ¦ MoarVM: Previously there was an issue since == has higher precedence than `&`
+
+[11:16] <Geth> ¦ MoarVM: and this would never be triggered. Fix this by adding parens and making
+
+[11:16] <Geth> ¦ MoarVM: it do what it was meant to do originally as suggested by timotimo++
+
+[11:16] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/3e91dc622a
+
+[11:16] <samcv> dogbert11: ok this should fix that bug
+
+[11:16] <timotimo> the precedence of & or | and == has bitten me multiple times in the past
+
+[11:16] <dogbert11> cool, will rerun
+
+[11:17] <dogbert11> doesn't gcc warn about this?
+
+[11:18] <samcv> not sure. clang at least does. never seen it on clang
+
+[11:18] <samcv> err never seen it on gcc that is
+
+[11:18] * samcv almost always uses clang for MoarVM
+
+[11:20] <samcv> mostly because the result is generally faster and the error messages are better. Though at times when i have been unable to figure out what's causing a specific compiler error such as when working on uthash which things go through about 5+ macros. i've switched to gcc and occasionally it would then have an error that made proper sense
+
+[11:20] <samcv> a missing piece of syntax when using that many macros is really annoying to locate :)
+
+[11:21] <samcv> or a missing backslash at the end of a line hah
+
+[11:21] <dogbert11> I wonder if we have more '& or | and ==' errors int the codebase
+
+[11:21] <samcv> not that clang detects at least
+
+[11:24] <dogbert11> cool
+
+[11:26] <dogbert11> hmm, there are a few failures ...
+
+[11:27] <dogbert11> let's see if I can repro them
+
+[11:28] <Geth> ¦ MoarVM: samcv++ created pull request #904: Remove previous hash handle pointers in hash implementation
+
+[11:28] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/904
+
+[11:39] <dogbert11> there's is still a problem
+
+[11:39] <dogbert11> wrt gc that is
+
+[11:39] <samcv> dogbert11: can you try going back to before my gc changes?
+
+[11:41] <dogbert11> I guess I can. Anyway, the stack trace is the same but the file is different in this case, i.e. t/spec/S32-io/indir.t
+
+[11:50] <dogbert11> hmm, should try to find a test which fails often first otherwise this will be difficult I think
+
+[11:53] *** MasterDuke joined
+[12:47] <dogbert11> samcv: I could definitely be wrong here but I believe that the problem was introduced with https://github.com/MoarVM/MoarVM/commit/0b7f26ce578e5ef727312f235ea666cd6d73c5d8
+
+[12:47] * dogbert11 walk &
+
+[12:59] <Geth> ¦ MoarVM: d4d8ff4159 | (Jonathan Worthington)++ | src/6model/serialization.h
+
+[12:59] <Geth> ¦ MoarVM: Mark functions used in Perl 6 extops MVM_PUBLIC
+
+[12:59] <Geth> ¦ MoarVM:
+
+[12:59] <Geth> ¦ MoarVM: It started using these recently, and they need marking MVM_PUBLIC so
+
+[12:59] <Geth> ¦ MoarVM: they are available to the extops on Windows.
+
+[12:59] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d4d8ff4159
+
+[14:13] *** MasterDuke left
+[14:16] *** MasterDuke joined
+[16:19] *** domidumont joined
+[16:25] *** domidumont left
+[16:26] *** domidumont joined
+[16:39] *** zakharyas joined
+[17:04] <lizmat> FWIW, it feels to me that the latest bump in MoarVM makes things significantly slower
+
+[17:05] <lizmat> test-t race on my machine: .914 -> .947
+
+[17:05] <lizmat> that's about 3% slower  :-(
+
+[17:05] *** zakharyas left
+[17:07] *** Ven`` joined
+[17:08] <lizmat> maybe it's just noise
+
+[17:16] *** AlexDani` joined
+[17:19] *** Ven`` left
+[17:20] *** AlexDaniel left
+[18:17] *** zakharyas joined
+[18:23] *** Zoffix joined
+[18:26] <Zoffix> I thought it was a bit slower than usual too when I wad bumping, but I thought it was the vm being slowet than udual. Aso stage parse for bump was 76s, but when I tried pre-bump version it was 71s
+
+[18:27] <Zoffix> m: say 71/76
+
+[18:27] <camelia> rakudo-moar 5cf0afce0: OUTPUT: «0.934211␤»
+
+[18:52] *** domidumont left
+[19:04] *** zakharyas left
+[19:05] *** Zoffix left
+[19:05] *** zakharyas joined
+[19:08] *** zakharyas1 joined
+[19:09] *** zakharyas left
+[19:26] *** zakharyas1 left
+[20:11] *** MasterDuke_ joined
+[20:12] *** MasterDuke left
+[20:13] *** MasterDuke_ is now known as MasterDuke
+
+[20:36] *** AlexDani` is now known as AlexDaniel
+
+[20:50] *** MasterDuke left
+[20:52] *** MasterDuke joined
+[20:58] *** AlexDaniel left
+[20:58] *** AlexDaniel joined
+[21:29] *** lizmat left
+[21:32] *** lizmat joined
+[22:01] *** robertle left
+[22:26] *** stmuk_ joined
+[22:28] *** stmuk left
+[23:32] <jnthn> Probably any slowdown observed is due to the slightly more expensive deopt point algorithm that went in yesterday. Aside from costing a little more, it currently does an extra pass through the tree at fact analysis time, plus another pass during optimization time.
+
+[23:33] <timotimo> it's impressive that speshing things just a little later can make such a noticable difference
+
+[23:33] <timotimo> maybe we should do a little performance pass over spesh in the medium future
+
+[23:34] <jnthn> It's almost certainly possible to fold the first of those back into the existing facts pass at some point.
+
+[23:34] <jnthn> But when there's a pile of tickets about spesh-related regressions to look in to, I'll defer that.
+
+[23:35] <timotimo> maybe we should just really quickly put timing output into the speshlog for the individual phases of spesh apart from receive/analyze/plan/spesh/jit
+
+[23:35] <timotimo> sure
+
+[23:35] <jnthn> Also, while CORE.setting compilation maybe got a bit slower in *this* bump, I'd like to point out that I shaved that amount off it in earlier bumps. :P
+
+[23:36] <jnthn> And possibly more :)
+
+[23:36] <jnthn> Probably folding the extra pass back into the facts pass will win us most of it back,t hough
+
+[23:37] <jnthn> Also, better deopt analysis is a pre-req for being able to do box/unbox elimination across inlines.
+
+[23:38] <jnthn> So we're paying a bit more to be able to implement future optimizations
+
+[23:40] <dogbert11> the offending commits are know for some of the reported problems, perhaps that makes finding the bugs a tad easier
+
+[23:40] <dogbert11> *known
+
+[23:40] <jnthn> Still hopeful that I can get the analysis folded back into the facts pass, now I understand the algorithm.
+
+[23:41] <jnthn> dogbert11: Sometimes, yes, but when the commit is "mark invoke_v logged" then unfortunately the commit just exposes an existing bug that we could well have run into another way anyway, and just got lucky with.
+
+[23:42] <jnthn> Every time we make inlining more capable, we end up tripping over something that copes badly with that.
+
+[23:43] <dogbert11> true, but at least it can be reproed ten times out of ten
+
+[23:43] <samcv> jnthn: if you can check out my hash PR https://github.com/MoarVM/MoarVM/pull/904/files or someone else may be ok but i think you know it better than others
+
+[23:43] <samcv> though the changes aren't too complicated
+
+[23:44] <jnthn> Inlining is one of the most important things that we can do so far as optimizing Perl 6 goes.
+
+[23:44] <dogbert11> I also believe that most stresstest related problems have something to do with  https://github.com/MoarVM/MoarVM/commit/0b7f26ce578e5ef727312f235ea666cd6d73c5d8
+
+[23:45] <jnthn> Hmmm
+
+[23:45] <jnthn> That's interesting
+
+[23:45] <jnthn> In that it's only JITting something that we interpreted OK before
+
+[23:45] <jnthn> Wonder if I messed up the JITting...
+
+[23:46] <jnthn> dogbert11: If that's the csae, though, MVM_JIT_DISABLE=1 should makethe problems go away, in theory.
+
+[23:47] <dogbert11> I don't think they do but lemme check real quick
+
+[23:48] <jnthn> samcv: I think by now you probably know it best. :-) Taking a look.
+
+[23:48] <dogbert11> gdb output looks like this FWIW https://gist.github.com/dogbert17/796acab7d7f737deac6f29dff8a2ce93
+
+[23:50] <jnthn> ooh, that's interesting
+
+[23:51] <jnthn> samcv: Nothing in there stands out to be as being unreasonable
+
+[23:52] <jnthn> samcv: Though with all the macros the hashing code ain't the easiest thing to reason about...
+
+[23:53] <dogbert11> no guarantee, but it seems as if the problem vanishes with MVM_JIT_DISABLE=1
+
+[23:54] <jnthn> dogbert11: What's curious is that the stack trace in gdb is from the interp, not JITted code
+
+[23:55] <dogbert11> perhaps I'm blaming the wrong commit :(
+
+[23:55] <jnthn> I guess you were running with GC debug turned on?
+
+[23:55] <dogbert11> yes, set to 1
+
+[23:56] <jnthn> Did you make an issue? I'm too tired to look at it now, but I'd be surprsied to get that output if there isn't a real bug.
+
+[23:56] <dogbert11> samcv fixed i problem in that code (the gc debug code) earlier today
+
+[23:57] <dogbert11> there is an issue by Zoffix about failing stresstests. R#2071
+
+[23:57] <synopsebot> R#2071 [open]: https://github.com/rakudo/rakudo/issues/2071 [⚠ blocker ⚠] Stresstest failures on v2018.06.179.g.9.dce.63318
+
+[23:57] <dogbert11> I was going to add the above commit in a comment but perhaps I should refrain from doing that :)
+

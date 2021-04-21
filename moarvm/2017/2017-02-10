@@ -1,0 +1,816 @@
+[00:40] *** ggoebel joined
+[00:54] *** geekosaur joined
+[01:00] *** pyrimidine joined
+[01:48] *** pyrimidine joined
+[01:49] <MasterDuke> timotimo: what, at the nqp or rakudo level, causes MVM_serialization_read_int to be called?
+
+[01:49] <timotimo> mostly the individual deserialize functions of each repr
+
+[01:49] <timotimo> but deserialization of "the whole thing" also uses it a couple of times
+
+[01:49] <timotimo> like "how many objects are in this serialized blob?" -> serialization_read_int
+
+[01:50] <MasterDuke> i happened to notice it's one of the top functions in a perf record of ./perl6-m -e ''
+
+[01:51] <timotimo> right
+
+[01:52] <timotimo> it'd be a lot better if our NFAs wouldn't store their entire contents twice
+
+[01:52] <MasterDuke> heh. redundancy is good. a RAID of the NFAs would be even safer!
+
+[01:53] <timotimo> well, it is kind of sort of RAID
+
+[01:54] <timotimo> i'd love it if TimToady could figure out how to clean out the states list before serializing and re-building it when it's needed after deserialization
+
+[01:54] <timotimo> i'm imagining the win would be noticable
+
+[01:54] <timotimo> i wonder, did i merge the nfatostatelist branch?
+
+[01:54] <timotimo> nfa_to_statelist in moarvm
+
+[01:55] <timotimo> nope, i didn't
+
+[02:23] <MasterDuke> timotimo: hm, no simple way to reduce the # of calls? (like making variables ints reduced smrt_numify calls)
+
+[02:25] <timotimo> nah, except for the nfa thing i can't think of anything simple
+
+[02:25] <timotimo> one thing is that we have "lazy deserialization"
+
+[02:25] <timotimo> i.e. things are only pulled out of the serialized blob when something requests them
+
+[02:26] <timotimo> look for functions with "demand" in their name
+
+[02:26] <timotimo> if we could make more classes and functions and such be "touched" during startup, the number of calls for all _serialization_ functions has a chance to fall
+
+[02:28] <MasterDuke> touching things reduces the calls? wouldn't it mean more things do deserialize?
+
+[02:28] <MasterDuke> *to
+
+[02:33] <timotimo> no, touching less things
+
+[02:34] <timotimo> i mistakened
+
+[02:34] <timotimo> i tireded
+
+[02:37] <MasterDuke> heh, so touching (using?) fewer classes/functions/etc during startup would reduce the number of calls?
+
+[02:37] <timotimo> aye
+
+[02:38] <MasterDuke> hm, any easy way to see what does get touched/used?
+
+[02:38] <timotimo> i built something at one point
+
+[02:39] <timotimo> need to look if it still exists
+
+[02:40] <timotimo> seems like it's gone
+
+[02:40] <timotimo> anyway
+
+[02:41] <timotimo> you can output the sc idx for the objects that get demanded (together with the ID of the SC itself)
+
+[02:41] <timotimo> just spew it to stdout, for example
+
+[02:41] <MasterDuke> in MVM_serialization_demand_object perhaps?
+
+[02:41] <timotimo> then from a perl6 script you can nqp::wval to get the object from the serialized heap
+
+[02:42] <timotimo> and ask it what it is, with .HOW.name and such
+
+[02:46] <timotimo> need to put lots of "try" all over the place, because things can fail magically :P
+
+[02:46] <timotimo> yes, that's one place to put it
+
+[02:46] <timotimo> should also be able to get the filename, line, and frame name for frames that get demanded
+
+[02:46] <timotimo> directly in the C i mean
+
+[02:46] <MasterDuke> from the MVMSerializationContext?
+
+[02:48] *** ilbot3 joined
+[02:53] <samcv> timotimo, cmph seems nice
+
+[02:53] <timotimo> i haven't looked into it more than the first few paragraphs on their site
+
+[02:53] *** pyrimidine joined
+[02:55] <samcv> timotimo, i made a github repo with the code since they have no git https://github.com/samcv/cmph
+
+[02:56] <samcv> one says it takes 2 bytes per key. that's pretty low
+
+[02:56] <samcv> idk tho if we have a huge number of cp
+
+[02:56] <samcv> but it won't hurt memory if we only load it on demand
+
+[02:56] <timotimo> i'm pretty sure it's supposed to land in the text segment, actually
+
+[02:56] <timotimo> i.e. shared between processes and such
+
+[02:57] <samcv> well you can load it from a file
+
+[02:57] <samcv> the hash
+
+[02:57] <timotimo> that's a recipe for desaster
+
+[02:58] <timotimo> that file has to be installed somewhere, and reliably found, and all that
+
+[02:59] <samcv> :(
+
+[02:59] <timotimo> not to mention that a user program can panic in the middle of running when that file doesn't get found and lazily loaded
+
+[03:00] <samcv> we can check the file exists before running?
+
+[03:00] <timotimo> well, sure, but then programs that don't need unicode lookups will refuse to start
+
+[03:01] <samcv> uh maybe install moarvm?
+
+[03:01] <samcv> and not delete the file? idk
+
+[03:01] <timotimo> why wouldn't you want it to be put into the text segment?
+
+[03:01] <samcv> because it takes memory yes?
+
+[03:01] <timotimo> sure
+
+[03:02] <timotimo> putting it into the text segment makes it zero-overhead for loading
+
+[03:02] <timotimo> currently we create a hash with uthash at startup, right?
+
+[03:02] <timotimo> if we have the hash in a file we just need to mmap it, and mmapping it shared and readonly will also give us the shared-between-processes benefit
+
+[03:02] <samcv> no only when needed
+
+[03:02] <timotimo> i was missing that piece of information
+
+[03:03] <samcv> sorry
+
+[03:03] <timotimo> how big will the perfect minimal hash be for all codepoint names?
+
+[03:03] <samcv> i dunno
+
+[03:03] <timotimo> can we just run the tool over our dataset?
+
+[03:03] <samcv> yeah
+
+[03:05] * TimToady suspects it will have exponential characteristics
+
+[03:06] <timotimo> oh, if we fail at loading the hash file we can just create the hash during runtime because we still have the list of all codepoint names in our program anyway
+
+[03:06] <samcv> sure
+
+[03:07] <timotimo> hmm. i don't feel comfortable making that call
+
+[03:07] <samcv> that's weird tho
+
+[03:07] <timotimo> what is?
+
+[03:08] <samcv> i mean i guess we could do it.
+
+[03:13] <timotimo> if we want to go the other direction, we could also build the hash table only up to the entry that we were looking for and when we request another name that isn't in the hash currently we just continue where we last stopped
+
+[03:14] <timotimo> we could also have a table of "first character of name" to "position of first name that starts with that in the table"
+
+[03:14] <timotimo> OSLT
+
+[03:14] <timotimo> so we don't have to go from 0 to 10000 to find that rare codepoint starting with Z
+
+[03:15] <timotimo> (again, collecting data about this would be interesting to gauge whether this is useless or not)
+
+[03:16] <timotimo> but also: that stuff needs locks and everything
+
+[03:18] <samcv> yeah
+
+[03:18] <samcv> dinner brb
+
+[03:18] <timotimo> sleep bbl :)
+
+[04:03] <samcv> wonder how this would compare https://github.com/powturbo/TurboPFor/blob/master/README.md
+
+[04:03] <samcv> to having all those if else statements for getting offsets for unicode codepoint properties
+
+[04:22] *** zakharyas joined
+[04:49] *** pyrimidine joined
+[04:54] *** pyrimidi_ joined
+[05:06] *** dogbert11 joined
+[05:50] *** pyrimidine joined
+[06:22] *** agentzh joined
+[06:33] *** agentzh joined
+[06:48] *** pyrimidine joined
+[06:54] *** pyrimidine joined
+[06:55] *** pyrimidi_ joined
+[07:03] *** brrt joined
+[07:08] <brrt> good * #moarvm
+
+[07:16] *** nebuchadnezzar joined
+[07:18] <brrt> .tell timotimo that get_label_for_obj is the mechanism I've used to assign a label to data objects (to pointers, really)
+
+[07:18] <yoleaux2> brrt: I'll pass your message to timotimo.
+
+[07:56] *** pyrimidine joined
+[08:03] *** brrt joined
+[08:47] <samcv> keeping checking this thing out https://github.com/powturbo/TurboPFor/blob/master/README.md it does seem great
+
+[08:47] <samcv> need to figure out the best encoding though
+
+[08:47] <samcv> at least seems to make it easy to bench things
+
+[08:49] <samcv> dunno if this stuff builds on MSVC tho
+
+[08:58] *** pyrimidine joined
+[09:01] <samcv> i think it's time for bed for me. night guys
+
+[09:16] *** pyrimidine joined
+[09:50] *** Ven joined
+[09:51] *** zakharyas joined
+[10:09] *** pyrimidine joined
+[11:02] *** patrickz joined
+[11:11] *** pyrimidine joined
+[11:27] <patrickz> Hi everyone! How does one typically use gdb with moarvom? I'd like to break in the file MVMArray.c:344 but a simple 'b MVMArray.c:344' does not work.
+
+[11:27] <jnthn> Quite often using the perl6-gdb-m script
+
+[11:28] <arnsholt> Ther perl6/nqp files are actually shell scripts
+
+[11:28] <patrickz> already did that...
+
+[11:28] <jnthn> OK, and built with debug symbols?
+
+[11:28] <jnthn> (--debug=3 to MoarVM's Configure.pl)
+
+[11:28] <patrickz> that script complains if there are none as far as I read id
+
+[11:28] <patrickz> *it
+
+[11:28] <patrickz> didn't complain for me
+
+[11:28] <jnthn> Ah, then that's why :)
+
+[11:28] <patrickz> ah
+
+[11:28] <patrickz> rakudobrew doesn't do that by default, right?
+
+[11:29] <jnthn> No
+
+[11:29] <jnthn> Well, MoarVM's configure doesn't do it by default
+
+[11:29] <patrickz> kthx, will rebuild
+
+[11:29] <jnthn> You only need rebuild MoarVM itself
+
+[11:29] <jnthn> Though dunno how feasible that is if rakudobrew "owns" the build
+
+[11:30] * jnthn never used rakudobrew :)
+
+[11:31] <patrickz> rakudobrew creates pretty normal builds in ~/.rakudobrew/moar-whatever/. One can even build a rakudo oneself and just link the folder in there to make it work with rakudobrew. :-)
+
+[11:44] <patrickz> it's working :-)
+
+[11:44] <jnthn> :)
+
+[11:47] <brrt> i usually also make variants for the nqp scripts
+
+[11:48] <brrt> and there is a lingering thought in the community to make 'all-in-one' binaries using MoarVM
+
+[11:49] <brrt> as far as i can tell, it shouldn't be too hard, but it's just never been done
+
+[11:52] *** pyrimidine joined
+[11:56] *** pyrimidine joined
+[12:16] *** Ven joined
+[12:34] *** brrt joined
+[12:46] *** zakharyas joined
+[12:57] *** pyrimidine joined
+[13:00] <timotimo> it's been tried multiple times :)
+
+[13:00] <yoleaux2> 07:18Z <brrt> timotimo: that get_label_for_obj is the mechanism I've used to assign a label to data objects (to pointers, really)
+
+[13:00] <timotimo> at least if you mean "binaries that also include a bunch of moarvm bytecode files"
+
+[13:12] *** Geth joined
+[13:17] <brrt> yeah, that's pretty much what i mean
+
+[13:17] <brrt> what made it fail?
+
+[13:18] <timotimo> the core setting's at fault
+
+[13:18] <timotimo> or something like that
+
+[13:18] <timotimo> you get a rather mysterious error when trying to use it somewhere in the compilation stage
+
+[13:24] <brrt> hmmm
+
+[13:43] *** pyrimidine joined
+[13:58] *** pyrimidine joined
+[14:07] <timotimo> i'm considering building a nqp::vmhealth op that gives a hash of tidbits of information
+
+[14:07] <timotimo> and i was wondering if we can have an API where we call a user-supplied function whenever a GC has run with a bunch of data. like, on the event loop thread
+
+[14:08] <jnthn> Finalization does that
+
+[14:08] <timotimo> ah, neat
+
+[14:08] <jnthn> Heh
+
+[14:08] * timotimo is looking into building a Prometheus client library
+
+[14:08] <jnthn> You could abuse that somewhat by just creating an throw-away object :)
+
+[14:09] <jnthn> *a
+
+[14:09] <timotimo> and having information about GC/memory behaviour and similar things would be interesting to have in every moar process
+
+[14:09] <jnthn> For the sake of the finalier
+
+[14:09] <jnthn> And then making a new one when it runs :P
+
+[14:09] <jnthn> But that's a total hack :)
+
+[14:09] <timotimo> what, DESTROY { data.new(...) }? :P
+
+[14:09] <jnthn> yeah :P
+
+[14:10] <timotimo> well, i want the data to come from inside the VM, and i don't think DESTROY takes arguments ;)
+
+[14:10] <timotimo> well, it probably "takes" the invocant
+
+[14:10] <timotimo> so ... i guess you could register the class that has that DESTROY to be "the thing that has to be created when a GC ran"?
+
+[14:11] <jnthn> Yeah, but this is a real hack, I'd not advise it :)
+
+[14:11] <timotimo> and it just creates the object at the very end and immediately calls its finalizer
+
+[14:11] <jnthn> I'd do it in some cleaner way
+
+[14:11] <timotimo> yes, i was hoping for a cleaner way, too
+
+[14:11] <timotimo> but just considering this is kind of amusing
+
+[14:11] <timotimo> er
+
+[14:11] <jnthn> Like generalizing the post-GC hook that is used to run finalizers
+
+[14:11] <timotimo> (just considering this) (is kind of amusing)
+
+[14:11] <timotimo> rather than (just) ((considering this) is kind of amusing)
+
+[14:15] <timotimo> hmpf. the issue about invmod (and thusly expmod) didn't get an answer in the last 7 days on libtom's tommath github issue tracker
+
+[14:16] <timotimo> when will we free up the earliest deprecated moarvm ops for re-use?
+
+[14:18] <timotimo> graphs_s "will be deprecated" since 2016-01-12, DEPRECATED_1 since 2016-11-16
+
+[14:19] <timotimo> okay they haven't been deprecated for terribly long
+
+[14:20] *** pyrimidine joined
+[14:21] <timotimo> and DEPRECATED_2 was also just 2017-01-06
+
+[14:23] *** Ven joined
+[14:33] <timotimo> jnthn: the "run code after GC has finished" thing could be a good hook to install the "dump heap snapshot to disk" thing as well, eh?
+
+[14:33] <Geth> ¦ MoarVM: dogbert17++ created pull request #531: Fix overflow on 32 bit systems in is_full_collection()
+
+[14:33] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/531
+
+[14:34] <jnthn> Not really because that in itself could trigger GC
+
+[14:34] <jnthn> And render the results useless
+
+[14:34] <timotimo> oh, that's true
+
+[15:14] *** patrickz joined
+[15:33] *** patrickz joined
+[15:52] *** Ven joined
+[16:04] *** lucasb joined
+[16:05] <lucasb> opcode prof_exit doesn't have an ".s" annotation. is it needed?
+
+[16:05] <lucasb> https://github.com/MoarVM/MoarVM/blob/master/src/core/oplist#L919
+
+[16:08] *** brrt joined
+[16:12] <timotimo> no, the exit op is called from user code, i think
+
+[16:13] <timotimo> oh no
+
+[16:13] <timotimo> that's startprofile and endprofile
+
+[16:19] *** patrickz joined
+[16:22] *** Ven joined
+[16:26] <timotimo> huh, i thought the threads were like a linked list, but i don't see a "next" pointer
+
+[16:28] <timotimo> there it is!
+
+[16:28] <timotimo> it's not MVMThreadContext, it's MVMThread obects
+
+[16:28] <timotimo> objects*
+
+[16:29] <timotimo> i think the comment in MVMThread.h for the next pointer is wrong:
+
+[16:30] <timotimo> is "next in tc's threads list."
+
+[16:30] <timotimo> should probably be "next in instance's threads list."
+
+[16:48] *** pyrimidine joined
+[17:16] *** patrickz joined
+[18:16] *** TimToady joined
+[18:35] *** pyrimidine joined
+[19:29] <samcv> so that seems to get 30% compression compressing integers from 0-20,000 on the fastest compression, so that's good i guess. but not better than i guess doing it yourself. but good to note
+
+[19:30] <samcv> talking about this btw: https://github.com/powturbo/TurboPFor
+
+[19:31] <samcv> have not yet tried on my actual set of data since our data isn't random
+
+[19:34] <samcv> will see what happens when i go back to making a huge list of cp's to bitfield rows
+
+[20:07] <Geth> ¦ MoarVM: 18df52c1d4 | (Jan-Olof Hendig)++ | src/gc/orchestrate.c
+
+[20:07] <Geth> ¦ MoarVM: Fix overflow on 32 bit systems in is_full_collection()
+
+[20:07] <Geth> ¦ MoarVM:
+
+[20:07] <Geth> ¦ MoarVM: In order to figure out whether a full GC should be made the code
+
+[20:07] <Geth> ¦ MoarVM: has logic which calculates the percentage of 'promoted' bytes as part
+
+[20:07] <Geth> ¦ MoarVM: of the resident set size. If the calculated percentage is equal to
+
+[20:07] <Geth> ¦ MoarVM: or larger than MVM_GC_GEN2_THRESHOLD_PERCENT a full collection will
+
+[20:07] <Geth> ¦ MoarVM: be made. However, the code which calculate the percent_growth does
+
+[20:07] <Geth> ¦ MoarVM: <…commit message has 10 more lines…>
+
+[20:07] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/18df52c1d4
+
+[20:07] <Geth> ¦ MoarVM: 0157007402 | (Jonathan Worthington)++ | src/gc/orchestrate.c
+
+[20:07] <Geth> ¦ MoarVM: Merge pull request #531 from dogbert17/master
+
+[20:07] <Geth> ¦ MoarVM:
+
+[20:07] <Geth> ¦ MoarVM: Fix overflow on 32 bit systems in is_full_collection()
+
+[20:07] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/0157007402
+
+[20:09] *** brrt joined
+[20:09] <samcv> dogbert11++
+
+[20:22] <timotimo> samcv: were you thinking of compressing the integers that we create with our base40 scheme?
+
+[20:25] <samcv> i had not yet. but that may be fun
+
+[20:25] <samcv> even if it's just to see what happens
+
+[20:26] <timotimo> mhm
+
+[20:28] *** pyrimidine joined
+[20:29] <samcv> let me try that now
+
+[20:29] <samcv> since it's a lot simpler than doing the point indexes since i already replaced the old code mostly
+
+[20:32] <samcv> it may be able to compress a lot, since if it only stores the difference between each 16 bit number that could save a lot
+
+[20:33] <samcv> and variable bit integers as well
+
+[20:36] <samcv> one of them got 50% compression timotimo
+
+[20:37] <samcv> so that's like what, 200KB instead of 1.7MB for storing all the names or whatever
+
+[20:37] <samcv> er wait hmm or maybe it's 400K. idk it said the final size was 401188 but ratio is 50.2%
+
+[20:38] <samcv> bits per int was 16.06 so actually that didn't compress it at all XD
+
+[20:38] <Geth> ¦ MoarVM/even-moar-jit: 36 commits pushed by (Samantha McVey)++, (Jonathan Worthington)++, (Timo Paulssen)++, (Daniel Green)++, (Bart Wiegmans)++, (Lucas Buchala)++, (Zoffix Znet)++, (Benny Siegert)++, niner++
+
+[20:38] <Geth> ¦ MoarVM/even-moar-jit: review: https://github.com/MoarVM/MoarVM/compare/bf3765f580...3065b2a47b
+
+[20:38] <samcv> maybe not supplying the correct options
+
+[20:40] <timotimo> hmm
+
+[20:40] <timotimo> lots of it is probably tuning, yeah
+
+[20:41] <samcv> maybe gotta specify the int size i think it defaults to 32 bit
+
+[20:41] <samcv> -f[X[c][H]][.d][s]  X = file format:
+
+[20:41] <samcv> [1=int8], [2=int16], [4=int32(default)], [f:float] [d:double]
+
+[20:41] <samcv> t = text:one integer per line, c=column number in multiple columns line
+
+[20:41] <samcv> c = text:integers separated by non digit char
+
+[20:41] <samcv> . = decimal digits (default 2)
+
+[20:41] <samcv> H = skip first line
+
+[20:41] <samcv> s = sorted (increasing), S=sorted (strictly increasing, no duplicates), z=ZigZag
+
+[20:41] <samcv> why they gotta make this confusing
+
+[20:42] <samcv> maybe i want -f2 ? and not sure how to specify uint
+
+[20:43] <samcv> i was running ./icbench -eBENCH -ft maybe that's size_t idk. it was just in the example
+
+[20:44] <samcv> running ./icbench -eBENCH -f2 gives me C Size  ratio% Bits/Int   C MI/s     D MI/s   Name            File
+
+[20:44] <samcv> 1001838    43.9   14.06     64.32    1822.27   TurboPack       base40-nl.txt
+
+[20:44] <samcv> 1139868    50.0   16.00     63.91     932.25   TurboVByte      base40-nl.txt
+
+[20:44] <samcv> C Size  ratio% Bits/Int   C MI/s     D MI/s   Name            File
+
+[20:44] <samcv> 1001838    43.9   14.06     64.32    1822.27   TurboPack       base40-nl.txt
+
+[20:44] <samcv> 1139868    50.0   16.00     63.91     932.25   TurboVByte      base40-nl.txt
+
+[20:44] <samcv> before i got
+
+[20:44] <samcv> 401188    50.2   16.06     67.14    3997.47   TurboPack       base40-nl.txt
+
+[20:45] <samcv> so shows a lower C size but shows more Bits/Int so i am confused
+
+[20:46] <samcv> maybe gonna try -f2t
+
+[20:49] *** pyrimidine joined
+[20:54] <samcv> anyway 14bits instead of 16 is not too much improvement
+
+[21:06] <timotimo> mh, fair enough
+
+[21:15] <timotimo> i've procrastinated the C code for index to codepointname
+
+[21:21] *** pyrimidine joined
+[21:33] *** pyrimidine joined
+[21:33] <timotimo> perl6 -e 'use nqp; nqp::hllize(nqp::vmhealth).perl.say'
+
+[21:33] <timotimo> {"fsa sizeclass current pages" => (2, 2, 2, 5, 3, 287, 4, 1, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0), "fsa sizeclass free elems at end" => (19, 102, 117, 26, 63, 88, 96, 68, 90, 84, 88,
+
+[21:33] <timotimo> 80, 118, 124, 121, 80, 125, 110, 118, 113, 125, 117, 122, 119, 121, 107, 119, 123, 124, 125, 126, 124, 124, 126, 124, 123, 126, 127, 127, 125, 126, 126, 127, 125, 126, 114, 127, 127, 121, 126, 125, 126, 127, 126, 127, 116, 126, 125, 0, 127, 126, 126, 127, 127, 0, 127, 127, 125, 127, 127, 126, 124, 126, 127, 125, 126, 126, 119, 125, 124, 126, 116, 126, 127, 127, 126, 125, 126, 126, 125, 127, 127, 127, 127,
+
+[21:33] <timotimo> 127, 127), "fsa sizeclass pagecounts" => (3, 3, 3, 6, 4, 288, 5, 2, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 0, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1, 1), "gc bytes promoted since full collection" => 0, "gc sequence number" => 0, "jit
+
+[21:33] <timotimo> frames produced" => 14, "num threads" => 2, "spesh frames produced" => 0}
+
+[21:34] <timotimo> ^- probably not correct, these
+
+[21:34] <jnthn> Lies, damned lies, and vmhealth
+
+[21:35] <timotimo> like, it surely can't have 0 spesh frames produced when it jitted 14 frames
+
+[21:35] <jnthn> Well, unless it spesh frames really means "spesh'd but didn't jit"
+
+[21:35] <timotimo> perhaps that number is only updated when something is turned on
+
+[21:35] <timotimo> and the sizeclass stuff is quite spammy :)
+
+[21:36] <samcv> timotimo, this is more interesting https://gist.github.com/samcv/7939ad8a27e356be37736e3ccb142385
+
+[21:36] <timotimo> oh wait what
+
+[21:36] <samcv> this is the codepoint index to the bitfield
+
+[21:36] <samcv> though 53K is still more than I think i did with a ton of if else statements
+
+[21:37] <timotimo> aye, it only increases that number if a spesh limit is set
+
+[21:39] <timotimo> now i just have to put output of that in a big script and see how things evolve
+
+[21:40] <timotimo> well, it segfaults though :)
+
+[21:41] <timotimo> oh, haha
+
+[21:41] <timotimo> i push temp roots, but i don't pop 'em back out
+
+[21:41] <timotimo> that's a recipe for disaster
+
+[21:46] <timotimo> https://gist.github.com/timo/d58473fe86c3382f33161db8f219f79c - my shooter example, but every 60 frames it outputs vmhealth
+
+[21:46] <timotimo> 24 GC runs per 60 frames, eh? :\
+
+[21:47] <timotimo> well, two frames without a GC, then one with ...
+
+[21:50] <MasterDuke> timotimo: yesterday i printed out sc->body->sc_idx and idx from the three *_demand_* functions. i then added an nqp::wval op and tried to print the ^name of the results of calling nqp::wval with the pairs of ids
+
+[21:51] <MasterDuke> some worked, some gave `Invalid SC index in bytecode stream`
+
+[21:52] <timotimo> right
+
+[21:52] <timotimo> i remember that some didn't work, but i don't remember how they b0rked
+
+[21:53] <MasterDuke> but i'm not confident that i gave the right arguments to wval. or if those are the two right things, is that the right order?
+
+[21:54] <timotimo> hm, is fsa's current page even interesting compared to number of pages?
+
+[21:54] <timotimo> i don't actually think it is
+
+[21:54] <timotimo> i might have actually used a different op from wval, come to think of it
+
+[21:55] <timotimo> scgetobj? scgetobjidx?
+
+[21:55] <timotimo> i think scgetobjidx gives you the index when you give it an object
+
+[21:55] <MasterDuke> wval calls MVM_sc_get_sc_object
+
+[21:57] <timotimo> ah, so it might be right
+
+[22:01] <MasterDuke> why would some give that error?
+
+[22:01] <timotimo> *shrug*
+
+[22:05] <jnthn> timotimo: I'd expect current page will probably always be the latest one, since when we free memory we freelist it
+
+[22:08] <timotimo> right
+
+[22:08] <timotimo> we never free whole pages yet
+
+[22:10] <timotimo> i wonder if it'd promote much less to gen2 if i re-used objects with a free list in perl6-space
+
+[22:11] <jnthn> Dunno...if the things only live 1 frame, they'd be collected anyway?
+
+[22:11] <MasterDuke> i kind of forget where i started with this, i think it was trying to reduce the number of MVM_serialization_read_int calls. and to do that fewer things need to be *_demand_*ed. so i printed out those ids, which i can use to figure out what it is that's being demanded
+
+[22:12] <jnthn> MasterDuke: Many of those are 'cus of NFAs, fwiw
+
+[22:12] <MasterDuke> and in that case, i should look for singletons, since those are more likely to be able to remove
+
+[22:12] <MasterDuke> yeah, perl6.moarvm:<dependencies+deserialize> is about 90+%
+
+[22:13] <MasterDuke> of the MVM_serialization_read_int calls
+
+[22:14] <MasterDuke> oops,`CORE.setting.moarvm:<dependencies+deserialize>` and 70% to be correct
+
+[22:17] <timotimo> jnthn: well, enemies and bullets are on the screen for upwards of 300 frames usually
+
+[22:17] <timotimo> bullets less time, enemies more time
+
+[22:18] <MasterDuke> jnthn: given TimToady is working on NFAs, would these profiles i'm doing likely be completely invalidated when his works lands?
+
+[22:21] <timotimo> i forgot to add the "nurseries filled with %d bytes" thing to the health hash
+
+[22:21] <timotimo> apparently i implemented it wrong because it gives me negative values :\
+
+[22:22] <timotimo> MVMuint64 bytes_filled = (char *)target->nursery_alloc - (char *)target->nursery_fromspace;
+
+[22:22] <timotimo> is that wrong?
+
+[22:22] <jnthn> tospae
+
+[22:22] <jnthn> *tospace
+
+[22:23] <jnthn> MasterDuke: They may well change from that, yeah, and I'm kinda waiting to see how that work lands up before looking into getting rid of the dupe storage in MVMArrays, which in theory would halve it
+
+[22:23] <timotimo> the descriptions must have confused me
+
+[22:23] <MasterDuke> m: given $TimToady.is-working-on-NFAs { when True { @NFA-related-profiles = () } }
+
+[22:23] <camelia> rakudo-moar 637241: OUTPUT«===SORRY!=== Error while compiling <tmp>␤Variable '$TimToady' is not declared␤at <tmp>:1␤------> given ⏏$TimToady.is-working-on-NFAs { when True␤»
+
+[22:25] <timotimo> i'm considering giving these hash keys shorter strings %)
+
+[22:25] <MasterDuke> very readable, though i do like the rule (actual rule, or just idiom?) Ruby has of putting ? on the end of methods that return a bool
+
+[22:26] <MasterDuke> jnthn: have any ideas for non-NFA related LHF?
+
+[22:27] <jnthn> MasterDuke: In what area? Memory usage?
+
+[22:27] <MasterDuke> or cpu
+
+[22:28] <jnthn> Yeah...there's some places I suspect we can save a good bit of memory and thus CPU deserializing those things
+
+[22:28] <jnthn> Did you use moar-ha before?
+
+[22:28] <jnthn> If you perl6 --profile=heap -e ''
+
+[22:28] <MasterDuke> nope. it's a module, right?
+
+[22:28] <jnthn> Then it'll spit out a heap profile of the stuff in memory after startup
+
+[22:29] <jnthn> Yeah, panda install App::MoarVM::HeapAnalyzer
+
+[22:29] <jnthn> Or zef
+
+[22:29] <jnthn> Just got the former wired into my fingers still :)
+
+[22:29] <jnthn> And it installs a moar-ha program that you can run on the profile
+
+[22:30] <jnthn> You'll note that a bunch of memory is taken up by, iirc, Parameter objects
+
+[22:30] <jnthn> Maybe some others
+
+[22:30] <jnthn> I've pondered whether we can move some of the unusual Parameter-related bits out into another object that we reference from Parameter
+
+[22:31] <jnthn> So that the majority of them shrink
+
+[22:31] <jnthn> You might spot some other easy wins poking around at the data though
+
+[22:31] <MasterDuke> thanks, i'll play around with it
+
+[22:31] <jnthn> I wrote it primarily to help me diagnose leaks
+
+[22:32] <jnthn> But when I was looking at the data I figured there was a ton of memory use improvements to be found in it
+
+[22:33] <MasterDuke> heh, `summary` is not instant
+
+[22:34] <MasterDuke> `top` is fast
+
+[22:36] <jnthn> Oh, it does a bunch of caching
+
+[22:36] <jnthn> So the first time you do certain things (like look at a partiuclar snapshot) it's costly
+
+[22:36] <jnthn> But then it's cheaper
+
+[22:36] <jnthn> If you do summary again it's probably comparatively fast :)
+
+[22:36] <jnthn> path is similar; costly the first time, less so the next
+
+[22:36] <jnthn> In fact nearly instant the next
+
+[22:37] <jnthn> Though path is probably less interesting if you're hunting for savings; it's very useful for leak hunts though :)
+
+[22:37] <jnthn> (It tells you the shortest path from a GC root to the object)
+
+[22:37] <timotimo> i had a branch where i was sharing some object related to parameters or scalar descriptors or something
+
+[22:37] <timotimo> i think the latter
+
+[22:37] <timotimo> it makes one single test fail ;(
+
+[22:40] <timotimo> jnthn: got a reason why spesh frames created should not be counted unless the spesh limit is set?
+
+[22:40] <timotimo> we don't need the value to be exact, so multithreading should be all right (and spesh is going to live on its own thread at some point anyway)
+
+[22:41] <jnthn> timotimo: Hm, I forget but I thought they were always counted
+
+[22:44] <timotimo> at least not via this particular field
+
+[22:44] <timotimo> mayhaps there's a per-tc field that also counts?
+
+[22:44] <jnthn> Don't think so, but I forget exactly how I implemented the limit thing :)
+
+[22:44] <timotimo> i'll make it do the thing, then
+
+[22:50] <Geth> ¦ MoarVM/vmhealth: 120c3b17f7 | (Timo Paulssen)++ | src/spesh/candidate.c
+
+[22:50] <Geth> ¦ MoarVM/vmhealth: Count spesh_produced even without spesh_limit.
+
+[22:50] <Geth> ¦ MoarVM/vmhealth: review: https://github.com/MoarVM/MoarVM/commit/120c3b17f7
+
+[22:50] <Geth> ¦ MoarVM/vmhealth: 2d9a7567e6 | (Timo Paulssen)++ | 10 files
+
+[22:50] <Geth> ¦ MoarVM/vmhealth: introduce vmhealth op
+
+[22:50] <Geth> ¦ MoarVM/vmhealth:
+
+[22:50] <Geth> ¦ MoarVM/vmhealth: gives moar-specific information about current state:
+
+[22:50] <Geth> ¦ MoarVM/vmhealth:
+
+[22:50] <Geth> ¦ MoarVM/vmhealth: memory in use by nursery and FSA, count of gc runs so far,
+
+[22:50] <Geth> ¦ MoarVM/vmhealth: number of frames speshed and jitted, bytes promoted since
+
+[22:50] <Geth> ¦ MoarVM/vmhealth: last full collection etc.
+
+[22:50] <Geth> ¦ MoarVM/vmhealth: review: https://github.com/MoarVM/MoarVM/commit/2d9a7567e6
+
+[22:57] <timotimo> https://github.com/timo/SDL2_raw-p6/blob/master/examples/shooter.pl#L311,L323 - see if you can spot the method that creates too many objects here :P
+
+[23:06] <timotimo> i've made it re-use a single SDL_Rect for all those things now, and it reduced the number of gc runs to 19 every 60 frames
+
+[23:27] <MasterDuke> timotimo: will your vmhealth branch be used to make profiling better?
+
+[23:32] <timotimo> unlikely
+
+[23:34] <timotimo> i was inspired to make it for the benefit of monitoring solutions like prometheus
+
+[23:34] <samcv> ok i have thought more about collation. so we need a way to designate if we want to reverse the sorting
+
+[23:34] <samcv> like swap the sorting order for case
+
+[23:34] <MasterDuke> timotimo: ah, cool
+
+[23:34] <samcv> so capitals come before lowercase versions
+
+[23:35] *** pyrimidine joined
+[23:35] <timotimo> so you can just set it up for like a web app or something
+
+[23:35] <samcv> not sure how that will work with the bitfield type things i have now
+
+[23:35] <timotimo> it'll be kind of more interesting to see something like a timeseries of GC times for minor and major collections and such
+
+[23:36] <samcv> 1, 2, 4, 8
+
+[23:36] <timotimo> number of open files perhaps
+
+[23:38] <samcv> probably want to add another integer value
+
+[23:39] <MasterDuke> is an int32 smaller than an int in perl6?
+
+[23:39] <samcv> so can have like unicmp_s(a, b, -4, 11 ...
+
+[23:39] <samcv> yeah i think so MasterDuke
+
+[23:39] <samcv> i think they're all 64bit
+
+[23:42] <jnthn> Sleep time; 'night all
+
+[23:42] <samcv> yeah i'll need to do that or else i will have to come up with something crazy for the collation_level int
+
+[23:56] <timotimo> had no internet for a couple minutes there :(
+
+[23:56] * timotimo added a freelist for enemy objects
