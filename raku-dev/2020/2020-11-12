@@ -1,0 +1,222 @@
+[00:09] *** MasterDuke left
+[02:17] *** lucasb left
+[02:32] *** leont left
+[02:39] *** maggotbrain left
+[02:40] *** maggotbrain joined
+[05:16] *** frost-lab joined
+[05:25] *** jdv79 left
+[05:25] *** jdv79 joined
+[05:54] *** lucs left
+[07:59] *** Altai-man joined
+[08:10] *** sena_kun joined
+[08:12] *** Altai-man left
+[08:17] *** domidumont joined
+[09:00] *** MasterDuke joined
+[09:10] <MasterDuke> m: my $a; my $s = now; $a = do given "hi" { when 3 { "three" }; when 5 { "five" }; when "hi" { "hello" }; when * > 40 { "> 40" }; default { "default" } } for ^40_000; say now - $s; say $a
+
+[09:10] <camelia> rakudo-moar 85847d2f1: OUTPUT: «7.73646496␤hello␤»
+
+[09:11] <MasterDuke> interesting. a profile of ^^^ shows the time dominated by https://github.com/rakudo/rakudo/blob/master/src/core.c/Backtrace.pm6#L98 44% of the entire execution is spent there
+
+[09:15] <MasterDuke> that's coming from the failed `"hi".Numeric` -> `val` -> `parse-real` -> etc.
+
+[09:21] <MasterDuke> the Backtrace is being created here https://github.com/rakudo/rakudo/blob/master/src/core.c/Failure.pm6#L13 from https://github.com/rakudo/rakudo/blob/master/src/core.c/Failure.pm6#L32 from https://github.com/rakudo/rakudo/blob/master/src/core.c/Failure.pm6#L147
+
+[09:23] *** eater joined
+[09:27] <MasterDuke> is there a way to know we can create a cheaper Failure? it's coming from here https://github.com/rakudo/rakudo/blob/master/src/core.c/allomorphs.pm6#L216-L222 maybe the fact that it's being sunk can be propagated forward?
+
+[09:52] *** maggotbrain left
+[10:32] *** MasterDuke left
+[10:37] <sena_kun> releasable6, status
+
+[10:37] <releasable6> sena_kun, Next release in ≈9 days and ≈8 hours. 1 blocker. Changelog for this release was not started yet
+
+[10:37] <releasable6> sena_kun, Details: https://gist.github.com/31b2233050d141a062dc0a1a301f1f4e
+
+[10:38] *** MasterDuke joined
+[10:56] <lizmat> MasterDuke: it's been a while since I looked at making Backtrace cheaper
+
+[10:57] <lizmat> aaahh... val processing....  another one of my dead projects  :-(
+
+[10:59] <MasterDuke> lizmat: that would obviously have the most global help. but cheaper failures, or cheaper failures at that particular spot, would at least help this specific usecase
+
+[11:00] <lizmat> I'll see if I can muster the courage to look into that again
+
+[11:00] <MasterDuke> but i have almost no knowledge/understanding of Failures, Exceptions, sinking, and how they all interact
+
+[11:02] <MasterDuke> i was attempting to gen more optimized code for given/when, but then noticed very little difference because the runtime is dominated by that fail->...->backtrace path. Amdahl strikes again...
+
+[11:02] <lizmat> welcome to much of my world  :-)
+
+[11:02] <MasterDuke> heh
+
+[11:06] <MasterDuke> fwiw, i have sped up that previous example from ~4.2s to ~3.3s locally, passing a spectest (and some ah-hoc test cases that broke, but weren't covered by the spectest). but it's codegen changed in Actions, and i'm not sure how much it would change/survive the rakuast branch
+
+[11:15] <lizmat> MasterDuke: if you figure out a smarter codegen for when, then I'm pretty sure that's going to be portable to the rakuast branch
+
+[11:17] <MasterDuke> it's not particularly smart or pretty, but i'll clean it up and PR it for improvement suggestions
+
+[11:32] *** MasterDuke left
+[12:09] *** Altai-man joined
+[12:12] *** sena_kun left
+[12:12] *** lucs joined
+[12:18] *** frost-lab left
+[12:39] *** leont joined
+[13:04] *** MasterDuke joined
+[13:37] *** tyil left
+[13:38] *** tyilanmenyn joined
+[13:39] *** tyilanmenyn is now known as tyil
+
+[13:48] *** lucasb joined
+[13:51] *** raku-bridge left
+[13:51] *** raku-bridge joined
+[14:21] <MasterDuke> hm. i've come up with a new test case that reveals a problem with my change not covered by a spectest
+
+[14:21] <MasterDuke> m: given Int { when 0 { say "zero" }; default { say "default" } }
+
+[14:21] <camelia> rakudo-moar 85847d2f1: OUTPUT: «default␤»
+
+[14:22] <MasterDuke> my change warns about `Use of uninitialized value of type Int in numeric context` and then prints 'zero'
+
+[14:22] <ugexe> `"depends" : [";top:from<native>"]` -- there is code in the ecosystem (not zef) that will run arbitrary code just parsing dependencies. i wonder how we, or the ecosystem, should handle security issues of this severity
+
+[14:24] <MasterDuke> because i gen when of a QAST::IVal as iseq_i to .Numeric called on the given value
+
+[14:25] <MasterDuke> and Int:U coerces to 0
+
+[14:26] <MasterDuke> m: say 0.ACCEPTS(Int)
+
+[14:26] <camelia> rakudo-moar 85847d2f1: OUTPUT: «False␤»
+
+[14:27] *** Kaiepi left
+[14:27] *** Kaiepi joined
+[14:28] <MasterDuke> anyone have a good idea for getting around this? heh, i could only do it if there's a compile time value != 0...
+
+[14:32] <vrurg> m: given Int { when Int { say "Int" }; when 0 { say "zero" }; default { say "default" } }
+
+[14:32] <camelia> rakudo-moar 85847d2f1: OUTPUT: «Int␤»
+
+[14:32] <vrurg> MasterDuke: ^ 
+
+[14:34] <MasterDuke> yeah, that still works with my changes. the problem comes if you don't have the `when Int { ... }`
+
+[14:35] <MasterDuke> with my changes it matches the `when 0 { ... }`
+
+[14:36] <vrurg> What changes have you done, BTW? Just yesterday I was modifying Bridge to work with new coercions.
+
+[14:36] <vrurg> m: say Int ~~ 0
+
+[14:36] <camelia> rakudo-moar 85847d2f1: OUTPUT: «False␤»
+
+[14:37] <vrurg> m: say 0 ~~ Int
+
+[14:37] <camelia> rakudo-moar 85847d2f1: OUTPUT: «True␤»
+
+[14:37] <lizmat> ugexe: could you make a problem-solving issue for that ?
+
+[14:37] <MasterDuke> vrurg: https://gist.github.com/MasterDuke17/9959976cabaa8c22649550d7ebfe708c
+
+[14:39] <vrurg> MasterDuke: Ha, wait for R#3891 to merge. Your sample gives me 'default' on that branch.
+
+[14:39] <linkable6> R#3891 [open]: https://github.com/rakudo/rakudo/pull/3891 [data types][type captures] New coercion semantics
+
+[14:40] <vrurg> And, with regard to that PR, I'd like someone with JVM background to help me locate a problem in it.
+
+[14:40] <MasterDuke> that branch + my diff?
+
+[14:42] <vrurg> No. Just my branch gives me 'default' on the given/when above.
+
+[14:43] <vrurg> ⇒ rakudo-m -e 'given Int { when 0 { say "zero" }; default { say "default" } }'
+
+[14:43] <vrurg> default
+
+[14:44] <MasterDuke> yeah, master does too. but my branch/changes give 'zero' (plus a warning)
+
+[14:46] <MasterDuke> btw, what's the JVM problem with that PR. 
+
+[14:46] <vrurg> Ah, I'm still sleepy, perhaps. :(
+
+[14:47] <vrurg> MasterDuke:  https://dev.azure.com/Rakudo/rakudo/_build/results?buildId=704&view=logs&j=c6029080-725b-5cac-140d-8eb32d1e932f&t=e661041f-7cfe-57fb-f671-7cbf417ae738&l=67
+
+[14:50] <MasterDuke> if i get some free time i'll take a look, but i'd really recommend pinging bartolin/usev6
+
+[14:50] <MasterDuke> fwiw, there are a bunch of XXX/TODOs in the PR
+
+[14:51] <vrurg> Will try them later today. I never remember who's good with JVM.
+
+[14:54] * [Coke] sees src/vm/js took a different approach than moar/jvm (lacks a stage0 with .js files)
+
+[14:54] <[Coke]> (nqp)
+
+[14:54] <vrurg> MasterDuke: the only XXX to be really taken care of is about taking care of nominalization. coerce_type to be marked deprecated at some later time, after, say, two Rakudo releases.
+
+[14:56] <MasterDuke> oO(weekly: [Coke]++ is well started on his promised new .NET 5.0 backend for NQP)
+
+[14:57] <[Coke]> THAT IS A LIE
+
+[14:58] <[Coke]> You know what I did? I learned enough C# to iterate over argv and dump it out. that's it. :)
+
+[14:58] <[Coke]> but I imagine a dotnet version would check in DLLs there.
+
+[15:00] <vrurg> MasterDuke: with regard to your smartmatch patch, you just shouldn't invoke coercion methods on undefined. I see that under QAST::Want branch you don't check for this. So, if the `Int` in a Want, you invoke Numeric unconditionally on it. This certainly results in a warning and a 0 as the return value.
+
+[15:04] <MasterDuke> yeah, the problem is i'm trying to find a smaller/faster implementation than the default of just calling .ACCEPTS which does handle this fine. so i want to add as little checking code as possible. but yeah, maybe i'll have to gen a !isconcrete branch in the checks
+
+[15:04] <MasterDuke> [Coke]: does .NET use dlls on linux?
+
+[15:08] <MasterDuke> vrurg: i've run into this kind of problem before when trying to optimize stuff that promises a smartmatch in the semantics. smartmatch does so much, that even trying to optimize simple cases is tough
+
+[15:10] <vrurg> MasterDuke: Unfortunately, there is no other workaround anyway. Let's just hope that if+isconcrete is fast enough. :)
+
+[15:12] <vrurg> It should be faster for sure because .ACCEPTS results in more than one code invocation. And is unlikely to be inlined.
+
+[15:35] <[Coke]> MasterDuke: it does on os x, anyway.
+
+[15:35] <MasterDuke> huh
+
+[15:37] <[Coke]> you can run it directly, or do a build which generates dll files, and then run those
+
+[15:37] <[Coke]> (based on intro understanding)
+
+[16:07] *** finsternis left
+[16:10] *** sena_kun joined
+[16:12] *** Altai-man left
+[16:24] *** vrurg left
+[16:36] <MasterDuke> timotimo: do you have a 2020.10 appimage made?
+
+[17:12] <[Coke]> if I want to work on stuff in nqp that also touches nqp-configure, fork both, how do I configure my copy of nqp to look at my copy of nqp-configure?
+
+[17:14] <MasterDuke> [Coke]: maybe you can edit your .gitmodules?
+
+[17:14] <MasterDuke> in nqp
+
+[17:14] *** Kaiepi left
+[17:15] *** Kaiepi joined
+[17:16] *** Kaiepi left
+[17:16] *** Kaiepi joined
+[17:18] <[Coke]> Danke.
+
+[17:19] *** vrurg joined
+[17:21] <[Coke]> ... guess I need to read up on submodules.
+
+[17:59] *** squashable6 left
+[18:02] *** squashable6 joined
+[18:10] *** domidumont left
+[18:42] *** MasterDuke left
+[20:09] *** Altai-man joined
+[20:12] *** sena_kun left
+[20:24] *** MasterDuke joined
+[20:29] *** MasterDuke left
+[21:08] *** MasterDuke joined
+[21:56] *** MasterDuke left
+[22:31] *** Altai-man left
+[22:32] *** sena_kun joined
+[22:41] *** Kaiepi left
+[22:49] *** Kaiepi joined
+[23:13] <timotimo> .tell MasterDuke https://github.com/timo/rakudo-appimage/releases/tag/2020.10
+
+[23:13] <tellable6> timotimo, I'll pass your message to MasterDuke
+
+[23:16] *** sena_kun left
+[23:23] *** JJAtria[m] left
+[23:24] *** JJAtria[m] joined

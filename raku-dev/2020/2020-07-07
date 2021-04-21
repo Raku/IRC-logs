@@ -1,0 +1,434 @@
+[00:01] *** JRaspass left
+[00:03] *** sena_kun joined
+[00:05] *** Altai-man_ left
+[00:14] <timotimo> so i've been playing around with lembark's workload and got heaptrack to actually output something helpful
+
+[00:14] <timotimo> 120629739 calls to allocation functions with 88.41GB peak consumption from
+
+[00:14] <timotimo> [...]
+
+[00:14] <timotimo> 8783964 calls with 83.13GB peak consumption from:
+
+[00:14] <timotimo>     uv__read
+
+[00:15] <timotimo> that looks like the program is either holding on to all the byte arrays that are being created by reading from the child process
+
+[00:16] <timotimo> or perhaps the child process is just writing as fast as it can go, which makes a bigger and bigger queue of read data pieces that we're too slow to process
+
+[00:19] *** Voldenet left
+[00:20] *** Voldenet joined
+[00:20] *** Voldenet left
+[00:20] *** Voldenet joined
+[00:30] <timotimo> well, i've sent sigstop to the zxcat process that's feeding data into the rakudo process and it's still going
+
+[00:31] <timotimo> i haven't looked at the source of the workload program much yet, so i'm not sure what exactly the status output lines mean
+
+[00:31] <timotimo> the memory size is sloooowly growing, i'm not sure how the growth would have been during the same timeframe but without stopping the zxcat process
+
+[00:31] <timotimo> so maybe that's where i should look next
+
+[00:34] <timotimo> also i should make sure the request-garbage-collection isn't causing objects to be promoted to the old generation too fast and thus wasting gen2 space that won't "shrink back"
+
+[00:38] <timotimo> the input data is about 123 GiB uncompressed
+
+[00:39] <timotimo> so if rakudo is processing slow enough and xzcat is spitting out fast enough, i can imagine rakudo going over 128 GiB RSS quite quickly
+
+[00:53] <timotimo> oh bother i didn't "nohup" the task, and there's neither tmux nor screen installed either
+
+[00:58] <timotimo> it's consumed about 1.3k minutes of cpu time and it's just recently started writing out the "stubs" of the chunks, meaning it's finished "process-chunk" on a bunch of the threads and is now sorting hashes to write to the files
+
+[00:58] <timotimo> about 32k entries each per chunk it seems like
+
+[01:00] <timotimo> at this point top shows the RES to be 4.8 gigs
+
+[01:01] <timotimo> m: say 37.base(16)
+
+[01:01] <camelia> rakudo-moar a74550507: OUTPUT: «25␤»
+
+[01:02] <timotimo> four more threads until all threads have passed on to stage "sort and output to file"
+
+[01:03] <timotimo> m: my @pieces = ["a".."z"].roll(128) xx 33000; say @pieces.elems; my $start = now; @pieces .= sort; say now - $start
+
+[01:03] <camelia> rakudo-moar a74550507: OUTPUT: «33000␤3.7065022␤»
+
+[01:04] <timotimo> m: my @pieces = ["a".."z"].roll(128) xx 33000; say @pieces.elems; my $start = now; @pieces .= sort({ $^a.substr(0, 64) <=> $^b.substr(0, 64) or $a.substr(64, 64) cmp $b.substr(64, 64) }); say now - $start
+
+[01:04] <camelia> rakudo-moar a74550507: OUTPUT: «33000␤Cannot convert string to number: base-10 number must begin with valid digits or '.' in '3⏏5d s d m f l r w w j v j w i l c w i b i t p n w j v m l y g f m ' (indicated by ⏏)␤  in block <unit> at <tmp> line 1␤␤»
+
+[01:04] <timotimo> m: my @pieces = ["a".."z"].roll(128).join("") xx 33000; say @pieces.elems; my $start = now; @pieces .= sort({ $^a.substr(0, 64) <=> $^b.substr(0, 64) or :16[$a].substr(64, 64) cmp :16[$b].substr(64, 64) }); say now - $start
+
+[01:04] <camelia> rakudo-moar a74550507: OUTPUT: «33000␤Cannot convert string to number: base-10 number must begin with valid digits or '.' in '3⏏5emmqkzndudltwxhkrilqjqjeffmroglztuwoozhjojyicscogaqdneakxgiemppl' (indicated by ⏏)␤  in block <unit> at <tmp> line 1␤␤»
+
+[01:05] <timotimo> oh, it's not even base 16 silly me
+
+[01:05] <timotimo> m: my @pieces = [|"a".."f", |"0".."9"].roll(128).join("") xx 33000; say @pieces.elems; my $start = now; @pieces .= sort({ :16[$^a].substr(0, 64) <=> :16[$^b].substr(0, 64) or $a.substr(64, 64) cmp $b.substr(64, 64) }); say now - $start
+
+[01:05] <camelia> rakudo-moar a74550507: OUTPUT: «Potential difficulties:␤    To apply a Slip flattener to a range, parenthesize the whole range.␤    (Or parenthesize the whole endpoint expression, if you meant that.)␤    at <tmp>:1␤    ------> 3my @pieces = [7⏏5|"a".."f", |"0".."9"].rol…»
+
+[01:06] <timotimo> m: my @pieces = [|("a".."f"), |("0".."9")].roll(128).join("") xx 33000; say @pieces.elems; my $start = now; @pieces .= sort({ :16[$^a].substr(0, 64) <=> :16[$^b].substr(0, 64) or $a.substr(64, 64) cmp $b.substr(64, 64) }); say now - $start
+
+[01:06] <camelia> rakudo-moar a74550507: OUTPUT: «33000␤Cannot convert string to number: trailing characters after number in '03249⏏5b3469b21abd139d913e9b2607eeced66f19c56cc6c1fb6ed18858d5957ff62e138268847dbf8a7288a7ed55f186335db3e32bec36c3015d7ad5e823a31df7' (indicated by ⏏)␤  in block <u…»
+
+[01:06] <timotimo> i'm using :16[] wrong, aren't i
+
+[01:06] <timotimo> m: my @pieces = [|("a".."f"), |("0".."9")].roll(128).join("") xx 33000; say @pieces.elems; my $start = now; @pieces .= sort({ parse-base($^a, 16).substr(0, 64) <=> parse-base($^b, 16).substr(0, 64) or $a.substr(64, 64) cmp $b.substr(64, 64) }); say now - $start
+
+[01:06] <camelia> rakudo-moar a74550507: OUTPUT: «(timeout)33000␤»
+
+[01:07] <timotimo> m: my @pieces = [|("a".."f"), |("0".."9")].roll(128).join("") xx 33000; say @pieces.elems; my $start = now; @pieces .= sort({ parse-base($^a.substr(0, 64), 16), parse-base($^a.substr(64, 64), 16) }); say now - $start
+
+[01:08] <camelia> rakudo-moar a74550507: OUTPUT: «33000␤3.8476713␤»
+
+[01:08] <timotimo> two-arg sort is slooooowwwww
+
+[01:09] <timotimo> i think i should really recommend lembark to change that
+
+[01:13] <timotimo> i sigcont'd xzcat and the rakudo process immediately started growing again, stopped it again and it stopped growing
+
+[01:16] <timotimo> how exactly is run(...).out implemented?
+
+[01:16] <timotimo> is it "just" a react/whenever that appends to some buffer or channel as soon as it gets data?
+
+[01:18] <timotimo> anyway it's about time for me to go to bed; none of the threads has finished the sorting bit yet
+
+[01:23] *** JRaspass joined
+[01:36] <jdv79> timotimo: interesting
+
+[02:02] *** Altai-man_ joined
+[02:04] *** sena_kun left
+[02:43] *** AlexDaniel left
+[02:44] *** AlexDaniel joined
+[02:45] *** AlexDaniel left
+[02:45] *** AlexDaniel joined
+[02:55] *** MasterDuke left
+[03:29] *** Kaiepi joined
+[04:03] *** sena_kun joined
+[04:05] *** Altai-man_ left
+[04:40] *** JRaspass left
+[05:01] *** nebuchadnezzar joined
+[06:02] *** Altai-man_ joined
+[06:04] *** sena_kun left
+[07:45] *** squashable6 left
+[07:45] *** squashable6 joined
+[07:51] *** JJMerelo joined
+[08:03] *** sena_kun joined
+[08:05] *** Altai-man_ left
+[08:25] *** leont joined
+[08:39] <lizmat> Files=1307, Tests=113021, 217 wallclock secs (28.62 usr  8.34 sys + 3026.18 cusr 286.18 csys = 3349.32 CPU)
+
+[09:00] <[Tux]> Rakudo version 2020.06-52-ga74550507 - MoarVM version 2020.06-20-g187b4564e
+
+[09:00] <[Tux]> csv-test-xs-20      0.386 -  0.403
+
+[09:00] <[Tux]> csv-ip5xs           0.853 -  0.854
+
+[09:00] <[Tux]> test-t --race       0.861 -  0.950
+
+[09:00] <[Tux]> test-t              1.920 -  2.025
+
+[09:00] <[Tux]> csv-ip5xs-20        7.910 -  8.418
+
+[09:00] <[Tux]> test                7.622 -  7.961
+
+[09:00] <[Tux]> test-t-20 --race    9.314 -  9.563
+
+[09:00] <[Tux]> csv-parser         26.629 - 27.471
+
+[09:00] <[Tux]> test-t-20          32.082 - 33.193
+
+[09:14] *** AlexDaniel left
+[09:14] *** AlexDaniel joined
+[09:16] *** AlexDani` joined
+[09:19] *** AlexDaniel left
+[09:23] *** JJMerelo left
+[09:27] *** Xliff joined
+[09:43] *** JJMerelo joined
+[09:45] *** AlexDani` is now known as AlexDaniel
+
+[09:45] *** AlexDaniel left
+[09:45] *** AlexDaniel joined
+[10:02] *** Altai-man_ joined
+[10:05] *** sena_kun left
+[10:44] <Geth> ¦ rakudo/remove-Seq-nonsense: c9a4f07de2 | (Aleks-Daniel Jakimenko-Aleksejev)++ | 2 files
+
+[10:44] <Geth> ¦ rakudo/remove-Seq-nonsense: Remove caching of Seqs
+
+[10:44] <Geth> ¦ rakudo/remove-Seq-nonsense: 
+
+[10:44] <Geth> ¦ rakudo/remove-Seq-nonsense: This is a temporary partial commit. If you see it on master then
+
+[10:44] <Geth> ¦ rakudo/remove-Seq-nonsense: things went very wrong.
+
+[10:44] <Geth> ¦ rakudo/remove-Seq-nonsense: review: https://github.com/rakudo/rakudo/commit/c9a4f07de2
+
+[11:29] <Geth> ¦ rakudo/remove-Seq-nonsense: 9c19fddc47 | (Aleks-Daniel Jakimenko-Aleksejev)++ | src/core.c/Seq.pm6
+
+[11:29] <Geth> ¦ rakudo/remove-Seq-nonsense: Fix rakudo install
+
+[11:29] <Geth> ¦ rakudo/remove-Seq-nonsense: 
+
+[11:29] <Geth> ¦ rakudo/remove-Seq-nonsense: Another temp commit. The method is skip-one, not skip. It used to
+
+[11:29] <Geth> ¦ rakudo/remove-Seq-nonsense: build but not install, now both work fine.
+
+[11:29] <Geth> ¦ rakudo/remove-Seq-nonsense: review: https://github.com/rakudo/rakudo/commit/9c19fddc47
+
+[11:29] <Geth> ¦ rakudo/remove-Seq-nonsense: 95cadc8916 | (Aleks-Daniel Jakimenko-Aleksejev)++ | src/core.c/Seq.pm6
+
+[11:29] <Geth> ¦ rakudo/remove-Seq-nonsense: Fix a thinko in AT-POS
+
+[11:29] <Geth> ¦ rakudo/remove-Seq-nonsense: 
+
+[11:29] <Geth> ¦ rakudo/remove-Seq-nonsense: It's the number of elements, so surely it's larger than the index.
+
+[11:29] <Geth> ¦ rakudo/remove-Seq-nonsense: review: https://github.com/rakudo/rakudo/commit/95cadc8916
+
+[11:54] <AlexDaniel> Altai-man_: can you run Blin on remove-Seq-nonsense branch? I'm expecting a bunch of stuff to fail, I just wanna know how much and how exactly it fails
+
+[11:54] <Altai-man_> AlexDaniel, will run one tonight.
+
+[11:54] <AlexDaniel> thanks
+
+[12:03] *** sena_kun joined
+[12:05] *** Altai-man_ left
+[12:07] *** JJMerelo left
+[12:26] <Geth> ¦ rakudo: f96a641fff | (Elizabeth Mattijsen)++ | src/core.c/Exception.pm6
+
+[12:26] <Geth> ¦ rakudo: Wordwrap X::Adverb message
+
+[12:26] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/f96a641fff
+
+[12:26] <Geth> ¦ rakudo: 1f93724f71 | (Elizabeth Mattijsen)++ | src/core.c/Exception.pm6
+
+[12:26] <Geth> ¦ rakudo: Wordwrap X::Syntax::KeywordAsFunction message
+
+[12:26] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/1f93724f71
+
+[12:26] <Geth> ¦ rakudo: 98c7e512a6 | (Elizabeth Mattijsen)++ | 2 files
+
+[12:26] <Geth> ¦ rakudo: Re-imagine X::Syntax::ParentAsHash message
+
+[12:26] <Geth> ¦ rakudo: 
+
+[12:26] <Geth> ¦ rakudo: Sadly, even though this error is a syntax error to be thrown at
+
+[12:26] <Geth> ¦ rakudo: compile time, it sadly has no access to parser state so it cannot
+
+[12:26] <Geth> ¦ rakudo: actually produce the line info.  Try to make up for it as best as
+
+[12:26] <Geth> ¦ rakudo: we can for now.
+
+[12:26] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/98c7e512a6
+
+[12:27] <Geth> ¦ rakudo/rakuast: 1cf5223bd4 | (Jonathan Worthington)++ | src/Raku/ast/regex.rakumod
+
+[12:27] <Geth> ¦ rakudo/rakuast: Compile regex sequences, alterations, conjunctions
+
+[12:27] <Geth> ¦ rakudo/rakuast: review: https://github.com/rakudo/rakudo/commit/1cf5223bd4
+
+[12:28] <lizmat> afk for a few hours&
+
+[13:53] <Geth> ¦ rakudo/rakuast: bd890a8813 | (Jonathan Worthington)++ | src/Raku/ast/regex.rakumod
+
+[13:53] <Geth> ¦ rakudo/rakuast: Fix copy-pasta; vendethiel++
+
+[13:53] <Geth> ¦ rakudo/rakuast: review: https://github.com/rakudo/rakudo/commit/bd890a8813
+
+[13:53] <Geth> ¦ rakudo/rakuast: 55e15dbfe4 | (Jonathan Worthington)++ | 3 files
+
+[13:53] <Geth> ¦ rakudo/rakuast: RakuAST hanlding of implicit $!, $/, and $_
+
+[13:53] <Geth> ¦ rakudo/rakuast: 
+
+[13:53] <Geth> ¦ rakudo/rakuast: At the compilation unit and routine level.
+
+[13:53] <Geth> ¦ rakudo/rakuast: review: https://github.com/rakudo/rakudo/commit/55e15dbfe4
+
+[14:02] *** Altai-man_ joined
+[14:05] *** sena_kun left
+[14:22] <Geth> ¦ rakudo/rakuast: 89921f7ea6 | (Jonathan Worthington)++ | 2 files
+
+[14:22] <Geth> ¦ rakudo/rakuast: RakuAST for regex anchors
+
+[14:22] <Geth> ¦ rakudo/rakuast: review: https://github.com/rakudo/rakudo/commit/89921f7ea6
+
+[14:36] *** softmoth joined
+[14:48] *** softmoth left
+[16:03] *** sena_kun joined
+[16:05] *** Altai-man_ left
+[16:22] <moritz> I'm curious, why are things like RakuAST::SinkBoundary classes instead of roles?
+
+[16:23] <jnthn> moritz: 'cus the node to MOP call translator didn't learn roles yet
+
+[16:23] <moritz> ah, pity :D
+
+[16:23] <jnthn> I'll get there eventually :)
+
+[16:24] <jnthn> It's listed as a "todo" in the README, even :)
+
+[16:24] <jnthn> Under the "tasks for anyone wanting to help"
+
+[16:24] <moritz> who reads thoss, ever? :D
+
+[16:24] <jnthn> Nobody crazy enough, apparently ;)
+
+[16:25] <moritz> is that README in rakudo? didn't find it there
+
+[16:26] <jnthn> In src/Raku/ast
+
+[16:26] <moritz> ah
+
+[16:30] <moritz> do I need any magic to build?
+
+[16:30] <moritz> currently I get Only typename on RHS of constant implemented so far at line 5850, near "nqp::hash(
+
+[16:30] <moritz> (after Configure.pl --gen-moar && make)
+
+[16:30] * sena_kun for the record, has read that section, but is probably too dumb anyway
+
+[16:34] *** squashable6 left
+[16:35] <jnthn> moritz: Ah, maybe I need to bump NQP_REVISION...it needs an NQP with 30b1d064da767bb
+
+[16:35] <linkable6> (2020-06-10) https://github.com/Raku/nqp/commit/30b1d064da Allow more interesting constants in NQP
+
+[16:36] *** squashable6 joined
+[16:36] <moritz> ok, I'll try with a newer nqp (and moar)
+
+[16:38] <Geth> ¦ rakudo/rakuast: f000b5780c | (Jonathan Worthington)++ | 2 files
+
+[16:38] <Geth> ¦ rakudo/rakuast: RakuAST for various built-in char classes
+
+[16:38] <Geth> ¦ rakudo/rakuast: review: https://github.com/rakudo/rakudo/commit/f000b5780c
+
+[16:38] <Geth> ¦ rakudo/rakuast: 5469d3cf14 | (Jonathan Worthington)++ | tools/templates/NQP_REVISION
+
+[16:38] <Geth> ¦ rakudo/rakuast: Bump NQP_REVISION
+
+[16:38] <Geth> ¦ rakudo/rakuast: 
+
+[16:38] <Geth> ¦ rakudo/rakuast: So that the rakuast branch builds "out of the box".
+
+[16:38] <Geth> ¦ rakudo/rakuast: review: https://github.com/rakudo/rakudo/commit/5469d3cf14
+
+[17:08] <Geth> ¦ rakudo/rakuast: 724c683fca | (Jonathan Worthington)++ | 2 files
+
+[17:08] <Geth> ¦ rakudo/rakuast: RakuAST support for basic regex quantifiers
+
+[17:08] <Geth> ¦ rakudo/rakuast: 
+
+[17:08] <Geth> ¦ rakudo/rakuast: Along with backtrack modifiers.
+
+[17:08] <Geth> ¦ rakudo/rakuast: review: https://github.com/rakudo/rakudo/commit/724c683fca
+
+[17:12] <jnthn> Almost enough to do 10-regex.t. It uses / <alpha> / which means I need to model assertion syntax too. But not right now...hometime.
+
+[17:40] *** AlexDaniel left
+[17:40] *** AlexDaniel joined
+[17:40] *** AlexDaniel left
+[17:40] *** AlexDaniel joined
+[18:02] *** Altai-man_ joined
+[18:05] *** sena_kun left
+[18:34] *** MasterDuke joined
+[18:44] <timotimo> hm, we don't have "int" constants, right?
+
+[18:44] <timotimo> in nqp, i mean
+
+[18:53] <lizmat> QRegex/Cursor.nqp has this comment in it:
+
+[18:53] <lizmat>     my $pass_mark := 1; # NQP has no constant table yet
+
+[18:53] <lizmat> so I guess that is correct 
+
+[18:53] <timotimo> the mast compiler has a bunch of "constants" too
+
+[18:55] <Geth> ¦ rakudo/rakuast: 89a19d7d15 | (Moritz Lenz)++ | src/Raku/ast/README.md
+
+[18:55] <Geth> ¦ rakudo/rakuast: Fix typo
+
+[18:55] <Geth> ¦ rakudo/rakuast: review: https://github.com/rakudo/rakudo/commit/89a19d7d15
+
+[19:22] *** vrurg left
+[19:42] *** vrurg joined
+[19:53] <jdv79> timotimo: did you get anywhere excidint with lembark's stuff?
+
+[19:53] <jdv79> *exciting
+
+[20:04] *** sena_kun joined
+[20:04] *** Altai-man_ left
+[20:15] <timotimo> i haven't touched it again today
+
+[20:33] <Geth> ¦ rakudo: 248664c6c3 | (Elizabeth Mattijsen)++ | src/core.c/Exception.pm6
+
+[20:33] <Geth> ¦ rakudo: Wordwrap X::Placeholder::Block message
+
+[20:33] <Geth> ¦ rakudo: 
+
+[20:33] <Geth> ¦ rakudo: And slightly reword it
+
+[20:33] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/248664c6c3
+
+[20:33] <Geth> ¦ rakudo: 3bc4fa90ad | (Elizabeth Mattijsen)++ | 2 files
+
+[20:33] <Geth> ¦ rakudo: Re-imagine X::Syntax::Variable::Twigil message
+
+[20:33] <Geth> ¦ rakudo: 
+
+[20:33] <Geth> ¦ rakudo: By providing it with more information, and make it more palatable
+
+[20:33] <Geth> ¦ rakudo: to readers that read English as a second language, by describing
+
+[20:33] <Geth> ¦ rakudo: the oxymoron rather than just using the word.
+
+[20:33] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/3bc4fa90ad
+
+[20:44] <timotimo> lizmat: since you're currently already working on exception output, i'd like to toss this your way for a quick look: https://gist.github.com/egmontkob/eb114294efbcd5adb1944c9f3cb5feda#quick-example
+
+[20:46] <lizmat> looks interesting, doesn't work for me on MacOS, but then again, I'm not on Catalina 
+
+[20:47] <lizmat> so not bleeding edge
+
+[20:47] <lizmat> I guess it could be used for the default .WHY ?
+
+[20:47] <lizmat> m: say Int.WHY
+
+[20:47] <camelia> rakudo-moar 98c7e512a: OUTPUT: «No documentation available for type 'Int'.␤Perhaps it can be found at https://docs.raku.org/type/Int␤»
+
+[20:53] <timotimo> hm that's already clickable
+
+[20:53] <lizmat> yeah, because of your IRC client, I presume?  It's just text in the code, afaik
+
+[20:54] <timotimo> nah, this irc client doesn't do that
+
+[20:54] <timotimo> in fact, if it's word-wrapped i have to switch to its special "raw mode" so i can click or copypaste it in full
+
+[20:55] <lizmat> "No documentation available for type '$name'.
+
+[20:55] <lizmat> Perhaps it can be found at https://docs.raku.org/type/$name"
+
+[20:56] <lizmat> hehehttps://github.com/rakudo/rakudo/blob/master/src/core.c/Mu.pm6#L86   # nothing magic there
+
+[20:56] <lizmat> https://github.com/rakudo/rakudo/blob/master/src/core.c/Mu.pm6#L86   # rather
+
+[21:05] <Geth> ¦ rakudo: 16d24a2127 | (Elizabeth Mattijsen)++ | src/core.c/Mu.pm6
+
+[21:05] <Geth> ¦ rakudo: Wordwrap Mu.WHY
+
+[21:05] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/16d24a2127
+
+[21:23] *** finsternis joined
+[22:02] *** Altai-man_ joined
+[22:05] *** sena_kun left
+[22:36] <AlexDaniel> Altai-man_: .tell me when it's ready
+
+[22:36] *** AlexDaniel left
+[22:48] *** tbrowder left
+[22:50] *** kawaii left
+[22:52] *** SmokeMachine left
+[22:52] *** zostay left
+[22:53] *** chansen_ left
+[23:27] *** lizmat left
+[23:41] *** Xliff left
+[23:43] *** Geth left
+[23:44] *** Geth joined
+[23:46] *** Geth left
+[23:47] *** Geth joined

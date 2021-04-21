@@ -1,0 +1,173 @@
+[00:02] *** patrickz left
+[00:55] *** Altai-man_ joined
+[00:57] *** sena_kun left
+[02:55] *** sena_kun joined
+[02:57] *** Altai-man_ left
+[04:55] *** Altai-man_ joined
+[04:57] *** sena_kun left
+[06:56] *** sena_kun joined
+[06:57] *** Altai-man_ left
+[07:44] *** leont joined
+[08:45] <[Tux]> Rakudo version 2020.06-1-g34f985de9 - MoarVM version 2020.06-2-g7d5cc1f3a
+
+[08:45] <[Tux]> csv-test-xs-20      0.395 -  0.417
+
+[08:45] <[Tux]> csv-ip5xs           0.808 -  0.832
+
+[08:45] <[Tux]> test-t --race       0.939 -  0.964
+
+[08:45] <[Tux]> test-t              1.909 -  1.953
+
+[08:45] <[Tux]> test                7.809 -  8.031
+
+[08:45] <[Tux]> csv-ip5xs-20        7.719 -  8.664
+
+[08:45] <[Tux]> test-t-20 --race    9.681 -  9.940
+
+[08:45] <[Tux]> csv-parser         26.195 - 26.712
+
+[08:45] <[Tux]> test-t-20          31.907 - 33.067
+
+[08:51] <nine> So, turns out use lib breaks in-process precompilation due to begin_time_lexical_fixup of role bodies (CompUnit::Repoisitory in this case)
+
+[08:52] <nine> Somehow the !LEXICAL_FIXUP block leaks into the precompilation comp unit despite getting created before we even start precompiling
+
+[08:55] *** Altai-man_ joined
+[08:57] *** sena_kun left
+[10:25] <lizmat> Files=1306, Tests=111383, 243 wallclock secs (30.74 usr  9.12 sys + 3258.88 cusr 317.27 csys = 3616.01 CPU)
+
+[10:26] <lizmat> this feels like a fluke ^^
+
+[10:28] <lizmat> sena_kun++ Altai-man++  # yet another Rakudo compiler release!
+
+[10:42] <Altai-man_> lizmat++ for all the annoying fixes demanded and great efforts toward making rakudo better. :)
+
+[10:56] *** sena_kun joined
+[10:57] *** Altai-man_ left
+[11:35] *** synthmeat left
+[11:51] *** Xliff joined
+[12:55] *** Altai-man_ joined
+[12:57] *** sena_kun left
+[14:33] <nine> OMG I got it!
+
+[14:33] <nine> It's not about roles... it's not about classes or subs either and not even about signatures.
+
+[14:34] <nine> It's the signature's $!count attribute that gets intiailized with an int....from MoarVM's int cache
+
+[14:41] <nine> So any integer constant from 0 to 15 used during compilation will be the same object across multiple compiler instances. And this leads to us adding a dependency on the outer compiler.
+
+[14:55] *** sena_kun joined
+[14:57] *** Altai-man_ left
+[14:57] *** patrickb joined
+[15:11] <timotimo> lmao, oh no
+
+[15:11] <timotimo> that's hilarious
+
+[15:15] <nine> Unfortunately there doesn't seem to be a way to disable the int cache
+
+[15:17] <patrickb> sena_kun: I'm currently working on doing the precomp build for 2020.06.
+
+[15:19] <patrickb> As feared https://github.com/MoarVM/MoarVM/pull/1317 broke the build on CentOS 6. So I'll see how I can patch around that. I'll do some tests with different compile flags. Maybe I can find a way to enable c99 constructs.
+
+[15:19] <timotimo> nine: what do you think happens if we "scdisclaim" the int objects when we create the int cache?
+
+[15:19] <sena_kun> patrickb, but the PR isn't merged yet? You mean, its absence is wrong?
+
+[15:20] <patrickb> Yes.
+
+[15:20] <patrickb> I'll try to find a way with only touching compile flags.
+
+[15:20] <patrickb> I'm not actually sure how clean it is to touch the code when doing an official build.
+
+[15:21] <sena_kun> CentOS 6 is 2011, ouch.
+
+[15:21] <patrickb> sena_kun: Thanks for doing the release work by the way!
+
+[15:22] <nine> timotimo: AFAICT scdisclaim works on a whole SC, which could work for the outer most compiler, i.e. a script that's not precompiled, but probably not anymore when we do multiple precompilations in a process.
+
+[15:22] <timotimo> ah, dang
+
+[15:22] <sena_kun> patrickb, in the worst case, I don't think applying a patch for the binary one can hurt.
+
+[15:23] <timotimo> should we do something during the serialization phase? have a check based on whether a compilee has been entered? have a +1 / -1 thing that turns a global flag on or off when it's > 0 and prevents int cache lookups?
+
+[15:23] <timotimo> a command that just empties out the int cache?
+
+[15:23] <patrickb> sena_kun: I know. But it's by far the easiest way to create a build that will run on older glibc versions. CentOS is the sweet spot of new enough to work at least a bit and old enough to not leave widely used OS's unsupported.
+
+[15:24] <patrickb> *CentOS6 is the sweet spot
+
+[15:24] <sena_kun> Not judging anyone, just wondering.
+
+[15:24] <timotimo> i think i still have some debian sarge installer CDs somewhere
+
+[15:28] <patrickb> https://gist.github.com/wagenet/35adca1a032cec2999d47b6c40aa45b1 <- This gives a nice overview of the different distributions and their glibc versions.
+
+[15:30] <nine> On that list the only distro using an older glibc version than CentOS 7 is CentOS 6. But the list is also pretty short
+
+[15:30] <patrickb> CentOS 6 is EOL end of 2020.
+
+[15:31] <patrickb> But not supporting RHEL 7 will give lots of people pain.
+
+[15:33] <nine> People interested in that just need to find out the correct compiler options
+
+[15:34] <nine> With a disabled Int cache and nqp::scwbdisable/nqp::scwbenable around $registry.head.need($spec); in load_module, I'm now down to 4 files failing in make test
+
+[15:36] <nine> Apparently the nqp::scwbdisable goes a tiny bit too far
+
+[15:59] *** JJMerelo joined
+[16:15] <nine> Or maybe it isn't actually the nqp::scwbdisable. The symptom is an empty my @cpp-name-mangler = ...; in NativeCall.rakumod. 
+
+[16:19] <nine> Indeed, must be something else
+
+[16:55] *** Altai-man_ joined
+[16:57] *** sena_kun left
+[17:29] <lizmat> nine: perhaps have each compunit have its own int cache ?
+
+[17:45] <nine> That....could be a decent workaround that doesn't require the program to know much about MoarVM's cache :) Would just cost as much as following a couple pointers: tc->cur_frame->body.sf->body.cu->body.int_cache
+
+[18:09] *** vrurg left
+[18:24] <Geth> ¦ rakudo: 0144905fb0 | (Elizabeth Mattijsen)++ | src/core.c/Grammar.pm6
+
+[18:24] <Geth> ¦ rakudo: Give Grammar its own .new
+
+[18:24] <Geth> ¦ rakudo: 
+
+[18:24] <Geth> ¦ rakudo: One should only call .new on a grammar if it has attributes of its
+
+[18:24] <Geth> ¦ rakudo: own that need initializing.  This is now (also) performed by
+
+[18:24] <Geth> ¦ rakudo: Match.new.  But that is *also* used to create the cursor that will
+
+[18:24] <Geth> ¦ rakudo: be used in matching.
+
+[18:24] <Geth> ¦ rakudo: 
+
+[18:24] <Geth> ¦ rakudo: By giving Grammar its own new, we're separating Grammar initialization
+
+[18:24] <Geth> ¦ rakudo: from cursor initialization.  Don't expect too much of a performance
+
+[18:24] <Geth> ¦ rakudo: gain yet, but this will make refactoring Match a lot easier, and allow
+
+[18:24] <Geth> ¦ rakudo: that refactor to be much more efficient.
+
+[18:24] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/0144905fb0
+
+[18:33] <patrickb> sena_kun: Precomp builds are done and uploaded.
+
+[18:33] <tellable6> patrickb, I'll pass your message to sena_kun
+
+[18:37] *** JJMerelo left
+[18:39] *** vrurg joined
+[18:55] *** sena_kun joined
+[18:57] *** Altai-man_ left
+[20:55] *** Altai-man_ joined
+[20:57] *** sena_kun left
+[22:55] *** sena_kun joined
+[22:57] *** Altai-man_ left
+[23:18] *** patrickb left
+[23:55] *** leont left
+[23:56] <timotimo> we are failing to JIT compile the read methods on blobs because of endian objects
+
+[23:57] <timotimo> it is not understanding them to be constant
+
