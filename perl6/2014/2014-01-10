@@ -1,0 +1,1682 @@
+[00:00] *** araujo left
+[00:00] <timotimo> why did this code pass Nil to p6parcel?
+
+[00:01] *** hypolin joined
+[00:01] *** hypolin left
+[00:02] <timotimo> that seems to be an argument to fill the array with Nil?
+
+[00:02] <timotimo> if there's nothing in it, huh.
+
+[00:07] *** araujo joined
+[00:07] *** araujo left
+[00:07] *** araujo joined
+[00:08] <timotimo> r: my Mu $res := nqp::list(); nqp::push($res, True); nqp::push($res, Nil); say nqp::p6parcel($res, Nil);
+
+[00:08] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«True Nil␤»
+
+[00:08] <timotimo> where does it disappear? :\
+
+[00:08] *** dmol left
+[00:09] *** rurban1 joined
+[00:09] <FROGGS> r: say all("5", "4").match(/4/).DUMP
+
+[00:09] <camelia> rakudo-jvm f614e5: OUTPUT«Junction<1>(␤    :$!storage(Array<2>(␤        :$!flattens(True),␤        :$!items(BOOTArray<4>(▶Match<5>(␤            :orig("4"),␤            :from(0),␤            :to(1),␤            :CURSOR(Cursor<9>(:$!ast(Any))),␤            :ast(▶An…»
+
+[00:09] <camelia> ..rakudo-parrot f614e5: OUTPUT«Junction<1>(␤    :$!storage(Array<2>(␤        :$!flattens(True),␤        :$!items(QRPA<4>(▶Match<5>(␤            :orig("4"),␤            :from(0),␤            :to(1),␤            :CURSOR(Cursor<9>(:$!ast(Any))),␤            :ast(▶Any)…»
+
+[00:09] <FROGGS> r: say all("5", "4").match(/4/).perl
+
+[00:10] <camelia> rakudo-parrot f614e5: OUTPUT«all(Match.new(orig => "4", from => 0, to => 1, ast => Any, list => ().list, hash => EnumMap.new()))␤»
+
+[00:10] <camelia> ..rakudo-jvm f614e5: OUTPUT«all(Match.new(to => 1, hash => EnumMap.new(), ast => Any, list => ().list, orig => "4", from => 0))␤»
+
+[00:11] <timotimo> maybe it's just the output of the all that's wrong.
+
+[00:13] <timotimo> nope, the storage contains just one thing
+
+[00:14] <timotimo> oh
+
+[00:14] <timotimo> @values.eager, eh?
+
+[00:15] <timotimo> huh, weird
+
+[00:15] <timotimo> it makes Junction.new(nqp::p6parcel(...), :type($type))
+
+[00:15] <timotimo> but the signature is *@values
+
+[00:15] <timotimo> so ... wha?
+
+[00:16] *** ajr_ left
+[00:17] * timotimo tries to | the p6parcel
+
+[00:17] <timotimo> i don't know how to things, so i just try
+
+[00:26] <clsn_> I think the push is what flattens the Nil.  It does not seem to be possible to make Nil an element in a list/array.
+
+[00:26] <timotimo> oh?
+
+[00:26] <timotimo> nil shouldn't disappear in lists any more
+
+[00:26] <timotimo> we have () for that
+
+[00:28] <clsn_> Nil definitely disappears in lists.
+
+[00:28] <clsn_> r: say [Nil].perl
+
+[00:28] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«[]␤»
+
+[00:29] <timotimo> noooooo! why? :(
+
+[00:29] <timotimo> i don't think that's right
+
+[00:30] <geekosaur> I thought the re-specced Nil was somewhat NYI in Rakudo
+
+[00:30] <timotimo> might very well be
+
+[00:30] * timotimo looks to try to figure out where that happens
+
+[00:30] <jnthn> Trouble is, we relied on that in a lot of places.
+
+[00:30] <jnthn> So it's a total nuisance of a spec change.
+
+[00:31] <jnthn> I'd kinda figured we'd just kick it down the road until the next big lists overhaul Pm had in mind, to let us do hyper and race right.
+
+[00:32] <timotimo> it seems simple to make it in ListIter and then i guess everything explodes everywhere
+
+[00:32] <timotimo> i'm too impatient :)
+
+[00:32] *** hoverboard left
+[00:32] *** FROGGS[mobile] left
+[00:32] *** FROGGS[mobile] joined
+[00:38] <timotimo> clsn_: i'm sorry :(
+
+[00:38] <timotimo> i suppose we need a non-flattening subtype of Nil
+
+[00:38] *** hoverboard joined
+[00:38] <clsn_> Should the .orig element of a match be stored as a Str?  Currently it's stored as a pointer to whatever the original value was, which might be strange.
+
+[00:38] <timotimo> my class Nil is Nil { } ... :P
+
+[00:39] <timotimo> i think it's a good idea to have that
+
+[00:39] <clsn_> I tried making a subclass of Nil; didn't work.
+
+[00:39] <timotimo> yeah, the subclass of nil must be invisible from the ListIter, but be used by the Junction construction code
+
+[00:39] <timotimo> it must not nqp::istype() to Nil :P
+
+[00:39] <jnthn> clsn_: Yes, orig means original, as in, "what did we start with". If we're matching against it, it's going to be something that can at least coerce to a string.
+
+[00:39] <timotimo> which is problematic
+
+[00:40] <clsn_> Junctions know about smart matching, when they're on the right.  But not when they're on the left.  And you get weird stuff like this:
+
+[00:40] <jnthn> timotimo: I'd rather not put in hacks...it'll make the real solution harder to do...
+
+[00:40] <timotimo> yes
+
+[00:40] <clsn_> r: my $a=(any("a","b") ~~ /./); say $a.gist; say $a.perl
+
+[00:40] <camelia> rakudo-jvm f614e5: OUTPUT«｢any("a", "b")｣␤␤Match.new(to => 1, hash => EnumMap.new(), ast => Any, list => ().list, orig => any("a", "b"), from => 0)␤»
+
+[00:40] <camelia> ..rakudo-parrot f614e5: OUTPUT«｢any("a", "b")｣␤␤Match.new(orig => any("a", "b"), from => 0, to => 1, ast => Any, list => ().list, hash => EnumMap.new())␤»
+
+[00:40] *** pecastro left
+[00:41] <timotimo> FTR, i find that acceptable
+
+[00:41] <clsn_> Hmm, I got error messages from the gist I thought.
+
+[00:41] <clsn_> r: my $a=(any("a","b") ~~ /./); say $a.gist; say $a.Str
+
+[00:41] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«｢any("a", "b")｣␤␤any(a, b)␤»
+
+[00:41] <clsn_> Yeah, I got weirder results... let me confirm.
+
+[00:41] <timotimo> is /./ supposed to give all of it?
+
+[00:42] <timotimo> r: my $a = ("foobar" ~~ /./); say $a.gist; say $a.Str;
+
+[00:42] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«｢f｣␤␤f␤»
+
+[00:42] <timotimo> yeah, that *is* weird.
+
+[00:43] <clsn_> Wow.  what I was getting only happened when I played with numbers... 
+
+[00:43] <timotimo> oh, it *does* autothread that?
+
+[00:43] <clsn_> r: any("4","5") ~~ /\d/;
+
+[00:43] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: ( no output )
+
+[00:43] <clsn_> r: any("4","5") ~~ /\d/; say $/
+
+[00:43] <timotimo> r: my $a = (any("a", "b") ~~ /{ say $/.CURSOR.orig.perl }./); say $a.gist; say $a.Str;
+
+[00:43] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«｢any(Failure.new(exception => X::OutOfRange.new(what => "Start of substr", got => 5, range => 0..1, comment => Any)), Failure.new(exception => X::OutOfRange.new(what => "Start of substr", got => 5, range => 0..1, comment => Any)))｣…»
+
+[00:43] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«any("a", "b")␤｢any("a", "b")｣␤␤any(a, b)␤»
+
+[00:43] <clsn_> There we are.
+
+[00:43] <clsn_> Whereas $/.perl is perfectly fine.
+
+[00:43] <clsn_> r: any("4","5") ~~ /\d/; say $/; say $/.perl
+
+[00:44] <camelia> rakudo-jvm f614e5: OUTPUT«｢any(Failure.new(exception => X::OutOfRange.new(what => "Start of substr", got => 5, range => 0..1, comment => Any)), Failure.new(exception => X::OutOfRange.new(what => "Start of substr", got => 5, range => 0..1, comment => Any)))｣␤␤Match.new(to => …»
+
+[00:44] <camelia> ..rakudo-parrot f614e5: OUTPUT«｢any(Failure.new(exception => X::OutOfRange.new(what => "Start of substr", got => 5, range => 0..1, comment => Any)), Failure.new(exception => X::OutOfRange.new(what => "Start of substr", got => 5, range => 0..1, comment => Any)))｣␤␤Match.new(ori…»
+
+[00:44] <timotimo> ouch.
+
+[00:44] <timotimo> my brain hurts.
+
+[00:44] <clsn_> r: any("4","5") ~~ /\d/; say $/.perl
+
+[00:44] <camelia> rakudo-jvm f614e5: OUTPUT«Match.new(to => 6, hash => EnumMap.new(), ast => Any, list => ().list, orig => any("4", "5"), from => 5)␤»
+
+[00:44] <camelia> ..rakudo-parrot f614e5: OUTPUT«Match.new(orig => any("4", "5"), from => 5, to => 6, ast => Any, list => ().list, hash => EnumMap.new())␤»
+
+[00:45] <clsn_> Wow.  And I can't make that happen for any("a","b") matching against various things.
+
+[00:46] <clsn_> see, only happens with the numbers:
+
+[00:47] <clsn_> r: any("a","b") ~~ /a/; say $/.gist
+
+[00:47] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«｢any("a", "b")｣␤␤»
+
+[00:47] <clsn_> r: any("4","5") ~~ /4/; say $/.gist
+
+[00:47] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«｢any(Failure.new(exception => X::OutOfRange.new(what => "Start of substr", got => 5, range => 0..1, comment => Any)), Failure.new(exception => X::OutOfRange.new(what => "Start of substr", got => 5, range => 0..1, comment => Any)))｣…»
+
+[00:47] <timotimo> where the hell does the 5 come from? if it were -5, i'd guess it's one of the result values for failed cursors, but ...
+
+[00:47] <clsn_> Oh, that I understand.
+
+[00:47] <clsn_> The 5 is from the start of the junction.Str.
+
+[00:47] <timotimo> r: "5" ~~ /4/
+
+[00:47] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: ( no output )
+
+[00:48] <timotimo> r: say "5" ~~ /5/
+
+[00:48] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«｢5｣␤␤»
+
+[00:48] <timotimo> r: say "5" ~~ /4/
+
+[00:48] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«Nil␤»
+
+[00:48] <timotimo> i apologize for nil-wrongness :(
+
+[00:49] <clsn_> The match is matching against the .Str representation, 'any("4","5")'.  But when it tries to print it out it goes all wobbly.
+
+[00:50] <clsn_> Now, "a" ~~ any(rx/a/, rx/b/) will give  the right Boolean answer, but matches are about more than Booleans.  I guess autothreaded matches is a bit much to ask.
+
+[00:54] <clsn_> Dunno why that weird stuff only happens with "4" and not with "a".
+
+[00:57] <clsn_> I dunno if smart matching between Signatures is really right.  It ignores the names of named params.
+
+[00:57] <clsn_> (I've been poring over src/core/*pm way too much lately, just out of boredom/curiosity)
+
+[01:00] <psch> i've got a working find_symbol in the optimizer now at least, gonna work on trying to get the whole awesome stuff for exceptions in there during the next few days
+
+[01:00] <clsn_> all().Bool == True is surprising, though correct.
+
+[01:00] <psch> and with that, good night #perl6
+
+[01:00] *** psch left
+[01:02] <jnthn> clsn_: I think smart-matching between sigs is fairly incomplete. Feel free to work on improving it. :)
+
+[01:02] <clsn_> Thanks; I might even do that.
+
+[01:05] <clsn_> I note that any("a", "b") ~~ /./ seems to do something akin to the Right Thing, while any("a", "b") ~~ m/./ returns False.  Not sure why.
+
+[01:06] <timotimo> oh shit. the substr autothreads, doesn't it
+
+[01:07] <clsn_> Yeah, taking the substr of a junction of strings gives you a junction of the results.
+
+[01:10] *** treehug88 joined
+[02:02] *** FROGGS left
+[02:04] *** mavcunha left
+[02:07] *** mavcunha joined
+[02:23] *** FROGGS joined
+[02:34] <BenGoldberg> r: my @a; say [*] @a
+
+[02:34] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«1␤»
+
+[02:37] <clsn_> Parameters can .perl-ize to empty strings; this is Not Good.  I'm looking at fixing it.  But I note that we have SIG_ELEM_HASH_SIGIL and SIG_ELEM_ARRAY_SIGIL to tell if the param was % or @, but there's no SIG_ELEM_CODE_SIGIL for &.  Can I just add that?
+
+[02:38] <clsn_> r: say :(Int).perl
+
+[02:38] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«:(Int )␤»
+
+[02:38] <clsn_> r: say :(Any).perl
+
+[02:38] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«:()␤»
+
+[02:40] <clsn_> r: say :($).perl
+
+[02:40] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«:(Mu )␤»
+
+[02:40] <clsn_> r: say :(@).perl
+
+[02:40] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«:()␤»
+
+[02:40] <clsn_> You get the idea.
+
+[02:41] *** abnorman left
+[02:48] <BenGoldberg> r: say :(%).perl
+
+[02:48] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«:()␤»
+
+[02:49] <BenGoldberg> r: say :(*).perl
+
+[02:49] <camelia> rakudo-jvm f614e5: OUTPUT«[31m===[0mSORRY![31m===[0m Error while compiling /tmp/HGvNc4ue80␤Malformed parameter␤at /tmp/HGvNc4ue80:1␤------> [32msay :([33m⏏[31m*).perl[0m␤    expecting any of:␤        colon pair␤        signature␤»
+
+[02:49] <camelia> ..rakudo-parrot f614e5: OUTPUT«[31m===[0mSORRY![31m===[0m Error while compiling /tmp/H09lV_hq2r␤Malformed parameter␤at /tmp/H09lV_hq2r:1␤------> [32msay :([33m⏏[31m*).perl[0m␤    expecting any of:␤        colon pair␤        signature␤»
+
+[02:49] <clsn_> r: say :(&).perl
+
+[02:49] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«:()␤»
+
+[03:10] *** treehug88 left
+[03:32] *** rurban1 left
+[04:05] *** mavcunha left
+[04:13] *** cognominal__ joined
+[04:16] *** cognominal left
+[04:17] *** xinming left
+[04:18] *** Nate848 joined
+[04:20] *** Nate848 left
+[04:26] *** hoverboard left
+[04:33] *** preflex left
+[04:33] *** FROGGS left
+[04:33] *** preflex_ joined
+[04:33] *** ChanServ sets mode: +v preflex_
+
+[04:33] *** rurban1 joined
+[04:33] *** preflex_ is now known as preflex
+
+[04:38] *** rurban1 left
+[04:39] *** xinming joined
+[04:49] *** hoverboard joined
+[04:55] *** smash left
+[04:56] *** brother left
+[05:03] *** smash_ joined
+[05:11] <moritz> good morning
+
+[05:20] *** BenGoldberg left
+[05:28] *** [Sno] left
+[05:31] *** xinming left
+[05:34] *** rurban1 joined
+[05:35] *** xinming joined
+[05:38] *** rurban1 left
+[05:40] *** brother joined
+[05:47] *** abnorman joined
+[05:50] <lue> Could not download module metadata: No such method 'defined' for invocant of type 'Hash'  :(
+
+[05:51] <moritz> lue: somehow you manage to get the most curious error messages
+
+[05:51] <moritz> p: say Hash.defined
+
+[05:51] <camelia> rakudo-parrot f614e5: OUTPUT«False␤»
+
+[05:52] <lue> It's not me, it's panda! :)
+
+[05:52] <moritz> lue: of course. So they all say :-)
+
+[05:55] <lue> Trouble is, the message only points to the CATCH block, not the actual error. Hmm...
+
+[05:56] <lue> r: CATCH { die "Failure to work: $_.message" };
+
+[05:56] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: ( no output )
+
+[05:56] *** xinming left
+[05:56] *** raiph joined
+[06:24] *** [Sno] joined
+[06:33] *** grondilu joined
+[06:33] *** thou left
+[06:35] <raiph> i'm aiming at implementing more of the sort spec
+
+[06:35] <raiph> http://perlcabal.org/syn/S32/Containers.html#line_430
+
+[06:36] <raiph> a first step is to add the Ordering type declarations:
+
+[06:36] <raiph> http://perlcabal.org/syn/S29.html#Ordering
+
+[06:37] <raiph> eg:  subset KeyExtractor of Code where { .signature === :(Any --> Any) };
+
+[06:38] <raiph> the --> doesn't work; but i can just leave that off for now, so:
+
+[06:39] <raiph> r: subset KeyExtractor of Code where { .signature === :(Any) };
+
+[06:39] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: ( no output )
+
+[06:39] *** rurban1 joined
+[06:40] <raiph> r-j: subset KeyExtractor of Code where { .signature === :(Any) }; say { $^a } ~~ Code; say { $^a } ~~ KeyExtractor;
+
+[06:40] <camelia> rakudo-jvm f614e5: OUTPUT«True␤False␤»
+
+[06:41] <raiph> r-j: print { $^a }.perl
+
+[06:41] <camelia> rakudo-jvm f614e5: OUTPUT«Block.new()»
+
+[06:41] *** FROGGS[mobile] left
+[06:41] *** FROGGS[mobile] joined
+[06:42] <raiph> r-j: print { $^a }.gist
+
+[06:42] <camelia> rakudo-jvm f614e5: OUTPUT«Block.new()»
+
+[06:42] <raiph> r-j: print { $^a }.signature
+
+[06:42] <camelia> rakudo-jvm f614e5: OUTPUT«Signature<2144491140>»
+
+[06:42] <raiph> r-j: print { $^a }.signature.gist
+
+[06:42] <camelia> rakudo-jvm f614e5: OUTPUT«:(Mu $a)»
+
+[06:42] <raiph> r-j: subset KeyExtractor of Code where { .signature === :(Mu) }; say { $^a } ~~ Code; say { $^a } ~~ KeyExtractor;
+
+[06:42] <camelia> rakudo-jvm f614e5: OUTPUT«True␤False␤»
+
+[06:45] <raiph> #perl6: ^^^ i need to go to sleep now but help appreciated, will backlog
+
+[06:55] *** kaleem joined
+[07:14] *** kaleem left
+[07:19] *** darutoko joined
+[07:32] *** dayangkun left
+[07:43] *** FROGGS joined
+[07:59] *** syndrum joined
+[08:08] *** zakharyas joined
+[08:09] *** Piers joined
+[08:09] *** Piers is now known as pdcawley
+
+[08:11] *** lizmat left
+[08:11] *** lizmat joined
+[08:20] *** abnorman left
+[08:22] *** hoverboard left
+[08:31] *** REPLeffect left
+[08:39] *** rurban1 left
+[08:40] *** dayangkun joined
+[08:41] *** kaleem joined
+[08:42] *** grondilu_ joined
+[08:45] *** grondilu left
+[08:53] <arnsholt> Have any of you people tried LightTable yet?
+
+[08:54] <arnsholt> (http://www.lighttable.com/ for those wondering WTH I'm talking about)
+
+[09:00] *** sqirrel joined
+[09:06] <tadzik> yeah, I didn't bother to fight with the docs that much
+
+[09:06] <preflex>  tadzik: you have 1 new message. '/msg preflex messages' to read it.
+
+[09:06] <tadzik> "to start Vim mode, enter :editor somethingsomething"
+
+[09:06] <tadzik> ...enter where? Enter how? No help about that
+
+[09:10] *** rurban1 joined
+[09:15] *** rurban1 left
+[09:22] <arnsholt> Yeah, I just tried to get it to work on my $work machine, but RedHat doesn't have recent enough libs
+
+[09:26] *** FROGGS[mobile] left
+[09:29] *** FROGGS[mobile] joined
+[09:34] *** dmol joined
+[09:40] *** FROGGS[mobile] left
+[09:43] *** FROGGS[mobile] joined
+[09:50] *** pecastro joined
+[09:55] *** kivutar joined
+[09:56] *** ssutch left
+[09:59] *** denis_boyun joined
+[10:00] *** bob__ joined
+[10:00] <bob__> hi
+
+[10:01] <FROGGS> hi bob__ 
+
+[10:01] *** bob__ left
+[10:10] *** smash_ is now known as smash
+
+[10:12] *** dayangkun left
+[10:12] *** rurban1 joined
+[10:17] *** rurban1 left
+[10:18] *** fhelmberger joined
+[10:24] *** grondilu_ left
+[10:31] *** grondilu joined
+[10:35] <jnthn> 'noon o/
+
+[10:35] <FROGGS> öl o/
+
+[10:36] <jnthn> ...bit early for that :P
+
+[10:36] <FROGGS> hehe, true
+
+[10:36] <FROGGS> cuppa o/ then :o)
+
+[10:37] <jnthn> yeah, coffee :)
+
+[10:37] <FROGGS> nice earl grey is nice, too
+
+[10:38] <jnthn> ooh, yes :)
+
+[10:38] <FROGGS> I even have clotted cream at home :o)
+
+[10:38] <jnthn> And scones? :)
+
+[10:38] <FROGGS> no :/
+
+[10:38] <jnthn> Darn, two segfaults in my last spectest run...
+
+[10:38] <FROGGS> :(
+
+[10:39] <FROGGS> we need to talk about getstdstream some day
+
+[10:47] <jnthn> r: 42 but role { method sink() { say 'sunk' } }; say 1
+
+[10:47] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«sunk␤1␤»
+
+[10:47] <jnthn> That doesn't say sunk on Moar. Which is the reason for some of our fail.
+
+[10:48] *** denis_boyun__ joined
+[10:49] *** denis_boyun left
+[10:57] *** daxim left
+[11:05] *** rindolf joined
+[11:10] <masak> good noon, #perl6
+
+[11:11] <moritz> good masak, #perl6
+
+[11:11] <moritz> or... so :-)
+
+[11:13] <masak> would I regret naming a project "capital L with stroke"? :)
+
+[11:13] <masak> or "Ł" for short.
+
+[11:13] *** kaleem left
+[11:13] *** rurban1 joined
+[11:13] *** kaleem joined
+[11:18] *** atroxaper joined
+[11:18] *** rurban1 left
+[11:18] *** mavcunha joined
+[11:22] *** erkan left
+[11:30] <tadzik> Ł sounds good, what can possibly go wrong
+
+[11:31] <FROGGS> what would an Ł on your forehead mean then?
+
+[11:31] <FROGGS> something good I suppose
+
+[11:33] <timotimo> ohai
+
+[11:33] *** erkan joined
+[11:35] <FROGGS> o/
+
+[11:35] <syndrum> WHAT DOES THE FOX SAY?
+
+[11:36] <masak> syndrum: what ever it does say, better not trust Norwegians to provide the answer.
+
+[11:38] *** raiph left
+[11:57] *** tipdbmp joined
+[12:00] <tipdbmp> If I $*OUT.close; $*OUT.open: 'some-file', :w; say 'write something'; # $*OUT is not automatically closed, I have to $*OUT.close;? Why is that?
+
+[12:00] *** aindilis joined
+[12:00] <masak> tipdbmp: that's true for all filehandles.
+
+[12:01] <masak> tipdbmp: there's no timely destriction in Perl 6.
+
+[12:01] <masak> timely destruction requires refcounting, and refcounting doesn't mix well with concurrency.
+
+[12:01] <masak> and Perl 6 prefers concurrency.
+
+[12:02] <tipdbmp> Hm, I see. Thanks.
+
+[12:02] <masak> destruction*
+
+[12:02] * masak .oO( sorry, I was distructed )
+
+[12:02] <jnthn> Also, if we want to run on things like the JVM, we can't demand ref-count semantics of it... :)
+
+[12:03] <jnthn> ...though concurrency is very likely one reason they also don't refcount...so what masak said. :)
+
+[12:10] *** xinming joined
+[12:14] *** rurban1 joined
+[12:18] *** rurban1 left
+[12:35] *** filly joined
+[12:39] *** xinming left
+[12:45] *** Alina-malina left
+[12:46] *** Alina-malina joined
+[12:46] *** Alina-malina left
+[12:56] *** daxim joined
+[12:58] *** Alina-malina joined
+[12:58] *** kaleem left
+[13:10] *** dolmen joined
+[13:11] <dolmen> Looks like the rendered output of the Unicode sysnopsis is missing : http://perlcabal.org/syn/S15.html => 404
+
+[13:11] <masak> dolmen++
+
+[13:12] <masak> I have no idea why that might happen, though. :/
+
+[13:13] <FROGGS> this was recently added
+
+[13:13] <FROGGS> maybe it must be registered in a job that creates the html
+
+[13:13] <moritz> I guess that whoever added the synpsis didn't take care that it also be rendered
+
+[13:17] <masak> that sounds likely.
+
+[13:17] <masak> what steps need be taken to make a synopsis rendered?
+
+[13:17] <masak> is that documented somewhere?
+
+[13:18] <moritz> if it is, I wouldn't know where
+
+[13:19] <moritz> but mu:docs/feather/script/update-syn is a good place to start investigating
+
+[13:22] *** pecastro left
+[13:23] *** kbaker_ joined
+[13:23] *** Timbus left
+[13:24] *** Timbus joined
+[13:28] *** dayangkun joined
+[13:28] *** pecastro joined
+[13:29] *** dayangkun left
+[13:30] *** dayangkun joined
+[13:31] *** dayangkun left
+[13:32] *** dayangkun joined
+[13:33] *** kaare_ left
+[13:41] *** ajr joined
+[13:41] *** ajr is now known as Guest17813
+
+[13:42] *** Guest17813 is now known as ajr_
+
+[13:57] <timotimo> r: say -9 div 10
+
+[13:57] <camelia> rakudo-jvm f614e5: OUTPUT«-1␤»
+
+[13:57] <camelia> ..rakudo-parrot f614e5: OUTPUT«0␤»
+
+[13:57] <moritz> p: say (-9) div 10
+
+[13:57] <camelia> rakudo-parrot f614e5: OUTPUT«0␤»
+
+[13:57] <moritz> r: say (-9) div 10
+
+[13:57] <camelia> rakudo-jvm f614e5: OUTPUT«-1␤»
+
+[13:57] <camelia> ..rakudo-parrot f614e5: OUTPUT«0␤»
+
+[13:58] *** FROGGS[mobile] left
+[13:58] *** FROGGS[mobile] joined
+[14:06] <mathw> o/
+
+[14:06] <timotimo> ah, you're just the person we need
+
+[14:06] <timotimo> (get it? because your name begins with math)
+
+[14:09] *** daxim left
+[14:09] * FROGGS .oO( IMO, u are totally OT Tim )
+
+[14:10] <mathw> ah but I'm english, we do maths here
+
+[14:12] <timotimo> oh!
+
+[14:12] <timotimo> okay then
+
+[14:26] <masak> mathw: quick, change your nick to mathsw!
+
+[14:29] <mathw> but that would imply I'm good at maths
+
+[14:31] *** denis_boyun__ left
+[14:36] <masak> heh.
+
+[14:37] *** denis_boyun joined
+[14:37] *** FROGGS[mobile] left
+[14:37] *** FROGGS[mobile] joined
+[14:42] * grondilu wonders if there is a standard test for math literacy.  Like IQ for maths or something.
+
+[14:43] *** kivutar left
+[14:45] *** kaleem joined
+[14:47] *** dayangkun left
+[14:47] *** bluescreen10 joined
+[14:47] <hoelzro> I don't remember if anything came of this question, but why can't one do for @values → $value { ... } as opposed to for @values -> $value { ... }?
+
+[14:54] <masak> guess we tend to keep within the Latin-1 char space.
+
+[14:55] <[Coke]> is that something we could module-ize?
+
+[14:55] <hoelzro> except for « » vs << >>
+
+[14:56] <hoelzro> on a separate note, consider this code:
+
+[14:56] <hoelzro> https://gist.github.com/hoelzro/8355699
+
+[14:56] <hoelzro> lines 14-17 and 32-34 are functionally equivalent, right?
+
+[14:56] <masak> [Coke]: I expect so.
+
+[14:57] <masak> [Coke]: ...with care, that is.
+
+[14:57] <masak> [Coke]: because '->' is also an expression stopper in EXPR, IIRC.
+
+[14:57] <masak> hoelzro: should be.
+
+[14:58] <hoelzro> ok, because I get some funny output (gist updated)
+
+[14:58] *** treehug88 joined
+[15:00] *** dayangkun joined
+[15:01] *** thou joined
+[15:10] <masak> p: my %h = foo => <1 2 3>; $h<foo> .= grep: { $_ %% 2 }; say %h<foo>
+
+[15:10] <camelia> rakudo-parrot f614e5: OUTPUT«[31m===[0mSORRY![31m===[0m Error while compiling /tmp/ikAPN2ZmS1␤Variable '$h' is not declared. Did you mean '%h'?␤at /tmp/ikAPN2ZmS1:1␤------> [32mmy %h = foo => <1 2 3>; $h<foo>[33m⏏[31m .= grep: { $_ %% 2 }; say %h<foo>[0m␤    expect…»
+
+[15:10] <synopsebot> Link: http://perlcabal.org/syn/S1.html#line_1
+
+[15:10] <masak> p: my %h = foo => <1 2 3>; %h<foo> .= grep: { $_ %% 2 }; say %h<foo>
+
+[15:10] <camelia> rakudo-parrot f614e5: OUTPUT«␤»
+
+[15:10] <masak> yeah, that's wrong, IMO.
+
+[15:10] <masak> but I recognize this bug.
+
+[15:10] <masak> either it or something very much like it has been RT'd before.
+
+[15:11] <timotimo> in case somebody here is not on #moarvm and would like a task: check out MoarVM/negative_integer_division and try to make t/spec/S32-num/rounders.t pass
+
+[15:12] <timotimo> before the changes in that branch, moarvm had the same wrongness in its integer division as parrot does (you have to use a div (b - 1) if a < 0), so i tried to put that into the division ops of moarvm
+
+[15:12] <timotimo> now it fails to create a rational properly in DIVIDE_NUMBERS when you have, for example, -0.5
+
+[15:13] <hoelzro> also, are hash keys automatically stringified? or is that just a quirk of Pakudo?
+
+[15:13] <benabik> Hash keys are strings unless specified otherwise.
+
+[15:13] * benabik does not remember the syntax for that though.
+
+[15:14] <hoelzro> benabik: how do you specify otherwise?
+
+[15:14] <hoelzro> =(
+
+[15:15] <benabik> S09
+
+[15:15] <benabik> my %hash{Any} or {*}
+
+[15:15] <benabik> (or whatever type you want to use as the key)
+
+[15:15] *** rurban1 joined
+[15:16] <hoelzro> nice
+
+[15:16] <hoelzro> thanks benabik 
+
+[15:16] <benabik> np
+
+[15:21] *** sqirrel left
+[15:29] <Ulti> that's neat I didn't realise you could define that type
+
+[15:32] *** atroxaper left
+[15:43] *** SamuraiJack joined
+[15:46] <masak> lizmat++ # implementing that
+
+[15:47] <masak> r: my %hash{Str}; %hash<foo> = 42; %hash{42} = "foo"; say "alive"
+
+[15:47] <camelia> rakudo-jvm f614e5: OUTPUT«Nominal type check failed for parameter 'key'␤␤»
+
+[15:47] <camelia> ..rakudo-parrot f614e5: OUTPUT«Nominal type check failed for parameter 'key'; expected Str but got Int instead␤  in method at_key at gen/parrot/CORE.setting:9101␤  in sub postcircumfix:<{ }> at gen/parrot/CORE.setting:2506␤  in sub postcircumfix:<{ }> at gen/parrot/CORE.setting:…»
+
+[15:47] <masak> interesting -- why is the 'expected ...' line missing on JVM?
+
+[15:47] * masak submits rakudobug
+
+[15:48] <benabik> masak: Yeah, I only knew about that feature because I remember lizmat++ implementing it.  :-D
+
+[15:58] *** Psyche^ joined
+[16:03] *** Psyche^_ left
+[16:06] *** gcole_ joined
+[16:08] *** gcole left
+[16:23] *** [Sno] left
+[16:23] *** sqirrel joined
+[16:29] *** kaleem left
+[16:40] <rindolf> Hi all. How do I build and install rakudo-jvm?
+
+[16:41] <rindolf> I already did «git clone git://github.com/rakudo/rakudo.git»
+
+[16:41] <colomon> look at the README file.  ;)
+
+[16:43] <colomon> perl Configure.pl --gen-nqp --backends=jvm # copied from the README
+
+[16:44] <[Coke]> also --prefix=/install/path
+
+[16:44] <[Coke]> then "make install"
+
+[16:44] * colomon never uses --prefix
+
+[16:44] <rindolf> colomon: I looked at the INSTALL.
+
+[16:44] <colomon> and note that you can say --backends=jvm,parrot and get both
+
+[16:45] <colomon> rindolf: …. yeah, kind of weird that INSTALL is a directory and all the installation help you need is in the README.  hmm.  :\
+
+[16:45] <rindolf> colomon: I mean INSTALL.txt
+
+[16:46] <colomon> oh.  which is outright wrong, eh?  sigh.
+
+[16:47] <rindolf> colomon: what is?
+
+[16:47] <colomon> INSTALL.txt doesn't seem to mention --backends at all
+
+[16:47] *** FROGGS[mobile] left
+[16:47] <PerlJam> it's not wrong, just highly parrot-centric and times have changed :)
+
+[16:47] *** FROGGS[mobile] joined
+[16:47] <colomon> Ah, I thought --backends was mandatory now.
+
+[16:52] <PerlJam> maybe we should get rid of INSTALL.txt as its relevance is fading and it causes confusion and it's likely to become "more wrong" with time if no one updates it.
+
+[16:52] <PerlJam> Better to just have the README and update that.
+
+[16:53] <[Coke]> +1 for dropping old stuff.
+
+[16:53] * TimToady feels old and stuffy
+
+[16:54] <[Coke]> GONE!
+
+[16:54] <PerlJam> TimToady: we'll try to drop you gently onto plush cushions.
+
+[16:54] <rindolf> Is nom a good branch to experiment with rakudo-jvm?
+
+[16:55] <PerlJam> rindolf: it's "the" branch unless you're being adventurous.
+
+[16:58] <[Coke]> there is no master, only nom.
+
+[16:58] <rindolf> PerlJam: bye, going.
+
+[16:58] <PerlJam> rindolf: happy hacking!  :)
+
+[16:59] *** rindolf left
+[16:59] <colomon> nom is my master now
+
+[17:02] *** zakharyas left
+[17:02] *** raiph joined
+[17:07] *** SamuraiJack left
+[17:14] <TimToady> masak: you could name it 七 instead
+
+[17:16] *** pecastro left
+[17:27] *** [Sno] joined
+[17:29] *** SamuraiJack joined
+[17:36] *** SamuraiJack left
+[17:37] *** SamuraiJack joined
+[17:38] <raiph> r-j: subset Foo of Code where { .signature === :(Mu) }; say { $^a } ~~ Code; say { $^a } ~~ Foo;
+
+[17:38] <camelia> rakudo-jvm f614e5: OUTPUT«True␤False␤»
+
+[17:39] <raiph> r-j: say { $^a }.signature
+
+[17:39] <camelia> rakudo-jvm f614e5: OUTPUT«:(Mu $a)␤»
+
+[17:40] <raiph> anyone know if i'm making a mistake with the where clause or is this a bug/nyi?
+
+[17:41] <raiph> r-j: subset Foo of Code where { say .signature; .signature === :(Mu) };
+
+[17:41] *** ajr_ left
+[17:41] <camelia> rakudo-jvm f614e5: ( no output )
+
+[17:41] *** ajr joined
+[17:41] *** ajr is now known as Guest17988
+
+[17:42] *** Guest17988 is now known as ajr_
+
+[17:42] *** SamuraiJack_ joined
+[17:42] <moritz> r: say { $^a }.signature 
+
+[17:42] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«:(Mu $a)␤»
+
+[17:42] <moritz> r: say { $^a }.signature === :(Mu)
+
+[17:42] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«False␤»
+
+[17:42] *** SamuraiJack left
+[17:42] <moritz> raiph: it seems that signatures don't compare as value types in rakudo
+
+[17:42] <moritz> r: say { $^a }.signature eqv :(Mu)
+
+[17:42] <camelia> rakudo-parrot f614e5, rakudo-jvm f614e5: OUTPUT«False␤»
+
+[17:44] *** SamuraiJack_ left
+[17:48] *** spider-mario joined
+[17:54] *** REPLeffect joined
+[17:55] *** locsmif joined
+[18:02] *** hoverboard joined
+[18:05] <[Coke]> does perl5 care about spaces after function names on invocation?
+
+[18:06] <TimToady> a little :)
+
+[18:06] *** denis_boyun left
+[18:08] * jnthn back
+
+[18:10] <jnthn> raiph: Not sure === on signatures makes sense; ~~ may work out better
+
+[18:12] <raiph> jnthn: yeah, i had come to that conclusion too
+
+[18:12] <raiph> tho of course it doesn't work well atm
+
+[18:13] <raiph> ++psch ;)
+
+[18:16] <TimToady> p: enum Elems ('A'..'Z');
+
+[18:16] <camelia> rakudo-parrot f614e5: OUTPUT«===SORRY!===␤No such method 'returns' for invocant of type 'Range'␤»
+
+[18:18] <jnthn> Looks like value / AST confusion...
+
+[18:21] *** ajr_ left
+[18:23] *** berekuk joined
+[18:24] *** hummeleBop joined
+[18:31] <raiph> TimToady: does smartmatching of signatures ignore variable names and where clauses?
+
+[18:35] *** farmG joined
+[18:43] <raiph> (common sense and research says yes for variable names)
+
+[18:43] <raiph> (so i'm mostly asking about where clauses)
+
+[18:45] <moritz> the current enum Actions code sometimes pushes ASTs and sometimes objects onto the same array
+
+[18:46] *** abnorman joined
+[18:47] *** darutoko left
+[18:53] *** benabik left
+[18:56] <TimToady> raiph: where clauses should certainly be enforced, I'd think
+
+[19:02] <jnthn> TimToady: Well, I thin the question is signature/signature, and comparing where clauses is undecidable... :)
+
+[19:03] <jnthn> *think
+
+[19:03] *** rindolf joined
+[19:04] <rindolf> Hi all.
+
+[19:04] <rindolf> Yay! Rakudo JVM is compiled.
+
+[19:04] <rindolf> And appears to work pretty nicely.
+
+[19:04] <PerlJam> rindolf: indeed :)
+
+[19:08] <locsmif> But... secretly, it plots to cause havoc :p
+
+[19:09] <PerlJam> .oO( ... and let slip the dogs of war? )
+
+[19:09] *** dmol left
+[19:11] *** ssutch joined
+[19:15] <rindolf> OK, http://pastie.org/8621484 - this programs gives me a «java.lang.StackOverflowError»
+
+[19:16] <rindolf> OK, http://pastie.org/8621484 - this *program* gives me a «java.lang.StackOverflowError»
+
+[19:16] <rindolf> In Perl 5 it runs fine.
+
+[19:16] <rindolf> # print hyperexp_modulo(3, 3, 1000), "\n"; -this line also runs fine.
+
+[19:16] <rindolf> I guess I can use a dedicated stack, but it feels hacky.
+
+[19:17] <colomon> rindolf: I believe you may be able to expand the stack available to Java?
+
+[19:17] <rindolf> colomon: ah.
+
+[19:19] <colomon> (Of course, it may also be a bug.)
+
+[19:19] <raiph> TimToady: well, let me back up. i'm looking at implementing more of the sort spec.
+
+[19:19] <colomon> -Xssn
+
+[19:19] <colomon> Sets the thread stack size.
+
+[19:19] <raiph> TimToady: http://feather.perl6.nl/syn/S32/Containers.html#sort
+
+[19:19] <colomon> rindolf: that might be it?
+
+[19:20] <raiph> TimToady: and hence http://perlcabal.org/syn/S29.html#Ordering
+
+[19:20] <rindolf> colomon: can I pass it to ./perl6 ?
+
+[19:20] <colomon> rindolf: no, but if you look at perl6 (in the jvm version) it's a script.
+
+[19:20] <raiph> TimToady: so I was thinking we'd declare "subset KeyExtractor of Code where ..." and subset OrderingPair of Pair where ..." and then test if an arg passed to sort matches OrderingPair.
+
+[19:21] <colomon> errr, at least in the OS X and I assume Linux versions
+
+[19:22] <rindolf> colomon: yes, I see it now - thanks.
+
+[19:22] <colomon> rindolf: good luck!  and please report your results here.  :)
+
+[19:22] <moritz> ok, this is curious
+
+[19:23] <moritz> we kinda use Pairs for enums before class Pair was declared
+
+[19:23] <rindolf> colomon: thanks! It now yields the correct result.
+
+[19:23] <colomon> \o/
+
+[19:23] <colomon> rindolf++
+
+[19:23] <moritz> we do this by checking that a certain piece of AST would evaluate to a pair
+
+[19:23] <moritz> but we don't actually evaluate it; we extract key and value separately
+
+[19:23] *** berekuk left
+[19:24] <colomon> rindolf: btw, is that an implementation of the built-in expmod?
+
+[19:28] *** farmG left
+[19:28] * moritz hates boostrapping issues
+
+[19:30] *** sqirrel left
+[19:30] <rindolf> colomon: maybe.
+
+[19:31] <rindolf> colomon: well, it's a hyperexp_mod for http://projecteuler.net/problem=188
+
+[19:31] <rindolf> colomon: it's a bit different.
+
+[19:31] <colomon> ah, yes
+
+[19:31] <rindolf> colomon: thanks for the karma bump. :-)
+
+[19:32] *** hummeleBop left
+[19:32] *** treehug88 left
+[19:34] <rindolf> colomon: https://bitbucket.org/shlomif/project-euler/src/f8e87cee230143ee4d8cb45052ccb0bbd6444e20/project-euler/188/euler_188.pl?at=default - this is my Perl 5 solution.
+
+[19:36] *** treehug88 joined
+[19:37] *** berekuk joined
+[19:46] <rindolf> colomon: OK, expmod can make my life a bit simpler in the second part of the function (after the recursion). Thanks.
+
+[19:54] <rindolf> colomon: http://pastie.org/8621582 - new version.
+
+[19:55] *** treehug88 left
+[19:56] <rindolf> colomon: I should note that running the program ends up consuming at least 12.2% of my 8GB of RAM (I'm on x86-64 Linux).
+
+[19:56] *** jnap joined
+[19:58] <rindolf> The same program on perl 5 consumes 0.1% of RAM.
+
+[19:58] <jnthn> r: my $b = BagHash.new("a", "b", "b"); my $a = $b.grab; my @a = $b.grab(2); say $b.total; say $b.elems;
+
+[19:58] <camelia> rakudo-jvm f614e5: OUTPUT«0␤2␤»
+
+[19:58] <camelia> ..rakudo-parrot f614e5: OUTPUT«0␤0␤»
+
+[19:59] <rindolf> jnthn: hi, what's up?
+
+[20:00] <jnthn> rindolf: hi...not much, just got a few moments now to look into some failing tests
+
+[20:01] <rindolf> jnthn: that's great.
+
+[20:05] * moritz pokes dalek 
+
+[20:07] *** ajr joined
+[20:07] *** ajr is now known as Guest94449
+
+[20:07] <timotimo> well, that nap kind of took longer than i expected
+
+[20:08] *** Guest94449 is now known as ajr_
+
+[20:08] *** treehug88 joined
+[20:08] <tadzik> naps are goood
+
+[20:09] *** dalek left
+[20:10] *** dalek joined
+[20:10] *** ChanServ sets mode: +v dalek
+
+[20:12] * rindolf puts the nap in napkin.
+
+[20:15] <diakopter> lol
+
+[20:16] *** fhelmberger left
+[20:16] <diakopter> at least you didn't put the nap in nappie
+
+[20:17] *** berekuk left
+[20:19] *** berekuk joined
+[20:20] <masak> or in kidnapping.
+
+[20:21] * TimToady has put kin in a nappie, however
+
+[20:23] *** jnap left
+[20:25] *** pecastro joined
+[20:25] *** jeffreykegler joined
+[20:28] *** pmurias joined
+[20:30] *** berekuk left
+[20:31] <pmurias> masak: what sort of project do you want to name Ł?
+
+[20:31] *** FROGGS[mobile] left
+[20:31] *** FROGGS[mobile] joined
+[20:33] *** berekuk joined
+[20:38] *** jeffreykegler left
+[20:39] <rindolf> Any ideas how I can make this program faster and/or consume less memory - http://pastie.org/8621582 - the Ints can be signed 32-bit ones too.
+
+[20:42] *** pecastro left
+[20:42] <arnsholt> Anything that doesn't need arbitrary precision can be made into int rather than Int
+
+[20:43] <arnsholt> Int overflows automatically to arbitrary precision, while int is platform native integers (long on JVM)
+
+[20:43] <timotimo> right, that'll do a big difference
+
+[20:43] <arnsholt> That should help with memory as well, since there'll be less objects in play
+
+[20:43] <arnsholt> But the JVM is generally happy to eat your memory, mind
+
+[20:44] <jnthn> Not sure it'll actually be an improvement, though.
+
+[20:44] *** jnap joined
+[20:44] <jnthn> At present, meta-ops like *= probably box, if they work at all...
+
+[20:44] <arnsholt> Ah, right
+
+[20:45] <timotimo> good point; they may very well not even work with int rather than Int
+
+[20:45] <arnsholt> I think that's a sacrifice rindolf can live with though
+
+[20:47] <rindolf> Can I also say that the function returns a single int value?
+
+[20:47] <arnsholt> You can, but I'm not sure if the compiler uses that information yet
+
+[20:47] <timotimo> it might, but not in a thoroughly worthwhile manner :|
+
+[20:48] <rindolf> timotimo, arnsholt : well, for posterity - how can it be done?
+
+[20:49] <timotimo> --> int
+
+[20:49] <timotimo> or --> Int
+
+[20:49] <timotimo> or returns Int (or int)
+
+[20:50] *** dmol joined
+[20:53] <arnsholt> Or even my int sub foo(...)
+
+[20:53] <clsn_> jnthn: Taking your advice; I'm all over smart-matching Signatures, and also fixing the .perl representation of Parameters.
+
+[20:56] <rindolf> timotimo: two dashes and a great than sign?
+
+[20:56] <rindolf> timotimo: two dashes and a greater than sign?
+
+[20:56] *** FROGGS[mobile] left
+[20:56] *** FROGGS[mobile] joined
+[20:57] <clsn_> At first I thought I was mistaken, but now I'm thinking we really do need a $SIG_ELEM_CODE_SIGIL flag.  Otherwise, how can I tell between :(Int &) and :(Callable[Int] $)?  Have to ponder.
+
+[20:57] <jnthn> There isn't a difference...
+
+[20:57] <preflex>  jnthn: you have 1 new message. '/msg preflex messages' to read it.
+
+[20:58] <rindolf> http://pastie.org/8621753 - this programs gives me «Cannot modify an immutable value   in sub hyperexp_modulo at euler_188.p6:15»
+
+[21:00] <clsn_> Welllll... I think :(Int @) would be different from :(Positional[Int] $) in that one would have the array sigil flag set.  I'm thinking in terms of .perl; how to make a string that exactly (as near as possible) generates the "same" Signature.
+
+[21:00] <rindolf> http://pastie.org/8621753 - this programs gives me «Cannot modify an immutable value   in sub hyperexp_modulo at euler_188.p6:15» - why? And how can I fix it?
+
+[21:01] <rindolf> s/programs/program/
+
+[21:01] <jnthn> clsn_: Yes, the @ case is different, for sure
+
+[21:02] <clsn_> But the & case is not?
+
+[21:02] <jnthn> clsn_: Well, it depends if you insist on producing something identical to what the user typed or just semantically equivalent.
+
+[21:02] <jnthn> @ and % are special because they imply flattening semantics
+
+[21:02] <clsn_> I would think .perl should strive for the former.
+
+[21:02] *** dayangkun left
+[21:02] <jnthn> Well, so far as is reasonable...
+
+[21:03] <jnthn> If you think getting & right is worth trawling through a couple of thousand lines of binder code that you might affect, you can add it. :)
+
+[21:03] *** denis_boyun joined
+[21:03] <clsn_> Well, it's something to consider.  I won't go changing World.nqp in my first patch.  :)  You think it would entail all that?
+
+[21:04] <jnthn> Well, the sigil flags are used in signature binding.
+
+[21:04] <clsn_> (do I have to fork rakudo on github and all, or can I just use a local repository and send in patches or something?)
+
+[21:04] <clsn_> Mmm... yeah, something to consider.
+
+[21:04] <jnthn> Which is implemented in C for Parrot, Java for the JVM and NQP for MoarVM...thus why I'm a bit hesitant. :)
+
+[21:05] *** skids joined
+[21:05] <jnthn> You could just send in patches also. But pull requests can be a little easier.
+
+[21:05] <[Coke]> r: my $a = 2; my $b = 3; my $c = 4; ($a *= $b) %= $c;
+
+[21:05] <jnthn> But I don't mind processsing git format-patch output :)
+
+[21:05] <camelia> rakudo-parrot 263aa0, rakudo-jvm 263aa0: ( no output )
+
+[21:05] <[Coke]> r: my int $a = 2; my int $b = 3; my int $c = 4; ($a *= $b) %= $c;
+
+[21:06] <camelia> rakudo-jvm 263aa0: OUTPUT«Cannot modify an immutable value␤  in block  at gen/jvm/CORE.setting:16313␤␤»
+
+[21:06] <camelia> ..rakudo-parrot 263aa0: OUTPUT«Cannot modify an immutable value␤  in block  at gen/parrot/CORE.setting:16590␤  in block  at /tmp/x1CqcyfAxN:1␤␤»
+
+[21:06] <[Coke]> rindolf: ^^ ints vs. Ints.
+
+[21:06] <jnthn> < jnthn> At present, meta-ops like *= probably box, if they work at all...
+
+[21:06] <[Coke]> I assume it's one of the remaining intbugs.
+
+[21:06] <jnthn> :)
+
+[21:06] <jnthn> Right
+
+[21:06] <clsn_> Yeah, I see what you mean by all the bind stuff...  OK, well, we'll see what I come up with.  Can't really work on it more until tomorrow night, but should get something together soon.
+
+[21:06] <[Coke]> jnthn: yes, but he may not know what box implies.
+
+[21:06] <jnthn> ok
+
+[21:07] <[Coke]> plus also that scrolled up real quick and I didn't see it. :)
+
+[21:07] <jnthn> [Coke]: Sure, but "may not work at all" was clear ;)
+
+[21:07] <rindolf> [Coke]: I don't understand - are "int"s immutable?
+
+[21:07] <jnthn> clsn_: Sounds good. Certianly .perl on a Paramter shouldn't ever be returning an empty string.
+
+[21:08] <rindolf> I mean "int" variables.
+
+[21:08] <jnthn> rindolf: So far, "int" has been implemented mostly to be useful to us for use in built-ins, rather than "ready for the typical user"
+
+[21:08] <rindolf> jnthn: ah.
+
+[21:08] <jnthn> rindolf: So if you use them you'll run into all sorts for the next couple of months, I'm afraid...
+
+[21:08] <clsn_> Yeah... I originally fixed it so that nameless params always had a bare sigil, so :(Int) became :(Int $), but I think you got too many $s that way.  I think I can change it just not to blank out the Any if there's no name, and so on.
+
+[21:08] <jnthn> (Fairly high on my todo list to sort those out...)
+
+[21:09] <rindolf> jnthn: run into all sorts of what?
+
+[21:10] <skids> .oO(all sorts of WTF)
+
+[21:10] <jnthn> rindolf: Places where they don't work like non-native types would.
+
+[21:10] <jnthn> rindolf: Especially anywhere they need to be passed by reference
+
+[21:10] <clsn_> Yeah, I see what you mean; my int $a behaves very differently from my Int $b.  Try setting it equal to Int, or to 19299084908429308087834834598345
+
+[21:11] <clsn_> r: my int $b=19299084908429308087834834598345; say $b
+
+[21:11] <camelia> rakudo-parrot 263aa0, rakudo-jvm 263aa0: OUTPUT«1169738125069744585␤»
+
+[21:11] <jnthn> Well, yeah, it's not gonna be big enough to hold that :)
+
+[21:11] <clsn_> Exactly.  Whereas an Int is.
+
+[21:11] <clsn_> Huh, I got a different value when I tried locally.
+
+[21:11] *** treehug88 left
+[21:11] <skids> 32 bit vs 64 bit machine, prolly.
+
+[21:11] <clsn_> Mm, good point.
+
+[21:11] <[Coke]> rindolf: if you'd like some six style guide suggestions, I have a few, (though I know you were trying to keep the same code working in both, earlier)
+
+[21:12] *** berekuk left
+[21:14] *** berekuk joined
+[21:15] <rindolf> [Coke]: six style guide?
+
+[21:15] <rindolf> [Coke]: what is that?
+
+[21:16] <[Coke]> Perl 6 style. (e.g.: parens around if/while conditionals are unneeded)
+
+[21:16] <rindolf> [Coke]: ah, that.
+
+[21:16] <rindolf> [Coke]: keep the same code working in both what?
+
+[21:16] <[Coke]> perl 5 and perl 6
+
+[21:17] <rindolf> [Coke]: I wasn't.
+
+[21:17] <rindolf> [Coke]: I took my Perl 5 code and translated it to Perl 6.
+
+[21:17] *** dayangkun joined
+[21:17] <[Coke]> ok.
+
+[21:20] <clsn_> If six is python3 * python2, shouldn't perl5 and perl6 be thirty?
+
+[21:21] <timotimo> :)
+
+[21:21] *** ilbot3 joined
+[21:22] <clsn_> OK, really have to go idle now.  Will resume work on Signatures and Parameters tomorrow night.
+
+[21:23] <[Coke]> 30perl²
+
+[21:25] *** raiph left
+[21:32] *** xenoterracide left
+[21:32] * japhb__ wonders if perl³  would be a solid block of perl
+
+[21:38] <dalek> rakudo/moar-support: dd0b9a0 | jnthn++ | src/vm/moar/ (2 files):
+
+[21:38] <dalek> rakudo/moar-support: Implement various missing phaser-related ops.
+
+[21:38] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/dd0b9a061b
+
+[21:38] <jnthn> ooh, dalek's back
+
+[21:38] <jnthn> That fixes "No registered operation handler for 'p6takefirstflag'" and "No registered operation handler for 'p6setpre'"
+
+[21:41] *** hoverboard left
+[21:42] *** xenoterracide joined
+[21:43] *** hoverboard joined
+[21:48] <[Coke]> yah, that's another 42 or so possibles.
+
+[21:48] *** raiph joined
+[21:49] <jnthn> Seeing if I can crack theS05-capture/caps.rakudo.moar one
+
+[21:52] *** ilbot3 left
+[21:54] <lue> r: say (1,2,3).Buf
+
+[21:54] <camelia> rakudo-jvm 263aa0: OUTPUT«No such method 'Buf' for invocant of type 'Parcel'␤␤»
+
+[21:54] *** FROGGS[mobile] left
+[21:54] <camelia> ..rakudo-parrot 263aa0: OUTPUT«No such method 'Buf' for invocant of type 'Parcel'␤  in block  at /tmp/oC6AQyukr5:1␤␤»
+
+[21:55] *** FROGGS[mobile] joined
+[21:55] <lue> r: say Buf.new((1,2,3))
+
+[21:55] <camelia> rakudo-parrot 263aa0, rakudo-jvm 263aa0: OUTPUT«Buf:0x<01 02 03>␤»
+
+[21:56] <lue> I assume there's a reason I can't use .Buf on a Parcel, which Buf.new() gladly takes?
+
+[21:57] <PerlJam> no one wrote it?  :)
+
+[21:58] <lue> I'd've thought there was a Cool.Buf or something though.
+
+[21:58] <moritz> how would you convert a Num to a Buf?
+
+[21:58] <moritz> or a Match, for that matter?
+
+[21:58] *** locsmif left
+[21:59] <moritz> and please in a way that is consistent with Int.Buf
+
+[21:59] <PerlJam> very very carefully
+
+[22:00] <PerlJam> moritz++ (for actually *thinking* about the question unlike myself :)
+
+[22:01] <lue> moritz: Ah, that would be it. It's just that I expect    $bufobj[range].Buf    to Just Work™.
+
+[22:04] *** BenGoldberg joined
+[22:04] <lue> Now that I think about it, we don't really have a "just integers" list type, do we? $bufobj[range] would need to return a Buf itself in my case.
+
+[22:05] *** treehug88 joined
+[22:07] *** skids left
+[22:11] <grondilu> r: my $buf = Buf.new: (^256).roll(5); say $buf[^3].WHAT;
+
+[22:11] <camelia> rakudo-parrot 263aa0, rakudo-jvm 263aa0: OUTPUT«(Parcel)␤»
+
+[22:11] <grondilu> r: my $buf = Buf.new: (^256).roll(5); say $buf.subbuf(0, 3).WHAT
+
+[22:11] <camelia> rakudo-parrot 263aa0, rakudo-jvm 263aa0: OUTPUT«(Buf)␤»
+
+[22:12] <lue> I'm not quite sure I like $list-type[range] -> Parcel , though I'm sure there's a good reason.
+
+[22:12] <lue> I would use subbuf, but I think it's too awkward for list subscripting :P
+
+[22:14] <grondilu> subbuf is the analogous to substr, because a buf can not just be seen as a list of integers, but also as a binary string.
+
+[22:14] <grondilu> (that's how I understand it, anyway)
+
+[22:14] <lue> grondilu: Yeah, but I never see bufs as "integer view of strings", but rather "low-level array", i.e. what you use for binary data.
+
+[22:15] *** denis_boyun left
+[22:15] <grondilu> well you don't, but you could.
+
+[22:16] <lue> :) I still think Buf[] returning an un-.Buf-able thing is a smell.
+
+[22:17] *** kaare_ joined
+[22:17] <grondilu> well, Str[] does not exist, so I guess Buf[] can't refer to the "string" side of buffers, but rather to the "array" side.  So Buf[] should return an array (but I guess a Parcel would do), not a Buf.
+
+[22:18] <grondilu> if you want a buf out of a buf, use subbuf, same as you use substr to get a string out of a string.
+
+[22:18] <lue> grondilu: to my knowledge, every list's [] returns a Parcel already.
+
+[22:19] <grondilu> there you go then, it does make sense that Buf[] returns a Parcel, then.
+
+[22:19] <lue> r: Buf.new((1e5, Match.new()));  # moritz: this is what I think Parcel.Buf should do on non-integer elements.
+
+[22:19] <camelia> rakudo-jvm 263aa0: OUTPUT«This representation can not unbox to a native int␤  in method new at gen/jvm/CORE.setting:5048␤␤»
+
+[22:19] <camelia> ..rakudo-parrot 263aa0: OUTPUT«This type cannot unbox to a native integer␤  in method new at gen/parrot/CORE.setting:5060␤  in method new at gen/parrot/CORE.setting:5050␤  in any  at gen/parrot/Metamodel.nqp:1478␤  in block  at /tmp/qAnMpz96vv:1␤␤»
+
+[22:21] <lue> If Buf has to be the integer-y string type, then I'd like a type that's designed specifically for binary data. (i.e. Buf without the Stringy stuff.)
+
+[22:21] <dalek> perl6-roast-data: b507320 | coke++ | / (3 files):
+
+[22:21] <dalek> perl6-roast-data: today (automated commit)
+
+[22:21] <dalek> perl6-roast-data: review: https://github.com/coke/perl6-roast-data/commit/b507320b0a
+
+[22:21] <grondilu> Blob, maybe?  I don't thing Blob does subbuf, does it?
+
+[22:22] <lue> Blob is just immutable Buf
+
+[22:22] <[Coke]> moar: 94.76%
+
+[22:22] <lue> \o/
+
+[22:22] <grondilu> Well, isn't a string just binary data, in the most generic sense?   I mean it's like that in P5, iirc.
+
+[22:23] *** mavcunha left
+[22:23] <lue> Everything's binary data :) I just don't want features on my binary data array weird because "we expect string-ish binary data."
+
+[22:24] <grondilu> what kind of features would you like to avoid, exactly?
+
+[22:25] * grondilu tries to remember what is a string, exactly
+
+[22:25] <lue> Well, my only issue at the moment is that Parcel.Buf doesn't exist, or alternatively Buf[] returns a Buf.
+
+[22:26] <lue> But this isn't the first time I've been bitten when trying to use Buf because my "binary data" concept conflicts with everyone else's "integery string view" concept.
+
+[22:27] <dalek> nqp: 2b7389d | jnthn++ | src/vm/moar/QAST/QASTCompilerMAST.nqp:
+
+[22:27] <dalek> nqp: Cope with duplication of QAST::Block in the tree.
+
+[22:27] <dalek> nqp: review: https://github.com/perl6/nqp/commit/2b7389d6e1
+
+[22:27] <jnthn> That's S05-capture/caps.rakudo.moar
+
+[22:27] *** hoverboard left
+[22:28] *** mavcunha joined
+[22:28] <grondilu> to me a string is an unstructured binary dataset.  It is therefore binary data in its purest form.  Instead of willing to avoid the stringy aspect of Buf, you should embrace it, imho.
+
+[22:29] <lue> grondilu: That's totally opposite of how I view strings. They're a very specialized class of binary data to me, and definitely shouldn't inspire design decisions on something more generalized.
+
+[22:29] *** jnap left
+[22:30] <grondilu> though I should have mentioned that I was talking about strings as in P5, not as P6's Str.
+
+[22:31] *** rurban1 left
+[22:31] <lue> Ah. Strings in Perl 6 are a bit more complex, what with encoding systems and all. *cough* S15 *cough* :)
+
+[22:31] *** abnorman left
+[22:32] <lue> fwiw I do see value in having an integer-y view of strings, I just don't want that to be the only low-level array type I have available to me.
+
+[22:34] <grondilu> so instead of being a integerish string-like thing, you would like buffers to be an integerish array-like thing. 
+
+[22:35] <lue> Considering you get Bufs out of IO methods when you use :bin, yes.
+
+[22:35] *** kbaker_ left
+[22:35] <lue> (if a new type was created for this purpose, that's what :bin would work with of course)
+
+[22:36] <lue> r: buf8.new(0x100)
+
+[22:36] <camelia> rakudo-parrot 263aa0, rakudo-jvm 263aa0: ( no output )
+
+[22:36] <lue> O.o  Huh, I could've sworn that buf was the place where rakudo cared about bit-size.
+
+[22:38] <grondilu> but aren't strings the natural thing that is supposed to come out of IO?  If so, a :bin should be an adverb to a "special case" of string.  Thus Buf would be closer to a string than to an array.
+
+[22:39] <lue> grondilu: I don't think Strs should be treated as anything near the bytes level. They're pretty high level to me.
+
+[22:39] * lue &
+
+[22:41] *** rindolf left
+[22:41] <grondilu> They are.  That's why for byte level there is Buf.  But Buf still shares some similarities with strings.  I mean, Str is the implementation of strings in Perl 6, but they are only a special case of what a string is in a more abstract way. 
+
+[22:43] *** abnorman joined
+[22:44] <grondilu> It's clearer in P5, I think.  I like how in Perl 6 there are two different types for binary strings (Buf) and "textual strings" (Str), but the downside is that it kind of hides the common aspects of both concepts. 
+
+[22:44] <grondilu> I mean, they really are both strings.
+
+[22:46] <grondilu> in perl 5 it can be a bit confusing that they are both the same kind of object, but at least it makes it clear that they are indeed the same kind of object.
+
+[22:46] *** rurban1 joined
+[22:52] <grondilu> thouh I guess you could say that a buffer is not at all a string, but rather it's an array of integers, while a string is an array of characters.
+
+[23:00] <lue> Remember, I'm fine with an integer view of strings --- that's probably helpful to somebody. I just want a low-level array type whose design is not influenced by a subset of binary data types.
+
+[23:02] <jnthn> lue: When it's implemented, that'll be called "my int @a" :)
+
+[23:02] <lue> :) Could IO.meth(:bin) not return a Buf, but an Array[int8] or similar then?
+
+[23:03] <jnthn> No, I think Buf is right there
+
+[23:03] <lue> (when I use :bin, I specifically do not want to treat the file's contents as strings. But that's just me.)
+
+[23:03] <jnthn> Well, Buf ain't a string, it's something you can choose to turn into one, or at least try to
+
+[23:04] <lue> jnthn: yeah, my issues merely come from when I run into a Buf design choice that was informed by "integer view of string"
+
+[23:04] <jnthn> lue: Which one, ooc?
+
+[23:05] <lue> But all this truly started because    Buf[$range].Buf    doesn't work. Which is only tangentially related to my history with Buf's design choices.
+
+[23:05] <lue> r: say Buf.new(1,2,3,4,5)[2..4].Buf;
+
+[23:05] <camelia> rakudo-parrot 263aa0: OUTPUT«No such method 'Buf' for invocant of type 'Parcel'␤  in block  at /tmp/u0wuH_Gfke:1␤␤»
+
+[23:05] <camelia> ..rakudo-jvm 263aa0: OUTPUT«No such method 'Buf' for invocant of type 'Parcel'␤␤»
+
+[23:06] <jnthn> lue: What's wrong with .subbuf for that?
+
+[23:06] <lue> r: say Buf.new(Buf.new(1,2,3,4,5)[2..4]);
+
+[23:06] <camelia> rakudo-parrot 263aa0, rakudo-jvm 263aa0: OUTPUT«Buf:0x<03 04 05>␤»
+
+[23:06] <lue> jnthn: feels too clunky and string-like for my low-level-array-ing :)
+
+[23:07] <grondilu> r: say .[^3].Array given my Array @a = ^10;
+
+[23:07] <camelia> rakudo-jvm 263aa0: OUTPUT«Type check failed in assignment to '@a'; expected 'Array' but got 'Int'␤  in method REIFY at gen/jvm/CORE.setting:8337␤  in block  at gen/jvm/CORE.setting:7220␤  in method gimme at gen/jvm/CORE.setting:7628␤  in method at_pos at gen/jvm/CORE.setting…»
+
+[23:07] <camelia> ..rakudo-parrot 263aa0: OUTPUT«Type check failed in assignment to '@a'; expected 'Array' but got 'Int'␤  in method REIFY at gen/parrot/CORE.setting:8363␤  in method reify at gen/parrot/CORE.setting:7239␤  in method gimme at gen/parrot/CORE.setting:7654␤  in method exists_pos a…»
+
+[23:07] <grondilu> r: say .[^3].Array given my Array $a = ^10;
+
+[23:07] <camelia> rakudo-jvm 263aa0: OUTPUT«Type check failed in assignment to '$a'; expected 'Array' but got 'Range'␤␤»
+
+[23:07] <camelia> ..rakudo-parrot 263aa0: OUTPUT«Type check failed in assignment to '$a'; expected 'Array' but got 'Range'␤  in block  at /tmp/ju9CFQO_xn:1␤␤»
+
+[23:08] <grondilu> hum
+
+[23:08] <lue> jnthn: the real issue here though, is that either Buf[] should return a Buf (consistent with .subbuf) and/or Parcel.Buf works ( consistent with Buf.new(Parcel) )
+
+[23:09] <lue> All that more philosophical posturing above is just a result of my idea of Buf conflicting with everyone else's.
+
+[23:11] <grondilu> as I wrote Buf[] returning Buf is not consistent with .subbuf, since subbuf is analogous to substr and Str[] does not exist
+
+[23:11] <lue> grondilu: If that inter-type consistency must be maintained, then I'd be just as fine with Parcel.Buf
+
+[23:12] <lue> Though unless someone can point me to the part of the spec that explains why otherwise, I think one could argue that ListType[] should return a ListType, not a Parcel.
+
+[23:15] <grondilu> r: say .WHAT, .[^3].WHAT given my $ = ^10;
+
+[23:15] <camelia> rakudo-parrot 263aa0, rakudo-jvm 263aa0: OUTPUT«(Range)(Parcel)␤»
+
+[23:15] *** dmol left
+[23:15] <lue> I'd also like to point out that I'd prefer  Buf.push  to  Buf ~=  , but that's not as important :)
+
+[23:16] <grondilu> I see reasons why FooType[] should not necessarily return FooType, but it's hard to explain.
+
+[23:17] <lue> r: my $a = Buf.new(1,2,3); $a ~= "hello"; say $a;
+
+[23:17] <camelia> rakudo-jvm 263aa0: OUTPUT«java.lang.RuntimeException: java.lang.StackOverflowError␤␤»
+
+[23:17] <camelia> ..rakudo-parrot 263aa0: OUTPUT«maximum recursion depth exceeded␤current instr.: 'print_exception' pc 138097 (src/gen/p-CORE.setting.pir:58679) (gen/parrot/CORE.setting:10848)␤called from Sub 'Stringy' pc 213188 (src/gen/p-CORE.setting.pir:88441) (gen/parrot/CORE.setting:1014)␤ca…»
+
+[23:17] <dalek> rakudo/moar-support: 9f6c362 | jnthn++ | src/ (3 files):
+
+[23:17] <dalek> rakudo/moar-support: Fix various cases of where clauses.
+
+[23:17] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/9f6c36231c
+
+[23:17] <lue> Regardless of how you think Bufs should operate, I think we can agree that that's a bug :)
+
+[23:18] <grondilu> well, the fact that you prefer Buf.push to Buf ~= is an other example showing you reluctance to consider buffers as anything looking like a string.
+
+[23:18] *** pmurias left
+[23:18] <grondilu> Yet to me a Buf is a binary string, so it's just fine to use stringish notation
+
+[23:18] *** spider-mario left
+[23:19] <lue> grondilu: It's the closest thing I have to a low-level array right now, I'd use Array[int8] in a heartbeat if it wasn't just decoration at this point.
+
+[23:19] <lue> r: my int8 $a = 0xFF; say $a; $a++; say $a;
+
+[23:19] <camelia> rakudo-parrot 263aa0: OUTPUT«255␤Cannot modify an immutable value␤  in sub postfix:<++> at gen/parrot/CORE.setting:4335␤  in sub postfix:<++> at gen/parrot/CORE.setting:1751␤  in block  at /tmp/dTQyN9JflE:1␤␤»
+
+[23:19] <camelia> ..rakudo-jvm 263aa0: OUTPUT«255␤Cannot modify an immutable value␤  in sub postfix:<++> at gen/jvm/CORE.setting:4324␤␤»
+
+[23:19] <lue> r: my int8 $a = 0xFF; say $a; $a += 1; say $a;
+
+[23:19] <camelia> rakudo-parrot 263aa0: OUTPUT«255␤Cannot modify an immutable value␤  in block  at gen/parrot/CORE.setting:16590␤  in block  at /tmp/5WkQ8o2pPI:1␤␤»
+
+[23:19] <camelia> ..rakudo-jvm 263aa0: OUTPUT«255␤Cannot modify an immutable value␤  in block  at gen/jvm/CORE.setting:16313␤␤»
+
+[23:19] <lue> r: my int8 $a = 0x100; say $a;
+
+[23:19] <camelia> rakudo-parrot 263aa0, rakudo-jvm 263aa0: OUTPUT«256␤»
+
+[23:19] *** pmurias joined
+[23:20] <jnthn> lue: It doesn't pay attention to the sizes there just yet
+
+[23:21] <lue> jnthn: which is why Array[int8] is just decoration to me :) . I'd use it instead of Buf if I could, because I don't want an integer view of strings.
+
+[23:22] <grondilu> .oO(  Maybe we could create a "Bring" type, novlang for Binary String  :-)  )
+
+[23:22] <lue> :)
+
+[23:23] *** syndrum left
+[23:23] *** rurban1 left
+[23:23] *** FROGGS[mobile] left
+[23:23] *** FROGGS[mobile] joined
+[23:23] <lue> By the way, if we insist on :bin returning a Buf in IO, could it *please* be renamed :buf ? When I say "binary data", I'm pretty sure I didn't mean "strings in number form".
+
+[23:23] <grondilu> why not?
+
+[23:24] <grondilu> I mean, why couldn't "binary data" mean "strings of numbers"?
+
+[23:24] <lue> Because string data ⊂ binary data. Thinking of binary data as a really funny-looking iso-8859-1 string isn't always useful.
+
+[23:25] <lue> (and for me, never is)
+
+[23:25] <grondilu> that's how strings are in P5, though.  The most general string in P5 is a binary string, isn't it?
+
+[23:26] <jnthn> lue: Buf has nothing to do with iso-8859-1
+
+[23:26] <lue> jnthn: I know, I only said "iso-8859-1" because it's the most common encoding that won't break on some of the higher-valued bytes.
+
+[23:26] <grondilu> strings are not just text.  After all a string is just something that has a length..
+
+[23:27] *** raiph left
+[23:28] <jnthn> grondilu: The point is to make a distinction between a bunch of bytes, which it doesn't mean anything to manipulate as if they were text, and things that are text and can be sanely treated as such.
+
+[23:28] <lue> I reject the general notion that strings are "just another view of numbers", I always consider them higher-level.
+
+[23:28] *** bluescreen10 left
+[23:28] <jnthn> Str is text. Buf is bytes.
+
+[23:29] <jnthn> You shouldn't even assume Str is implemented as an array under the hood.
+
+[23:29] <lue> .oO(Strings are just a built-in interpreter of some kinds of binary data.)
+
+[23:30] <lue> jnthn: should  Parcel.Buf  work exactly the same as Buf.new(Parcel)? I just want $buf[$range].Buf to work. That's how this all started :)
+
+[23:31] <grondilu> jnthn: Str is text indeed, but I was talking about strings as a general concept, for which a certain vocabulary (such as concatenation, substirngs...) makes sense.  That's Buf borrows some of these concepts to Str  (such as ~ or substr (translated in subbuf))
+
+[23:32] <grondilu> s/That's Buf/That's why Buf/
+
+[23:32] <jnthn> grondilu: Yes, sometimes being able to re-use concepts that make sense is useful
+
+[23:32] <jnthn> Concatenation can be sanely defined on two bunches of bytes. It's things like lc, chars, etc. that cannot.
+
+[23:33] <lue> To tell the truth, I'm not quite sure why  open("file", :bin).read($number)  giving me a low-level array of numbers is such a seemingly hard concept. :/
+
+[23:33] <grondilu> the problem is that Str in Perl 6 only covers one part of  the general concept of string.
+
+[23:34] <grondilu> I mean that Str really is textual strings.
+
+[23:34] <timotimo> r: say -1 gcd 2
+
+[23:34] <camelia> rakudo-parrot 263aa0, rakudo-jvm 263aa0: OUTPUT«1␤»
+
+[23:34] <timotimo> moarvm gives -1 for that, that's wrong right?
+
+[23:34] <timotimo> r: say nqp::gcd_i(-1, 2)
+
+[23:34] <camelia> rakudo-parrot 263aa0, rakudo-jvm 263aa0: OUTPUT«1␤»
+
+[23:34] <jnthn> timotimo: Consistency would be good, yes :)
+
+[23:35] <timotimo> that may be the cause of the rat failure.
+
+[23:35] <lue> timotimo: wxMaxima gives me 1, so I think MVM is wrong there :)
+
+[23:35] <jnthn> grondilu: Yes, it's true we took the name Str for that. otoh, most of the time when you say "string" to somebody, they think of textual data, so it's not so bad naming wise...
+
+[23:36] <lue> I would really love it if Buf wasn't so tied to Strs, "Buffer" does not imply string data to me :/
+
+[23:36] <lue> I'd much prefer if Buf was the native equivalent of Array, much like  int  and  Int  .
+
+[23:37] <grondilu> jnthn: good point.  Indeed when people say string they usually mean "text".
+
+[23:37] <timotimo> should i just abs() both arguments to the gcd algorithm?
+
+[23:37] <jnthn> lue: It's only tied in that some of the same operations are defined on Buf and Str. But + is defined on Complex and Int, but I don't hear you complaining those are too tied :)
+
+[23:38] <jnthn> timotimo: That could work. Worth checking out what we do on Parrot for gcd_I given that's also done with libtommath
+
+[23:38] <lue> Complex and Int are both mathematical concepts. Buf and Str are *not* both string concepts.
+
+[23:38] <grondilu> lue: this is arguable.
+
+[23:38] *** treehug88 left
+[23:39] <grondilu> to me Buf and Str *are* both string concepts
+
+[23:39] <timotimo> oh, interesting
+
+[23:39] <lue> Buffers (the general concept). are. not. Strings (the general concept). This is getting maddening. I just want open("file", :bin).read() or slurp("file", :bin) to give me data that functions like an array.
+
+[23:39] <lue> Not like a funny perspective on strings.
+
+[23:40] <grondilu> why do you say it's funny when it's how binary data has been treated in P5 for ages?
+
+[23:41] <grondilu> IIRC, when you open a binary file in P5, you don't get an array.
+
+[23:41] <lue> Perl 5 is wrong. C/C++ is more right here, treating strings as totally separate from all other kinds of data.
+
+[23:41] *** pmurias left
+[23:42] <jnthn> Time for me to get some rest. Got some flying to do tomorrow, so won't be online much at all...
+
+[23:42] <jnthn> 'night o/
+
+[23:42] <lue> I just want to do binary IO with objects that don't operate in the string-verse.
+
+[23:42] <lue> ♞ jnthn o/
+
+[23:43] *** skids joined
+[23:44] <timotimo> i see no special handling for abs-ing big integers before passing it to libtommath
+
+[23:45] <timotimo> and in fact gcd_I on moar is also correct
+
+[23:46] <lue> timotimo: but... -1 < 1 , so isn't 1 the "greatest" common denominator? :)
+
+[23:46] <timotimo> yes.
+
+[23:46] <timotimo> that's why i'm fixing moar to return 1 as the gcd of -1, 2
+
+[23:47] <timotimo> i'm still a bit puzzled as to what's going on. i think i need to put some debug prints.
+
+[23:48] <jercos> The first prime is 2, what if the 0th prime were -1? :p
+
+[23:48] <lue> I just wrote '00' because I was too lazy to write out '0x00' (but the extra zero helps me in keeping the nybbles straight), and I got a bunch of reminders that I'd enjoy  no perl5-warnings-seriously
+
+[23:48] <jercos> -2 gcd -10 suddenly equals -2?
+
+[23:50] <timotimo> r: say -2 gcd -10
+
+[23:50] <camelia> rakudo-parrot 263aa0, rakudo-jvm 263aa0: OUTPUT«2␤»
+
+[23:50] <timotimo> phew. i thought i was doing it wrong :)
+
+[23:52] *** smls joined
+[23:52] <grondilu> lue: I don't want to insist too much, but I'd just like to remind you that the word "string" is a metaphor when it's used to describe the machine representation of text.   A string is initially a long, flexible piece of rope.  This metaphor does not only make sense for text.
+
+[23:54] <lue> grondilu: most people associate "string" with textual data, I do the same. Imagine 'Str' was instead 'Txt', and maybe you'll see why I hate .subbuf and Buf ~= and the general design choices for Buf.
+
+[23:55] <lue> "string" is synonymous with "text" these days, so I need *very* good arguments to treat the word "string" as anything more.
+
+[23:57] <lue> In fact, I think (but am not sure that) "stream" has become the general term nowadays.
+
+[23:57] <smls> lue: Maybe the default interpretation of the word "string" absent qualifier is "string of characters", but when the given definition is explicitly "string of bytes" , I don't see any room for confusion
+
+[23:57] <grondilu> I'm used to consider string as not necessarily text for two reasons.  The fist one is that I've been doing so in Perl 5 for quite some time.  The second one is that when I  learned some bioinformatics on rosalind, I got to read bout string algorithms, where the mathematical definition of strings was quite general:  https://en.wikipedia.org/wiki/String_(computer_science) 
+
+[23:57] <smls> (if you don't mind me joining the discussion... :)
+
+[23:59] <lue> smls: yes, but "string of bytes" is to be handled way differently than "string of characters", and conflating the general notion of "string" with textual "string"s when designing Bufs is incorrect.
+
+[23:59] <grondilu> smls: exactly, "string of bytes" or "binary string" are perfectly valid expression.  Again, the string metaphor is valid not just with text.
+
+[23:59] <lue> The Str type is *specifically* designed for "strings of characters", to be explicit. Buf could be described as a "string of bytes", but to me that's equivalent to calling Array a "string of objects".
+

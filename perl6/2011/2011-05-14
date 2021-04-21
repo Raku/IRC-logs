@@ -1,0 +1,2034 @@
+[00:13] *** Schwern joined
+[00:40] *** mattp_ joined
+[00:44] *** bacek joined
+[00:49] *** whiteknight left
+[00:50] *** whiteknight joined
+[00:52] *** woosley joined
+[00:55] <Tene> colomon: you should callgrind the callgrind
+
+[00:56] *** whiteknight left
+[00:56] *** whiteknight joined
+[01:02] *** ymasory_ joined
+[01:04] *** am0c joined
+[01:11] *** thou left
+[01:22] <plobsing_> ping pmichaud, jnthn 
+
+[01:24] <pmichaud> plobsing_: pong
+
+[01:24] <pmichaud> (yay, I have a preliminary Rakudo subroutine counter running!)
+
+[01:24] <plobsing_> I've been working on a fix for zavolaj
+
+[01:24] <plobsing_> http://nopaste.snit.ch/45257
+
+[01:24] <colomon> \\o//
+
+[01:24] <colomon> plobsing_++
+
+[01:25] <plobsing_> but I can't seem to get rakudos reference wrapping/unwrapping right
+
+[01:27] <colomon> pmichaud: was that 262724 calls to Rakudo_binding_bind_llsig?  I now have kcachegrind running on my Mac and accessing the callgrind output on my Linux box.
+
+[01:28] <pmichaud> colomon: something like that, yes.
+
+[01:29] <pmichaud> plobsing_: some of those assignments might be an issue
+
+[01:29] <pmichaud> but jnthn++ would probably have to be the one to help out from here
+
+[01:29] *** Schwern left
+[01:30] *** slavik left
+[01:31] <colomon> so.... one line of the sin.t (towards the end) is 102 function calls
+
+[01:31] <pmichaud> could be
+
+[01:31] <colomon> is_approx(asin(:x(DifferentReal.new(0.707106781186548)), :base(Degrees)), 45, "asin(:x(DifferentReal), :base(Degrees)) - 45");
+
+[01:32] <colomon> is the line
+
+[01:32] <pmichaud> I have a logging system set up locally that captures the names of the caller and called subs
+
+[01:32] <colomon> that's based on a profile run with it and a profile run with it commented out
+
+[01:32] <pmichaud> 102 function calls doesn't sound too far off the mark to me for that one
+
+[01:32] <pmichaud> (whether it should actually be that many is a valid question :-)
+
+[01:32] <plobsing_> phenny: tell jnthn I have a preliminary fix for zavolaj (http://nopaste.snit.ch/45257), but somewhere rakudo's reference wraping/unwrapping is tripping me up
+
+[01:32] <phenny> plobsing_: I'll pass that on when jnthn is around.
+
+[01:33] <pmichaud> just creating the 0.707106781...  value is going to be a ton of calls
+
+[01:33] <pmichaud> (because Rakudo does it at runtime)
+
+[01:33] <colomon> pmichaud: I'll tell you how many in about 20 minutes.
+
+[01:33] <pmichaud> :)
+
+[01:38] <pmichaud> top Rakudo block calls for sin.t:  http://gist.github.com/971584
+
+[01:39] <colomon> upgrade_to_num_if_needed ... ah
+
+[01:39] <pmichaud> last night I tried moving that to be PIR instead of Perl 6... it only made a small difference
+
+[01:41] <pmichaud> oh, outstanding
+
+[01:41] <pmichaud> so, since it's obvious that .item is a hot path -- we might get a huge win by moving it to PIR instead of Perl 6
+
+[01:41] <pmichaud> especially since all it does is return 'self'
+
+[01:41] <pmichaud> (for Mu)
+
+[01:42] <pmichaud> we'd save a bunch of PMC creations by doing that
+
+[01:43] <colomon> when is .item called?
+
+[01:43] <pmichaud> whenever something is needed in item context -- e.g., assignment to a scalar
+
+[01:44] <pmichaud> just looking at the code generated for Mu.item -- we create at least twelve PMCs per invocation
+
+[01:45] <colomon> !!!
+
+[01:45] <pmichaud> oh, maybe nine
+
+[01:45] <pmichaud> still
+
+[01:47] <colomon> This is "method item { self; }" we're talking about here?!
+
+[01:47] <pmichaud> yes
+
+[01:47] <colomon> dang
+
+[01:51] *** johnjohn101 joined
+[01:51] <johnjohn101> any date on release
+
+[01:51] <pmichaud> it's been released :)
+
+[01:52] <flussence> the last one was 2 weeks ago ;)
+
+[01:54] <flussence> oh wait, niecza v5 was released last week too. I bet there were more compilers I'm missing too.
+
+[01:54] <johnjohn101> does it do threading yet?
+
+[01:54] <pmichaud> no, we don't have threading yet.
+
+[01:54] <flussence> yes, niecza does
+
+[01:54] <flussence> (iirc)
+
+[01:55] <johnjohn101> ok i see rakudo star is out
+
+[01:56] <pmichaud> colomon: the approach I ended up taking creates a new opcode just for recording subroutine entry
+
+[01:56] <johnjohn101> niecza, does it have a web site?
+
+[01:56] <pmichaud> that way we can put it on routine that don't use bind_llsig
+
+[01:56] <pmichaud> *routines
+
+[01:56] <pmichaud> e.g., cheats/ and builtins/
+
+[01:57] <colomon> pmichaud: does that require a parrot update, or is it npq/rakudo specific?
+
+[01:57] <pmichaud> it's rakudo specific
+
+[01:57] <pmichaud> no parrot update
+
+[01:57] <colomon> sweet
+
+[01:57] <pmichaud> it would make sense to go into nqp (not -rx)
+
+[01:58] <johnjohn101> ok i see niecza works with mono..
+
+[02:03] <colomon> pmichaud: glancing at your output again, what catches my eye is div.  I think that's only called internally from Rat (in sin.t, anyway).  
+
+[02:04] <pmichaud> sure, we have lots of rat operations
+
+[02:07] <colomon> that's going to be almost all decimal constant construction, I think.
+
+[02:09] <colomon> having trouble getting kcachegrind to open the third file.   stupid computers...
+
+[02:11] <colomon> arrrrgh.  ran against the wrong sin.t file.
+
+[02:14] <pmichaud> there's a "div" in Real.pm
+
+[02:14] *** mishnik joined
+[02:14] *** mishnik left
+[02:14] <sorear> good * #perl6
+
+[02:14] <pmichaud> (used for infix:<mod> apparently)
+
+[02:14] *** mishnik joined
+[02:14] <colomon> yeah, probably not a big issue for sin.t
+
+[02:15] <mishnik> hi
+
+[02:15] <pmichaud> updated list after instrumenting the builtins:  http://gist.github.com/971619
+
+[02:16] <sorear> johnjohn101: Hi!
+
+[02:18] *** ymasory left
+[02:29] <sorear> johnjohn101: is github.com/sorear/niecza enough?
+
+[02:29] <sorear> johnjohn101: if not, what do you want to see on a website?
+
+[02:32] <johnjohn101> sorear: that's what i found.   I may have to ease into perl 6.
+
+[02:40] *** whiteknight left
+[02:44] *** woosley left
+[02:48] *** orafu joined
+[02:48] *** risou_awy is now known as risou
+
+[02:49] <pmichaud> http://gist.github.com/971866 # calling details for sin.t
+
+[02:49] <pmichaud> afk, dinner and break
+
+[02:49] <dalek> rakudo: e54eeca | pmichaud++ | src/ (3 files):
+
+[02:49] <dalek> rakudo: Initial implementation of Parrot sub logging (sublog) -- this
+
+[02:49] <dalek> rakudo: enables us to log each entry into various Rakudo and Parrot
+
+[02:49] <dalek> rakudo: subroutines (for profiling and optimization).
+
+[02:49] <dalek> rakudo: review: https://github.com/rakudo/rakudo/commit/e54eecaabb
+
+[02:49] <dalek> rakudo: f81d740 | pmichaud++ | tools/sublog-report.pl:
+
+[02:49] <dalek> rakudo: Add a simple tool to process the files produced from RAKUDO_SUBLOG.
+
+[02:49] <dalek> rakudo: For the moment it simply returns a count of the number of times each
+
+[02:49] <dalek> rakudo: subroutine is entered.
+
+[02:49] <dalek> rakudo: review: https://github.com/rakudo/rakudo/commit/f81d7406ea
+
+[02:49] <dalek> rakudo: afd9577 | pmichaud++ | src/cheats/ (14 files):
+
+[02:49] <dalek> rakudo: Instrument cheat subs with x_enter_sublog opcodes upon entry.
+
+[02:49] <dalek> rakudo: review: https://github.com/rakudo/rakudo/commit/afd957754e
+
+[02:49] <dalek> rakudo: e952e29 | pmichaud++ | src/builtins/ (35 files):
+
+[02:49] <dalek> rakudo: Instrument builtins/ with "x_enter_sublog".
+
+[02:49] <dalek> rakudo: review: https://github.com/rakudo/rakudo/commit/e952e295a4
+
+[02:49] <dalek> rakudo: 25fce41 | pmichaud++ | tools/sublog-report.pl:
+
+[02:49] <dalek> rakudo: Add some more details to tools/sublog-report.pl .
+
+[02:49] <dalek> rakudo: review: https://github.com/rakudo/rakudo/commit/25fce41f0a
+
+[02:49] <dalek> rakudo: be887ad | pmichaud++ | tools/sublog-report.pl:
+
+[02:49] <dalek> rakudo: Update tools/sublog-report.pl with some basic documentation for
+
+[02:49] <dalek> rakudo: how to use it.
+
+[02:49] <dalek> rakudo: review: https://github.com/rakudo/rakudo/commit/be887ad10b
+
+[02:53] <colomon> pmichaud++
+
+[02:55] <colomon> May be a while before I get to playing with it, because I've got an extremely busy weekend and a wicked $work bug that needs to be done by Monday on top of it.  But I really look forward to working it out. 
+
+[02:55] <colomon> s/working it out/playing with it extensively/
+
+[03:01] *** alester_ joined
+[03:12] <pmichaud> yes, me too :)
+
+[03:23] *** Su-Shee_ joined
+[03:24] *** Trashlord left
+[03:25] *** cooper left
+[03:26] *** Su-Shee left
+[03:34] *** Schwern joined
+[03:40] *** am0c left
+[03:40] *** alester_ left
+[03:51] *** ymasory_ left
+[03:59] *** mishnik left
+[04:11] *** ymasory joined
+[04:17] *** nakashiman joined
+[04:27] *** Su-Shee_ left
+[04:48] *** pmichaud left
+[05:02] *** pmichaud joined
+[05:03] <pmichaud> http://gist.github.com/971937  # result of rewriting Mu.item (a hotpath) into PIR
+
+[05:04] <pmichaud> basically we save the cost of creating (and discarding) 470,000 PMCs
+
+[05:04] * pmichaud runs the full suite
+
+[05:05] *** dur-randir joined
+[05:14] *** Helios left
+[05:16] *** Helios joined
+[05:18] *** molaf joined
+[05:28] *** envi joined
+[05:29] *** dur-randir left
+[05:31] <pmichaud> http://gist.github.com/971944  # the full rakbench suite after rewriting Mu.item
+
+[05:31] <pmichaud> looks like overall a 8%+ improvement, except for rx.t (it gets slower for some reason, likely solvable)
+
+[05:32] <pmichaud> I'm in favor of applying the change, but would like opinions first
+
+[05:32] <pmichaud> note that we even get a 10% improvement in *startup*
+
+[05:33] *** dur-randir joined
+[05:36] <sorear> yaya
+
+[05:39] <PerlJam> Is that the subid in parens?
+
+[05:39] <pmichaud> yes
+
+[05:39] <pmichaud> so that we can distinguish same-named subs
+
+[05:39] <PerlJam> Why are some like "new (new)" ?
+
+[05:39] <pmichaud> those are generally written in PIR, and thus don't have a PAST-generated subid
+
+[05:39] <pmichaud> (but the subid is in fact "new")
+
+[05:40] <PerlJam> I haven't looked at the diff yet, but how hard would it be to add timing info?
+
+[05:41] <pmichaud> I can put timestamps in, yes.  I'm not sure it's useful.
+
+[05:41] <pmichaud> there's no notion of "exiting" a sub here.
+
+[05:41] <pmichaud> just entrance.
+
+[05:41] <PerlJam> Hmm.
+
+[05:44] *** Helios left
+[05:45] *** Helios joined
+[05:48] * sorear looks at tools/sublog-report.pl
+
+[05:48] * sorear wonders what to think of it
+
+[05:53] *** nymacro joined
+[05:54] * pmichaud heads to bed
+
+[06:04] <sorear> bye
+
+[06:23] *** dur-randir left
+[06:30] *** colomon left
+[06:40] *** dolmen joined
+[06:50] *** birdwindupbird joined
+[06:50] *** nakashiman left
+[06:54] *** Trashlord joined
+[06:55] *** Su-Shee joined
+[06:58] <jnthn> yay YAPC::Russia :)
+
+[06:58] <phenny> jnthn: 01:32Z <plobsing_> tell jnthn I have a preliminary fix for zavolaj (http://nopaste.snit.ch/45257), but somewhere rakudo's reference wraping/unwrapping is tripping me up
+
+[07:02] <jnthn> Will take a look later. :)
+
+[07:03] <moritz> good morning
+
+[07:04] <sorear> hi jnthn!!
+
+[07:04] *** bessarabov joined
+[07:07] <jnthn> privet ;)
+
+[07:09] *** Mowah joined
+[07:10] <jnthn> pmichaud++ # call counts!
+
+[07:11] *** mberends joined
+[07:14] *** dur-randir joined
+[07:16] <sorear> hey mberends!
+
+[07:16] <mberends> hi sorear!
+
+[07:18] <jnthn> mberends! \o/
+
+[07:19] <mberends> hi jnthn, what are you doing awake so early? ;)
+
+[07:19] * moritz joins the happy familiy
+
+[07:19] <moritz> different time zone? :-)
+
+[07:19] <jnthn> mberends: Being three timezones east of you :P
+
+[07:21] * moritz confused by RAKUDO_SUBLOG
+
+[07:22] <moritz> it's not easy to run a spectest run with it
+
+[07:22] <moritz> maybe I need to hack the harness
+
+[07:24] *** mishnik joined
+[07:26] *** dionys joined
+[07:27] *** kappa joined
+[07:27] *** dayangkun joined
+[07:27] <moritz> ah yes
+
+[07:30] <moritz> TAP::Harness++ # having callbacks for the exec => param
+
+[07:32] *** kappa left
+[07:34] * moritz wonders if his available disc space is enough
+
+[07:35] <jnthn> moritz: You going to profile the whole spectests? :)
+
+[07:35] <moritz> jnthn: if my disc allows it, yes
+
+[07:36] <jnthn> ;)
+
+[07:36] <moritz> I just wonder what the output means
+
+[07:36] <moritz> is the list of indent subs the list of callers?
+
+[07:36] <jnthn> moritz: e.g. in https://gist.github.com/971866
+
+[07:36] <jnthn> Yes
+
+[07:36] <jnthn> It's number of calls and sub
+
+[07:36] <jnthn> then indented below it the top call sites
+
+[07:37] <jnthn> And counts of those
+
+[07:37] <moritz> I'm a bit surprised that CREATE is leading the list by a clear margin
+
+[07:37] <jnthn> It's called everytime we create an object.
+
+[07:38] * moritz wonders which ACCEPTS calls WHAT that often
+
+[07:38] <tadzik> good morning!
+
+[07:39] <moritz> now in S05, and 340M of logs
+
+[07:39] <moritz> good morning tadzik 
+
+[07:42] <tadzik> what's the Mu.item rewrite?
+
+[07:43] *** AlexKotov joined
+[07:45] *** uKibab joined
+[07:46] <AlexKotov> Hi, uKibab!
+
+[07:46] <uKibab> Hi Alex
+
+[07:46] <AlexKotov> :) YAPC::Russia - 2011 is starting now!
+
+[07:47] <tadzik> hello hackathoners!
+
+[07:47] <tadzik> AlexKotov: I saw you had some panda/windows issues. Back in the neutro days I wanted it to be windows-friendly, but there was no windows user to try it out. If you want to have a module installer on windows, that may be your day
+
+[07:48] * mberends shoulda been in Moscow, but the UK post (almost) eated his passport :(
+
+[07:48] <uKibab> mberends: that's sad :-(
+
+[07:48] <tadzik> what happened!
+
+[07:48] <tadzik> ?
+
+[07:49] <AlexKotov> Hi, Martin! Today is Saturday, not big chance that post will deliver it today :(
+
+[07:49] <mberends> Visa application posted priority 29th April, arrived at agency 10th May :P
+
+[07:50] <AlexKotov> tadzik: yes, some windows issues are easy to fix
+
+[07:50] *** mishnik left
+[07:51] <AlexKotov> tadzik: for example, folder that is bypassed to wget ($HOME) should be quited - that will help
+
+[07:51] <tadzik> did you mean: quoted? :)
+
+[07:52] * sorear out
+
+[07:52] <tadzik> AlexKotov: want to fix that or should I? I have nowhere to test it anyway
+
+[07:52] <tadzik> mberends: heh, ask the Perl Foundation when did they receive my CLA :P
+
+[07:53] <AlexKotov> tadzik: I'm on the conference for the weekend, so better you do quotation for wget pathes
+
+[07:53] <AlexKotov> *NIX will not be broken, Windows will be fixed :)
+
+[07:54] <tadzik> AlexKotov: I don't see how a conference (especially YAPC) interferes, but ok :)
+
+[07:54] <moritz> http://moritz.faui2k3.org/tmp/sublog.log.gz # number of calls for the spectests upto S06-signature
+
+[07:54] <tadzik> there's no more than one wget call, is there?
+
+[07:57] <AlexKotov> I think one (didn't look inside installer actually)
+
+[07:58] <tadzik> I don't think sublog-report.pl likes "... and 348 more" in the input. Should it be ignored or something maybe?
+
+[07:58] <moritz> tadzik: the "... and 348 more" are from the *output* of sublog-report.pl
+
+[07:58] <AlexKotov> BTW, additional instruction for windows users - is to download wget.exe and copy it into folder available in $PATH :)
+
+[07:59] <moritz> tadzik: don't feed the scripts output to the script itself :-)
+
+[08:00] <tadzik> oh! :)
+
+[08:01] <tadzik> I like how the new sublogging doesn't add any overhead
+
+[08:01] <moritz> it does not?
+
+[08:02] <tadzik> panda list ran 15.86 before, and 15.88 after
+
+[08:06] <tadzik> http://nopaste.snit.ch/45298 -- logs for say "Hello, world!"
+
+[08:09] *** bessarabov left
+[08:10] *** bessarabov joined
+[08:13] *** Trashlord left
+[08:17] *** drbean joined
+[08:19] <bessarabov> 2 photos from the stage from yapc in moscow http://friendfeed.com/bessarabov/b62377d1/perl6-hackathon-results-on-yapc
+
+[08:19] <moritz> those guys look vaguley familiar :-)
+
+[08:20] <bessarabov> =)
+
+[08:21] <jnthn> bessarabov: ooh, thakns for taking :)
+
+[08:21] * jnthn was crazy enough to try and introduce himself in Russian :)
+
+[08:21] <jnthn> Dunno if anybody understood ;)
+
+[08:21] <tadzik> hey, I know those guys :)
+
+[08:22] <bessarabov> jnthn, well, you have an accent, but it is easy to understand your russian =)
+
+[08:22] <jnthn> bessarabov: Oh, at this point I'm happy if it's just understandable :)
+
+[08:22] <jnthn> I get to speak it like, once a year or so :)
+
+[08:23] <jnthn> tadzik: (hello world logs) so that's where we spend time at startup. Not too surprising that we create lots of stuff...but it looks like quite a bit.
+
+[08:27] <jnthn> Why does .Bool create though... :/
+
+[08:27] <moritz> it creates a new Bool::{True,False}?
+
+[08:27] <jnthn> I'd...hope not.
+
+[08:28] <jnthn> Not 282 times
+
+[08:28] *** Moukeddar joined
+[08:30] *** araujo left
+[08:34] <tadzik> :D
+
+[08:34] <tadzik> is that all the PHASERS blocks we don't use?
+
+[08:35] *** drbean left
+[08:37] *** mj41 joined
+[08:38] *** risou is now known as risou_awy
+
+[08:45] *** stasy joined
+[08:46] <stasy> hi everybody
+
+[08:46] <AlexKotov> stasy: Hi
+
+[08:47] *** Moukeddar left
+[08:48] *** ilyuha joined
+[08:48] *** ilyuha left
+[08:49] *** kjeldahl joined
+[08:56] *** ershov joined
+[09:00] *** mj41 left
+[09:04] *** AlexKotov left
+[09:04] *** bessarabov left
+[09:06] *** drbean joined
+[09:09] *** stasy left
+[09:10] *** f00li5h left
+[09:10] *** ershov left
+[09:11] *** drbean left
+[09:14] *** Chillance left
+[09:15] *** dolmen left
+[09:23] *** orafu left
+[09:23] *** bessarabov joined
+[09:24] *** stasy joined
+[09:28] *** MayDaniel joined
+[09:29] *** stasy left
+[09:34] *** rainerschuster joined
+[09:35] *** drbean joined
+[09:36] *** birdwindupbird left
+[09:40] *** drbean left
+[09:40] *** MayDaniel left
+[09:43] *** Trashlord joined
+[09:44] *** bessarabov left
+[09:44] *** mberends left
+[09:50] <tadzik> that reminds me, I still have the NLPW pictures not yet uploaded anywhere
+
+[09:51] *** tangent_ joined
+[09:55] *** stasy joined
+[09:55] *** AndroUser2 joined
+[09:56] *** risou_awy is now known as risou
+
+[09:57] *** AlexKotov joined
+[09:59] *** stasy left
+[10:21] *** orafu joined
+[10:21] *** dolmen joined
+[10:24] *** rainerschuster left
+[10:27] *** AndroUser2 left
+[10:27] *** stasy joined
+[10:29] <dalek> nqp: 372e310 | jonathan++ | src/6model/reprs/P6opaque.c:
+
+[10:29] <dalek> nqp: Fix crash when we have a typed attribute but the meta-attribute doesn't expose a .box_target.
+
+[10:29] <dalek> nqp: review: https://github.com/perl6/nqp/commit/372e31075f
+
+[10:30] <tadzik> what does the » character stand for in rules?
+
+[10:30] <tadzik> ||  .*? \n '=' 'end' \h+ $<identifier> » \N* -- from Perl6/Grammar.pm
+
+[10:30] <moritz> right word boundary
+
+[10:30] *** woosley joined
+[10:30] <tadzik> ok, thanks
+
+[10:31] <tadzik> >> too?
+
+[10:31] <jnthn> think that's just the texas version of it
+
+[10:31] <tadzik> aye
+
+[10:32] <tadzik> proto tokens get to have possibly different gramar definitions, but the same action method, right?
+
+[10:33] <jnthn> tadzik: Ech variant gets its own action meth
+
+[10:33] <jnthn> *Each
+
+[10:33] <tadzik> ok, thanks
+
+[10:34] <jnthn> typically the variants need different things
+
+[10:34] <jnthn> or that's been my experience thus far, anyways
+
+[10:35] <tadzik> I'm looking for something for my Blocks. Every kind of block will end up being produced exactly the same way, but they'll have different parsing rules
+
+[10:38] <moritz> tadzik: if you have an example of how two blocks are parsed and what they should produce, maybe we can come up with something clevery-ish
+
+[10:39] *** woosley left
+[10:40] <tadzik> moritz: I'm now working on the grammar rules. Basically, the point is that '=begin foo\nbla bla\n=end foo' and '=for foo\nblabla\n\n
+
+[10:40] <tadzik> ' end up being the same
+
+[10:41] <moritz> tadzik: if you use the same captures in each rule, it shouldn't be hard to write a routine that takes a Match and returns a Pod::Block
+
+[10:42] *** woosley joined
+[10:43] <tadzik> yeah, I suppose so
+
+[10:47] *** masak joined
+[10:48] <masak> hi #perl6.
+
+[10:48] * masak just finished writing his presentation
+
+[10:48] <jnthn> Finished with over an hour to spare!!
+
+[10:48] <masak> 168 slides \o/
+
+[10:49] <jnthn> O_O
+
+[10:49] <masak> I have no idea how long it's going to take to deliver... :)
+
+[10:49] <masak> maybe we'll be here all night.
+
+[10:50] <masak> mberends: wish you were here :/
+
+[10:57] *** stasy left
+[10:59] *** risou is now known as risou_awy
+
+[11:00] <moritz> pink floyd?
+
+[11:02] *** Psyche^ joined
+[11:05] *** Patterner left
+[11:06] *** Psyche^ is now known as Patterner
+
+[11:09] *** whiteknight joined
+[11:21] *** Ali_h_ joined
+[11:22] *** Ali_h left
+[11:22] *** Ali_h_ is now known as Ali_h
+
+[11:26] <masak> moritz: sorry. just another brick in the Wall. :)
+
+[11:27] * masak don't need no Eddy Kayshun
+
+[11:33] *** wamba joined
+[11:34] * masak just made a DSL for the Moscow metro
+
+[11:36] <AlexKotov> DSL = Domain Specific Language ?
+
+[11:37] <tadzik> Digital Subscriber Line?
+
+[11:38] <masak> moritz: there's a talk about exceptions going on here right now. http://event.perlrussia.org/mayperl4/talk/131
+
+[11:38] <masak> AlexKotov: yes. stay tuned for my talk this afternoon :)
+
+[11:38] <masak> (it's in the talk)
+
+[11:38] <tadzik> hrm
+
+[11:39] <AlexKotov> ye, looking forward for your talk today))
+
+[11:40] <masak> \o/
+
+[11:40] <tadzik> http://nopaste.snit.ch/45315 -- line * - 3, could anyone take a look?
+
+[11:40] <masak> AlexKotov: I'm looking forward to it as well, now that I've finished writing it! :P
+
+[11:40] <tadzik> masak: will there be any live streaming?
+
+[11:40] <masak> I doubt that.
+
+[11:42] <arnsholt> masak: OOC, how long is your talk with 168 slides? =)
+
+[11:42] <masak> tadzik: whoa. I'd like to help -- it looks interesting -- but it's doubtful this environment will provide the right kind of peace of mind for debugging grammars.
+
+[11:42] <masak> arnsholt: I don't know, I've never given it :)
+
+[11:42] <masak> arnsholt: I hope it's about 40 minutes :P
+
+[11:43] <masak> tadzik: hopefully moritz or someone else can help...
+
+[11:43] <arnsholt> Oh, right. How much time have the organisers allocated to you, then? =)
+
+[11:43] <masak> 40 minutes.
+
+[11:43] <arnsholt> Right. That's a lot of slides/minute ^_^
+
+[11:44] <tadzik> masak: I hope so. I'm investigating in other axis, but I'm afraid there's something about protos I don't quite understand
+
+[11:44] <masak> rakudo: say 40 / 169
+
+[11:44] <p6eval> rakudo be887a: OUTPUT«0.236686390532544␤»
+
+[11:44] <masak> rakudo: say 40 / 169 * 60
+
+[11:44] <p6eval> rakudo be887a: OUTPUT«14.2011834319527␤»
+
+[11:44] <tadzik> :O
+
+[11:44] <tadzik> blasphemy
+
+[11:45] *** araujo joined
+[11:46] <jnthn> 14 seconds a slide! :)
+
+[11:46] <masak> on average :)
+
+[11:46] * jnthn is looking forward to this :)
+
+[11:47] <arnsholt> tadzik: I think the reason the rule PASSes is the *
+
+[11:47] <arnsholt> It matches 0 <pod_block>, which is a success
+
+[11:48] <tadzik> oh
+
+[11:48] <tadzik> Right, S05 mentions Longest Token Matching for protoregexes, but we don't have that
+
+[11:48] <masak> corrct.
+
+[11:49] <masak> there's some LTM somewhere, but not nearly all of it.
+
+[11:49] <dalek> nqp: b12c862 | jonathan++ | src/NQP/ (2 files):
+
+[11:49] <dalek> nqp: Add a way to stub in a type without doing anything with it other than new_type and with an explicitly specified meta-object type.
+
+[11:49] <dalek> nqp: review: https://github.com/perl6/nqp/commit/b12c86229c
+
+[11:49] <dalek> nqp: d0f50b8 | jonathan++ | src/NQP/Actions.pm:
+
+[11:49] <dalek> nqp: Ensure we build proper AST node in newly added action method.
+
+[11:49] <dalek> nqp: review: https://github.com/perl6/nqp/commit/d0f50b85c1
+
+[11:49] <dalek> nqp: 3b5eec5 | jonathan++ | src/NQP/SymbolTable.pm:
+
+[11:49] <dalek> nqp: Rather than dying when trying to run code we didn't compile yet, instead try to compile it on-demand and run it. Missing various environmental bits just yet, but essentially works.
+
+[11:49] <dalek> nqp: review: https://github.com/perl6/nqp/commit/3b5eec59ae
+
+[11:49] <masak> tadzik: on that note, I wouldn't use infix:<|> in rules if I were you. it's not very future-proof.
+
+[11:50] <masak> I'd use infix:<||> across the board.
+
+[11:50] <tadzik> thanks
+
+[11:52] <Tene> masak: what's your talk on?
+
+[11:53] * masak realizes that he will give a compiler talk right after jnthn gives... a compiler talk
+
+[11:53] <jnthn> :P
+
+[11:53] <masak> though it's not that bad. :) mine is less detailed and more philosophical.
+
+[11:53] <masak> Tene: http://event.perlrussia.org/mayperl4/talk/117
+
+[11:53] <jnthn> Mine has less pretty diagrams :P
+
+[11:54] <Tene> shame I'm missing out; that sounds like a lot of fun
+
+[11:54] <masak> I plan to post slides here as I give the presentation. if you just advance them each 14 seconds, you can pretend you're here... :)
+
+[11:55] <masak> s/each/every/
+
+[11:58] <AlexKotov> http://www.picamatic.com/view/7557015_P1050552_halfsized/
+
+[11:58] <AlexKotov> Pic from latest YAPC::Russia talk (about exceptions)
+
+[11:59] <Tene> I should find a conference to give a talk at; that would be a lot of fun.
+
+[11:59] <masak> Tene: YAPC::EU! :)
+
+[11:59] <masak> Tene: in beautiful Riga :)
+
+[11:59] <Tene> I don't think I have the money for that.
+
+[12:00] <AlexKotov> Tene: where are you now (geographically) ?
+
+[12:00] <masak> Tene: I'm speaking purely out of self-interest -- it's be nice to meet.
+
+[12:00] <masak> but I suspect I'll end up at a YAPC::NA sooner or later.
+
+[12:00] <Tene> AlexKotov: California, US
+
+[12:00] <Tene> masak: agreed
+
+[12:01] <AlexKotov> Tene: yes, far way to any of Europe....
+
+[12:01] <Tene> I haven't attended a YAPC::NA yet either.
+
+[12:01] *** wamba left
+[12:02] <Tene> I really should, one of these days
+
+[12:06] <bacek> ~~
+
+[12:06] <bacek> jnthn, ping
+
+[12:07] <AlexKotov> jnthn just started his Perl6 talk right now
+
+[12:07] <masak> oh. it would seem my talk just got moved to first thing tomorrow. :)
+
+[12:08] <masak> oh great, several bonus hours of procrastination :P
+
+[12:09] <AlexKotov> http://www.picamatic.com/view/7557065_P1050553_halfsized/
+
+[12:09] <AlexKotov> Pic of jnthn at the stage
+
+[12:09] <masak> AlexKotov++ jnthn++
+
+[12:10] <masak> note the camera pointing at the laptop :P
+
+[12:10] *** yegor joined
+[12:12] <masak> yegor: hi.
+
+[12:14] <Tene> I remember meeting jnthn at the parrot summit once
+
+[12:14] <Tene> the hotetl we stayed in happens to be right next to where I live, when I moved to CA
+
+[12:14] *** satyavvd joined
+[12:15] <uKibab> http://dl.kibab.com/jonathan0.jpg
+
+[12:15] <Tene> like, two blocks from my first apartment here.
+
+[12:15] <uKibab> :-)
+
+[12:15] <masak> uKibab: nice one!
+
+[12:18] <bacek> AlexKotov, передавай ему привет после презентации :)
+
+[12:18] <bacek> (Sorry for Russian guys :)
+
+[12:18] <dalek> nqp: a555ce0 | bacek++ | src/6model/reprs/P6opaque.c:
+
+[12:18] <dalek> nqp: Add awful, terrible block of GC
+
+[12:18] <dalek> nqp: review: https://github.com/perl6/nqp/commit/a555ce0b4a
+
+[12:19] <masak> phenny: "передавай ему привет после презентации"?
+
+[12:19] <phenny> masak: "peredavay emu hello then presentations" (bg to en, translate.google.com)
+
+[12:19] <masak> phenny: ru "передавай ему привет после презентации"?
+
+[12:19] <phenny> masak: "Give my regards to him after the presentation" (ru to en, translate.google.com)
+
+[12:19] <bacek> AlexKotov, and tell him to review my last commit to nqp :)
+
+[12:19] <bacek> wow! phenny++
+
+[12:19] <bacek> actually google.translate++ :)
+
+[12:20] <masak> phenny: tell jnthn <bacek> AlexKotov, передавай ему привет после презентации :) <bacek> AlexKotov, and tell him to review my last commit to nqp :) [re commit a555ce0]
+
+[12:20] <phenny> masak: I'll pass that on when jnthn is around.
+
+[12:20] <bacek> masak, meh!
+
+[12:20] <masak> :)
+
+[12:20] <bacek> aloha, msg jnthn please review my last commit to nqp
+
+[12:21] <bacek> oh. This incarnation of aloha doesn't have "msg". Which is probably good anyway :)
+
+[12:21] <masak> aye.
+
+[12:22] <bacek> otoh.
+
+[12:22] <bacek> aloha, seen tadzik
+
+[12:22] <aloha> bacek: tadzik was last seen in #perl6 31 mins 37 seconds ago saying "thanks".
+
+[12:22] <tadzik> bacek: I'm hier
+
+[12:22] <tadzik> heh, I'll upload my NLPW pics too, for the fun
+
+[12:22] <bacek> tadzik, I know. I'm just checking cross-channel "seen"
+
+[12:22] <bacek> :)
+
+[12:22] <tadzik> :)
+
+[12:23] <AlexKotov> seen tadzik
+
+[12:23] <aloha> tadzik was last seen in #parrot 9 seconds ago saying "(:".
+
+[12:23] <AlexKotov> works!
+
+[12:23] <uKibab> great :-)
+
+[12:23] <bacek> Indeed :)
+
+[12:24] *** Moukeddar joined
+[12:24] <masak> Moukeddar: hi!
+
+[12:24] <tadzik> oh, that's a hackathoney thing?
+
+[12:24] <Moukeddar> hello Sir
+
+[12:24] <bacek> So, cross-channel msg via aloha will work too. You just have to use #parrot to send message
+
+[12:24] <Moukeddar> how are you doing?
+
+[12:24] <masak> tadzik: what is?
+
+[12:24] <tadzik> masak: the cross-channel-seen
+
+[12:24] <masak> Moukeddar: I'm at YAPC::Russia :)
+
+[12:24] *** cognominal left
+[12:25] <masak> tadzik: I don't think so...
+
+[12:25] <Moukeddar> you made it 
+
+[12:25] <Moukeddar> congrats
+
+[12:25] <masak> Moukeddar: yeah! thank.
+
+[12:25] <masak> s*
+
+[12:25] <masak> Moukeddar: how're you?
+
+[12:26] <Moukeddar> good but a bit Tired :)
+
+[12:26] * bacek thinking about visiting YAPC::Russia some day
+
+[12:28] <AlexKotov> bacek: where are you now? (geographically)
+
+[12:28] <bacek> AlexKotov, Sydney
+
+[12:28] <AlexKotov> Yeah.... really far way to go to Moscow )
+
+[12:29] <bacek> Yeah :)
+
+[12:29] *** risou_awy is now known as risou
+
+[12:32] <tadzik> http://imgur.com/SSb6L&KR52j&w3vYW -- 3 NLPW pictures
+
+[12:32] <Moukeddar> nice
+
+[12:32] <Moukeddar> many heads
+
+[12:33] <tadzik> I think masak is on all three :)
+
+[12:33] <masak> huh. how'd that happen? :)
+
+[12:33] <tadzik> easily, my dear Watson. Your head is between the other heads
+
+[12:34] <Moukeddar> found him :)
+
+[12:34] <Moukeddar> he's in the last line of heads
+
+[12:34] <Moukeddar> bottom-right
+
+[12:35] <tadzik> depends on a picture :)
+
+[12:35] <masak> right. I've moved to a completely different place in the third picture :)
+
+[12:36] <masak> er. my head has, I mean.
+
+[12:36] <Moukeddar> i'm talking about the first one
+
+[12:36] <Moukeddar> right?
+
+[12:36] <masak> right.
+
+[12:36] <Moukeddar> that's jnthn in the second piC right?
+
+[12:37] <masak> aye.
+
+[12:37] <Moukeddar> why do you have to use a dish as a background image ?
+
+[12:37] <Moukeddar> pavlov Experiment?
+
+[12:38] <masak> Moukeddar: because the talk was called "Perl 6 Appetizers" :)
+
+[12:38] <Moukeddar> lol, and that's an appetizer?
+
+[12:38] <masak> right.
+
+[12:38] <Moukeddar> more like an insect fight club
+
+[12:39] <masak> I assure you it looks very tasty in the actual PDF.
+
+[12:40] <Moukeddar> must be the projection
+
+[12:40] <masak> I regret to say that I never managed to compress this particular PDF enough to be able to upload it.
+
+[12:41] <Moukeddar> too many pics?
+
+[12:41] <masak> it became huge because the same title imeages were repeated on all the subsequent slides.
+
+[12:41] <masak> very pretty, but too large. I haven't used that presentation system since.
+
+[12:41] <Moukeddar> oh, isn't there a way to make it as a template
+
+[12:42] <Moukeddar> so all the title images get linked to the first one
+
+[12:42] <masak> I didn't find one at the time.
+
+[12:42] <masak> I did look for one.
+
+[12:42] <Moukeddar> most of my PDFs are <15 page
+
+[12:42] <masak> the problem is the way I make PDFs per page, and then glue them together...
+
+[12:43] <Moukeddar> masak, try to make the whole document in Word 2010 for example
+
+[12:43] <masak> the presentation framework for Appetizers is online, though. it's written in Perl 6: https://github.com/masak/talks/blob/master/yapc-eu-2010-appetizers/make-presentation
+
+[12:43] <Moukeddar> then save as PDF
+
+[12:43] <masak> Moukeddar: not if I can avoid it :D
+
+[12:43] <Moukeddar> it's FAT ;)
+
+[12:44] <masak> FAT16 or FAT32?
+
+[12:44] <moritz> tadzik: have you solved the issue in http://nopaste.snit.ch/45315 ?
+
+[12:45] <tadzik> moritz: yeah, we got to that
+
+[12:45] <Moukeddar> just plain FAT :)
+
+[12:45] <Moukeddar> but it depends on the C chain :)
+
+[12:45] <tadzik> I also solved a few new things, will probably have something to show off in a near future
+
+[12:46] <moritz> great, just came back from purchasing a new bicycle
+
+[12:46] <tadzik> sounds good
+
+[12:46] <moritz> will get it on Tuesday :-9
+
+[12:46] <tadzik> I was looking at some bicecles yesterday, but ended up getting new shoes and new haircut :)
+
+[12:47] <moritz> I also got a new haircut yesterday... for free. $wife++ :-)
+
+[12:47] <Moukeddar> for free?
+
+[12:47] <moritz> yes
+
+[12:47] <Moukeddar> sweet
+
+[12:47] <moritz> ok, it cost me a kiss
+
+[12:47] <Moukeddar> it's getting Hot in here, i need a military hair cut
+
+[12:47] <Moukeddar> moritz, that's expensive
+
+[12:48] <Moukeddar> get a refund
+
+[12:48] <tadzik> a kiss is not a contract :>
+
+[12:48] <Moukeddar> oh it will become one
+
+[12:48] <Moukeddar> soon
+
+[12:49] * masak .oO( sub kiss { PRE { ... }; POST { ... } } )
+
+[12:49] <tadzik> there's a trap in my gsoc proposal. Rakudo can't really parse the delimited blocks, it can ignore them :)
+
+[12:50] <masak> tadzik: that's correct.
+
+[12:50] * uKibab unfortunately had to w  leave in the middle of John's talk
+
+[12:50] <uKibab> :(
+
+[12:51] <Moukeddar> must be the kebab
+
+[12:52] <uKibab> nope :-P
+
+[12:52] <AlexKotov> uKibab will be back tomorrow :)
+
+[12:52] <uKibab> tadzik, are you participating in gsoc this summer?
+
+[12:52] <Moukeddar> they had this google/Opensource talk here at my city
+
+[12:53] <Moukeddar> i couldn't make it
+
+[12:53] <AlexKotov> Changes in tomorrow's timetable for YAPC::Russia: 1.) mberends's talks removed :( 2.) masak's talk moved from today
+
+[12:54] <tadzik> uKibab: yes
+
+[12:54] <AlexKotov> http://event.perlrussia.org/mayperl4/schedule?day=2011-05-15
+
+[12:54] <AlexKotov> Moukeddar: where are you now (geographically)?
+
+[12:55] <Moukeddar> Morocco
+
+[12:55] <AlexKotov> Closer than Sydney or California, but still far enough...
+
+[12:56] <Moukeddar> yes pretty fat
+
+[12:56] <Moukeddar> far*
+
+[12:56] <Moukeddar> i think my uncle married a russian girl :)
+
+[12:57] <pmichaud> good morning, #perl6
+
+[12:57] <masak> pmichaud! \o/
+
+[12:57] <masak> pmichaud: jnthn is mid-talk: "Inside a Compiler".
+
+[12:58] * uKibab also participa
+
+[12:58] *** ymasory left
+[12:59] *** AlexKotov left
+[12:59] *** AlexKotov joined
+[12:59] <tadzik> good morning pmichaud 
+
+[13:00] *** woosley left
+[13:02] *** Moukeddar left
+[13:02] <pmichaud> masak: I trust the talk is going exceedingly well, as all of jnthn++'s talks do?
+
+[13:03] <masak> yes, it's proceeding nicely.
+
+[13:03] <AlexKotov> Current slide is "Current focus" (NQP)
+
+[13:03] <pmichaud> Today at 2100UTC is the Parrot Developer Summit (on #parrotsketch) -- anyone have any items they wish me to share at the summit?
+
+[13:04] <tadzik> pmichaud: could you poke cotto about the Select PMC which was contributed, but not yet reviewed enought to be accepted?
+
+[13:05] <pmichaud> tadzik: will try to do that, yes.
+
+[13:05] <pmichaud> the summit often tends to focus on bigger picture items... but that probably qualifies
+
+[13:05] <tadzik> I see
+
+[13:06] <tadzik> well, that'll open us some way to async IO
+
+[13:06] <pmichaud> also, I know everyone is watching jnthn's talk, but I'm still wanting to hear opinions on http://gist.github.com/971944 (replacing Perl 6 Mu.item with a PIR one for 8% performance improvement)
+
+[13:06] <pmichaud> tadzik: where was Select PMC contributed?
+
+[13:06] <pmichaud> (ticket?  mailing list?)
+
+[13:07] *** Chillance joined
+[13:08] <tadzik> pmichaud: tewk/select branch or something
+
+[13:08] <pmichaud> tadzik: it might get more attention with a trac ticket for it
+
+[13:08] *** AlexKotov left
+[13:08] <tadzik> pmichaud: it has a trac ticket
+
+[13:08] <tadzik> let me find it
+
+[13:08] <pmichaud> if you could .... thanks
+
+[13:09] <tadzik> http://trac.parrot.org/parrot/ticket/2034
+
+[13:09] <pmichaud> I can only be here for about an hour -- have a meeting irl here this morning
+
+[13:09] <masak> pizza! &
+
+[13:09] *** masak left
+[13:09] <tadzik> pmichaud: re Mu.item, I thought replacing Perl 6 with PIR was less than desired
+
+[13:10] <uKibab> pizza arrived?
+
+[13:10] <pmichaud> tadzik: I've always maintained that hotpath items (such as this) should not have to be written in P6
+
+[13:10] <pmichaud> besides, all I'm doing is replaying
+
+[13:10] <pmichaud> *replacing
+
+[13:10] <pmichaud>      method item() { self }
+
+[13:10] <pmichaud> with a PIR method
+
+[13:10] <pmichaud>     .sub 'item' :method; .return (self); .end
+
+[13:11] <pmichaud> seems minor enough for an 8% overall speed improvement
+
+[13:11] <pmichaud> we can leave the p6 version in the source, with a comment that it's actually in builtins/Mu.pir
+
+[13:11] <pmichaud> (p6 version commented out)
+
+[13:14] <moritz> +1
+
+[13:14] <pmichaud> someday our compiler will be smart enough that it can compile the p6 version to be on par with the PIR version.  Until then, I'd like to take the speed improvement.
+
+[13:17] <flussence> now I'm curious, what does the P6 currently compile down to?
+
+[13:17] <pmichaud> well, since it's a perl 6 routine, it
+
+[13:17] <pmichaud>    creates $_, $!, and $/
+
+[13:18] <pmichaud>     (this involves creating at least 6 pmcs)
+
+[13:18] <pmichaud>     creates a return exception handler
+
+[13:18] <pmichaud>     (another pmc)
+
+[13:19] <pmichaud> (looking)
+
+[13:20] <pmichaud> creates a lexical 'self' PMC and binds the invocant to that
+
+[13:20] <pmichaud> so, that's another pmc
+
+[13:20] *** JimmyZ joined
+[13:20] <flussence> ouch, that's a lot of work for nothing :)
+
+[13:21] <pmichaud> it creates a Hash for %_
+
+[13:21] <pmichaud> (another PMC)
+
+[13:21] <tadzik> pmichaud: makes sense
+
+[13:21] <pmichaud> and in the case of sin.t, this sequence was called 45K times
+
+[13:22] <pmichaud> meaning we created ~450K PMCs that we just threw away
+
+[13:22] <flussence> yow!
+
+[13:22] <pmichaud> (that's what is meant by "hotpath" :)
+
+[13:22] <tadzik> (I meant the replacing)
+
+[13:22] <pmichaud> (tadzik: got it :)
+
+[13:23] <flussence> I think I've seen a few other bits of core that are just "{ self; }", would it make sense to do the same to those?
+
+[13:24] <flussence> oh, they're just $var.{$var.WHAT}
+
+[13:25] <moritz> flussence: only if they are called that often (I doubt it)
+
+[13:25] *** stasy joined
+[13:25] *** sjn joined
+[13:26] <flussence> oh well, it's only a temporary fix anyway
+
+[13:27] <pmichaud> https://github.com/pmichaud/rakbench/blob/master/results/kiwi-x86_64-201105140653.txt # latest rakbench results
+
+[13:28] <pmichaud> https://github.com/pmichaud/rakbench/blob/master/results/plum-x86_64-201105140651.txt # latest rakbench results, #2
+
+[13:28] *** JimmyZ left
+[13:28] <pmichaud> the above do not include the Mu.item hotpath patch
+
+[13:28] <pmichaud> gtg -- bbl
+
+[13:28] *** JimmyZ joined
+[13:29] *** yegor left
+[13:30] *** stasy left
+[13:31] <tadzik> pod6 showoff: http://nopaste.snit.ch/45436
+
+[13:44] <arnsholt> Cool!
+
+[13:44] <arnsholt> Also, for all your placeholder text needs, I recommend http://lipsum.lipsum.com/
+
+[13:44] <arnsholt> =)
+
+[13:46] *** Su-Shee left
+[13:48] <tadzik> naah ;)
+
+[13:53] *** woosley joined
+[13:54] *** AlexKotov joined
+[13:55] *** Ali_h left
+[13:57] *** masak joined
+[13:57] <masak> mmm, pizza. :)
+
+[13:57] <AlexKotov> Yeah, pizza was tasty!
+
+[13:59] <moritz> tadzik++ # POD parsing
+
+[14:00] *** Su-Shee joined
+[14:01] <masak> pmichaud++ # http://groups.google.com/group/parrot-dev/msg/ec6c3b62b7fc93f6
+
+[14:06] *** Trashlord left
+[14:09] <tadzik> debugging grammars is a huge pain
+
+[14:10] *** risou is now known as risou_awy
+
+[14:11] <moritz> tadzik: it is, but you'll gather experience, and will need less debugging soon
+
+[14:11] <tadzik> probably, yes
+
+[14:11] <tadzik> For now I'm stuck on paragraph blocks
+
+[14:12] <jnthn> pmichaud: I know PIR methods are faster. They also lack signatures, and won't play well with the metamodel stuff at all, let alone v-table indexing and stuff.
+
+[14:12] <phenny> jnthn: 12:20Z <masak> tell jnthn <bacek> AlexKotov, передавай ему привет после презентации :) <bacek> AlexKotov, and tell him to review my last commit to nqp :) [re commit a555ce0]
+
+[14:12] <masak> I can't claim that it has gotten easier over time to write large grammars. I've become more careful over time though, and prefer to depend on tests for making sure I don't regress.
+
+[14:12] <tadzik> but maybe I'll try to (1) write a hell of tests for the delimited blocks and (2) stick it inside Rakudo and see if that works
+
+[14:12] <jnthn> pmichaud: It's fine for a workaround for now but it'll only cause pain. I've wasted quite enough time on the bits of NQP still written in PIR.
+
+[14:13] <jnthn> pmichaud: PIR inside the method is OK-er.
+
+[14:13] <masak> tadzik: you might want to consider evolving grammar+tests in one isolated file, and then injecting it into Rakudo when it's ready enough.
+
+[14:13] <masak> tadzik: quicker development cycle.
+
+[14:13] <tadzik> masak: that's what I started doing, yes
+
+[14:13] <jnthn> pmichaud: An optimizer is kinda high on my list post-nom.
+
+[14:14] <masak> tadzik++
+
+[14:14] <tadzik> Rakudo's grammar will need a bit of refactoring too, it seems
+
+[14:15] <tadzik> alright, tests first, parablocks later
+
+[14:15] *** Moukeddar joined
+[14:16] <tadzik> that's an entire week 2
+
+[14:17] <masak> ...is this week 2?
+
+[14:18] <tadzik> nope, it's about -2
+
+[14:18] <masak> \o/
+
+[14:18] <tadzik> I mean I wanted to do an entire week 2 before week 1, or something like this :)
+
+[14:19] *** SHODAN joined
+[14:24] *** dayangkun left
+[14:24] *** AlexKotov left
+[14:25] <masak> ok, conf over for the day :)
+
+[14:25] <jnthn> ПИВОООООО! \o/
+
+[14:25] <masak> :P
+
+[14:25] <tadzik> phenny: "ПИВОООООО!"?
+
+[14:25] <phenny> tadzik: "PIVOOOOOO!" (ru to en, translate.google.com)
+
+[14:25] <masak> or should I say :П
+
+[14:25] <tadzik> :D
+
+[14:26] * masak would have been really impressed if phenny'd said "BEEEEEEER!"
+
+[14:26] <tadzik> oh, I forgot about the missing ingredient for debugging grammars!
+
+[14:26] <jnthn> :Д
+
+[14:26] <masak> tadzik: love? :)
+
+[14:26] <jnthn> tadzik: sacrifies?
+
+[14:27] <masak> tadzik: jelly beans?
+
+[14:27] <tadzik> no! ПИВОООООО!
+
+[14:27] <jnthn> OOOO!
+
+[14:27] <tadzik> that's what helped last time with Config::INI
+
+[14:27] <tadzik> twice
+
+[14:27] <masak> (Ballmer peak)++
+
+[14:27] <jnthn> Always practice BDD.
+
+[14:27] <masak> Ballmer-Driven Development?
+
+[14:27] <jnthn> Beer Driven Development \o/
+
+[14:27] <masak> oh :)
+
+[14:28] <tadzik> combined with Test Driven Development that gives us Best Driven Development!
+
+[14:28] <masak> could also have been Водка Driven Development :P
+
+[14:28] <jnthn> :D
+
+[14:28] *** dur-randir left
+[14:28] <tadzik> I prefer Bier :)
+
+[14:28] <masak> I'm so glad you didn't say "Biber".
+
+[14:29] <masak> er, Bieber*
+
+[14:29] <jnthn> ewww!
+
+[14:29] <jnthn> Why'd you have to mention...
+
+[14:29] <jnthn> :P
+
+[14:29] * masak .oO( do not imbiebe... )
+
+[14:29] <jnthn> :P
+
+[14:29] <jnthn> let's go!
+
+[14:29] <masak> &
+
+[14:29] *** masak left
+[14:29] *** dionys left
+[14:34] *** stasy joined
+[14:38] *** Trashlord joined
+[14:41] *** walkalone joined
+[14:41] *** stasy left
+[14:43] *** Moukeddar left
+[14:45] <tadzik> heh, who was looking for the shortest code to generate a Null PMC Access? :)
+
+[14:45] <tadzik> rakudo: @.a
+
+[14:45] <p6eval> rakudo be887a: OUTPUT«Null PMC access in find_method('a')␤  in main program body at line 2:/tmp/g2_bhzNFCM␤»
+
+[14:48] *** woosley left
+[14:48] <tadzik> how do I create an Foo::Bar::$Baz instance in runtime?
+
+[14:48] *** woosley joined
+[14:48] <tadzik> w/o eval of course
+
+[14:49] * PerlJam wonders why tadzik says "of course"  :)
+
+[14:50] <tadzik> I'm trying to cut myself off the thought that there isn't any better way:)
+
+[14:54] <dalek> mu: 223892f | jimmy++ | docs/zh-cn/syn/S02-bits.pod:
+
+[14:54] <dalek> mu: use more descriptive words
+
+[14:54] <dalek> mu: review: https://github.com/perl6/mu/commit/223892f4a9
+
+[14:57] <tadzik> more descriptive words? These are all squares! :P
+
+[14:58] <JimmyZ> :)
+
+[14:59] <JimmyZ> you may want to learn chinese?
+
+[14:59] *** miso_soup joined
+[15:01] *** MayDaniel joined
+[15:03] <tadzik> maybe one day
+
+[15:03] *** tty234 left
+[15:04] <tadzik> how do I deal with "Illegal redeclaration of symbol 'Pod6::Block'" again?
+
+[15:07] <dalek> mu: 38aa395 | jimmy++ | docs/zh-cn/syn/S02-bits.pod:
+
+[15:07] <dalek> mu: use more descriptive words again, this makes words more smooth
+
+[15:07] <dalek> mu: review: https://github.com/perl6/mu/commit/38aa39556e
+
+[15:18] *** JimmyZ left
+[15:22] *** Ali_h joined
+[15:22] *** whiteknight left
+[15:25] *** kborer joined
+[15:27] *** p6eval left
+[15:27] *** Ali_h left
+[15:27] *** whiteknight joined
+[15:28] *** dolmen left
+[15:28] *** p6eval joined
+[15:28] *** ChanServ sets mode: +v p6eval
+
+[15:29] *** Ali_h joined
+[15:32] *** mj41 joined
+[15:33] *** mberends joined
+[15:34] *** MayDaniel left
+[15:36] *** tty234 joined
+[15:36] *** dur-randir joined
+[15:39] *** bluescreen10 joined
+[15:40] *** bluescreen100 joined
+[15:41] *** bluescreen__ joined
+[15:42] <tadzik> rakudo: my $a = Nil; say $a.perl # expected?
+
+[15:42] <p6eval> rakudo be887a: OUTPUT«Any␤»
+
+[15:43] *** risou_awy is now known as risou
+
+[15:43] <tadzik> rakudo: my @a = Nil; say @a.perl # expected?
+
+[15:43] <p6eval> rakudo be887a: OUTPUT«[]␤»
+
+[15:43] *** yegor joined
+[15:43] <tadzik> s:2nd/expected\?//
+
+[15:44] *** p6eval left
+[15:45] <TimToady> yes, see S02:2240
+
+[15:46] <tadzik> right. Thank you
+
+[15:46] *** bluescreen100 left
+[15:46] *** p6eval joined
+[15:46] *** ChanServ sets mode: +v p6eval
+
+[15:46] *** bluescreen100 joined
+[15:46] *** kborer left
+[15:47] *** kborer joined
+[15:48] *** f00li5h joined
+[15:55] *** snearch joined
+[15:55] *** envi left
+[16:01] *** birdwindupbird joined
+[16:02] *** miso_soup left
+[16:03] *** ymasory joined
+[16:08] *** p6eval left
+[16:10] *** p6eval joined
+[16:10] *** ChanServ sets mode: +v p6eval
+
+[16:16] *** dur-randir left
+[16:19] *** walkalone left
+[16:19] *** mj41 left
+[16:20] *** mj41 joined
+[16:21] *** bluescreen100 left
+[16:22] *** bluescreen100 joined
+[16:23] *** bluescreen10 left
+[16:23] *** bluescreen__ left
+[16:23] *** bluescreen100 left
+[16:27] *** woosley left
+[16:28] *** p6eval left
+[16:30] *** p6eval joined
+[16:30] *** ChanServ sets mode: +v p6eval
+
+[16:35] *** donri joined
+[16:43] *** _jaldhar left
+[16:47] *** colomon joined
+[16:48] *** orafu left
+[16:58] *** lestrrat joined
+[16:58] *** risou is now known as risou_awy
+
+[16:59] *** wamba joined
+[17:02] *** sjn left
+[17:04] *** yegor left
+[17:06] *** kborer left
+[17:07] *** johnjohn101 left
+[17:14] *** cognominal joined
+[17:19] *** mj41 left
+[17:26] *** jesk joined
+[17:28] *** icwiener joined
+[17:32] *** Schwern left
+[17:33] <sorear> good * #perl6
+
+[17:38] <dalek> book/first-example-more-robust: e9930d3 | moritz++ | src/basics.pod:
+
+[17:38] <dalek> book/first-example-more-robust: [basics] fix duplicate invocant explanation found by PerlJam++
+
+[17:38] <dalek> book/first-example-more-robust: review: https://github.com/perl6/book/commit/e9930d3a89
+
+[17:38] *** snearch left
+[17:38] <dalek> book: 0281365 | moritz++ | src/basics.pod:
+
+[17:38] <dalek> book: [basics] made first example more robust wrt whitespace. Text still needs updating
+
+[17:38] <dalek> book: review: https://github.com/perl6/book/commit/0281365b94
+
+[17:38] <dalek> book: 346ed6a | moritz++ | src/basics.pod:
+
+[17:38] <dalek> book: [basics] start to updated description of the new first example
+
+[17:38] <dalek> book: review: https://github.com/perl6/book/commit/346ed6a170
+
+[17:38] <dalek> book: e83af18 | moritz++ | src/basics.pod:
+
+[17:38] <dalek> book: [basics] further wording changes after the s/split/words/ refactor
+
+[17:38] <dalek> book: review: https://github.com/perl6/book/commit/e83af18ca2
+
+[17:38] <dalek> book: e9930d3 | moritz++ | src/basics.pod:
+
+[17:38] <dalek> book: [basics] fix duplicate invocant explanation found by PerlJam++
+
+[17:38] <dalek> book: review: https://github.com/perl6/book/commit/e9930d3a89
+
+[17:39] <dalek> book: 3d702f6 | moritz++ | src/basics.pod:
+
+[17:39] <dalek> book: Merge branch 'first-example-more-robust'
+
+[17:39] <dalek> book: review: https://github.com/perl6/book/commit/3d702f6bf9
+
+[17:48] *** mj41 joined
+[17:49] *** dju joined
+[17:50] *** masak joined
+[17:50] <masak> lol hi!
+
+[17:51] <tadzik> lol hi masak!
+
+[17:52] <masak> lol
+
+[17:52] <tadzik> if you're adventure-hungry, gsocmess got some funny updates recently
+
+[17:52] <masak> thanks; now is a good time for me to have a peek.
+
+[17:52] <tadzik> cool
+
+[17:52] <jnthn> evenin'
+
+[17:53] <sorear> hi masak!
+
+[17:53] <masak> ooh -- "Add some meat." -- Pod with meat on it :)
+
+[17:53] <tadzik> evenin' jnthn'
+
+[17:53] <masak> evening' sorear'
+
+[17:56] <jnthn> masak: I think you took the hungry bit too literally :P
+
+[17:59] <masak> jnthn: hunger is not to be trifled with!
+
+[17:59] * masak makes Pac Man motions
+
+[17:59] * jnthn smiles cherrily
+
+[18:01] * tadzik writes FotC inspired tests
+
+[18:04] *** mj41 left
+[18:08] *** orafu joined
+[18:08] <cognominal> jnthn, masak, mberends : osdc.fr is tentatively scheduled in September 2011, Thursday 22 to Saturday 24.  It would be part of a larger event and hosted Avenue Georges V (difficullt to find a more classy place in Paris which will change from the seedy area around Cité des Sciences). Still free and open.
+
+[18:09] <mberends> \o/
+
+[18:10] <cognominal> beers will be probably way more expensive in the area too :(
+
+[18:10] <jnthn> cognominal: OK. I'm still looking at FPW too
+
+[18:10] <cognominal> nice
+
+[18:10] <jnthn> cognominal: They'll probably still be cheaper than in Swedne :P
+
+[18:10] <mberends> jnthn: travel via .nl if you like :)
+
+[18:11] <jnthn> mberends: Canny do that on the way there - I'll be coming straight from teaching.
+
+[18:11] <cognominal> I remember English guys  complaning about the price of beers in Paris, in yapc 2003.
+
+[18:11] <jnthn> But on the way back maybe ;)
+
+[18:11] <mberends> :)
+
+[18:12] <cognominal> That would help organizers if you submit your talks at http://journeesperl.fr/fpw2011/
+
+[18:13] <cognominal> sure enough, anyone on this channel is invited to come and talk in our conferences…
+
+[18:15] * mberends is preparing a submission
+
+[18:16] <cognominal> beer is expensive but Chartreuse is free as usual :)
+
+[18:17] <moritz> tadzik: I get a parse error in podclasses.pl line 14
+
+[18:17] <cognominal> "for the happy few" would say Stendhal en Français dans le texte.
+
+[18:17] <moritz> tadzik: Whitespace character is not allowed as a delimiter at line 14, near " nothing s
+
+[18:17] <moritz> #= nothing special. BOARing!
+
+[18:17] <tadzik> moritz: yeah, apparently Rakudo does not like #= anymore
+
+[18:17] <tadzik> moritz: I got rid of that in the Real Code
+
+[18:19] <moritz> tadzik: so I should be running the t/ files instead?
+
+[18:19] <tadzik> moritz: ufo && make test should do
+
+[18:21] <moritz> tadzik++ # passing tests
+
+[18:21] <Tene> cognominal: any chance fpw would fund my travel to give a presentation there?
+
+[18:21] <tadzik> moritz: I have some local ones that don't :)
+
+[18:22] <moritz> failing tests are great too :-)
+
+[18:22] <tadzik> they're even better :)
+
+[18:23] <moritz> but having *some* tests pass is way better than only failing tests
+
+[18:24] <tadzik> yes
+
+[18:25] <tadzik> I just added some new, both passing and failing.
+
+[18:30] <tadzik> moritz: could you give me a hand with prototokens?
+
+[18:32] <cognominal> Tene, I am writing a mail to the fpw oganizers but it would be good that you submit your potential talks with the mention you need funding.
+
+[18:34] <tadzik> moritz: nvm
+
+[18:47] <dalek> rakudo/nom: 79d1ccc | jnthn++ | src/Perl6/Metamodel/BOOTSTRAP.pm:
+
+[18:47] <dalek> rakudo/nom: Update bootstrap to use stub syntax so that symbols end up installed in the serialization context properly.
+
+[18:47] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/79d1ccc367
+
+[18:47] <dalek> rakudo/nom: f0d615d | jnthn++ | src/CORE.setting/stubs.pm:
+
+[18:47] <dalek> rakudo/nom: Stuff in the setting should be my-scoped.
+
+[18:47] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/f0d615d13a
+
+[18:47] * masak sleeps &
+
+[18:47] *** masak left
+[18:48] <tadzik> what time is it in Russia?
+
+[18:49] <jnthn> tadzik: Getting towards 11pm
+
+[18:49] <jnthn> tadzik: And masak stayed up slide hacking last night ;)
+
+[18:50] * colomon reminds himself to get his presentation for YAPC::NA done *before* leaving for the conference.
+
+[18:50] <tadzik> (:
+
+[18:50] <colomon> That way I can stay up drinking instead.  ;)
+
+[18:51] *** Mowah left
+[18:52] * colomon is also hoping there might be a chance for tunes... there's at least one world-class Irish guitarist living in Asheville.
+
+[18:53] *** fhelmberger joined
+[18:54] *** Mowah joined
+[18:59] *** dionys joined
+[19:00] *** noganex_ joined
+[19:00] *** noganex left
+[19:05] *** yegor joined
+[19:07] <jnthn> sleep &
+
+[19:17] *** kjeldahl left
+[19:20] <tadzik> rakudo: say Seq.new(1, 2, 3).perl.eval.WHAT
+
+[19:20] <p6eval> rakudo be887a: OUTPUT«Parcel()␤»
+
+[19:20] <tadzik> intentional?
+
+[19:21] *** ruz joined
+[19:22] *** wamba left
+[19:23] <moritz> probably not really
+
+[19:23] <pmichaud> rakudo:  say Seq.new(1,2,3)
+
+[19:23] <p6eval> rakudo be887a: OUTPUT«123␤»
+
+[19:23] <pmichaud> rakudo:  say Seq.new(1,2,3).perl
+
+[19:23] <p6eval> rakudo be887a: OUTPUT«(1, 2, 3)␤»
+
+[19:23] <pmichaud> that's likely why.
+
+[19:23] <pmichaud> rakudo:  say Seq.new(1,2,3).perl.eval.item.WHAT
+
+[19:23] <p6eval> rakudo be887a: OUTPUT«Seq()␤»
+
+[19:23] <pmichaud> that works, though :-)
+
+[19:24] *** dionys left
+[19:25] <tadzik> I'm debugging this for like half an hour now. In .perl it looks like a Parcel, and I'm wondering why doesn't it flatten
+
+[19:25] <sorear> .perl is broken by design for Seq/Parcel/List/Array
+
+[19:26] <sorear> one of the reasons why I'd like to get away from the notion of perl/eval dualism
+
+[19:26] <sorear> who invented .perl, and were they asleep in ~1997 when the Haskell community made the same mistake?
+
+[19:26] <tadzik> I don't really like the dozen types of lists
+
+[19:27] <colomon> or we need something else which is a dual with eval?  ie a pretty-printer and a serializer, and never the twain shall meet?
+
+[19:28] <sorear> colomon: using eval() as a deserializer is fundamentally stupid
+
+[19:28] <colomon> yeah, I thought that as soon as I typed it.  :)
+
+[19:29] <colomon> (well, as soon as I hit enter, anyway.)
+
+[19:30] <moritz> btw perl 5.14 release is very soon
+
+[19:31] <tadzik> 72 min ago    Jesse Vincent    Remove RC3 marker
+
+[19:31] <tadzik> it's now /o\
+
+[19:31] <colomon> sorear: so we have, what, three distinctly different concepts all trying to squeeze into the .perl / .eval box?
+
+[19:32] <tadzik> and we won't be using package Foo {} syntax anyway, because everyone will be obliged to keep 5.8 compatibility
+
+[19:32] <sorear> colomon: I'd say.
+
+[19:36] <tadzik> All tests successful.
+
+[19:36] <tadzik> I almost stopped believing this is possible :)
+
+[19:40] *** iley joined
+[19:43] *** wamba joined
+[19:43] *** kappa joined
+[19:44] *** kappa left
+[19:45] <pmichaud> I've remarked numerous times that I disagree with .perl's current definition, with little effect.
+
+[19:45] <pmichaud> (definition as given by spec as well as implementation)
+
+[19:45] <pmichaud> .perl lacks item/list awareness
+
+[19:50] *** SHODAN left
+[19:55] <colomon> http://www.johndcook.com/blog/2011/05/13/theory-and-practice/
+
+[19:56] *** kappa joined
+[19:57] *** ymasory left
+[20:00] <moritz> .perl is specced to imply .item context
+
+[20:00] <pmichaud> sure, but the thing it outputs might not be .item
+
+[20:01] <moritz> that's an implementation bug
+
+[20:01] <pmichaud> or, put another way, I believe the spec says that if you evaluate the result of .perl in item context, you get the same result as what you put in
+
+[20:01] <pmichaud> that's certainly what happens in the case of .Seq
+
+[20:01] <pmichaud> rakudo:  say Seq.new(1,2,3).perl.eval.item.WHAT
+
+[20:01] <p6eval> rakudo be887a: OUTPUT«Seq()␤»
+
+[20:04] *** mj41 joined
+[20:12] <plobsing_> phenny: tell jnthn I have updated the zavolaj patch: http://nopaste.snit.ch/45500. it still doesn't like something about the references.
+
+[20:12] <phenny> plobsing_: I'll pass that on when jnthn is around.
+
+[20:18] *** awwaiid left
+[20:20] *** awwaiid joined
+[20:24] *** wamba left
+[20:32] *** MayDaniel joined
+[20:33] *** AlexKotov joined
+[20:38] *** Trashlord left
+[20:39] *** Trashlord joined
+[20:40] <pmichaud> if anyone has time to quickly review my pds message for suggestions:   https://gist.github.com/972609
+
+[20:40] <pmichaud> I'll post it in about 5 mins
+
+[20:40] <pmichaud> (it's a draft now)
+
+[20:40] <tadzik> pmichaud: garbage collection => better/faster garbage collection?
+
+[20:41] <tadzik> Parrot did have GC back then )
+
+[20:41] <pmichaud> "improved"
+
+[20:42] <pmichaud> well, Parrot has all of those, really, except the last
+
+[20:42] <pmichaud> we just needed more still :)
+
+[20:42] <tadzik> (:
+
+[20:42] <tadzik> pmichaud: are you about to push your Mu.item change?
+
+[20:43] <pmichaud> tadzik: probably after PDS
+
+[20:43] <pmichaud> right now my focus is there
+
+[20:44] <Tene> pmichaud: the phrasing about "we don't mind breakage ... to get them fixed or avoided" seems a bit off, in that if you're trying to avoid or fix breakage, then you do mind breakage?
+
+[20:45] <pmichaud> the fact that breakages occur is expected
+
+[20:46] <pmichaud> that doesn't frustrate us (much)
+
+[20:46] <Tene> I don't have any recommendations; it just took me a few readings to understand what I think you meant there.
+
+[20:46] <pmichaud> if we could say "oh, this broke" and have a parrot person simply say "oops, we'll revert or otherwise help you out", that'd be great.
+
+[20:47] <pmichaud> instead, we end up arguing for hours about why the breakage is absolutely necessary or that rakudo shouldn't be doing what it does or that rakudo shouldn't be targeting Parrot HEAD in the first place
+
+[20:48] <pmichaud> the initial arguments rarely seem to listen to what we're saying, but instead are knee-jerk "you're wrong" sorts of responses.
+
+[20:48] <pmichaud> I don't know how to improve that sentence to make that clearer, either.
+
+[20:49] <Tene> Perhaps "herculean effort to get necessary support from parrot"?
+
+[20:49] <pmichaud> too vague
+
+[20:49] <pmichaud> and also not what I'm saying
+
+[20:49] * Tene nods.
+
+[20:49] <pmichaud> it's not so much that it takes so long to get support, it's that we have to wade through a ton of anti-support first
+
+[20:49] <Tene> 'k, probably good enough.
+
+[20:49] <pmichaud> i.e., things that actively work against us
+
+[20:50] *** ab5tract joined
+[20:50] *** MayDaniel left
+[20:51] <pmichaud> "We don't mind the existence of breakages, we mind the 
+
+[20:51] <pmichaud> absolutely herculean efforts we have to go through with various
+
+[20:51] <pmichaud> Parrot developers to get them to stop denying there's an issue 
+
+[20:51] <pmichaud> (or that they've already addressed it) so that a solution can be found. "
+
+[20:51] <pmichaud> better ?
+
+[20:52] <pmichaud> I'm going with that.
+
+[20:53] <moritz> http://news.perlfoundation.org/2011/05/perl-514.html
+
+[20:53] <tadzik> Quick, reddit it first! :P
+
+[20:54] <flussence> 5.14! :D
+
+[20:54] * tadzik reddited it first
+
+[20:56] <tadzik> http://www.perl.org/get.html still lists 5.12.3 as the latest stable though
+
+[20:57] *** AlexKotov left
+[21:00] *** birdwindupbird left
+[21:05] *** iley left
+[21:08] *** ab5tract left
+[21:09] *** ab5tract joined
+[21:10] *** mj41 left
+[21:14] *** wamba joined
+[21:26] *** fhelmberger left
+[21:28] *** silent_h joined
+[21:29] *** Schwern joined
+[21:33] *** _jaldhar joined
+[21:34] *** kappa left
+[21:36] *** _jaldhar left
+[21:36] *** _jaldhar joined
+[21:47] *** ab5tract left
+[21:48] *** wamba left
+[21:48] *** Mowah left
+[22:12] *** ab5tract joined
+[22:17] *** ab5tract left
+[22:22] *** bluescreen10 joined
+[22:34] *** ab5tract joined
+[22:38] *** icwiener left
+[22:42] *** ab5tract left
+[22:43] *** ab5tract joined
+[22:48] *** ab5tract left
+[22:49] *** ab5tract joined
+[23:01] *** ab5tract left
+[23:13] *** ymasory joined
+[23:27] *** molaf_ joined
+[23:27] <sorear> good * #perl6
+
+[23:27] <sorear> pmichaud: I would like to talk to you about .perl
+
+[23:28] <pmichaud> sorear: I'm hoping to take a break soon (been in PDS channel for 2.5 hrs) but I'll gladly take questions now :)
+
+[23:28] <pmichaud> (or comments)
+
+[23:28] *** molaf left
+[23:28] <pmichaud> I'd only start by saying that .perl in rakudo is its best approximation of what I think to be a spec that needs some rethink/updating
+
+[23:29] <pmichaud> i.e., by no means will I be defining what rakudo currently does with respect to what it *ought* to do :)
+
+[23:30] <pmichaud> s/defining/defending/  # gah, can't type!
+
+[23:31] <sorear> pmichaud: I don't like the spec at all; I want to know what you'd like to see
+
+[23:31] <pmichaud> I think it needs to be more dwimmy
+
+[23:31] <pmichaud> in other words, when someone uses .perl, they expect to see Perl code that would reproduce the thing they're .perling
+
+[23:32] <pmichaud> I think we should stay true to that, even down to the notion of "this is an item" versus "this is a non-item"
+
+[23:33] <sorear> Do you think that @array.perl should be different from $(@array).perl?
+
+[23:33] <sorear> my @foo = 1,2,3; @foo.perl;  # @([1, 2, 3]) ?
+
+[23:38] *** jferrero joined
+[23:43] <pmichaud> I think that  @foo.perl probably should be  either  (1,2,3) or @([1,2,3])
+
+[23:43] <mberends> did we not come up with some cases a few months ago that even raised doubts about whether a .perl could ever be universal? Private object members, for example { has $!x; }
+
+[23:43] <pmichaud> depends on the level of fidelity we need
+
+[23:43] <pmichaud> mberends: I'm willing to forego universal.  I'd like "unsurprising" though.
+
+[23:43] <pmichaud> right now lots of people get surprised by .perl
+
+[23:44] <pmichaud> sorear: I can argue it either way, yes.  I don't like that Array always becomes [1,2,3] though
+
+[23:45] <sorear> pmichaud: ignore the spec- I want to know how you think to do this right
+
+[23:45] *** donri left
+[23:45] <pmichaud> the more interesting case is something like:    my @a = 1,2,3;  (5, @a, 6).perl
+
+[23:45] <sorear> (5, @([1,2,3]), 6)
+
+[23:45] <pmichaud> right
+
+[23:45] <pmichaud> that would be fine with me
+
+[23:45] <pmichaud> it preserves the knowledge of the array, but also flattens
+
+[23:46] <pmichaud> whereas:
+
+[23:46] <pmichaud> (5, @a.item, 6).perl   #   (5, [1,2,3], 6)
+
+[23:46] <pmichaud> or
+
+[23:47] <pmichaud> my $a = [1,2,3];   (5, $a, 6).perl   # (5, [1,2,3], 6)
+
+[23:48] <pmichaud> I think that making .perl item-aware would remove a good majority of the "Huh?" moments we currently get (more)
+
+[23:49] <sorear> sounds easy enough to do
+
+[23:49] <sorear> I'll do that
+
+[23:49] <pmichaud> also, I think it would help people understand the difference between item and list context
+
+[23:49] <pmichaud> if you can *see* the difference in .perl, it makes it easier to understand what's going on
+
+[23:49] <sorear> +1
+
+[23:49] <pmichaud> (there might be cases that are more confusion as a result of the change, I admit.)
+
+[23:49] <sorear> @([]) is a bit ugly, is all I'll say
+
+[23:49] <pmichaud> it could be .list
+
+[23:49] <sorear> rakudo: say @([1])
+
+[23:49] <p6eval> rakudo be887a: OUTPUT«1␤»
+
+[23:49] <pmichaud> [1,2,3].list
+
+[23:50] <pmichaud> or even list([1,2,3])
+
+[23:50] <sorear> rakudo does @() now?
+
+[23:50] <pmichaud> I don't think it does... but it might
+
+[23:50] <pmichaud> rakudo:  say @([1,2,3]).elems
+
+[23:50] <p6eval> rakudo be887a: OUTPUT«3␤»
+
+[23:50] <pmichaud> hmmmm
+
+[23:50] <pmichaud> rakudo:  my @a = (1, @([2,3,4]), 5);  say @a.elems
+
+[23:51] <p6eval> rakudo be887a: OUTPUT«5␤»
+
+[23:51] <pmichaud> looks like "yes"
+
+[23:51] <pmichaud> oh, I think rakudo doesn't handle   @$a yet
+
+[23:51] <pmichaud> it knows the paren form, but not the non-paren prefix form
+
+[23:51] <pmichaud> rakudo:  my $a = [1,2,3];  say (1, @$a, 3).elems
+
+[23:51] <p6eval> rakudo be887a: OUTPUT«===SORRY!===␤Non-declarative sigil is missing its name at line 22, near "@$a, 3).el"␤»
+
+[23:51] <pmichaud> right, that's the one it doesn't know yet.
+
+[23:52] <pmichaud> anyway, I think you and I are in agreement on how .perl should start to change.  I'll be happy to help you make it happen :)
+
+[23:53] <pmichaud> "Perl 6 implementors!  Rise up and throw off the chains of your tormentor!"
+
+[23:53] <sorear> ...help?
+
+[23:53] <pmichaud> or something like that
+
+[23:53] <sorear> tehehe.
+
+[23:53] <pmichaud> anyway, I need a break from irc -- bbl
+
+[23:59] *** silent_h left

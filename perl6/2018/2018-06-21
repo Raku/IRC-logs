@@ -1,0 +1,2052 @@
+[00:00] <Zoffix> This is the bench I used that showed normal lookup 5x faster: https://gist.github.com/zoffixznet/c46533e1a54ba6eb242ed9b12c72f713
+
+[00:01] <Zoffix> And this is the diff of the changes: https://gist.github.com/zoffixznet/7e45adca9cb04d5aec3b7a711b509abf
+
+[00:02] *** MasterDuke left
+[00:02] <timotimo> did you happen to look at how often DYNAMIC gets invoked with and without your change?
+
+[00:03] <jnthn> nqp::ctx forces the frame to the heap so we can reference it (those these days MoarVM also keeps stats on which frames nearly always end up getting promoted there, and then just allocates them there in the first place to save the copy).
+
+[00:03] <jnthn> nqp::ctx also is not possible to inline
+
+[00:03] <jnthn> (Because there's no frame for it to refer to if the frame is inlined)
+
+[00:03] <Zoffix> ahh
+
+[00:04] <timotimo> should we introduce a variant of getlexdyn that starts in the current frame rather than the caller's?
+
+[00:04] <jnthn> Hm, I'd forgotten that even did start at the caller :)
+
+[00:04] * Zoffix tries with nqp::getlexdyn to see if that boosts the `print` stuff
+
+[00:04] <timotimo> wait, what about getlexreldyn?
+
+[00:05] <timotimo> oh, that's what you had
+
+[00:05] <jnthn> I figured if you're in the current scope, though, then you can just emit a lexical lookup
+
+[00:05] <timotimo> is that proper? doesn't that perhaps give outers too high a priority, so to speak?
+
+[00:06] <jnthn> I meant strictly declared the current scope :)
+
+[00:06] <jnthn> That is, it's in the .symbol hash of $*W.cur_lexpad
+
+[00:06] <timotimo> ah, that'd be a compile-time decision, even
+
+[00:06] <jnthn> *decalred in
+
+[00:07] <jnthn> Yes, exactly
+
+[00:07] <timotimo> which would make dynamic variables inside the scope they're declared in cheaper
+
+[00:07] <timotimo> well, it wouldn't have to look far in the dynamic lookup either, but still
+
+[00:07] <jnthn> Right, which is useful because one usually touches them at least once there to initialize them.
+
+[00:07] <timotimo> aye
+
+[00:07] <jnthn> Sure, but it still has to do that lookup by name
+
+[00:07] <timotimo> oh, true
+
+[00:07] <jnthn> Whereas a lexical compiles into an array indexing operation
+
+[00:08] <jnthn> And so can JIT into just an instruction or two
+
+[00:09] <Zoffix> well, even with getlexdyn it's slower. By less, but slower. 0m3.301s on HEAD vs 0m3.547s with my changes
+
+[00:09] <Zoffix> Damn, I made ZofBot get ready the medal for nothing :)
+
+[00:10] <Zoffix> At least I learned a bunch of stuff from this.
+
+[00:11] <timotimo> will you try the lexical lookup thing before you scrap the idea?
+
+[00:11] <Zoffix> timotimo: what do you mean?
+
+[00:11] <Zoffix> what lexical lookup thing?
+
+[00:12] <timotimo> when compiling the DYNAMIC call, first check if the current $!symbols has the $*FOO as a lexical
+
+[00:12] <timotimo> and if it does, just use QAST::Var.new with '$*FOO'
+
+[00:12] <timotimo> otherwise emit the same code you have now
+
+[00:12] *** lizmat joined
+[00:12] <timotimo> that way you don't need to do the nqp::ctx
+
+[00:12] <timotimo> because now you don't have to do dynamic lookup in the current frame, the caller's is an acceptable starting point
+
+[00:13] <Kaiepi> m: role Foo { proto method gist(| --> Str) { "SB {*} SE" }; multi method gist(--> Str) { callwith("NAWS") } }; Foo.new.gist
+
+[00:13] <camelia> rakudo-moar a167e6cca: ( no output )
+
+[00:13] <Kaiepi> m: role Foo { proto method gist(| --> Str) { "SB {*} SE" }; multi method gist(--> Str) { callwith("NAWS") } }; say Foo.new.gist
+
+[00:13] <camelia> rakudo-moar a167e6cca: OUTPUT: «SB * SE␤»
+
+[00:13] <Zoffix> timotimo: so the QAST::Var would be just the only thing there for $*OUT?
+
+[00:13] <Kaiepi> is there a way to get it to output "SB NAWS SE"?
+
+[00:13] <Zoffix> like when would it be lexical?
+
+[00:13] <timotimo> that's right
+
+[00:14] <timotimo> Kaiepi: {{*}} probably
+
+[00:14] <timotimo> maybe { {*} }
+
+[00:15] <Zoffix> m: role Foo { proto method gist(| --> Str) { "SB { {*} } SE" }; multi method gist(--> Str) { callwith("NAWS") } }; say Foo.new.gist 
+
+[00:15] <camelia> rakudo-moar a167e6cca: OUTPUT: «Use of Nil in string context␤SB  SE␤  in method gist at <tmp> line 1␤»
+
+[00:15] <timotimo> aaw
+
+[00:15] <Zoffix> m: role Foo { proto method gist(| --> Str) { "SB $({*}) SE" }; multi method gist(--> Str) { callwith("NAWS") } }; say Foo.new.gist 
+
+[00:15] <camelia> rakudo-moar a167e6cca: OUTPUT: «Use of Nil in string context␤SB  SE␤  in method gist at <tmp> line 1␤»
+
+[00:15] <timotimo> m: role Foo { proto method gist(| --> Str) { "SB " ~ {*} ~  SE" }; multi method gist(--> Str) { callwith("NAWS") } }; say Foo.new.gist
+
+[00:15] <camelia> rakudo-moar a167e6cca: OUTPUT: «5===SORRY!5=== Error while compiling <tmp>␤Two terms in a row␤at <tmp>:1␤------> 3thod gist(| --> Str) { "SB " ~ {*} ~  SE7⏏5" }; multi method gist(--> Str) { callwi␤    expecting any of:␤        infix␤        infix stopper␤   …»
+
+[00:15] <timotimo> m: role Foo { proto method gist(| --> Str) { "SB " ~ {*} ~ " SE" }; multi method gist(--> Str) { callwith("NAWS") } }; say Foo.new.gist
+
+[00:15] <camelia> rakudo-moar a167e6cca: OUTPUT: «Use of Nil in string context␤SB  SE␤  in method gist at <tmp> line 1␤»
+
+[00:16] <timotimo> oh
+
+[00:16] <timotimo> i don't think you can callwith the "original" gist like that, as you've actually overridden the proto
+
+[00:16] <Kaiepi> m: role Foo { proto method gist(|$ --> Str) { "SB " ~ {$} ~ " SE" }; multi method gist(--> Str) { callwith("NAWS") } }; say Foo.new.gist
+
+[00:16] <camelia> rakudo-moar a167e6cca: OUTPUT: «5===SORRY!5=== Error while compiling <tmp>␤Obsolete use of | or \ with sigil on param $␤at <tmp>:1␤------> 3role Foo { proto method gist(|$7⏏5 --> Str) { "SB " ~ {$} ~ " SE" }; multi␤    expecting any of:␤        formal parameter…»
+
+[00:16] <timotimo> the candidate from Any isn't available to that particular dispatcher any more
+
+[00:16] <timotimo> m: role Foo { proto method gist(| --> Str) { "SB " ~ {*} ~ " SE" }; multi method gist(--> Str) { self::Any.gist("NAWS") } }; say Foo.new.gist
+
+[00:16] <camelia> rakudo-moar a167e6cca: OUTPUT: «Could not find symbol '&Any'␤  in method gist at <tmp> line 1␤  in method gist at <tmp> line 1␤  in block <unit> at <tmp> line 1␤␤»
+
+[00:17] <Kaiepi> m: role Foo { proto method gist(|$a --> Str) { "SB " ~ {$a} ~ " SE" }; multi method gist(--> Str) { callwith("NAWS") } }; say Foo.new.gist
+
+[00:17] <camelia> rakudo-moar a167e6cca: OUTPUT: «5===SORRY!5=== Error while compiling <tmp>␤Obsolete use of | or \ with sigil on param $a␤at <tmp>:1␤------> 3role Foo { proto method gist(|$a7⏏5 --> Str) { "SB " ~ {$a} ~ " SE" }; mult␤    expecting any of:␤        shape declaratio…»
+
+[00:17] <Zoffix> It's in Mu, but it don't take any args
+
+[00:17] <timotimo> oh
+
+[00:17] <jnthn> Zoffix: Dynamic variables are stored in the lexpad of the block that declares them.
+
+[00:17] <Kaiepi> m: role Foo { proto method gist(|a --> Str) { "SB " ~ {a} ~ " SE" }; multi method gist(--> Str) { callwith("NAWS") } }; say Foo.new.gist
+
+[00:17] <camelia> rakudo-moar a167e6cca: OUTPUT: «Block object coerced to string (please use .gist or .perl to do that)␤SB  SE␤  in method gist at <tmp> line 1␤»
+
+[00:17] <Kaiepi> m: role Foo { proto method gist($a --> Str) { "SB " ~ {$a} ~ " SE" }; multi method gist(--> Str) { callwith("NAWS") } }; say Foo.new.gist
+
+[00:17] <camelia> rakudo-moar a167e6cca: OUTPUT: «Too few positionals passed; expected 2 arguments but got 1␤  in method gist at <tmp> line 1␤  in block <unit> at <tmp> line 1␤␤»
+
+[00:17] <Kaiepi> m: role Foo { proto method gist($a --> Str) { "SB " ~ {$a} ~ " SE" }; multi method gist(--> Str) { callwith(self, "NAWS") } }; say Foo.new.gist
+
+[00:17] <camelia> rakudo-moar a167e6cca: OUTPUT: «Too few positionals passed; expected 2 arguments but got 1␤  in method gist at <tmp> line 1␤  in block <unit> at <tmp> line 1␤␤»
+
+[00:17] <jnthn> Zoffix: So if you're in the declaring scope then a lexical lookup and a dynamic lookup are equivalent, since there's no searching to do.
+
+[00:18] <Zoffix> OK, I'll give that a go. Thanks.
+
+[00:18] <Kaiepi> m: role Foo { proto method gist(*@a --> Str) { "SB " ~ {@a[1]} ~ " SE" }; multi method gist(--> Str) { callwith(self, "NAWS") } }; say Foo.new.gist
+
+[00:18] <camelia> rakudo-moar a167e6cca: OUTPUT: «Block object coerced to string (please use .gist or .perl to do that)␤SB  SE␤  in method gist at <tmp> line 1␤»
+
+[00:18] <jnthn> Kaiepi: callwith has no candidates to call, because you only declared one (and the proto hides all inherited ones)
+
+[00:18] <Kaiepi> oh
+
+[00:19] <Kaiepi> m: role Foo { proto method gist(--> Str) {*}; multi method gist(--> Str) { "SE {nextsame} SE" }; multi method gist(--> Str) { "NAWS" } }; say Foo.new.gist
+
+[00:19] <camelia> rakudo-moar a167e6cca: OUTPUT: «Nil␤»
+
+[00:19] <Kaiepi> m: role Foo { proto method gist(--> Str) {*}; multi method gist(--> Str) { "SE {callsame} SE" }; multi method gist(--> Str) { "NAWS" } }; say Foo.new.gist
+
+[00:19] <camelia> rakudo-moar a167e6cca: OUTPUT: «Use of Nil in string context␤SE  SE␤  in method gist at <tmp> line 1␤»
+
+[00:19] <jnthn> nextsame is walking the exact same dispatch list
+
+[00:19] <Zoffix> m: role Foo { proto method gist(| --> Str) { "SB " ~ {*} ~ " SE" }; multi method gist(\s) { s }; multi method gist(--> Str) { samewith "NAWS" } }; say Foo.new.gist
+
+[00:19] <camelia> rakudo-moar a167e6cca: OUTPUT: «SB SB NAWS SE SE␤»
+
+[00:19] <timotimo> why did my self::Any.gist not work?
+
+[00:20] <timotimo> i thought that's how you call a method from a parent class on yourself
+
+[00:20] <jnthn> timotimo: Because the syntax is self.Any::gist :)
+
+[00:20] <Zoffix> timotimo: it's in Mu
+
+[00:20] <Zoffix> oh
+
+[00:20] <timotimo> ah!
+
+[00:20] <Zoffix> m: 42.Any::gist
+
+[00:20] <camelia> rakudo-moar a167e6cca: ( no output )
+
+[00:20] <Zoffix> TIL
+
+[00:20] <timotimo> a haven't had a use for this yet i believe?
+
+[00:20] <jnthn> And Any is just the starting point of the lookup
+
+[00:20] <jnthn> So it'll find the Mu one also :)
+
+[00:20] <Zoffix> Cool
+
+[00:20] <Zoffix> I thought it had to be exact
+
+[00:20] <timotimo> no, Any.
+
+[00:21] <timotimo> :P
+
+[00:21] <Zoffix> m: class Foo {}; class Bar is Foo {}; dd Bar.Foo::gist
+
+[00:21] <camelia> rakudo-moar a167e6cca: OUTPUT: «"(Bar)"␤»
+
+[00:21] <Zoffix> awesome
+
+[00:21] <jnthn> Also, this form of call got about 12x faster recently. :-)
+
+[00:21] <Zoffix> m: role Foo { proto method gist(|c --> Str) { c ?? "SB " ~ {*} ~ " SE" !! {*} }; multi method gist(\s) { s }; multi method gist(--> Str) { samewith "NAWS" } }; say Foo.new.gist
+
+[00:21] <camelia> rakudo-moar a167e6cca: OUTPUT: «SB NAWS SE␤»
+
+[00:21] <Zoffix> \o/
+
+[00:21] <Zoffix> jnthn++
+
+[00:22] *** markoong left
+[00:23] <Zoffix> hm, I think lexical thing for dynvars won't work, would it
+
+[00:23] <Zoffix> m: my $*FOO = 42; sub bar { say $*FOO }; { my $*FOO = 100; bar }
+
+[00:23] <camelia> rakudo-moar a167e6cca: OUTPUT: «100␤»
+
+[00:23] <Zoffix> like, wouldn't this start giving 42?
+
+[00:24] <timotimo> we have to be careful to only look in the exact lexpad of the current sub
+
+[00:24] <timotimo> not in any of the outers
+
+[00:24] <jnthn> Zoffix: Yes, this only works in the case where the symbol is declared precisely in this scope
+
+[00:24] <Zoffix> aw :( that would help only a tiny amount of cases then
+
+[00:24] <jnthn> Zoffix: I think if you can check by something like $*W.cur_lexpad.symbol('$*FOO') truthy
+
+[00:25] <jnthn> Yes, but every little helps :)
+
+[00:25] <Zoffix> Yeah, I s'pose
+
+[00:25] <timotimo> it helps exactly in those cases where getlexdyn would miss it because it starts at the caller rather than the current frame
+
+[00:25] <jnthn> Right, which I thought was the aim :)
+
+[00:25] <Zoffix> timotimo: no, but the caller is the caller of &DYNAMIC
+
+[00:25] <timotimo> that's my idea of it anyway
+
+[00:25] <Zoffix> which is the current scope of where $*FOO is defined
+
+[00:26] <timotimo> yeah, but don't you generate the lookup op directly in the caller of DYNAMIC now?
+
+[00:26] <Zoffix> Right
+
+[00:26] <japhb> As timotimo says, isn't the point that checking for this one case and separating it out allows you to use a better opt for many other cases?
+
+[00:26] <Zoffix> But getlexdyn wouldn't miss it
+
+[00:26] <timotimo> sorry, getdynlex
+
+[00:26] <timotimo> the one that doesn't have nqp::ctx in it
+
+[00:27] <timotimo> because nqp::ctx is the one that kills your performance
+
+[00:27] <jnthn> m: use nqp; sub foo() { my $*foo = 42; say nqp::getdynlex('$*foo') }; foo
+
+[00:27] <camelia> rakudo-moar a167e6cca: OUTPUT: «===SORRY!===␤No registered operation handler for 'getdynlex'␤»
+
+[00:27] <Zoffix> timotimo: no, but I already tried the one without nqp::ctx in it, it's still slow
+
+[00:27] <Zoffix> it's getlexdyn
+
+[00:27] <jnthn> m: use nqp; sub foo() { my $*foo = 42; say nqp::getlexdyn('$*foo') }; foo
+
+[00:27] <camelia> rakudo-moar a167e6cca: OUTPUT: «(Mu)␤»
+
+[00:27] <jnthn> Notice how it fails to find $*foo due to what timotimo said
+
+[00:28] <jnthn> Hm, I'm surprised it's as slow as taking the nqp::ctx
+
+[00:28] <jnthn> ooc, how were you deciding whether to fall back to calling DYNAMIC?
+
+[00:28] <timotimo> i expect with ifnull
+
+[00:28] <jnthn> Yeah, that'd be the best way, I think. Was checking in case it was another way :)
+
+[00:28] <Zoffix> It's not as slow, the diff with getlexreldyn(ctx) was ~.8s and with getlexreldyn was ~.4s
+
+[00:28] <Zoffix> slower
+
+[00:29] *** gabiruh left
+[00:29] <jnthn> That surprises me
+
+[00:30] <Zoffix> jnthn: this is what I'm genning: https://gist.github.com/zoffixznet/7e45adca9cb04d5aec3b7a711b509abf#file-diff-diff-L18-L21    and I tried changing that getlexreldyn(ctx) to just getlexdyn and (it failed to install modules, since it can't find current-scoped vars anymore), that was still slow
+
+[00:30] <jnthn> Not saying you're measuring wrong, just that it doesn't mesh with what I know about how those two work.
+
+[00:30] <Zoffix> I hope I'm measuring wrong or doign something wrong :D
+
+[00:31] <Zoffix> was measuring with    time perl6 -e '(print ".") xx 1_000_000' > /dev/null
+
+[00:31] <timotimo> hopefully there's some hidden factor we can smoke out
+
+[00:32] <Zoffix> jnthn: what timotimo proposed is that getting nqp::ifnull(getlexdyn,callstatic &DYNAMIC) instead of just callstatic &DYNAMIC was making something else important to get too large to get inlined
+
+[00:32] <Zoffix> s:1st/getting/genning/;
+
+[00:33] *** zachk left
+[00:33] <timotimo> jnthn is also about to do another round of tuning for "what should the inline limit be"
+
+[00:35] <jnthn> One possible hypothesis: we can't JIT one of these ops yet, and so including it prevents us from JITting the enclosing code, which also blocks JIT of anything it's inlined in to
+
+[00:36] <jnthn> Another one: we can't JIT something that's in DYNAMIC, but we brought it below the inlining limit, so now it's inlined and also blocks JIT of whatever it's inlined in to
+
+[00:36] <jnthn> MVM_JIT_LOG=jit_log perl6 -e '...'
+
+[00:36] <jnthn> grep BAIL jit_log
+
+[00:36] <jnthn> Will potentially be informative
+
+[00:37] <timotimo> my cmdline is usually grep "Constructing\|BAIL\|Entering"
+
+[00:37] <timotimo> so you'll see what exact frame is getting the bail
+
+[00:37] <Zoffix> BAIL: op <atkey_u>
+
+[00:37] <jnthn> ah, cute :)
+
+[00:37] <Zoffix> BAIL: op <getlexreldyn>
+
+[00:37] <jnthn> aha...that second one would be the guilty party :)
+
+[00:38] <Zoffix> Don't think it's my getlexreldyn, 'cause my code's using getlexdyn
+
+[00:38] <jnthn> It's used in DYNAMIC though, I think
+
+[00:38] *** MasterDuke joined
+[00:38] <Zoffix> $ ./perl6 -e 'my $*x; say $*x'
+
+[00:38] *** raschipi left
+[00:38] <timotimo> getlexdyn isn't actually an op that exists in moar
+
+[00:38] <Zoffix> Dynamic variable $*x not found
+
+[00:38] <timotimo> there's a naming confusion somewhere in there
+
+[00:38] <timotimo> in the mapping between ops and nqp::ops
+
+[00:38] <Zoffix> but I don't think we're calling &DYNAMIC now, like with my code now
+
+[00:39] <jnthn> timotimo: Yeah, there is. D'oh
+
+[00:39] <lookatme> what's the difference between `my $x is dynamic` and twigil `my $*x` ?
+
+[00:39] <Zoffix> with these changes that don't quite compile right: https://gist.github.com/zoffixznet/725ea622bf0bebfce25c54e0364d5deb
+
+[00:39] <Zoffix> (modules fail to install)
+
+[00:39] <timotimo> getlexdyn in nqp:: is getdynlex in moar
+
+[00:39] <timotimo> or the other way around
+
+[00:39] <timotimo> but getlexreldyn corresponds to the same name
+
+[00:39] <jnthn> lookatme: You can only access the former via CALLERS::<$x> or similar
+
+[00:39] <lookatme> oh
+
+[00:40] <Zoffix> ../nqp/gen/moar/stage1/QAST.nqp:4325:QAST::MASTOperations.add_core_moarop_mapping('getlexdyn', 'getdynlex');
+
+[00:40] <jnthn> .oO( dynlexic )
+
+[00:40] <timotimo> oh, what does a Var with scope :contextual compile to?
+
+[00:41] <jnthn> timotimo: Not sure, but perhaps the "is it in this scope" and "if not use getlexdyn"
+
+[00:41] <jnthn> In which case it's perfect :)
+
+[00:41] <jnthn> Though I'd check it doesn't do some odd NQP-ism 
+
+[00:42] <Zoffix> |45d see if &DYNAMIC stuff can be made better: http://colabti.org/irclogger/irclogger_log/perl6?date=2018-06-21#l2
+
+[00:42] <ZofBot> Zoffix, Will remind you on 2018-08-04T20:42:12.623304-04:00 about see if &DYNAMIC stuff can be made better: http://colabti.org/irclogger/irclogger_log/perl6?date=2018-06-21#l2
+
+[00:42] * Zoffix calls it a day
+
+[00:42] *** Zoffix left
+[00:42] <timotimo> that compiles to getdynlex
+
+[00:42] <timotimo> but yeah, if it's in the same frame already, it does do a regular lexical lookup
+
+[00:44] <jnthn> Sleep time for me also, I think :)
+
+[00:44] <jnthn> 'night o/
+
+[00:45] <timotimo> i think i'll go to sleep as well
+
+[00:45] *** lizmat left
+[00:46] *** perlpilot joined
+[00:51] <timotimo> gnite
+
+[00:52] <ryn1x> .
+
+[00:56] *** sacomo joined
+[01:01] *** Kaiepi left
+[01:01] *** Kaiepi joined
+[01:04] <Kaiepi> m: constant IAC = 0xFF.chr; grammar A { token TOP { <a> <.b {~$<a>}> }; proto token a {*}; token a:sym(IAC) { <sym> }; method b($a) { if $a eq IAC { 0xFB.chr } } }; say A.parse("{IAC}\xFB")
+
+[01:04] <camelia> rakudo-moar a167e6cca: OUTPUT: «P6opaque: no such attribute '$!pos' on type Match in a Slip when trying to get a value␤  in regex TOP at <tmp> line 1␤  in block <unit> at <tmp> line 1␤␤»
+
+[01:05] <Kaiepi> how do i pass the match of a token to another token/method?
+
+[01:05] <Kaiepi> would i need to use a global variable or something?
+
+[01:12] <Kaiepi> actually i think i should ask this on stackoverflow
+
+[01:12] <Kaiepi> i can't be the only one that needs to be able to do this
+
+[01:20] *** molaf left
+[01:21] <Kaiepi> never mind, all i needed to do was move a token from one token to another to do what i want
+
+[01:29] *** gabiruh joined
+[01:33] *** molaf joined
+[01:37] *** ChoHag left
+[01:38] *** ChoHag joined
+[01:48] <Kaiepi> m: grammar Foo { token TOP { <a> <b <{$<a>}> }; token a { foo }; token b($a) { <{~$a}> } }; say Foo.parse('foofoo')
+
+[01:48] <camelia> rakudo-moar a167e6cca: OUTPUT: «5===SORRY!5=== Error while compiling <tmp>␤Unable to parse expression in metachar:sym<assert>; couldn't find final '>' (corresponding starter was at line 1)␤at <tmp>:1␤------> 3ammar Foo { token TOP { <a> <b <{$<a>}> 7⏏5}; token a { foo…»
+
+[01:49] <Kaiepi> m: grammar Foo { token TOP { <a> <b <{$<a>}>> }; token a { foo }; token b($a) { <{~$a}> } }; say Foo.parse('foofoo')
+
+[01:49] <camelia> rakudo-moar a167e6cca: OUTPUT: «No such method 'anon' for invocant of type 'Foo'. Did you mean any of these?␤    acos␤    any␤    asin␤    atan␤␤  in regex  at EVAL_0 line 1␤  in regex b at <tmp> line 1␤  in regex TOP at <tmp> line 1␤  in block <unit> at <tmp> line…»
+
+[01:49] <Kaiepi> m: grammar Foo { token TOP { <a> <b $<a>> }; token a { foo }; token b($a) { <{~$a}> } }; say Foo.parse('foofoo')
+
+[01:49] <camelia> rakudo-moar a167e6cca: OUTPUT: «No such method 'anon' for invocant of type 'Foo'. Did you mean any of these?␤    acos␤    any␤    asin␤    atan␤␤  in regex  at EVAL_0 line 1␤  in regex b at <tmp> line 1␤  in regex TOP at <tmp> line 1␤  in block <unit> at <tmp> line…»
+
+[01:49] <Kaiepi> m: grammar Foo { token TOP { <a> <b $<a>> }; token a { foo }; token b($a) { {~$a} } }; say Foo.parse('foofoo')
+
+[01:49] <camelia> rakudo-moar a167e6cca: OUTPUT: «Nil␤»
+
+[01:50] <Kaiepi> m: grammar Foo { token TOP { <a> <b $<a>> }; token a { foo }; token b($a) { <{{$a}}> } }; say Foo.parse('foofoo')
+
+[01:50] <camelia> rakudo-moar a167e6cca: OUTPUT: «No such method 'anon' for invocant of type 'Foo'. Did you mean any of these?␤    acos␤    any␤    asin␤    atan␤␤  in regex  at EVAL_0 line 1␤  in regex b at <tmp> line 1␤  in regex TOP at <tmp> line 1␤  in block <unit> at <tmp> line…»
+
+[01:51] *** perlpilot left
+[01:53] <tony-o_> what are you trying to do with the match value Kaiepi ?
+
+[02:02] <Kaiepi> tony-o_, i'm writing a grammar to parse telnet's protocol
+
+[02:03] <Kaiepi> for IAC DO/DONT/WILL/WONT <option>, i'm required to keep the state for both sides of the connection for each type of telnet option
+
+[02:03] <tony-o_> ah
+
+[02:04] <Kaiepi> the token looks like <{IAC}> <type=sym> <negotiation>, but i need to be able to pass type to negotiation
+
+[02:04] *** kjk joined
+[02:04] <Kaiepi> and set state accordingly depending on the value of <type>
+
+[02:04] <kjk> p6: for CORE::.kv -> $k, $v { put $k }
+
+[02:04] <camelia> rakudo-moar a167e6cca: OUTPUT: «&ord␤Too few positionals passed; expected 2 arguments but got 1␤  in block <unit> at <tmp> line 1␤␤&infix:<⊈>␤&infix:«(<)»␤&samemark␤&prefix:<?>␤&infix:<%%>␤&sprintf␤SocketType␤&infix:<⊖>␤&METAOP_TEST_ASSIGN:<andthen>␤&…»
+
+[02:05] <kjk> I wonder why I can't iterate what's in CORE directly like that
+
+[02:05] <tony-o_> should that not be happening in the actions?
+
+[02:07] <kjk> p6: for CORE::.keys -> $k { put $k }
+
+[02:07] <camelia> rakudo-moar a167e6cca: OUTPUT: «e␤&tan␤&infix:<⊃>␤&infix:«+<»␤&infix:<×>␤NQPMatchRole␤StrPosRef␤Range␤Collation␤&substr-rw␤&infix:«=>»␤SIGTERM␤&infix:<before>␤&infix:<∉>␤&duckmap␤&infix:«<=»␤PositionalBindFailover␤ThreadPoolScheduler␤Na…»
+
+[02:07] <tony-o_> m: my $*ACTION; grammar F { token TOP { <a> <b> }; regex a { \w { $*ACTION=$/; } }; regex b { { $*ACTION.say; } \w+ }; }; F.parse("helloh");
+
+[02:07] <camelia> rakudo-moar a167e6cca: OUTPUT: «｢h｣␤»
+
+[02:07] <kjk> p6: for CORE::.values -> $v { put $v }
+
+[02:07] <camelia> rakudo-moar a167e6cca: OUTPUT: «Sub object coerced to string (please use .gist or .perl to do that)␤uniprops␤trait_mod:<returns>␤0␤flat␤infix:<…^>␤␤set␤infix:<∌>␤cotan␤␤leave␤prefix:<!>␤prepend␤split␤␤prefix:<^>␤spurt␤  in block  at <tmp> line…»
+
+[02:07] <tony-o_> m: my $*ACTION; grammar F { token TOP { <a> <b> }; regex a { \w { $*ACTION=$/; } }; regex b { { $*ACTION.say; } \w+ }; }; F.parse("helloh"); # Kaiepi 
+
+[02:07] <camelia> rakudo-moar a167e6cca: OUTPUT: «｢h｣␤»
+
+[02:08] <kjk> p6: for CORE::.values -> $v { put $v .^name }
+
+[02:08] <camelia> rakudo-moar a167e6cca: OUTPUT: «5===SORRY!5=== Error while compiling <tmp>␤Malformed postfix call (only alphabetic methods may be detached)␤at <tmp>:1␤------> 3for CORE::.values -> $v { put $v .7⏏5^name }␤»
+
+[02:08] <tony-o_> there are other ways to abuse the matching too
+
+[02:08] <kjk> p6: for CORE::.values -> $v { put $v.^name }
+
+[02:08] <camelia> rakudo-moar a167e6cca: OUTPUT: «Signal␤Sub+{is-pure}␤Signature␤Sub+{Precedence}␤Sub+{Precedence}␤Sub␤Sub␤Sub␤NFKC␤Sub␤Sub␤Sub␤Sub+{is-pure}␤Sub+{is-pure}+{Precedence}␤Sub␤Sub+{is-nodal}+{Precedence}+{is-nodal}␤Sub␤Systemic␤Sub+{is-pure}␤Sub+{is-…»
+
+[02:09] <kjk> so iterating through CORE::.keys and CORE::.values work, but not CORE::.kv,   something the CORE module is triping up the for loop?
+
+[02:12] <geekosaur> m: dd CORE::.kv
+
+[02:12] <camelia> rakudo-moar a167e6cca: OUTPUT: «No such method 'perl' for invocant of type 'NQPMatchRole'␤  in block <unit> at <tmp> line 1␤␤»
+
+[02:12] <geekosaur> guess there's your answer: it's not a perl 6 thing, it's more primitive
+
+[02:13] <geekosaur> which might be an oversight, and might be worth a rakudobug
+
+[02:13] <geekosaur> m: say CORE::.kv.^name
+
+[02:13] <camelia> rakudo-moar a167e6cca: OUTPUT: «Seq␤»
+
+[02:13] <geekosaur> huh
+
+[02:13] <geekosaur> m: say CORE::.kv[0].^name
+
+[02:13] <camelia> rakudo-moar a167e6cca: OUTPUT: «Str␤»
+
+[02:13] <kjk> but I was only printing the key
+
+[02:13] <geekosaur> m: say CORE::.kv[1].^name
+
+[02:13] <camelia> rakudo-moar a167e6cca: OUTPUT: «Sub␤»
+
+[02:14] <geekosaur> ok, think it's handling that. it's .kv itself that may be strange.
+
+[02:14] <geekosaur> m: say CORE::.kv.WHAT
+
+[02:14] <camelia> rakudo-moar a167e6cca: OUTPUT: «(Seq)␤»
+
+[02:14] <kjk> if you assign the .kv result to an array and then iterate through that, it works
+
+[02:14] <geekosaur> oh, hm, that earlier error may have been something in it
+
+[02:15] <geekosaur> yes, I'm saying it's not quite a perl 6 value, it's somethoing else that only behaves as you expect part of the time
+
+[02:15] <geekosaur> underneath perl 6 is nqp, and sometimes nqp values leak through and do unexpected things
+
+[02:16] <kjk> should I open a bug report?
+
+[02:16] <geekosaur> I think .kv should work for it like it works for anything else. although CORE:: is a PseudoStash, maybe it's known to do something different
+
+[02:16] <geekosaur> iirc
+
+[02:17] <geekosaur> m: say CORE::.^name
+
+[02:17] <camelia> rakudo-moar a167e6cca: OUTPUT: «PseudoStash␤»
+
+[02:18] <geekosaur> might see if other PseudoStash-es (UNIT::, GLOBAL::, etc.) do the same thing, and include that in bug report
+
+[02:18] <geekosaur> it looks like it should work
+
+[02:25] *** lizmat joined
+[02:26] <kjk> does'nt seem to be because it's a PseudoStash. I suspect it might be some value in CORE:: that caused the problem.
+
+[02:27] *** lizmat left
+[02:28] <kjk> p6: say PROCESS::.^name;  for PROCESS::.kv -> $k, $v { put $k }
+
+[02:28] <camelia> rakudo-moar a167e6cca: OUTPUT: «Stash␤$AWAITER␤$IN␤$SPEC␤$ERR␤&chdir␤$PID␤$OUT␤$SCHEDULER␤%ENV␤»
+
+[02:29] <geekosaur> actually, I bet it;s the same thing that tripped my earlier check, then
+
+[02:29] <geekosaur> where dd tripped over an NQPMatchRole
+
+[02:30] <kjk> but isn't that because dd calls .perl on NQPMatchRole? my for loop didn't call .perl on the values at all
+
+[02:31] <geekosaur> but it's missing more things than just .perl
+
+[02:31] <geekosaur> nqp values are missing most things you expect
+
+[02:33] *** lizmat joined
+[02:37] <Kaiepi> can i subclass a grammar with a class and use it both to parse data and handle socket connections?
+
+[02:37] <Kaiepi> there's a lot of state that both the grammar and the client class need to know
+
+[02:39] <geekosaur> I'm wondering if you should be looking at action classes at this point
+
+[02:40] *** xinming joined
+[02:40] <Kaiepi> i've been trying to avoid action classes because i honestly have no clue how to write them even after looking at the documentation
+
+[02:40] *** xinming left
+[02:41] *** xinming joined
+[02:41] <kjk> I wonder if it has something to do with IterationEnd in CORE
+
+[02:42] <Kaiepi> i'll post the code i have so far in a sec and see if i can figure out how to use action classes for what i'm doing
+
+[02:42] <kjk> p6: my %h = CORE::.kv
+
+[02:42] <camelia> rakudo-moar a167e6cca: OUTPUT: «Odd number of elements found where hash initializer expected:␤Found 189 (implicit) elements:␤Last element seen: "IterationEnd"␤  in block <unit> at <tmp> line 1␤␤»
+
+[02:44] <MasterDuke> i think Slip might also be causing problems
+
+[02:44] <kjk> p6: my %h = CORE::.kv
+
+[02:44] <camelia> rakudo-moar a167e6cca: OUTPUT: «Odd number of elements found where hash initializer expected:␤Found 119 (implicit) elements:␤Last element seen: "IterationEnd"␤  in block <unit> at <tmp> line 1␤␤»
+
+[02:44] <kjk> p6: my %h = CORE::.kv
+
+[02:44] <camelia> rakudo-moar a167e6cca: OUTPUT: «Odd number of elements found where hash initializer expected:␤Found 1339 (implicit) elements:␤Last element seen: "IterationEnd"␤  in block <unit> at <tmp> line 1␤␤»
+
+[02:44] <MasterDuke> m: my @a; for CORE::.kv -> $k, $v { @a.push: $v }
+
+[02:44] <camelia> rakudo-moar a167e6cca: OUTPUT: «Invocant of method 'iterator' must be an object instance of type 'List', not a type object of type 'Slip'.  Did you forget a '.new'?␤  in block <unit> at <tmp> line 1␤␤»
+
+[02:45] <geekosaur> o.O
+
+[02:48] <Util> timotimo: timotimo: "The enemy is a Nazi ghost tank?" is one of three "Easter Eggs", 
+
+[02:48] <kjk> p6: my @a = CORE::.kv; for @a -> $k, $v { put $k }
+
+[02:48] <camelia> rakudo-moar a167e6cca: OUTPUT: «buf32␤num64␤Dateish␤&METAOP_CROSS␤&univals␤MultiDispatcher␤&undefine␤SIGSTKFLT␤NFD␤&log␤&minmax␤uint32␤&combinations␤&infix:<⊍>␤&atomic-assign␤&infix:<×>␤&awaiterator␤SIGUSR1␤SIGINFO␤&infix:<//>␤&item␤&infi…»
+
+[02:48] <Util> to tempt people into Googling the phrases, which lead to online stories they might enjoy.
+
+[02:50] <tony-o_> it definitely sounds like you need to be using actions Kaiepi 
+
+[02:50] <tony-o_> https://docs.perl6.org/language/grammars#Action_Objects
+
+[02:51] <tony-o_> are you going to run the grammar against every response from the server?
+
+[02:56] <Kaiepi> yes
+
+[02:57] <Kaiepi> the grammar's a bit tricky since there can be multiple actions in one message received from the server, and the actions can be either raw text or commands with subnegotiations that are unique to each command
+
+[02:58] <Kaiepi> this is the code i have so far https://pastebin.com/9Yc8m1e2
+
+[03:00] <Kaiepi> i need to move $*SUPPRESS-GO-AHEAD and $*ACTION to the actions class since rfc1143 forces me to deal with DO/DONT/WILL/WONT in a certain way
+
+[03:05] <buggable> New CPAN upload: IP-Random-0.0.3.tar.gz by JMASLAK http://modules.perl6.org/dist/IP::Random:cpan:JMASLAK
+
+[03:05] <Kaiepi> what confuses me about actions is what make/made/ast are doing
+
+[03:06] <Kaiepi> and when methods are called
+
+[03:17] *** Actualeyes left
+[03:20] <[Coke]> zoffix++ # mtime docs
+
+[03:36] *** Kaiepi left
+[03:36] *** Kaiepi joined
+[03:59] *** Schepeers left
+[04:10] *** Schepeers joined
+[04:23] *** Kaiepi left
+[04:23] *** Kaiepi joined
+[04:29] <Geth> ¦ doc/pod-cache: e9a057962d | (Will "Coke" Coleda)++ | 6 files
+
+[04:29] <Geth> ¦ doc/pod-cache: Add Pod::Cache
+
+[04:29] <Geth> ¦ doc/pod-cache: 
+
+[04:29] <Geth> ¦ doc/pod-cache: Instead of generating pod files each time for each test that needs
+
+[04:29] <Geth> ¦ doc/pod-cache: it, generate a cache as we go, that uses the timestamp to insure
+
+[04:30] <Geth> ¦ doc/pod-cache: we don't regen them if not needed.
+
+[04:30] <Geth> ¦ doc/pod-cache: 
+
+[04:30] <Geth> ¦ doc/pod-cache: This temporarily removes the concurrency from some files.
+
+[04:30] <Geth> ¦ doc/pod-cache: 
+
+[04:30] <Geth> ¦ doc/pod-cache: Related to #1952
+
+[04:30] <Geth> ¦ doc/pod-cache: review: https://github.com/perl6/doc/commit/e9a057962d
+
+[04:31] <lizmat> [Coke]: wouldn't a sha1 be handier ?
+
+[04:32] <[Coke]> handier in what way?
+
+[04:33] <[Coke]> (i'd have to store the sha1 somewhere at that point as well)
+
+[04:33] <lizmat> sometimes people touch files inadvertently without changes
+
+[04:33] <[Coke]> but I'm definitely open to a better algorithm.
+
+[04:33] <lizmat> well, you're storing the mtime somewhere ?
+
+[04:33] <[Coke]> it's in the cached copy of the pod.
+
+[04:33] <[Coke]> if someone touches the file, regen'ing the pod isn't that slow.
+
+[04:33] <[Coke]> it's just that we were regening it 5 times.
+
+[04:34] <[Coke]> (and tossing it every single time)
+
+[04:34] <lizmat> oki...  I guess I was just thinking about the precomp logic
+
+[04:34] <[Coke]> so, this is better, but not perfect.
+
+[04:45] <buggable> New CPAN upload: Acme-Dont-0.0.1.tar.gz by ELIZABETH https://cpan.metacpan.org/authors/id/E/EL/ELIZABETH/Perl6/Acme-Dont-0.0.1.tar.gz
+
+[04:46] <lizmat> yeah, couldn't resist  :-)
+
+[04:47] *** dabella12 joined
+[04:47] *** curan joined
+[04:51] *** lizmat left
+[05:02] *** lizmat joined
+[05:06] *** Actualeyes joined
+[05:07] *** xinming left
+[05:17] <Kaiepi> i think i'm starting to work out how to use action classees
+
+[05:17] <Kaiepi> is there a difference between .ast and .made?
+
+[05:20] *** sauvin joined
+[05:20] *** sauvin left
+[05:24] *** xtreak joined
+[05:25] <geekosaur> nope, they're aliases
+
+[05:25] <geekosaur> https://docs.perl6.org/routine/ast
+
+[05:27] *** kjk left
+[05:46] * masak enjoyed https://arp242.net/weblog/yaml_probably_not_so_great_after_all.html
+
+[05:47] <masak> I mean, I like YAML. but it _is_ a very complicated format.
+
+[05:47] <masak> the article goes into some of the WATs
+
+[05:50] <masak> also, TIL about StrictYAML
+
+[05:51] *** HaraldJoerg joined
+[05:52] <moritz> yaml also has this mis-feature where 15:30 can be parsed either as a string or into the integer 15*60 + 30
+
+[05:53] <masak> the article points to the practice of explicitly quoting strings everywhere to avoid a lot of unexpected behavior
+
+[05:53] <masak> (which throws into stark relief the JSON practice of requiring this for object keys)
+
+[05:56] *** sno left
+[05:57] *** sauvin joined
+[06:05] *** domidumont joined
+[06:05] <masak> I find that, in general, people don't appreciate the distinction between "parameters" and "arguments"
+
+[06:05] <masak> even accounting for different terms being used in different cultures, it seems to me that most of the time, people just conflate the two
+
+[06:06] <masak> unless they're language designers :)
+
+[06:07] *** damnlie left
+[06:08] *** damnlie joined
+[06:09] *** dabella12 left
+[06:11] *** domidumont left
+[06:12] *** domidumont joined
+[06:13] *** benji__ joined
+[06:15] *** ufobat_ joined
+[06:17] *** benjikun2 left
+[06:20] <tadzik> hm, I'm quite surprise at the first point of that article; is that a python-specific thing though, or does every yaml parser actually do this?
+
+[06:21] *** darutoko joined
+[06:21] <geekosaur> didn;t it address that? they pointed to load vs. load_safe. and that you need to change php's ini file to get safe loading
+
+[06:21] <tadzik> it seems like YAML.pm has this as an opt-in
+
+[06:22] <tadzik> right, but I expected a criticism of YAML, not its stupid default library in that language or the other
+
+[06:22] <geekosaur> it addressed that one too
+
+[06:22] <tadzik> "yaml is bad becuase its default python library is awful" is a weak point imho
+
+[06:22] <geekosaur> yaml is bad because its API encourages that bad defauklt
+
+[06:22] <geekosaur> and worse defaults like php's
+
+[06:23] <Kaiepi> is there a token like <:ascii> that exists for <[ 0x[00] .. 0x[FF] ]>?
+
+[06:23] <Kaiepi> i tried <:latin> but apparently it's not latin-1
+
+[06:23] <masak> I think most language have both a load and a loadSafe method -- the load method is probably the first one and the loadSafe method was added after the security implications became clearer
+
+[06:23] *** domidumont left
+[06:24] <masak> Kaiepi: I got a mental image of you trying <:latin> and the error message being "HAEC FORMA NON VALET"
+
+[06:25] <Kaiepi> lol
+
+[06:26] <tadzik> I still feel a bit like it's saying "memory is OSes is bad because we have strcpy() and not everyone uses strncpy()" :) But eh
+
+[06:27] <geekosaur> API design's a valid complaint. and I would --- and many security types have --- made exactly that argument re libc
+
+[06:28] *** metracom joined
+[06:28] <masak> tadzik: I disagree. I think if you have a library that loads a data file, and that library has a default Load method which can have arbitrary side effects decided by the one who authored the data file, then that's a problem and a security risk and bad design.
+
+[06:29] <tadzik> oh, I fully agree with that! But I think it's a failure of that library, not the data format
+
+[06:29] <masak> it's something about expectations. loading a data format counts as "pure" in people's minds, so it doesn't register as a security risk.
+
+[06:29] <geekosaur> YAML is more than just a data format; it is an API for processing that data format
+
+[06:29] <masak> tadzik: to a large extent it falls on the libraries, yes. but the spec is what suggests having the side effects in the first place.
+
+[06:29] <tadzik> just like the strcpy argumemt is against libc :)
+
+[06:30] *** benji__ left
+[06:30] <metracom> Slurp mode
+
+[06:31] <tadzik> right. I guess it could be a failure of the spec that it doesn't make it clear enough that YAML does a lot of things
+
+[06:31] <tadzik> or it failed in its marketing, and we all know how hard it is to fix that :P
+
+[06:32] <masak> I think the spec is culpable to the extent that things should be secure by default. just having loadSafe on the side doesn't feel like enough -- somewhat backed up by the usage statistics.
+
+[06:32] <tadzik> . o O ( mysql_real_escape_string )
+
+[06:32] <masak> I mean, I'd much rather see a safe-by-default load method, along with a side-effecty loadDangerously
+
+[06:32] <tadzik> absolutely
+
+[06:32] *** HaraldJoerg1 joined
+[06:33] <tadzik> or don't call it load, but rather something more obvious: eval? :)
+
+[06:33] <metracom> loadandpray
+
+[06:33] <masak> I recall we had similar-ish discussions about Pod back in 2006 or something
+
+[06:33] <tadzik> you could even make it uppercase EVAL for it to stand out more...
+
+[06:33] <masak> don't really know how those resolved themselves
+
+[06:34] <masak> tadzik: heh
+
+[06:34] <tadzik> "The reason for this is because you can’t use a list as a dict key in Python" -- ...so use a tuple? %)
+
+[06:35] <tadzik> not sure if you can have such a workaround in ruby or php though
+
+[06:35] <masak> the point about portability still stands, though
+
+[06:35] <masak> the same input data works in some languages but not in others
+
+[06:35] <tadzik> I guess YAML's strongest point, ultimately, is "it's less PITA to write by hand than other things"
+
+[06:35] <tadzik> yep, agreed
+
+[06:36] <masak> I think the stated goal of YAML is noble
+
+[06:36] *** HaraldJoerg left
+[06:36] <masak> it's also worth remembering (as HN points out) that YAML got started about the same time as JSON
+
+[06:40] <tadzik> all in all, it's was a good read and a pretty convincing one too :)
+
+[06:41] <tadzik> and TOML certainly looks sensible
+
+[06:45] <masak> https://news.ycombinator.com/item?id=17362178 -- this reminded me of Perl 6 on a good day
+
+[06:49] *** skids left
+[06:54] *** stmuk_ joined
+[07:00] <tadzik> indeed :) I did chime in
+
+[07:01] <masak> tadzik++
+
+[07:09] <masak> m: constant foo = [ sub { say "OH HAI" } ]; foo[0]()
+
+[07:09] <camelia> rakudo-moar a167e6cca: OUTPUT: «OH HAI␤»
+
+[07:10] <masak> ...I'm new here. is there a tool to check how long ago something started working in Rakudo?
+
+[07:10] <masak> bisectable6: help
+
+[07:10] <bisectable6> masak, Like this: bisectable6: old=2015.12 new=HEAD exit 1 if (^∞).grep({ last })[5] // 0 == 4 # See wiki for more examples: https://github.com/perl6/whateverable/wiki/Bisectable
+
+[07:10] *** robertle joined
+[07:11] <masak> bisectable6: old=2017.01 new=HEAD constant foo = [ sub { say "OH HAI" } ]; foo[0]()
+
+[07:11] <bisectable6> masak, On both starting points (old=2017.01 new=a167e6c) the exit code is 0 and the output is identical as well
+
+[07:11] <bisectable6> masak, Output on both points: «OH HAI␤»
+
+[07:11] <masak> hm.
+
+[07:11] <masak> there was something with bounded serialization and subs in constants that didn't work a while ago
+
+[07:12] *** sno joined
+[07:13] <moritz> try going back further?
+
+[07:13] <moritz> or maybe the problem is only in precompiled code?
+
+[07:14] *** wamba joined
+[07:15] <masak> yes, I suspect so.
+
+[07:16] <masak> https://rt.perl.org/Public/Bug/Display.html?id=131840 seems related
+
+[07:18] *** lizmat left
+[07:21] *** timotimo left
+[07:24] <masak> m: my %h1; %h1<foo> = 1; my %h2 := %h1.clone; %h2<bar> = 2; say %h1
+
+[07:24] <camelia> rakudo-moar a167e6cca: OUTPUT: «{foo => 1}␤»
+
+[07:24] <masak> I see RT #127704 has been resolved too long ago. nice.
+
+[07:24] <synopsebot_> RT#127704 [resolved]: https://rt.perl.org/Ticket/Display.html?id=127704 [BUG] Hash.clone differs from hash assignment; the hash and its clone are spookily entangled
+
+[07:25] *** kurahaupo left
+[07:25] *** kurahaupo joined
+[07:27] *** HaraldJoerg1 is now known as HaraldJoerg
+
+[07:28] *** dakkar joined
+[07:43] *** zakharyas joined
+[08:00] *** lizmat joined
+[08:03] *** xtreak left
+[08:07] *** zakharyas left
+[08:08] *** zakharyas joined
+[08:11] *** jmerelo joined
+[08:11] <jmerelo> Hi
+
+[08:12] <masak> aloha, jmerelo 
+
+[08:15] *** domidumont joined
+[08:16] <jmerelo> masak: :-) So everyone is sleeping and getting ready for the next TPC session in SLC, I guess...
+
+[08:17] <jmerelo> Somehow, I expected to see, if not a wave, at least a trickle of new Perl6 users. Maybe it's not so immediate...
+
+[08:29] *** xtreak joined
+[08:37] *** [Sno] joined
+[08:38] *** sno left
+[08:38] <Kaiepi> why do the actions for <action> return Nil, while the ones for <data> work fine? https://hastebin.com/razayevezu.xml
+
+[08:44] <Geth> ¦ doc/pod-cache: 56086e010a | (JJ Merelo)++ | 2 files
+
+[08:44] <Geth> ¦ doc/pod-cache: Expands filehandle explanation closes #2111
+
+[08:44] <Geth> ¦ doc/pod-cache: review: https://github.com/perl6/doc/commit/56086e010a
+
+[08:47] <jmerelo> Hum, wrong branch...
+
+[08:49] <Geth> ¦ doc: 5db6e0e006 | (JJ Merelo)++ | doc/Type/IO.pod6
+
+[08:49] <Geth> ¦ doc: Improves run docs by adding filehandle argument, closes #2111
+
+[08:49] <Geth> ¦ doc: review: https://github.com/perl6/doc/commit/5db6e0e006
+
+[08:49] <synopsebot_> Link: https://doc.perl6.org/type/IO
+
+[08:49] <masak> Kaiepi: because the methods in the action class need to be named action:sym etc, not action
+
+[08:50] * masak finds that one of the big problems with the grammar/actions boundary is that it's far too loosely typed
+
+[08:51] <masak> the other day I got an error message to the effect of "Got 2 arguments but expected 1", but the underlying problem was "You forgot to give your action method a $/ parameter!"
+
+[08:52] <Kaiepi> ohhh
+
+[08:54] <masak> if you want a single method in the actions class, then consider not using a proto token in the first place :)
+
+[08:55] <masak> protoregexes in the end are a convenient form of "implicit alternatives", with the dispatch happening somewhere inside the regex engine
+
+[08:56] <moritz> you can always have a single action method upstream
+
+[08:57] <moritz> though the separate action methods are what makes proto regexes so composable
+
+[08:59] <masak> I had a situation yesterday where I was doing `[<foo> | <bar> | <baz>]` in the token, and then `$<foo>.ast || $<bar>.ast || $<baz>.ast` in the action method (except I forgot the final $<baz>.ast in the heat of battle). and I was thinking "there's gotta be a better way"
+
+[08:59] <masak> and that better way was protoregexes :)
+
+[09:00] <moritz> you can also do  $/.hash.values[0].ast
+
+[09:05] *** zakharyas left
+[09:10] *** gregf_ joined
+[09:12] <masak> I'm simultaneously informed by this, and disgusted :)
+
+[09:12] <masak> hm, there's a place in 007 where I might have use of this trick
+
+[09:13] <masak> moritz++
+
+[09:16] <moritz> you can reduce the scope of this madness by putting the alternative into a capture
+
+[09:17] <moritz> so if you have  token flurb { <foo> (<bar>|<baz>|<quox>) }
+
+[09:17] <moritz> you can say $0.hash.values[0].ast
+
+[09:21] *** wamba left
+[09:22] <masak> ooh
+
+[09:22] *** wamba joined
+[09:22] <masak> sir, I will credit you in the commit message
+
+[09:26] *** zakharyas joined
+[09:27] *** ChoHag left
+[09:40] *** [Sno] left
+[09:47] *** [Sno] joined
+[09:57] *** pmurias joined
+[09:58] <pmurias> tadzik: YAML being vastly more complex then people using it casually expect is something you could consider a failure of the design
+
+[09:58] *** kurahaupo is now known as opuaharuk
+
+[09:58] *** pmurias left
+[10:04] *** zakharyas left
+[10:05] *** [Sno] left
+[10:06] *** scimon joined
+[10:07] *** zakharyas joined
+[10:11] <masak> interestingly, that complexity seems to stem from (a) wanting to be a readable format, and (b) targeting many dynamic languages
+
+[10:31] *** sno joined
+[10:40] *** Actualeyes left
+[10:46] <moritz> and (c) too much creativity :)
+
+[10:48] <masak> at first I thought you were doing an ASCII copyright symbol ;)
+
+[10:53] <jnthn> "too much creativity" would be a cute company name :)
+
+[10:54] <jnthn> Though I'm not sure what for :P
+
+[10:54] <jmerelo> jnthn: A cupcake company
+
+[10:54] <jnthn> ooh, yes, that'd work :)
+
+[10:55] <jnthn> Until you end up eating the brussel sprout puree with shrimp paste cupcake, anyway...
+
+[10:57] <masak> Cannot invoke this object (REPR: Null; VMNull)
+
+[10:57] <masak> awwww
+
+[10:57] <masak> seems I can't stick the 007 builtins in a BEGIN block just yet
+
+[10:58] <masak> I looked around in RT for this ticket, but didn't find it on a first attempt
+
+[10:58] <masak> I might have to log in so I can do an Advanced Search
+
+[11:03] *** zakharyas left
+[11:05] *** telex left
+[11:07] *** timo joined
+[11:07] *** zakharyas joined
+[11:07] *** telex joined
+[11:08] *** rindolf joined
+[11:09] <masak> ah! found the ticket about anonymous subs being broken across module/precomp lines: https://rt.perl.org/Public/Bug/Display.html?id=127089
+
+[11:10] <masak> (maybe there are more tickets in RT about it, though)
+
+[11:12] *** sno left
+[11:13] *** sno joined
+[11:13] <tinita> tadzik: the "YAML is insecure by default" is nonsense
+
+[11:14] <tinita> YAML does not do anything, it's just a serialization language
+
+[11:14] <tinita> there's just the fact that some of the processors load generic objects by default
+
+[11:14] <tinita> this will be fixed in the next version of PyYAML
+
+[11:15] <tinita> and now that YAML::{Syck,XS,.pm} all have $LoadBlessed, I would like to change the default to 0 at some point
+
+[11:15] <tinita> there's a pyyaml release planned
+
+[11:16] *** zakharyas left
+[11:16] <tinita> YAML::PP is safe by default anyway
+
+[11:17] <tinita> (if you don't count cyclic references as unsafe, they can be turned off optionally)
+
+[11:18] <masak> tinita: I take your meaning, but somewhere (I think you'll admit) a lot of implementations ended up implementing the spec in such a way that (by default) generic objects could be loaded. the fact that they're correcting this *now* is... good, but detracting from the main point that the insecure way was put in there in the first place.
+
+[11:19] <tinita> about the "The reason for this is because you can’t use a list as a dict key in Python:" I made a pull request to fix that actally
+
+[11:19] <masak> \o/
+
+[11:19] <tinita> masak: yeah, agreed that the current state is bad
+
+[11:20] <masak> I think "YAML does not do anything, it's just a serialization language" loses sight of the fact that several implementations ended up doing the insecure thing by default
+
+[11:20] <masak> it's kind of like saying "the law does not do anything, it's just a book"
+
+[11:20] *** n1ge left
+[11:21] <tinita> still, I think writing that in an article is misleading
+
+[11:21] *** n1ge joined
+[11:21] *** zak-l joined
+[11:21] <tinita> moritz: the 15:30 thing is not read as a number in YAML 1.2 anymore
+
+[11:21] <masak> aye, getting the spec/implementation distinction across is hard, as we in the Rakudo Perl 6 world know ;)
+
+[11:21] <tinita> just that not too many libraries picked up 1.2 :-/
+
+[11:21] *** HaraldJoerg1 joined
+[11:21] *** HaraldJoerg left
+[11:22] <tinita> YAML::PP will be able to do both soon
+
+[11:25] *** zak-l left
+[11:25] *** n1ge left
+[11:25] <tinita> the thing about large YAML files and losing track of indendation: I'm using vim folding if necessary =)
+
+[11:25] *** n1ge joined
+[11:27] <timo> "if a yaml structure gets too big, it gets unwieldy. if code gets too big i split it into different functions" - so why not split the yaml structure up with references?
+
+[11:27] *** timo is now known as timotimo
+
+[11:27] <timotimo> that should work fine, right?
+
+[11:27] <yoleaux> 02:40Z <MasterDuke> timotimo: can you think of a reason a profile just wouldn't get written? i'm attempting to --profile-compile the rakudo build and it takes a long time (~16m) and finishes without any sort of error, but it never even starts the 'Writing profiler output...' stage
+
+[11:28] <tinita> timotimo: I'm planning to implement an !include thing, but there's no such thing in the specification
+
+[11:28] <tinita> so yes, splitting the file up is often better
+
+[11:29] <timotimo> in the example they give, the "post:" part could have been replaced with a reference and then the post: subtree could have lived at 0 indentation?
+
+[11:30] <tinita> hm, maybe I read the wrong article
+
+[11:30] <timotimo> the "Can be hard to edit, especially for large files" section
+
+[11:31] *** raynold left
+[11:31] <tinita> I see. I think that depends on which framework you use. in openapi you can use something like $ref, and maybe in rails, too, but I don't know it. so that's not a "builtin" YAML thing
+
+[11:32] *** sena_kun joined
+[11:32] <timotimo> i thought about using & and *
+
+[11:32] <tinita> I see
+
+[11:32] <timotimo> but now i realize that would mean the node would also have to show up in some other place; anchors and aliases are probably not able to go between documents in the same file?
+
+[11:33] <tinita> exactly
+
+[11:34] <tinita> it would work if your structure allows something like: x-definitions: # define some &anchors here
+
+[11:34] *** sno left
+[11:37] *** pmurias joined
+[11:38] <timotimo> also, i just realized that something like json pointers would be difficult in yaml, since json doesn't have to handle complex keys at all
+
+[11:39] <timotimo> so while json pointers can be a simple format of their own, yaml pointers would have to include at least one way of writing yaml objects, most probably the one that doesn't need any newlines
+
+[11:41] <tinita> with json pointers you mean /foo/bar?
+
+[11:41] <timotimo> yes
+
+[11:41] <tinita> I think a couple of people started ypath, but it never was completed :-/
+
+[11:42] <tinita> https://github.com/peterkmurphy/YPath-Specification
+
+[11:43] <Kaiepi> why does parsing "{IAC}{SB}{NAWS}0x[00]0x[80]0x[00]0x[80]{IAC}{SE}" work ok with the grammar itself, but parsing it with these actions gives me Nil instead? https://hastebin.com/uyumetilab.sm
+
+[11:46] *** pmurias left
+[11:52] <timotimo> hm, regexes are allowed in ypath? that could allow user-provided ypaths to DOS using catastrophic backtracking, couldn't it?
+
+[11:53] *** rindolf left
+[11:54] *** pmurias joined
+[11:56] *** rindolf joined
+[11:56] <tinita> timotimo: probably, I never looked at ypath closely =)
+
+[11:56] <timotimo> [Coke]: i think on the Proc::Async slide you're potentially resizing the %output hash when output comes from one of the processes, which can lead to a crash if two processes make their first output sufficiently close together
+
+[11:57] <timotimo> even in a later version of moarvm that can do concurrent hash resizes without crashing, i think that'll still give data loss
+
+[11:58] <masak> timotimo: is there a pattern for how to handle that?
+
+[11:58] <timotimo> concurrent resizes you mean?
+
+[11:58] <masak> I mean, what if a hash is what I actually want here?
+
+[11:58] <timotimo> have it in a supply or react block, where execution is guaranteed to only be active in one thread at a time
+
+[11:58] <masak> should I have an array and make a hash later?
+
+[11:59] <masak> oh, supply or react. that makes sense.
+
+[11:59] <timotimo> if you know the keys up front, just initialize all of them up front, that works too
+
+[11:59] <masak> right
+
+[11:59] <masak> right, 'cus it's the resizing that's the problem
+
+[11:59] <timotimo> yeah
+
+[11:59] <masak> initializing keys up front sounds like a generally good idea, concurrency or no
+
+[11:59] <timotimo> assigning to the same scalar from two threads at the same time just races and whoever wins gets to install their value
+
+[12:00] <timotimo> though of course you can use CAS if you want for that purpose
+
+[12:04] <timotimo> y'all remember the "soft" cat? she woke up my computer from suspend last night by putting her foot down somewhere on my keyboard
+
+[12:05] *** telex left
+[12:10] *** committable6 left
+[12:10] *** committable6 joined
+[12:12] *** Pheix joined
+[12:15] *** raschipi joined
+[12:24] <jmerelo> timotimo: she learns pretty fast. You'll have her getting out of vim pretty soon.
+
+[12:25] <jmerelo> You probably know, but another batch of TPC talks has been accepted.
+
+[12:25] <timotimo> i wish this wouldn't lead to all the loose cat hair accumulating all over the keyboard, because that makes it hard to take pretty pictures
+
+[12:25] <timotimo> also, it's a little icky just in general
+
+[12:26] <jmerelo> timotimo: get an old computer and put some herrings in the screen _and_ over the keyboard. That will keep her busy for a while.
+
+[12:26] <timotimo> red herrings?
+
+[12:27] <jmerelo> timotimo: that would be doubly effective. Even more so if she's investigating some crime in the feline world.
+
+[12:27] <jmerelo> jmerelo: also, LOL :-)
+
+[12:36] <pmurias> jmerelo: TPC::EU?
+
+[12:37] <stmuk_> timotimo: a trained cat on the keyboard is good for crypto entropy
+
+[12:37] <timotimo> she's far too lazy for that :)
+
+[12:48] * masak .oO( lovingly paw-crafted entropy )
+
+[12:52] <timotimo> well, for now the *other* cat is relaxing between my keyboard and monitor
+
+[12:53] *** telex joined
+[12:56] *** aborazmeh joined
+[12:56] *** aborazmeh left
+[12:56] *** aborazmeh joined
+[12:58] *** xtreak left
+[12:58] *** telex left
+[13:02] *** jmerelo left
+[13:03] *** zakharyas joined
+[13:09] *** Khisanth left
+[13:22] *** Khisanth joined
+[13:23] *** sno joined
+[13:25] *** AlexDani` joined
+[13:27] *** AlexDaniel left
+[13:36] *** scimon left
+[13:36] *** scimon joined
+[13:38] *** AlexDani` is now known as AlexDaniel
+
+[13:39] *** raschipi left
+[13:41] *** aborazmeh left
+[13:47] <tbrowder_> jmerelo: not a cat comment, but how are non-breaking spaces working now? any problems noticed?
+
+[13:54] <ingy> if I enter `sub x {}; x < 1` in the p6 repl and hit enter it goes it a mode I don't understand
+
+[13:54] <ingy> and can't seem to get out of
+
+[13:54] *** sno left
+[13:55] <ingy> can someone explain that?
+
+[13:55] <ingy> e: sub x {}; x < 1
+
+[13:55] <evalable6> ingy, rakudo-moar a167e6cca: OUTPUT: «(exit code 1) 04===SORRY!04=== Error while compiling /tmp/YBnZ35wPEx␤Unable …»
+
+[13:55] <evalable6> ingy, Sorry kid, that's not my department.
+
+[13:55] *** evalable6 left
+[13:55] *** evalable6 joined
+[13:55] <AlexDaniel> e: sub x {}; x < 1
+
+[13:55] <evalable6> AlexDaniel, rakudo-moar a167e6cca: OUTPUT: «(exit code 1) 04===SORRY!04=== Error while compiling /tmp/k6ZUj7oWwJ␤Unable …»
+
+[13:55] <evalable6> AlexDaniel, Full output: https://gist.github.com/54f38a3a9446b9dec31c8dce91e88a77
+
+[13:55] <moritz> m: sub x {}; x < 1
+
+[13:55] <camelia> rakudo-moar a167e6cca: OUTPUT: «5===SORRY!5=== Error while compiling <tmp>␤Unable to parse expression in quote words; couldn't find final '>' (corresponding starter was at line 1)␤at <tmp>:1␤------> 3sub x {}; x < 17⏏5<EOL>␤    expecting any of:␤        argument …»
+
+[13:55] <moritz> ingy: it's a quote-word expression <...>
+
+[13:55] <moritz> that you didn't finish
+
+[13:56] <moritz> need x() < 1
+
+[13:56] <ingy> I was playing with qw vs lt
+
+[13:56] <ingy> actually
+
+[13:57] <moritz> the repl somehow recognizes that there's an unfinished quote, and asks you for more input
+
+[13:57] <ingy> moritz: but how do I tell the repl to give up but not exit?
+
+[13:57] <ingy> ctl-c kills the repl
+
+[13:57] <moritz> besides closing the quote? no idea :(
+
+[13:57] <ingy> as does ctl-d
+
+[13:58] <ingy> BAD REPL! BAD REPL!
+
+[13:58] <ingy> :)
+
+[13:58] <moritz> patches welcome :)
+
+[13:59] <ingy> ctl-c should probably kill the context, not the repl (unless top context (and only after prompt))
+
+[14:00] *** sno joined
+[14:00] <ingy> $ coffee
+
+[14:00] <ingy> coffee>
+
+[14:00] <ingy> (To exit, press ^C again or type .exit)
+
+[14:00] <ingy> good example
+
+[14:00] <moritz> +1
+
+[14:05] <ingy> e: sub x {}; sub y { x < 0 }
+
+[14:05] <evalable6> ingy, rakudo-moar cf10780da: OUTPUT: «(exit code 1) 04===SORRY!04=== Error while compiling /tmp/OZEjh76AEZ␤Unable …»
+
+[14:05] <evalable6> ingy, Full output: https://gist.github.com/d1cdd30d2a2a790a865ef7e5b3e37980
+
+[14:06] <ingy> moritz: doesn't that seem like an ambiguity?
+
+[14:06] <Kaiepi> i worked out what i was doing wrong with my grammar
+
+[14:06] <Kaiepi> now i have a basic telnet parser! \o/
+
+[14:06] *** raschipi joined
+[14:07] <ingy> Kaiepi++
+
+[14:07] <robertle> isn't telnet a surprisingly complicated protocol? I remember looking at the spec once and benig shocked by the sheer size of it...
+
+[14:07] <moritz> ingy: no, the parser always knows whether it expects a term or an operator
+
+[14:08] <ingy> moritz: in that case y should have returned a Bool
+
+[14:08] <Kaiepi> it's a simple protocol but really annoying to parse, if it makes sense
+
+[14:09] <moritz> ingy: x is a listop, so it expects a term after that
+
+[14:09] <robertle> hmm, i remember the autonegotiation on connection establishment as rather long-winded...
+
+[14:09] *** Luneburg joined
+[14:09] <moritz> x < 0 is the same as x( < 0 )
+
+[14:09] <Luneburg> m: False and $number > 0;
+
+[14:09] <camelia> rakudo-moar a167e6cca: OUTPUT: «5===SORRY!5=== Error while compiling <tmp>␤Variable '$number' is not declared␤at <tmp>:1␤------> 3False and 7⏏5$number > 0;␤»
+
+[14:11] <ingy> e: sub x {}; sub y { x }
+
+[14:11] <evalable6> ingy, rakudo-moar cf10780da: OUTPUT: «»
+
+[14:11] <ingy> e: sub x {}; sub y { x() < 0 }
+
+[14:11] <evalable6> ingy, rakudo-moar cf10780da: OUTPUT: «»
+
+[14:11] *** HaraldJoerg1 left
+[14:11] <Luneburg> Interesting, in the ThinkPerl6 book it says that "False and $number > 0;"expression should short-circuit after the first Boolean is read, and it shouldn't check whether $number has even been declared?
+
+[14:11] <ingy> just seems a little fragile to me
+
+[14:12] *** HaraldJoerg joined
+[14:12] <moritz> Luneburg: the declaration check happens at compile time
+
+[14:12] <moritz> Luneburg: before the short-circuiting at run time
+
+[14:12] <Luneburg> moritz: Got it, thanks :D
+
+[14:12] <ingy> bbl 
+
+[14:19] *** sno left
+[14:19] *** Luneburg left
+[14:20] *** raschipi left
+[14:21] *** sno joined
+[14:27] *** curan left
+[14:27] *** diakopter joined
+[14:27] *** MasterDuke left
+[14:29] *** molaf left
+[14:29] *** molaf joined
+[14:34] *** markoong joined
+[14:37] *** ChoHag joined
+[14:43] *** xtreak joined
+[14:45] *** domidumont left
+[14:48] *** Luneburg joined
+[14:50] <Luneburg> I have a value from 0 to 100(decimals included). Every time the value passes a whole integer (1,2,3,4,5), I want to concatenate a dot to an array. How can I do this without using given statements?
+
+[14:51] <timotimo> an important question is: does the number hit a whole integer exactly? or are you using floating point?
+
+[14:52] <timotimo> or are you just looking for "was the value before a given integer before and is now after that given integer?"
+
+[14:52] <Luneburg> timotimo: The number will hit all the whole integers
+
+[14:52] <timotimo> OK
+
+[14:52] <timotimo> m: for 0, 0.1 ... 10 { if $_ %% 1 { print "." } }
+
+[14:52] <camelia> rakudo-moar cf10780da: OUTPUT: «...........»
+
+[14:52] <timotimo> m: for 0, 0.1 ... 10 { if $_ %% 1 { print "." } else { print " " } }
+
+[14:52] <camelia> rakudo-moar cf10780da: OUTPUT: «.         .         .         .         .         .         .         .         .         .         .»
+
+[14:55] <Luneburg> timotimo: Doesn't that just print a "." if the number $_ is divisible by 1?
+
+[14:55] <timotimo> yes
+
+[14:55] <timotimo> i might be misunderstanding your question
+
+[14:57] <Luneburg> timotimo: Ah, for one of the project euler problems I decided to make a progress bar thing. Currently, I have it display a percentage towards completion (i.e. "search 0.125% complete)
+
+[14:57] <Luneburg> But every time it passes a 1, I want it to add a "." to a progress bar, if that makes sense?
+
+[14:57] <Luneburg> And display the progress bar instead
+
+[14:58] <timotimo> OK, i don't quite understand why just checking for percentages that are divisible by 1 isn't good enough
+
+[14:58] <ilmari> https://github.com/sergot/Term--ProgressBar?
+
+[14:58] <AlexDaniel> timotimo: because it can jump over some numbers?
+
+[14:59] <timotimo> that's why i asked if it hits integers exactly
+
+[14:59] <timotimo> and Luneburg said "will hit all the whole integers"
+
+[14:59] <Luneburg> timotimo: Yup
+
+[14:59] <Luneburg> timotimo: I'm just thinking, aren't all the percentages... divisible by 1 though?
+
+[15:00] <timotimo> 100 of the ones between 0 and 100 are
+
+[15:01] <Luneburg> *facepalm* I forgot that "divisible" means without decimal points
+
+[15:01] <Luneburg> timotimo: Thanks :D
+
+[15:01] <timotimo> hah
+
+[15:01] <timotimo> it'd be kind of useless otherwise :D
+
+[15:01] <AlexDaniel> m: my $progress = 2.3; my $last = 0; sub dots() { put ‘.’ x ($progress.floor - $last.floor); $last = $progress; }; dots; $progress = 5.2; dots
+
+[15:01] <camelia> rakudo-moar cf10780da: OUTPUT: «..␤...␤»
+
+[15:01] <AlexDaniel> something like this maybe?
+
+[15:01] <AlexDaniel> I'm not sure if it is correct
+
+[15:01] <timotimo> AlexDaniel: i'm sure something with a supply could be pretty
+
+[15:02] <AlexDaniel> m: my $progress = 2.3; my $last = 0; my &dots = { put ‘.’ x ($progress.floor - $last.floor); $last = $progress; }; dots; $progress = 5.2; dots
+
+[15:02] <camelia> rakudo-moar cf10780da: OUTPUT: «..␤...␤»
+
+[15:03] <timotimo> m: my $numbers = Supply.from-list(0.1, 1.1 ... 20.1); $numbers.rotor(2 => 1).tap({ .say if .[0].ceil == .[1].floor });
+
+[15:03] <camelia> rakudo-moar cf10780da: ( no output )
+
+[15:03] <timotimo> m: my $numbers = Supply.from-list(0.1, 1.1 ... 20.1); $numbers.rotor(2 => 1).tap({ say .[0].ceil, .[1].floor });
+
+[15:03] <camelia> rakudo-moar cf10780da: ( no output )
+
+[15:03] <AlexDaniel> maybe https://modules.perl6.org/search/?q=ncurses ?
+
+[15:04] <timotimo> m: my $numbers = Supplier::Preserving.new; $numbers.rotor(2 => 1).tap({ say .[0].ceil, .[1].floor }); $numbers.emit($_) for 1.1, 2.1 ... 10.1;
+
+[15:04] <camelia> rakudo-moar cf10780da: OUTPUT: «No such method 'tap' for invocant of type 'Seq'. Did you mean any of these?␤    Map␤    map␤    tan␤␤  in block <unit> at <tmp> line 1␤␤»
+
+[15:04] <timotimo> m: my $numbers = Supplier::Preserving.new; $numbers.Supply.rotor(2 => 1).tap({ say .[0].ceil, .[1].floor }); $numbers.emit($_) for 1.1, 2.1 ... 10.1;
+
+[15:04] <camelia> rakudo-moar cf10780da: OUTPUT: «No such method 'ceil' for invocant of type 'Rat'. Did you mean any of these?␤    Real␤    cis␤    perl␤    tail␤␤  in block <unit> at <tmp> line 1␤␤»
+
+[15:04] <timotimo> m: my $numbers = Supplier::Preserving.new; $numbers.Supply.rotor(2 => 1).tap({ say .[0].ceiling, .[1].floor }); $numbers.emit($_) for 1.1, 2.1 ... 10.1;
+
+[15:04] <camelia> rakudo-moar cf10780da: OUTPUT: «22␤55␤88␤»
+
+[15:04] *** zakharyas left
+[15:05] <timotimo> m: my $numbers = Supplier::Preserving.new; $numbers.Supply.rotor(2 => 1).tap({ .say if .[0].ceiling == .[1].floor }); $numbers.emit($_) for 1.1, 2.1 ... 10.1;
+
+[15:05] <camelia> rakudo-moar cf10780da: OUTPUT: «[1.1 2.1]␤[4.1 5.1]␤[7.1 8.1]␤»
+
+[15:05] <timotimo> m: my $numbers = Supplier::Preserving.new; $numbers.Supply.rotor(2 => -1).tap({ .say if .[0].ceiling == .[1].floor }); $numbers.emit($_) for 1.1, 2.1 ... 10.1;
+
+[15:05] <camelia> rakudo-moar cf10780da: OUTPUT: «[1.1 2.1]␤[2.1 3.1]␤[3.1 4.1]␤[4.1 5.1]␤[5.1 6.1]␤[6.1 7.1]␤[7.1 8.1]␤[8.1 9.1]␤[9.1 10.1]␤»
+
+[15:05] <timotimo> m: my $numbers = Supplier::Preserving.new; $numbers.Supply.rotor(2 => -1).tap({ .say if .[0].ceiling == .[1].floor }); $numbers.emit($_) for 1.1, 1.2 ... 10.1;
+
+[15:05] <camelia> rakudo-moar cf10780da: OUTPUT: «[1.9 2]␤[2 2.1]␤[2.9 3]␤[3 3.1]␤[3.9 4]␤[4 4.1]␤[4.9 5]␤[5 5.1]␤[5.9 6]␤[6 6.1]␤[6.9 7]␤[7 7.1]␤[7.9 8]␤[8 8.1]␤[8.9 9]␤[9 9.1]␤[9.9 10]␤[10 10.1]␤»
+
+[15:05] <timotimo> damn, that fires just a bit too often
+
+[15:05] <timotimo> ah
+
+[15:06] <timotimo> m: my $numbers = Supplier::Preserving.new; $numbers.Supply.rotor(2 => -1).tap({ .say if .[0].truncate != .[1].truncate }); $numbers.emit($_) for 1.1, 1.2 ... 10.1;
+
+[15:06] <camelia> rakudo-moar cf10780da: OUTPUT: «[1.9 2]␤[2.9 3]␤[3.9 4]␤[4.9 5]␤[5.9 6]␤[6.9 7]␤[7.9 8]␤[8.9 9]␤[9.9 10]␤»
+
+[15:06] <timotimo> perfect
+
+[15:06] <timotimo> this can handle the case when integers aren't hit exactly, too
+
+[15:06] <timotimo> m: my $numbers = Supplier::Preserving.new; $numbers.Supply.rotor(2 => -1).tap({ .say if .[0].truncate != .[1].truncate }); $numbers.emit($_) for 1.1, 1.3 ... 10.1;
+
+[15:06] <camelia> rakudo-moar cf10780da: OUTPUT: «[1.9 2.1]␤[2.9 3.1]␤[3.9 4.1]␤[4.9 5.1]␤[5.9 6.1]␤[6.9 7.1]␤[7.9 8.1]␤[8.9 9.1]␤[9.9 10.1]␤»
+
+[15:08] *** zakharyas joined
+[15:10] *** robertle left
+[15:15] *** sena_kun left
+[15:18] *** diakopter left
+[15:34] *** xtreak left
+[15:35] *** lizmat left
+[15:40] *** Pheix left
+[15:41] *** Pheix joined
+[15:41] *** Luneburg left
+[15:42] *** Pheix left
+[15:42] *** sno left
+[15:46] *** robertle joined
+[15:54] *** lichtkind joined
+[15:54] *** wamba left
+[16:02] *** lichtkind left
+[16:04] *** zakharyas left
+[16:14] *** lizmat joined
+[16:15] *** lizmat_ joined
+[16:19] *** lizmat left
+[16:21] *** zakharyas joined
+[16:28] *** wamba joined
+[16:28] *** dakkar left
+[16:28] *** scimon left
+[16:34] *** lizmat_ is now known as lizmat
+
+[16:35] <buggable> New CPAN upload: Acme-Dont-0.0.2.tar.gz by ELIZABETH https://cpan.metacpan.org/authors/id/E/EL/ELIZABETH/Perl6/Acme-Dont-0.0.2.tar.gz
+
+[16:39] *** perlpilot joined
+[16:40] <[Coke]> timotimo: (hash resize) oops!
+
+[16:40] <timotimo> [Coke]: i like your talks, your presentation style is pleasant
+
+[16:43] <[Coke]> Recipe: Stress out for weeks, do all the work the night before!
+
+[16:43] <[Coke]> . o O (Don't actualy do that)
+
+[16:45] <timotimo> i tend to do it in an even worse way, but then i'm also rather nervous and don't speak very clearly and all that
+
+[16:45] *** zakharyas left
+[16:46] *** fou joined
+[16:46] <perlpilot> timotimo, there are several people who have pleasant presentation styles.  I wish I could relax in front of people like that. (or at least look like it! :-)
+
+[16:46] <fou> hey, I'm porting Peter Norvig's lis.py tutorial to perl6, but it crashes - could I get some help here? I'm desperated :(
+
+[16:47] <timotimo> fou: i'd say you've come to the right place
+
+[16:47] <fou> timotimo: what a relief
+
+[16:48] <timotimo> what's the nature of the crash? just exceptions, or an actual segfault?
+
+[16:48] <fou> timotimo: seems like a logic bug. which is weird, because my code is 1:1 translation
+
+[16:48] <fou> can I post a gist here?
+
+[16:49] <timotimo> yes, you can. if you put a m: in front it'll even run the code and put the output on irc, too
+
+[16:49] <fou> one second
+
+[16:50] <fou> timotimo: https://gist.github.com/fou/a70ecd989c47c75dcf421b15d5d5ee0e
+
+[16:50] <fou> read-from-tokens always dies with 'unexpected EOF'
+
+[16:51] <fou> norvig.com/lispy.html <- python version
+
+[16:51] <timotimo> do you have example input? does it get deep into recursion at all?
+
+[16:51] <timotimo> oh, heh.
+
+[16:51] <timotimo> you're using ~ in the if/elsif in read-from-tokens
+
+[16:51] <timotimo> you'll want "eq" there instead
+
+[16:52] <timotimo> and i'd probably replace the !~~ with ne as well
+
+[16:52] <fou> oh ^^ thank you!
+
+[16:52] <fou> I have to go now, will join later though. thanks for help :)
+
+[16:52] <timotimo> you're welcome
+
+[16:52] *** fou left
+[16:55] *** mahafyi joined
+[16:59] *** grumble joined
+[17:17] *** |oLa| left
+[17:27] <Geth> ¦ doc: e9a057962d | (Will "Coke" Coleda)++ | 6 files
+
+[17:27] <Geth> ¦ doc: Add Pod::Cache
+
+[17:27] <Geth> ¦ doc: 
+
+[17:27] <Geth> ¦ doc: Instead of generating pod files each time for each test that needs
+
+[17:27] <Geth> ¦ doc: it, generate a cache as we go, that uses the timestamp to insure
+
+[17:27] <Geth> ¦ doc: we don't regen them if not needed.
+
+[17:27] <Geth> ¦ doc: 
+
+[17:27] <Geth> ¦ doc: This temporarily removes the concurrency from some files.
+
+[17:27] <Geth> ¦ doc: 
+
+[17:27] <Geth> ¦ doc: Related to #1952
+
+[17:28] <Geth> ¦ doc: review: https://github.com/perl6/doc/commit/e9a057962d
+
+[17:28] <Geth> ¦ doc: 56086e010a | (JJ Merelo)++ | 2 files
+
+[17:28] <Geth> ¦ doc: Expands filehandle explanation closes #2111
+
+[17:28] <Geth> ¦ doc: review: https://github.com/perl6/doc/commit/56086e010a
+
+[17:28] <Geth> ¦ doc: 6e4c16e3a1 | (Will "Coke" Coleda)++ | 8 files
+
+[17:28] <Geth> ¦ doc: Merge branch 'pod-cache'
+
+[17:28] <Geth> ¦ doc: review: https://github.com/perl6/doc/commit/6e4c16e3a1
+
+[17:38] *** dha joined
+[17:58] *** dha left
+[18:00] *** dha joined
+[18:07] *** Grauwolf left
+[18:15] *** Grauwolf joined
+[18:15] *** Grauwolf left
+[18:15] *** Grauwolf joined
+[18:25] *** zachk joined
+[18:25] *** Xliff_ left
+[18:25] *** Xliff joined
+[18:26] *** zachk left
+[18:26] *** zachk joined
+[18:26] *** sauvin left
+[18:28] *** fou joined
+[18:28] <fou> timotimo: it works! but the array is flattened for some reason
+
+[18:30] *** espadrine joined
+[18:30] *** lembark joined
+[18:31] <perlpilot> fou: flattened?  you mean @l in your program?  If so, perhaps you wanted @l.push instead of @l.append
+
+[18:31] <fou> perlpilot: ah, right :) I've changed it to .append and wanted to switch back but I forgot
+
+[18:31] <lembark> Q: If I want to get the same effect as P5's "use lib...", how would I manage $*REPOS in order to add new lib's?
+
+[18:32] <lembark> Liz doesn't know where this is documented -- her one attempt left her emotionally scarred enought that she has attempted to blot it from her memory :-)
+
+[18:32] <moritz> lembark: why not just "use lib 'path';"?
+
+[18:33] <moritz> works in Perl 6, afaict :-)
+
+[18:33] <lembark> If that works, fine.
+
+[18:33] <moritz> worked last I tried it :-)
+
+[18:33] <lembark> i.e., "use lib @prefix_these_libs;" works in Perl6 as it does in Perl5?
+
+[18:33] <perlpilot> It's that "manage $*REPOS" part you should probably stay away from  :)
+
+[18:33] <lembark> Fine with me.
+
+[18:34] <lembark> I've got a working version of FindBin (much simpler in P6), wanted to implement FindBin::libs.
+
+[18:36] *** fou left
+[18:37] <lembark> Q: Given a list of paths in @pathz what is the correct syntax for calling P6 "lib" at runtime to make use of the values in @pathz?
+
+[18:37] <lembark> Thanks.
+
+[18:46] <moritz> m: my $r = CompUnit::RepositoryRegistry; $r.use-repository($r.repository-for-spec("some/path"));
+
+[18:46] <camelia> rakudo-moar cf10780da: ( no output )
+
+[18:46] *** Xliff left
+[18:47] <moritz> lembark: ^^ should work something like that (which you have to repeate for every element in @pathz
+
+[18:53] *** Xliff joined
+[19:00] <tbrowder_> .ask jmerelo how are pod non-breaking spaces working now? any problems noticed?
+
+[19:00] <yoleaux> tbrowder_: I'll pass your message to jmerelo.
+
+[19:08] *** dha left
+[19:10] *** jmerelo joined
+[19:12] <jmerelo> So very soon there will be a Perl 6 .gitignore in GitHub https://github.com/github/gitignore/pull/2153#event-1693842140 thanks to bdfoy
+
+[19:12] <yoleaux> 19:00Z <tbrowder_> jmerelo: how are pod non-breaking spaces working now? any problems noticed?
+
+[19:13] <jmerelo> tbrowder_: Has it been included in the new release? I'll check. Thanks!
+
+[19:13] <jmerelo> Is there a new release?
+
+[19:13] <jmerelo> releasable6: status
+
+[19:13] <releasable6> jmerelo, Next release will happen when it's ready. 0 blockers. 88 out of 123 commits logged
+
+[19:13] <releasable6> jmerelo, Details: https://gist.github.com/ec61a4a60c235504fa6ef1d492fd6dcc
+
+[19:13] <jmerelo> Not yet, I guess...
+
+[19:14] <tbrowder_> oh, you’re right, i can’t keep up with the release process :(
+
+[19:15] *** opuaharuk is now known as kurahaupo
+
+[19:16] <AlexDaniel> release will happen in a few hours
+
+[19:16] <AlexDaniel> nothing is blocking, I just need to get my hands on it
+
+[19:17] <jmerelo> tbrowder_: thanks for warning, anyway. I'm still travelling but will try to do something as soon as it's availab.e
+
+[19:17] <jmerelo> AlexDaniel++
+
+[19:17] <El_Che> release depends on Argentina playing better
+
+[19:17] <El_Che> :)
+
+[19:17] <jmerelo> El_Che: Well, that goal was terrible...
+
+[19:18] <jmerelo> I mean, really.
+
+[19:18] <jmerelo> Kick it into the hands of the Croatian forward.
+
+[19:18] <El_Che> It's on onto the hand of god, that's sure
+
+[19:18] <El_Che> not
+
+[19:19] <geekosaur> another team that barely qualified on the way out :p
+
+[19:19] <jmerelo> Or boots, rather
+
+[19:19] <jmerelo> Also, 4 days without Perl6 questions in StackOverflow. We're missing Brian D. Foy there...
+
+[19:21] <El_Che> jmerelo: it's because your new doc is too clear
+
+[19:23] <jmerelo> El_Che: :-) 155 issues say otherwise... 
+
+[19:23] <AlexDaniel> o-o-o my PR to FastCGI was merged
+
+[19:24] <jmerelo> AlexDaniel: congrats!
+
+[19:24] <El_Che> AlexDaniel: you da man
+
+[19:24] <lucs> jmerelo: bdf's book is now in t
+
+[19:24] <lucs> meh
+
+[19:24] <jmerelo> Beer|Soft drink|water for everyone. Next round is on AlexDaniel.
+
+[19:24] <lucs> jmerelo: bdf's book is now in the hands of his editors, so that probably explains his absence.
+
+[19:25] <AlexDaniel> .oO(beer water for everyone!)
+
+[19:25] <jmerelo> lucs: that's probably the case. But there's no one else taking up the slack...
+
+[19:25] <lucs> jmerelo: Write a book! ;)
+
+[19:26] <El_Che> is the code on the draft ideomatic?
+
+[19:26] <El_Che> there was some critique on the blog posts
+
+[19:26] <jmerelo> lucs: Hey, I _did_ write a book! https://amzn.to/2JVX2MF
+
+[19:27] <lucs> Could be tricky -- one person's idiom is another one's golf example.
+
+[19:27] <Geth> ¦ doc: ronaldxs++ created pull request #2112: Update regexes.pod6 fix reversed suppress capture operators ".&"
+
+[19:27] <Geth> ¦ doc: review: https://github.com/perl6/doc/pull/2112
+
+[19:27] <lucs> jmerelo: Oh, cool :)
+
+[19:27] <jmerelo> El_Che: there's no such thing as "idiomatic" perl6
+
+[19:28] <AlexDaniel> why not
+
+[19:28] <El_Che> there pis perl6 with a stong perl 5 accent
+
+[19:28] <jmerelo> We barely have a word for it: p6y...
+
+[19:28] <jmerelo> AlexDaniel: Well, there's maybe such a thing "in the abstract". But it's a matter of opinions.
+
+[19:29] <jmerelo> Not that, actually. Rather of what you want to optimize. Speed, "functional", thread-safe...
+
+[19:30] <El_Che> I prefer slow, non-functioning and locking code, myself
+
+[19:34] *** n1ge left
+[19:34] <jmerelo> El_Che: If it non-works optimally, great :-)
+
+[19:35] <Geth> ¦ doc: 33a4b40ddb | (Jan-Olof Hendig)++ | xt/examples-compilation.t
+
+[19:35] <Geth> ¦ doc: Added a couple of missing close statements
+
+[19:35] <Geth> ¦ doc: 
+
+[19:35] <Geth> ¦ doc: Could cause problems on systems where the number of open fh's per process
+
+[19:35] <Geth> ¦ doc: was set too low, e.g. 1024
+
+[19:35] <Geth> ¦ doc: review: https://github.com/perl6/doc/commit/33a4b40ddb
+
+[19:39] <El_Che> jmerelo: it looks like the Argentinian selection will have some time soon to ask question on SO
+
+[19:39] *** n1ge joined
+[19:41] <jmerelo> El_Che: :-) a lot of time indeed. 
+
+[19:45] <Geth> ¦ doc: 81f5da0ccf | (JJ Merelo)++ | doc/Type/IO.pod6
+
+[19:45] <Geth> ¦ doc: Minor reflow
+
+[19:45] <Geth> ¦ doc: review: https://github.com/perl6/doc/commit/81f5da0ccf
+
+[19:45] <Geth> ¦ doc: c678f271bd | (JJ Merelo)++ | 9 files
+
+[19:45] <Geth> ¦ doc: Fixes conflict
+
+[19:45] <synopsebot_> Link: https://doc.perl6.org/type/IO
+
+[19:45] <Geth> ¦ doc: review: https://github.com/perl6/doc/commit/c678f271bd
+
+[19:46] <Geth> ¦ doc: 23578bb4e0 | (Ronald Schmidt)++ | doc/Language/regexes.pod6
+
+[19:46] <synopsebot_> Link: https://doc.perl6.org/language/regexes
+
+[19:46] <Geth> ¦ doc: Update regexes.pod6 fix reversed suppress capture operators ".&"
+
+[19:46] <Geth> ¦ doc: review: https://github.com/perl6/doc/commit/23578bb4e0
+
+[19:46] <Geth> ¦ doc: a3753c01a3 | (Juan Julián Merelo Guervós)++ (committed using GitHub Web editor) | doc/Language/regexes.pod6
+
+[19:46] <Geth> ¦ doc: Merge pull request #2112 from ronaldxs/reverse-suppress-capture
+
+[19:46] <Geth> ¦ doc: 
+
+[19:46] <Geth> ¦ doc: Update regexes.pod6 fix reversed suppress capture operators ".&"
+
+[19:46] <Geth> ¦ doc: Thanks a lot!
+
+[19:46] <Geth> ¦ doc: review: https://github.com/perl6/doc/commit/a3753c01a3
+
+[19:47] *** darutoko left
+[19:49] <El_Che> jmerelo: heh, indeed :)
+
+[19:49] *** Kaiepi left
+[19:49] *** Kaiepi joined
+[19:49] <geekosaur> one could argue they have time right now
+
+[19:50] <geekosaur> not sure what they're doing out there, ight as well be on SO
+
+[19:50] <jmerelo> geekosaur: yep, they are not doing much...
+
+[19:51] <jmerelo> I'm pretty sure that if they ask "How to win a match with a second-tier European team having the (arguably) best player in the world" will be voted down as "too broad"
+
+[19:51] <El_Che> opiniated
+
+[19:51] <jmerelo> Finished
+
+[19:53] <El_Che> The Promise was broken
+
+[20:20] *** gabiruh left
+[20:21] *** drforr joined
+[20:23] *** perlpilot left
+[20:23] <drforr> You'd think there was a convention going on or something.
+
+[20:23] <yoleaux> 16 Apr 2018 13:31Z <Zoffix> drforr: you done a bunch of Perl 6 workshops. Do you got any advice to offer for what should be included in our Perl 6 Starter Kit? https://github.com/perl6/marketing/issues/14
+
+[20:23] <yoleaux> 16 Jun 2018 18:38Z <Zoffix> drforr: a long shot, but is there a version of your ML talk with working sound by any chance? https://www.youtube.com/watch?v=GI9DmIbNXrM
+
+[20:23] *** raschipi joined
+[20:24] *** MasterDuke joined
+[20:24] *** ChoHag left
+[20:25] <drforr> .tell Zoffix I'll give it some thought tonight.
+
+[20:25] <yoleaux> drforr: I'll pass your message to Zoffix.
+
+[20:26] *** gabiruh joined
+[20:27] *** ChoHag joined
+[20:28] <drforr> .tell Zoffix I know of no other version of
+
+[20:28] <yoleaux> drforr: I'll pass your message to Zoffix.
+
+[20:29] <drforr> .tell Zoffix ... of the talk.
+
+[20:29] <yoleaux> drforr: I'll pass your message to Zoffix.
+
+[20:30] *** ryn1x left
+[20:31] <jmerelo> drforr: you've done a talk on machine learning?
+
+[20:32] *** rindolf left
+[20:36] *** rindolf joined
+[20:38] *** drforr left
+[20:41] *** ufobat_ left
+[20:42] *** jmerelo left
+[20:43] *** pmurias left
+[20:54] *** pmurias joined
+[20:56] *** perlpilot joined
+[21:08] *** ryn1x joined
+[21:08] *** raschipi left
+[21:17] <masak> why is EXPR upper-cased in the Perl 6 grammar?
+
+[21:18] *** jast joined
+[21:20] *** sno joined
+[21:27] <Geth> ¦ perl6-most-wanted: c9b3fbbb5b | (Will Coleda)++ (committed using GitHub Web editor) | most-wanted/modules.md
+
+[21:27] <Geth> ¦ perl6-most-wanted: Update modules.md
+
+[21:27] <Geth> ¦ perl6-most-wanted: review: https://github.com/perl6/perl6-most-wanted/commit/c9b3fbbb5b
+
+[21:28] <Geth> ¦ perl6-most-wanted: c08f7c4cf9 | (Will Coleda)++ (committed using GitHub Web editor) | most-wanted/modules.md
+
+[21:28] <Geth> ¦ perl6-most-wanted: Update modules.md
+
+[21:28] <Geth> ¦ perl6-most-wanted: 
+
+[21:28] <Geth> ¦ perl6-most-wanted: App::Uni was done ages ago: https://github.com/coke/p6-uni
+
+[21:28] <Geth> ¦ perl6-most-wanted: review: https://github.com/perl6/perl6-most-wanted/commit/c08f7c4cf9
+
+[21:28] *** pmurias left
+[21:29] *** pmurias joined
+[21:30] <Xliff> m: my $a = 1; my $b := $a; say $b.^name;
+
+[21:30] <camelia> rakudo-moar cf10780da: OUTPUT: «Int␤»
+
+[21:30] <[Coke]> is https://docs.perl6.org/language/modules#Upload_your_Module_to_CPAN up to date?
+
+[21:30] <Xliff> m: my $a = 1; my $b := $a; say $b.VAR.^name;
+
+[21:30] <camelia> rakudo-moar cf10780da: OUTPUT: «Scalar␤»
+
+[21:32] <Xliff> m: my $a = 1; my $b := $a; say $b.VAR.gist.say;
+
+[21:32] <camelia> rakudo-moar cf10780da: OUTPUT: «1␤True␤»
+
+[21:36] <Xliff> How can you get the name assigned to a variable?
+
+[21:36] <Xliff> And is there a way to determine if that variable has been bound to another?
+
+[21:36] <timotimo> you can compare with :=:
+
+[21:36] <Xliff> (The second one isn't as important)
+
+[21:36] <timotimo> er
+
+[21:36] <timotimo> =:=
+
+[21:37] <Xliff> m: my $a = 1; my $b := $a; say ($b =:= $a)
+
+[21:37] <camelia> rakudo-moar cf10780da: OUTPUT: «True␤»
+
+[21:37] <Xliff> m: my $a = 1; my $b := $a; my $c = 2; say ($b =:= $c)
+
+[21:37] <camelia> rakudo-moar cf10780da: OUTPUT: «False␤»
+
+[21:37] <MasterDuke> m: my $a = 1; my $b := $a; say $b.VAR.name;
+
+[21:37] <camelia> rakudo-moar cf10780da: OUTPUT: «$a␤»
+
+[21:38] <masak> I'd say this, if you need to check whether a variable has been bound to another, you might want to step back and re-examine the premises of your program design :P
+
+[21:38] <[Coke]> lizmat: you've probably uploaded more cpan modules than anyone, let me borrow you for 30s when you get a chance.
+
+[21:43] *** telex joined
+[21:44] <Xliff> m: my $a = 1; my $b := $a; say $b.VAR.name;
+
+[21:44] <camelia> rakudo-moar cf10780da: OUTPUT: «$a␤»
+
+[21:44] <Xliff> ^^ Is there a way to get that to say "b"?
+
+[21:45] <Xliff> m: my $a = 1; my $b := $a; my $c = 2; say $c.VAR.name
+
+[21:45] <camelia> rakudo-moar cf10780da: OUTPUT: «$c␤»
+
+[21:45] <timotimo> you're overwriting the very existence of $b, at that point, no b exists any more
+
+[21:45] <Xliff> That's what I was afraid of.
+
+[21:45] <Xliff> OK, thanks!
+
+[21:45] <timotimo> it could potentially be possible, if perl6 didn't decont when assigning
+
+[21:50] <ingy> why is https://modules.perl6.org/t/SLANG so empty?
+
+[21:51] <ingy> I am thinking to make a Slang::Destructure to implement https://coffeescript.org/#destructuring in p6
+
+[21:51] <ingy> I thought there would be more slang modules
+
+[21:52] <ingy> hmm there are actually 9 slang modules. people just suck at tagging
+
+[21:53] *** raynold joined
+[21:54] <Kaiepi> there's no destructuring for stuff like hashes?
+
+[21:55] <Kaiepi> m: my %a = a => 1, b => 2; my ($a, $b) = %a; say $a, $b
+
+[21:55] <camelia> rakudo-moar cf10780da: OUTPUT: «a => 1b => 2␤»
+
+[21:55] <Kaiepi> m: my %a = a => 1, b => 2; my ($a, $b) = %a; say $a
+
+[21:55] <camelia> rakudo-moar cf10780da: OUTPUT: «a => 1␤»
+
+[21:57] <timotimo> m: my %a = :1a, :2b; my (:$a, :$b) = %a; dd $a, $b;
+
+[21:57] <camelia> rakudo-moar cf10780da: OUTPUT: «Pair $a = :b(2)␤Pair $b = :a(1)␤»
+
+[21:57] <timotimo> m: my %a = :1a, :2b; my (:$a, :$b) = %a; say $a.perl; say $b.perl
+
+[21:57] <camelia> rakudo-moar cf10780da: OUTPUT: «:b(2)␤:a(1)␤»
+
+[21:57] <timotimo> huh
+
+[21:57] <timotimo> m: my %a = :1a, :2b; my \(:$a, :$b) := %a; say $a.perl; say $b.perl
+
+[21:57] <camelia> rakudo-moar cf10780da: OUTPUT: «5===SORRY!5=== Error while compiling <tmp>␤Malformed my␤at <tmp>:1␤------> 3my %a = :1a, :2b; my7⏏5 \(:$a, :$b) := %a; say $a.perl; say $b.␤»
+
+[21:57] <timotimo> m: my %a = :1a, :2b; my (:$a, :$b) := %a; say $a.perl; say $b.perl
+
+[21:57] <camelia> rakudo-moar cf10780da: OUTPUT: «1␤2␤»
+
+[21:57] <timotimo> that's how
+
+[21:58] <Kaiepi> what would be cool is an equivalent to something like "let foo = {a: 1}; let bar = {b: 2, ...a}" like in javascript
+
+[21:59] <timotimo> m: my %foo = :1a; my %bar = :2b, %foo; say %bar.perl
+
+[21:59] <Kaiepi> wait
+
+[21:59] <camelia> rakudo-moar cf10780da: OUTPUT: «{:a(1), :b(2)}␤»
+
+[21:59] <Kaiepi> m: my %a = a => 1; my %b = b => 2, |%a; dd %b
+
+[21:59] <camelia> rakudo-moar cf10780da: OUTPUT: «Hash %b = {:a(1), :b(2)}␤»
+
+[22:00] <timotimo> no need for the | actually
+
+[22:00] <Kaiepi> oh nice
+
+[22:04] *** rindolf left
+[22:05] *** diakopter joined
+[22:06] *** perlpilot left
+[22:07] *** sno left
+[22:07] *** sno joined
+[22:11] *** pmurias left
+[22:14] *** sno left
+[22:15] *** sno joined
+[22:31] *** labster joined
+[22:35] *** Kaiepi left
+[22:42] *** HaraldJoerg left
+[22:53] *** Kaiepi joined
+[22:57] *** robertle left
+[23:03] *** cpage joined
+[23:05] <buggable> New CPAN upload: IP-Random-0.0.4.tar.gz by JMASLAK http://modules.perl6.org/dist/IP::Random:cpan:JMASLAK
+
+[23:06] *** kurahaupo_ joined
+[23:08] *** kurahaupo left
+[23:10] *** perlpilot joined
+[23:32] *** espadrine left
+[23:33] *** greppable6 left
+[23:34] *** greppable6 joined
+[23:34] *** ChanServ sets mode: +v greppable6
+
+[23:34] *** kurahaupo_ is now known as kurahaupo
+
+[23:35] *** molaf left
+[23:36] *** lembark left
+[23:43] *** Kaiepi left
+[23:46] *** raschipi joined
+[23:48] *** Kaiepi joined
+[23:48] <Xliff> Can someone point me to docs for caller()?
+
+[23:48] <Xliff> I need to get the call chain from within a method or sub.
+
+[23:50] <geekosaur> if it's implemented yet, it's a wrapper for https://docs.perl6.org/routine/callframe
+
+[23:50] <perlpilot> Xliff, there's https://docs.perl6.org/routine/callframe
+
+[23:50] <perlpilot> I think there might be a module (from lizmat?) that does caller()
+
+[23:52] *** molaf joined
+[23:53] <perlpilot> oh, I'm thinking of https://modules.perl6.org/dist/P5caller:cpan:ELIZABETH
+
+[23:57] *** lizmat left
+[23:57] <jnthn> Xliff: Depending why you want it, the Backtrace class may also be sueful
+
+[23:57] <jnthn> *useful
+
+[23:58] *** Kaypie joined
+[23:58] *** quotable6 left
+[23:58] *** Kaiepi left
+[23:58] *** quotable6 joined
+[23:59] *** lizmat joined

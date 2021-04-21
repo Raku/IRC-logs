@@ -1,0 +1,2319 @@
+[00:02] *** pmurias left
+[00:02] <BooK> mmm, same error with the commit before that, it seems
+
+[00:02] <timotimo> masak: thanks for the fantastic laugh you gave me :)
+
+[00:03] *** ptolemarch left
+[00:03] *** labster left
+[00:04] <timotimo> BooK: potentially we were trying to make Version more efficient and neglected the possibility of subclassing it
+
+[00:04] <timotimo> so it's assuming something is one thing (or type) in all instances, where you replace it with a different thing in your subclass
+
+[00:04] <timotimo> like, returning a List or Array in a place where it used to be a nqp::list or nqp::hash or something
+
+[00:05] *** cdg joined
+[00:07] *** labster joined
+[00:08] <BooK> timotimo: actually, lizmat knows that I'm trying to subclass it
+
+[00:13] <timotimo> oh
+
+[00:14] <timotimo> did you get a --ll-exception of the thing? that could hopefully tell us where it's trying to iterate a P6opaque directly
+
+[00:14] <timotimo> it sounds like something's calling nqp::iter on a thing that's a class containing an iterable, rather than using its .iterator or having a directly-iterable object there
+
+[00:14] <timotimo> m: use nqp; nqp::iter([1, 2, 3, 4])
+
+[00:14] <camelia> rakudo-moar 2126ed: OUTPUT«===SORRY!===␤No registered operation handler for 'iter'␤»
+
+[00:14] <timotimo> m: use nqp; nqp::iterator([1, 2, 3, 4])
+
+[00:14] <camelia> rakudo-moar 2126ed: OUTPUT«Cannot iterate object with P6opaque representation␤  in block <unit> at <tmp> line 1␤␤»
+
+[00:15] <timotimo> m: use nqp; nqp::iterator(nqp::list(1, 2, 3, 4))
+
+[00:15] <camelia> rakudo-moar 2126ed: ( no output )
+
+[00:15] <timotimo> m: use nqp; nqp::iterator([1, 2, 3, 4].FLATTENABLE_LIST)
+
+[00:15] <camelia> rakudo-moar 2126ed: ( no output )
+
+[00:15] <timotimo> like that
+
+[00:15] <BooK> my code is using this to create the new instances:
+
+[00:15] <BooK> multi method new(Version: @parts, Str:D $string, Int() $plus = 0) {
+
+[00:15] <BooK> that's the definition from Version.pm
+
+[00:15] <sortiz> Book, in particular the standard Version cmp expects that $!parts can be uses by the low level nqp::iterator
+
+[00:15] <timotimo> well, i'm expecting the problem isn't in your code :)
+
+[00:16] <BooK> https://github.com/rakudo/rakudo/blob/nom/src/core/Version.pm#L21-L23
+
+[00:16] <sortiz> s/uses/used/
+
+[00:17] <sortiz> Yep, but see: https://github.com/rakudo/rakudo/blob/781c6cd8f3ebc8d113b2a058ce00d4d5e1b3f917/src/core/Version.pm#L134
+
+[00:17] <timotimo> ah, in SET-SELF it directly grabs the $!reified out of the List you pass
+
+[00:17] <BooK> so what should I pass it?
+
+[00:17] *** cdg left
+[00:18] <BooK> right now I'm handing stuff like: Array @v = [0, 99, 0, 0, 0, 0]
+
+[00:18] <timotimo> hm, Array derives from List, right?
+
+[00:18] <timotimo> m: say List.^mro
+
+[00:18] <camelia> rakudo-moar 2126ed: OUTPUT«((List) (Cool) (Any) (Mu))␤»
+
+[00:18] <timotimo> right ...
+
+[00:21] <timotimo> could you output the value of nqp::getattr(nqp::decont(a),Version,'$!parts'), or its .WHAT?
+
+[00:23] <timotimo> doesn't have to be in cmp, maybe just after you create an instance of your thing
+
+[00:23] <sortiz> or  nqp::getattr(self,Version,'$!parts') after creation.
+
+[00:24] <BooK> ok
+
+[00:26] *** MasterDuke_ joined
+[00:26] <BooK> if I want to run that in my code, how do I write it ?
+
+[00:26] <AlexDaniel> this is pretty cool: https://github.com/perl6/doc/issues/114
+
+[00:27] <timotimo> also, there's things to consider like can you reach SET-SELF from a subclass? because all the derived "new" candidates will just nqp::create(Version) and there's no version of bless you will get for free by running ".new"
+
+[00:27] <timotimo> BooK: all you need is a "use nqp" at the beginning
+
+[00:28] <timotimo> i should go to bed about now
+
+[00:30] *** TimToady joined
+[00:30] <BooK> is there a preferred paste site?
+
+[00:30] *** BenGoldberg joined
+[00:31] <timotimo> i often use github's gist, but anything is fine
+
+[00:31] <BooK> http://paste.scsys.co.uk/523600
+
+[00:31] <MasterDuke_> m: my $*TOLERANCE = .1; say .9 =~= 1
+
+[00:31] <camelia> rakudo-moar 2126ed: OUTPUT«False␤»
+
+[00:31] <MasterDuke_> m: my $*TOLERANCE = .1; say 1.1 =~= 1
+
+[00:31] <camelia> rakudo-moar 2126ed: OUTPUT«True␤»
+
+[00:32] <MasterDuke_> is ^^^^ expected behavior?
+
+[00:32] <BooK> the code that fails is using the second new
+
+[00:32] <AlexDaniel> m: my $*TOLERANCE = .1; say .90001 =~= 1
+
+[00:32] <camelia> rakudo-moar 2126ed: OUTPUT«True␤»
+
+[00:33] <sortiz> BooK, yep, as timotimo says, that bless worries me
+
+[00:33] <AlexDaniel> m: my $*TOLERANCE = .1; say .90000 =~= 1
+
+[00:33] <camelia> rakudo-moar 2126ed: OUTPUT«False␤»
+
+[00:33] <timotimo> yeah, when you run that bless, it won't do the necessary setup for the rest of the Version object at all
+
+[00:33] <AlexDaniel> MasterDuke_: I'd be interested to see somebody who expected that
+
+[00:33] <timotimo> because you're not giving it anything for those values
+
+[00:33] *** ssotka left
+[00:33] <sortiz> So $!parts is Mu.
+
+[00:34] <BooK> so it should do something like the one above
+
+[00:34] <MasterDuke_> yeah, it doesn't like what i'd expect
+
+[00:34] *** ssotka joined
+[00:34] <timotimo> also, i thought in a recent-ish moarvm version i added a piece of extra output for the "with p6opaque representation" thing
+
+[00:34] <timotimo> looks like i missed that one
+
+[00:34] <AlexDaniel> bisect: my $*TOLERANCE = 0.1; say .9 =~= 1
+
+[00:34] <bisectable> AlexDaniel: on both starting points the exit code is 0 and the output is identical as well
+
+[00:35] <BooK> so, dropping that broken new runs 12000+ tests instead of 500 :-)
+
+[00:35] <MasterDuke_> the implementation of =~= has only changed once
+
+[00:35] <timotimo> found it, added it.
+
+[00:35] <MasterDuke_> TimToady created it, and then modified it shortly after
+
+[00:36] <timotimo> Cannot iterate object with P6opaque representation (Mu)
+
+[00:36] <timotimo> ^- this would probably have helped immediately
+
+[00:36] <BooK> not sure why there's this Str $s is there, I'll just put $v
+
+[00:36] <MasterDuke_> also, why do i have an '_' after my name? pretty sure i didn't type that
+
+[00:37] <timotimo> it often happens that you disconnect from your internets, and your old connection stays until it ping-timeouts and blocks the nick you had
+
+[00:37] *** Zoffix joined
+[00:37] <BooK> so your client picked it up
+
+[00:37] <timotimo> then, when the server tells your client "that nick is already in use" it'll fallback, usually by adding a number or _ to the name
+
+[00:37] <AlexDaniel> MasterDuke_: please do something about it
+
+[00:38] <Zoffix> MasterDuke_, it picks max, which is why there's a difference.
+
+[00:38] <MasterDuke_> yeah, i see why it's doing that, don't know how intentional it is though
+
+[00:39] *** kerframil joined
+[00:39] <Zoffix> I'd bet on intentional: https://en.wikipedia.org/wiki/Relative_change_and_difference
+
+[00:39] <MasterDuke_> seems like changing 'abs($a - $b) < ($a max $b) * $tolerance' to 'abs($a - $b) <= ($a max $b) * $tolerance' would "fix" it
+
+[00:40] <Zoffix> m: use Test; is-approx .9,  1, :rel-tol<.1>
+
+[00:40] <camelia> rakudo-moar 2126ed: OUTPUT«ok 1 - ␤»
+
+[00:40] <MasterDuke_> nice, i was googling for all sorts of things but never came up with relative change
+
+[00:40] *** silug joined
+[00:40] <Zoffix> MasterDuke_, you may be right
+
+[00:41] <Zoffix> Unless I'm really bad at math, I've used the same algo in is-approx 
+
+[00:41] <Zoffix> hmmm
+
+[00:41] <AlexDaniel> but this tolerance is not absolute, hmm
+
+[00:42] <Zoffix> m: say 2 ≅ -2
+
+[00:42] <camelia> rakudo-moar 2126ed: OUTPUT«True␤»
+
+[00:42] <Zoffix> bug \o/
+
+[00:42] <MasterDuke_> for absolute it's 'abs(a.Num - b.Num) < $tolerance'
+
+[00:42] <AlexDaniel> Zoffix: /o\
+
+[00:42] <Zoffix> missing abs
+
+[00:43] <Zoffix> m: say -∞ ≅∞
+
+[00:43] <camelia> rakudo-moar 2126ed: OUTPUT«False␤»
+
+[00:43] <Zoffix> m: say -1e100 ≅ 1e100
+
+[00:43] <camelia> rakudo-moar 2126ed: OUTPUT«True␤»
+
+[00:43] * Zoffix giggles
+
+[00:43] <Zoffix> I'll submit a PR
+
+[00:43] <AlexDaniel> m: my $*TOLERANCE = 0.1; say 95 =~= 100
+
+[00:43] <camelia> rakudo-moar 2126ed: OUTPUT«True␤»
+
+[00:43] <AlexDaniel> I'm not sure if I understand it
+
+[00:44] <BooK> thanks timotimo, sortiz and AlexDaniel 
+
+[00:44] <Zoffix> m: say 100*.1 < 5
+
+[00:44] <camelia> rakudo-moar 2126ed: OUTPUT«False␤»
+
+[00:44] <Zoffix> m: say 100*.1
+
+[00:44] <camelia> rakudo-moar 2126ed: OUTPUT«10␤»
+
+[00:45] <AlexDaniel> so 0.1 is basically 10%
+
+[00:45] <Zoffix> Ah, the > 
+
+[00:45] <Zoffix> AlexDaniel, right, 10% of max, which is 10, they can differ by 10, so 90 ^..^ 110 will give True
+
+[00:46] <AlexDaniel> Zoffix: um
+
+[00:46] <Zoffix> ?
+
+[00:46] <AlexDaniel> 10% of 110 is something different
+
+[00:46] <BooK> so $*TOLERANCE is multiplicative and the initial issue was that .9 + .9*.1 == .99
+
+[00:47] <AlexDaniel> which is why this works
+
+[00:47] <AlexDaniel> m: my $*TOLERANCE = 0.1; say 111 =~= 100
+
+[00:47] <camelia> rakudo-moar 2126ed: OUTPUT«True␤»
+
+[00:47] <Zoffix> AlexDaniel, right, when RHS is 100, left one can be  90 ^..^ 110
+
+[00:47] <BooK> m: my $*TOLERANCE = 0.1; say .9 =~= 1, 1 =~= .9;
+
+[00:47] <camelia> rakudo-moar 2126ed: OUTPUT«FalseFalse␤»
+
+[00:47] <Zoffix> AlexDaniel, oh, I see what you mean
+
+[00:47] <Zoffix> Yeah, it'd pick the bigger one
+
+[00:47] <BooK> ok, so I misunderstood too :-)
+
+[00:48] <MasterDuke_> m: say (90 ^..^ 110).map( {my $*TOLERANCE = .1; $_ =~= 100} )
+
+[00:48] <camelia> rakudo-moar 2126ed: OUTPUT«(True True True True True True True True True True True True True True True True True True True)␤»
+
+[00:48] <Zoffix> m: say (90 ^..^ 120).map( {my $*TOLERANCE = .1; $_ =~= 100} )
+
+[00:48] <camelia> rakudo-moar 2126ed: OUTPUT«(True True True True True True True True True True True True True True True True True True True True True False False False False False False False False)␤»
+
+[00:49] <Zoffix> It uses $*TOLERANCE * 100 percent of the largest value
+
+[00:49] <AlexDaniel> m: my $*TOLERANCE = 0.1; say 111.1111111 =~= 100
+
+[00:49] <camelia> rakudo-moar 2126ed: OUTPUT«True␤»
+
+[00:49] <AlexDaniel> m: my $*TOLERANCE = 0.1; say 111.1111112 =~= 100
+
+[00:49] <camelia> rakudo-moar 2126ed: OUTPUT«False␤»
+
+[00:50] <AlexDaniel> ok, so =~= compares the numbers magically. You can't tell what's going to happen off the top of your head
+
+[00:51] <timotimo> yup
+
+[00:51] <timotimo> That's A Feature™
+
+[00:53] <Zoffix> It compares relative diff. ¯\_(ツ)_/¯
+
+[00:53] <MasterDuke_> but it's currently not very well documented
+
+[00:54] <sortiz> m: 
+
+[00:54] <AlexDaniel> MasterDuke_: by “not very well documented” you mean not documented at all?
+
+[00:55] <MasterDuke_> =~= and ≅ are in the unicode <-> texas table, but that's it
+
+[00:55] <sortiz> dinner&
+
+[00:55] <MasterDuke_> not in the operator docs
+
+[00:57] <MasterDuke_> i've thought about writing something up, but wanted to clarify the expected behavior first
+
+[00:57] <AlexDaniel> https://github.com/perl6/doc/issues/601
+
+[00:59] <MasterDuke_> i also have some more tests written in my repo, but again, wanted to make sure i tested the "right" behavior
+
+[01:01] *** ssotka left
+[01:02] *** sortiz left
+[01:04] <Zoffix> m: "&[wat]"
+
+[01:04] <camelia> rakudo-moar 2126ed: OUTPUT«5===SORRY!5=== Error while compiling <tmp>␤Missing infix inside []␤at <tmp>:1␤------> 3"&[7⏏5wat]"␤    expecting any of:␤        double quotes␤        infix␤        infix noun␤        infix stopper␤        term␤»
+
+[01:04] <Zoffix> Was it it doing?
+
+[01:06] <AlexDaniel> m: say "&[-](5, 2)"
+
+[01:06] <camelia> rakudo-moar 2126ed: OUTPUT«3␤»
+
+[01:06] <AlexDaniel> dunno
+
+[01:06] <Zoffix> m: "&say('meow')"
+
+[01:06] <camelia> rakudo-moar 2126ed: OUTPUT«meow␤»
+
+[01:06] <Zoffix> I see
+
+[01:07] <Hotkeys> is there a way to create a regex from a string?
+
+[01:08] <Zoffix> m: my $str = '\w+'; my $regex = rx/<$str>/; say 'foo bar ber' ~~ $regex
+
+[01:08] <camelia> rakudo-moar 2126ed: OUTPUT«True␤»
+
+[01:08] <Zoffix> .o( True? Where's the match :/ )
+
+[01:08] <Zoffix> m: my $str = '\w+'; my $regex = rx/<$str>/; my $m = 'foo bar ber' ~~ $regex; say $m
+
+[01:08] <camelia> rakudo-moar 2126ed: OUTPUT«True␤»
+
+[01:08] <Zoffix> m: my $str = '\w+'; my $regex = rx/<$str>/; my $m = 'foo bar ber' ~~ /$regex/; say $m
+
+[01:08] <camelia> rakudo-moar 2126ed: OUTPUT«｢foo｣␤»
+
+[01:09] <Zoffix> There we go
+
+[01:09] <Zoffix> m: my $str = '\w+'; say 'foo bar ber' ~~ m:g/<$str>/
+
+[01:09] <camelia> rakudo-moar 2126ed: OUTPUT«(｢foo｣ ｢bar｣ ｢ber｣)␤»
+
+[01:09] <Hotkeys> ah cool
+
+[01:10] <Hotkeys> m: my @foo = ["foo", "bar", "baz"]; my $pattern = @foo.join("|"); say "bar" ~~ rx/<$pattern>/
+
+[01:11] <camelia> rakudo-moar 2126ed: OUTPUT«｢bar｣␤»
+
+[01:11] <Hotkeys> m: my @foo = ["foo", "bar", "baz"]; my $pattern = @foo.join("|"); say "bam" ~~ rx/<$pattern>/
+
+[01:11] <camelia> rakudo-moar 2126ed: OUTPUT«Nil␤»
+
+[01:11] <Hotkeys> neato
+
+[01:11] <Hotkeys> ty Zoffix 
+
+[01:11] <Zoffix> m: my @foo = ["foo", "bar", "baz"]; say "bam" ~~ /@foo/
+
+[01:11] <camelia> rakudo-moar 2126ed: OUTPUT«Nil␤»
+
+[01:11] <Zoffix> m: my @foo = ["foo", "bar", "baz"]; say "baz" ~~ /@foo/
+
+[01:11] <camelia> rakudo-moar 2126ed: OUTPUT«｢baz｣␤»
+
+[01:11] <Zoffix> Hotkeys, ^
+
+[01:11] <Hotkeys> oh
+
+[01:11] *** molaf left
+[01:12] <Zoffix> (note that in my version, the contents of @foo are evaluated as strings, without any regex meta chars
+
+[01:12] <Zoffix> )
+
+[01:12] <Hotkeys> m: my @foo = ["foo", "bar", "baz", "bazz"]; say "bazz" ~~ /@foo/
+
+[01:12] <camelia> rakudo-moar 2126ed: OUTPUT«｢bazz｣␤»
+
+[01:13] *** aborazmeh joined
+[01:13] *** aborazmeh left
+[01:13] *** aborazmeh joined
+[01:14] <AlexDaniel> 95 \o/
+
+[01:14] <timotimo> windows 95?
+
+[01:15] <AlexDaniel> no, 95 doc issues
+
+[01:16] <Zoffix> I got 99 problems but a doc ain't one.
+
+[01:20] *** kurahaupo left
+[01:20] *** yqt left
+[01:24] *** molaf joined
+[01:31] *** FROGGS_ joined
+[01:35] *** FROGGS left
+[01:38] *** jack_rabbit joined
+[01:45] *** ilbot3 left
+[01:46] *** bjz left
+[01:47] *** kid51 left
+[01:47] *** ilbot3 joined
+[01:48] *** bjz joined
+[01:56] *** sufrostico left
+[01:57] *** Zero_Dogg left
+[01:57] *** Zero_Dogg joined
+[01:57] *** Zero_Dogg left
+[01:57] *** Zero_Dogg joined
+[02:00] *** user9 left
+[02:05] *** Hor|zon joined
+[02:10] <johnjohn101> is the perl 6 project for .net dead?
+
+[02:17] <AlexDaniel> johnjohn101: you mean niecza? Yeah
+
+[02:26] *** noganex_ joined
+[02:29] *** noganex left
+[02:43] *** AlexDaniel left
+[02:50] <dalek> doc: 6b0b678 | (Zoffix Znet)++ | doc/Language/testing.pod:
+
+[02:50] <dalek> doc: Make it clearer cmp-ok can take a Callable
+
+[02:50] <dalek> doc: review: https://github.com/perl6/doc/commit/6b0b678905
+
+[02:56] *** Actualeyes left
+[02:57] *** skids left
+[02:59] <lizmat> .
+
+[02:59] <yoleaux> 16 Jun 2016 14:32Z <FROGGS> lizmat: this describes ac0dcdd very well: https://github.com/rakudo/rakudo/blob/nom/docs/ChangeLog#L9
+
+[02:59] <lizmat> FROGGS: thanks
+
+[03:02] <dalek> doc: 9307750 | (Zoffix Znet)++ | doc/Language/testing.pod:
+
+[03:02] <dalek> doc: Expand/Clarify/Reword cmp-ok section
+
+[03:02] <dalek> doc: review: https://github.com/perl6/doc/commit/9307750527
+
+[03:04] *** rgrinberg joined
+[03:10] *** Actualeyes joined
+[03:26] *** Ben_Goldberg joined
+[03:26] *** Ben_Goldberg left
+[03:30] *** lizmat left
+[03:33] *** BenGoldberg left
+[03:42] *** bjz_ joined
+[03:43] *** bjz left
+[03:43] *** huggable joined
+[03:46] *** BenGoldberg joined
+[03:49] <dalek> doc: 71c3efb | (Zoffix Znet)++ | doc/Language/testing.pod:
+
+[03:49] <dalek> doc: Minor clarifification of Str form of throws-like
+
+[03:49] <dalek> doc: review: https://github.com/perl6/doc/commit/71c3efb8b0
+
+[03:55] *** diakopter joined
+[03:58] *** kerframil left
+[04:01] *** rgrinberg left
+[04:01] *** aborazmeh left
+[04:08] *** Cabanossi left
+[04:11] *** Cabanossi joined
+[04:19] *** cooper joined
+[04:22] *** telex joined
+[04:23] *** kerframil joined
+[04:37] *** cooper_ joined
+[04:39] *** cooper left
+[04:42] *** khw left
+[04:47] *** ssotka joined
+[04:49] <buharin> hi :-)
+
+[04:53] *** llfourn_ joined
+[04:53] *** llfourn left
+[05:05] *** llfourn_ left
+[05:07] *** llfourn joined
+[05:13] *** fhorck joined
+[05:16] *** BenGoldberg left
+[05:20] *** cooper_ left
+[05:20] *** cooper joined
+[05:20] *** cooper left
+[05:20] *** cooper joined
+[05:28] *** lol joined
+[05:30] *** japhb joined
+[05:31] *** jrusso joined
+[05:34] *** MadcapJake left
+[05:34] *** fhorck left
+[05:38] *** teatime joined
+[05:43] *** mr-foobar left
+[05:44] *** lol left
+[05:54] *** FROGGS_ left
+[06:00] *** lizmat joined
+[06:00] *** wamba joined
+[06:08] *** ssotka left
+[06:26] *** jrusso is now known as MadcapJake
+
+[06:30] *** lizmat left
+[06:34] *** vendethiel left
+[06:42] *** firstdayonthejob left
+[06:49] *** pdcawley joined
+[06:49] <nine> ugexe: why did you close PR 729?
+
+[06:51] *** stmuk joined
+[06:52] *** stmuk left
+[06:53] *** domidumont joined
+[06:55] *** domidumont left
+[06:55] *** stmuk joined
+[06:56] *** domidumont joined
+[06:58] *** stmuk left
+[06:58] *** stmuk joined
+[06:59] *** CIAvash joined
+[07:08] *** _mg_ joined
+[07:10] *** rkr joined
+[07:12] *** abraxxa joined
+[07:18] *** patrickz joined
+[07:18] *** rurban_ joined
+[07:19] *** rurban joined
+[07:22] *** darutoko joined
+[07:24] <buharin> hey I find bug in documentation
+
+[07:25] <grondilu> tell us
+
+[07:25] <buharin> I was trying to figure what sign // mean
+
+[07:26] <buharin> I looked for // infix
+
+[07:26] <buharin> and here it is
+
+[07:26] <buharin> https://doc.perl6.org/routine/%2F%2F
+
+[07:27] <masak> or "and here it isn't" :)
+
+[07:27] <grondilu> I'm not too surprised
+
+[07:27] <buharin> if I am trying to find something which is not exist I see error 404 no exist yet or something
+
+[07:28] <buharin> but it looks like bugged url
+
+[07:28] <grondilu> using literal slashes in an url is probably a bad idea anyway
+
+[07:28] <grondilu> https://doc.perl6.org/language/5to6-perlop#Logical_Defined-Or
+
+[07:29] <grondilu> ^here's what you were looking for
+
+[07:29] <buharin> anyway what does infix // mean is it somekind of or
+
+[07:29] *** Lucas_One__ is now known as Lucas_One
+
+[07:30] <buharin> m: say "HELLO"
+
+[07:30] <camelia> rakudo-moar 70c19d: OUTPUT«HELLO␤»
+
+[07:30] <buharin> m: $*FOO // 'foo'
+
+[07:30] <camelia> rakudo-moar 70c19d: ( no output )
+
+[07:30] <grondilu> m: say $foo // "bar"
+
+[07:30] <camelia> rakudo-moar 70c19d: OUTPUT«5===SORRY!5=== Error while compiling <tmp>␤Variable '$foo' is not declared␤at <tmp>:1␤------> 3say 7⏏5$foo // "bar"␤»
+
+[07:30] <grondilu> oops
+
+[07:30] <buharin> m: say "$*FOO // 'foo'"
+
+[07:30] <camelia> rakudo-moar 70c19d: OUTPUT«Dynamic variable $*FOO not found␤  in block <unit> at <tmp> line 1␤␤Actually thrown at:␤  in block <unit> at <tmp> line 1␤␤»
+
+[07:30] <grondilu> m: say my $ // "bar"
+
+[07:30] <camelia> rakudo-moar 70c19d: OUTPUT«bar␤»
+
+[07:31] <buharin> m: my $*FOO = 'suck'; say "$*FOO // 'foo'"
+
+[07:31] <camelia> rakudo-moar 70c19d: OUTPUT«suck // 'foo'␤»
+
+[07:31] <grondilu> notice that it's "defined or" not "declared or"
+
+[07:32] <buharin> ya I see
+
+[07:32] <buharin> but I don't know why we need // not just or
+
+[07:32] <buharin> m: my $*FOO = 'suck'; say "$*FOO || 'foo'"
+
+[07:32] <camelia> rakudo-moar 70c19d: OUTPUT«suck || 'foo'␤»
+
+[07:32] <buharin> m: say "$*FOO || 'foo'"
+
+[07:32] <camelia> rakudo-moar 70c19d: OUTPUT«Dynamic variable $*FOO not found␤  in block <unit> at <tmp> line 1␤␤Actually thrown at:␤  in block <unit> at <tmp> line 1␤␤»
+
+[07:32] <grondilu>  // is most often used with =
+
+[07:33] <grondilu> sub f { state $ //= do-stuff }
+
+[07:33] <grondilu> ^very common idiom for caching
+
+[07:33] <buharin> grondilu: oh okay it is the same as or but additionaly you can add =
+
+[07:33] *** patrickz left
+[07:35] <grondilu> $foo //= $bar means $foo = $foo // $bar
+
+[07:36] <grondilu> C-style combination of binary operator, as in +=, *= etc
+
+[07:36] <buharin> yaya I understand
+
+[07:37] *** _mg_ left
+[07:41] *** finanalyst joined
+[07:43] *** huggable left
+[07:44] *** zakharyas joined
+[07:47] <buharin> m: @a = 1 ... 4
+
+[07:47] <camelia> rakudo-moar 70c19d: OUTPUT«5===SORRY!5=== Error while compiling <tmp>␤Variable '@a' is not declared␤at <tmp>:1␤------> 3<BOL>7⏏5@a = 1 ... 4␤»
+
+[07:47] <masak> random poll: if Python had a `my`-like keyword, how would it be spelled?
+
+[07:47] <buharin> m: my @a = 1 ... 4
+
+[07:47] <camelia> rakudo-moar 70c19d: ( no output )
+
+[07:48] <buharin> m: my @a = 1 ... 4; say @a
+
+[07:48] <camelia> rakudo-moar 70c19d: OUTPUT«[1 2 3 4]␤»
+
+[07:48] <buharin> m: my @a = 1 ... *; say @a
+
+[07:48] <camelia> rakudo-moar 70c19d: OUTPUT«[...]␤»
+
+[07:48] <masak> buharin: you can also privmsg with camelia, to avoid noising the channel with partial results
+
+[07:48] <buharin> m: my @a = 1 ... *; say @a[3]
+
+[07:48] <camelia> rakudo-moar 70c19d: OUTPUT«4␤»
+
+[07:48] <buharin> m: my @a = 1 ... *; say @a[100]
+
+[07:48] <camelia> rakudo-moar 70c19d: OUTPUT«101␤»
+
+[07:49] <buharin> masak: okay :)
+
+[07:49] <buharin> I got a deal to you masak 
+
+[07:50] <masak> a deal? are you a Nigerian prince with lots of gold that needs to be transferred internationally?
+
+[07:51] <buharin> masak: unfortunately no :(
+
+[07:52] <buharin> masak: just want to ask if it is good method, to copy API but provide own implementation while transfering Python lib to Perl
+
+[07:52] <masak> depends, I guess
+
+[07:52] <masak> have you considered working test-first?
+
+[07:53] <buharin> masak: ye, testing small parts of code is obligatory
+
+[07:53] <DrForr> What I did with Dancer2 was to just take the test files, add :from<Perl5> to the package names and then convert the perl5 tests to perl6.
+
+[07:54] <DrForr> I don't know if Inline::Python works similarly, but it'd be worth a look.
+
+[07:55] *** andreoss joined
+[07:56] <buharin> no I don't want to use Inline Python
+
+[07:56] <andreoss> m: my @fs = find(dir => '/'); for @fs -> $f { say $f ; last }
+
+[07:56] <camelia> rakudo-moar 70c19d: OUTPUT«5===SORRY!5=== Error while compiling <tmp>␤Undeclared routine:␤    find used at line 1␤␤»
+
+[07:56] <andreoss> m: use File::Find; my @fs = find(dir => '/'); for @fs -> $f { say $f ; last }
+
+[07:56] <camelia> rakudo-moar 70c19d: OUTPUT«===SORRY!===␤Could not find File::Find at line 1 in:␤    /home/camelia/.perl6␤    /home/camelia/rakudo-m-inst-1/share/perl6/site␤    /home/camelia/rakudo-m-inst-1/share/perl6/vendor␤    /home/camelia/rakudo-m-inst-1/share/perl6␤    CompUnit::Re…»
+
+[07:56] *** Peter_R joined
+[07:56] <buharin> I want to rewrite something
+
+[07:56] <buharin> with saving actual API
+
+[07:57] <buharin> I think also that Inline Python will be slow as fuck
+
+[07:58] <DrForr> It may be, but at least you wouldn't have to rewrite the entire Flask (or whatever) stack at once.
+
+[07:58] *** flok420 joined
+[07:59] *** flok420 left
+[08:00] <buharin> DrForr: I should try first I think
+
+[08:00] <andreoss> is File::Find supposed to be lazy?
+
+[08:00] <DrForr> Good luck eating that elephant.
+
+[08:01] <andreoss> why is it so slow?
+
+[08:03] *** pecastro joined
+[08:07] *** rindolf joined
+[08:09] *** jack_rabbit left
+[08:10] *** vytas joined
+[08:11] *** ocbtec joined
+[08:11] *** finanalyst left
+[08:16] *** iH2O joined
+[08:17] *** iH2O left
+[08:20] *** baest joined
+[08:21] *** wtw_ joined
+[08:21] *** vytas left
+[08:22] *** vytas joined
+[08:22] *** a3r0 left
+[08:23] *** stmuk left
+[08:24] *** stmuk joined
+[08:24] *** arnsholt joined
+[08:29] *** a3r0 joined
+[08:31] *** melezhik joined
+[08:33] *** pdcawley_ joined
+[08:34] *** a3r0 left
+[08:35] *** pdcawley left
+[08:35] *** a3r0_ joined
+[08:37] *** tinita_ joined
+[08:37] *** yx_ joined
+[08:37] *** esh_ joined
+[08:37] *** mls_ joined
+[08:38] *** Amnez777- joined
+[08:39] *** cpage_ joined
+[08:39] *** m0ltar_ left
+[08:39] *** araujo joined
+[08:39] *** araujo left
+[08:39] *** m0ltar joined
+[08:40] *** xinming left
+[08:40] *** ZeroDogg joined
+[08:40] *** xinming joined
+[08:41] *** emdashcomma_ left
+[08:42] *** TakinOver left
+[08:42] *** a3r0 joined
+[08:42] *** araujo joined
+[08:42] *** araujo left
+[08:42] *** araujo joined
+[08:42] *** yubimusubi joined
+[08:43] *** emdashcomma joined
+[08:43] *** Zero_Dogg left
+[08:43] *** yx_ is now known as xnrand
+
+[08:43] *** ZeroDogg is now known as Zero_Dogg
+
+[08:43] *** a3r0_ left
+[08:43] *** TakinOver joined
+[08:43] *** k-man joined
+[08:45] *** gnull joined
+[08:46] *** gabiruh left
+[08:52] *** TEttinger left
+[08:53] *** gabiruh joined
+[08:59] *** g4 joined
+[09:04] *** labster left
+[09:07] *** mls_ is now known as mls
+
+[09:11] <andreoss> how to make IO::Handle.lines to work like cat rather than tail?
+
+[09:13] *** rkr left
+[09:15] <andreoss> *like tail rather than cat
+
+[09:15] *** finanalyst joined
+[09:20] *** _mg_ joined
+[09:20] *** rurban1 joined
+[09:20] *** rurban left
+[09:23] <andreoss> > my $h = "uni.txt".IO.open; $h.seek(10); $h.lines.elems
+
+[09:23] <andreoss> Malformed UTF-8
+
+[09:23] <andreoss>  
+
+[09:26] *** CIAvash left
+[09:27] <nine> I think .seek works in terms of bytes, not characters
+
+[09:29] <andreoss> what should i use in this case?
+
+[09:31] *** finanalyst left
+[09:31] <DrForr> .seek(0); .readchars(10); # ?
+
+[09:32] <DrForr> Though a .seekchars analogous to .readchars would be nice.
+
+[09:32] <andreoss> .readchars would read the file
+
+[09:33] <DrForr> In UTF-8 you can't advance the file pointer by 10 characters without knowing what each character is.
+
+[09:33] *** rurban1 left
+[09:33] *** xinming left
+[09:33] <DrForr> Remember that UTF-8 isn't fixed-width.
+
+[09:34] *** xinming joined
+[09:35] *** RabidGravy joined
+[09:35] <DrForr> Characters can be anything up to 4 bytes, and when you consider combining characters they can be practically any length.
+
+[09:36] <dalek> doc: 1ad7597 | (Wenzel P. P. Peppmeyer)++ | doc/Type/Signature.pod:
+
+[09:36] <dalek> doc: improve capture parameters
+
+[09:36] <dalek> doc: review: https://github.com/perl6/doc/commit/1ad75976b1
+
+[09:39] *** _mg_ left
+[09:39] <andreoss> > loop { try { $h.getc(); last ; CATCH { default { $h.seek(1, SeekFromCurrent) } } }}
+
+[09:40] <andreoss> will this even work?
+
+[09:42] <andreoss> seems not
+
+[09:51] *** ChoHag joined
+[09:54] *** vibha joined
+[09:59] *** AlexDaniel joined
+[10:06] *** user9 joined
+[10:07] <dalek> doc: 79b198d | (Wenzel P. P. Peppmeyer)++ | doc/Type/Signature.pod:
+
+[10:07] <dalek> doc: add coercion types to signature
+
+[10:07] <dalek> doc: review: https://github.com/perl6/doc/commit/79b198d7b9
+
+[10:30] <dalek> doc: 85c37a8 | (Wenzel P. P. Peppmeyer)++ | doc/Type/Signature.pod:
+
+[10:30] <dalek> doc: add long names to signature
+
+[10:30] <dalek> doc: review: https://github.com/perl6/doc/commit/85c37a81df
+
+[10:30] <dalek> doc: ae72862 | (Wenzel P. P. Peppmeyer)++ | doc/Type/Signature.pod:
+
+[10:30] <dalek> doc: signatures can be smart matched against a list
+
+[10:30] <dalek> doc: review: https://github.com/perl6/doc/commit/ae72862a32
+
+[10:32] <gfldex> i am confident we will have complete docs shortly after Christmas
+
+[10:35] *** tinita_ is now known as tinita
+
+[10:43] *** darutoko left
+[10:48] *** kaare_ joined
+[10:49] <RabidGravy> does anyone else get this kind of stuff ? https://github.com/jonathanstowe/TermReadKey/issues/11
+
+[10:50] <gfldex> m: my %h = left => 1, right => 2; say %h ~~ :(Hash $top ($left, $right) );
+
+[10:50] <camelia> rakudo-moar 70c19d: OUTPUT«False␤»
+
+[10:50] <gfldex> m: my %h = left => 1, right => 2; say %h ~~ :(%top ($left, $right) );
+
+[10:50] <camelia> rakudo-moar 70c19d: OUTPUT«False␤»
+
+[10:50] <RabidGravy> I have written/maintained/distributed quite a lot of software over the years and Term::ReadKey is almost unique in that I spend more time addressing the license than actively working on the software
+
+[10:51] *** user9 left
+[10:52] <gfldex> m: my %h = left => 1, right => 2; say %h ~~ :(Any:D $top ($left, $right) );
+
+[10:52] <camelia> rakudo-moar 70c19d: OUTPUT«False␤»
+
+[10:52] <gfldex> jnthn: should that match?
+
+[10:52] *** user9 joined
+[10:54] <AlexDaniel> gfldex: the graph here is amazing https://github.com/perl6/doc/graphs/contributors
+
+[10:54] *** _mg_ joined
+[10:54] <gfldex> #3 is in reach :)
+
+[10:56] *** _mg_ left
+[10:56] <gfldex> m: my %h = left => 1, right => 2; say %h ~~ :(Any:D $top (:$left, :$right) );
+
+[10:56] <camelia> rakudo-moar 70c19d: OUTPUT«False␤»
+
+[10:56] <gfldex> m: my %h = left => 1, right => 2; say %h ~~ :(%top (:$left, :$right) );
+
+[10:56] <camelia> rakudo-moar 70c19d: OUTPUT«False␤»
+
+[10:57] <psch> m: my %h = left => 1, right => 2; say \(%h) ~~ :(%top (:$left, :$right) );
+
+[10:57] <camelia> rakudo-moar 70c19d: OUTPUT«True␤»
+
+[10:57] *** aries_liuxueyang joined
+[10:57] <psch> hm
+
+[10:57] *** jameslenz left
+[10:58] <gfldex> ACCEPT for Signature seams to be lacking, unless there are nasty side effects
+
+[10:59] <psch> m: my %h = left => 1, right => 2; say \(%h) eqv %h.Capture
+
+[10:59] <camelia> rakudo-moar 70c19d: OUTPUT«False␤»
+
+[10:59] <psch> so, Signature.ACCEPTS(%topic) calls %topic.Capture
+
+[10:59] <psch> but %topic.Capture isn't eqv to \(%topic)
+
+[10:59] <psch> m: my %h = left => 1, right => 2; say \(%h).perl; say %h.Capture.perl
+
+[10:59] <camelia> rakudo-moar 70c19d: OUTPUT«\({:left(1), :right(2)})␤\(:left(1), :right(2))␤»
+
+[10:59] <psch> aha
+
+[11:00] <psch> it's slipping
+
+[11:00] <jnthn> gfldex: A Hash, when coerced to a Capture, is a capture of named arguments
+
+[11:00] *** jameslenz joined
+[11:00] *** user9 left
+[11:00] <psch> m: my %h = left => 1, right => 2; say %h ~~ :(:$left, :$right);
+
+[11:00] <jnthn> gfldex: So m: my %h = left => 1, right => 2; say %h ~~ :(:$left, :$right)
+
+[11:01] <jnthn> m: my %h = left => 1, right => 2; say %h ~~ :(:$left, :$right)
+
+[11:01] *** user9 joined
+[11:01] <camelia> rakudo-moar 70c19d: OUTPUT«True␤»
+
+[11:01] <camelia> rakudo-moar 70c19d: OUTPUT«True␤»
+
+[11:01] <jnthn> So, that matches
+
+[11:01] <jnthn> Ah, psch beat me to it
+
+[11:01] <jnthn> That's the correct behavior, anyways.
+
+[11:01] <jnthn> m: my %h = left => 1, right => 2; say \(%h) ~~ :($top (:$left, :$right))
+
+[11:01] <camelia> rakudo-moar 70c19d: OUTPUT«True␤»
+
+[11:02] <jnthn> That is a Capture with a single positional arg which is a Hash, and it is then coerced to a Capture for unpacking by the nested signature
+
+[11:04] <dalek> doc: 3c254d7 | (Wenzel P. P. Peppmeyer)++ | doc/Type/Signature.pod:
+
+[11:04] <dalek> doc: signatures do smartmatch against Hash
+
+[11:04] <dalek> doc: review: https://github.com/perl6/doc/commit/3c254d70ea
+
+[11:11] *** pdcawley_ left
+[11:12] <AlexDaniel> OK guys, if you have Microsoft Edge installed, please go to http://doc.perl6.org/type/Proxy#Methods
+
+[11:12] <AlexDaniel> and try to reproduce this bug: https://github.com/perl6/doc/issues/252
+
+[11:13] *** Emeric joined
+[11:14] *** _mg_ joined
+[11:15] <AlexDaniel> basically if nobody can, then it is probably not an issue on our side
+
+[11:16] *** kid51 joined
+[11:18] <Woodi> why Captures and Signatures are different thing ? any prior art in other language for that ?
+
+[11:19] <psch> Woodi: Captures consist of arguments, Signatures consist of Parameters
+
+[11:19] <psch> well, Signatures also can consist of Signatures...
+
+[11:19] <gfldex> m: my $is-signature(Str $s when * ~~ "Woodi"); # a where clause would not make sense in a capture
+
+[11:19] <camelia> rakudo-moar 70c19d: OUTPUT«5===SORRY!5=== Error while compiling <tmp>␤Malformed parameter␤at <tmp>:1␤------> 3my $is-signature(Str $s7⏏5 when * ~~ "Woodi"); # a where clause wo␤    expecting any of:␤        constraint␤»
+
+[11:20] <gfldex> m: my $is-signature(Str $s where * ~~ "Woodi"); # a where clause would not make sense in a capture
+
+[11:20] <camelia> rakudo-moar 70c19d: OUTPUT«5===SORRY!5=== Error while compiling <tmp>␤The () shape syntax in variable declarations is reserved␤at <tmp>:1␤------> 3 $is-signature(Str $s where * ~~ "Woodi"7⏏5); # a where clause would not make sense␤    expecting any of:␤        co…»
+
+[11:20] <gfldex> m: my $is-signature = :(Str $s where * ~~ "Woodi"); # a where clause would not make sense in a capture
+
+[11:20] <camelia> rakudo-moar 70c19d: ( no output )
+
+[11:20] <Woodi> to me just same thing named differently on two sides of routine...
+
+[11:21] <psch> but they clearly are not
+
+[11:21] *** darutoko joined
+[11:21] <psch> i mean, the fact they exist on different sides of the routine already is a difference, isn't it?
+
+[11:21] <Woodi> "where" makes new type or subtype, so can be just: my Int $x where < 0;  so on Capture side... 
+
+[11:22] <psch> that's a declaration, which is closer to a Parameter than an Argument
+
+[11:22] <Woodi> psch: but it's just memcpy(struct)...
+
+[11:22] <psch> Woodi: and .map(&sub) is just goto..?
+
+[11:22] <Woodi> psch: no, it is for :)
+
+[11:23] <psch> ah, but for is while is goto
+
+[11:23] <Woodi> ok, then it's goto :)
+
+[11:23] <psch> that kind of thinking doesn't help, fwiw
+
+[11:24] <psch> like, a class can be translated to a struct with function pointers
+
+[11:24] <psch> but conceptionally they are not the same
+
+[11:24] <Woodi> I just don't see (so far) difference in Sig and Capture
+
+[11:24] *** bhm_ is now known as bhm
+
+[11:24] <psch> Woodi: well, one is declarative, the other is a collection of values
+
+[11:25] <psch> m: say :($foo, :$bar) # no "Variable ... is not declared"
+
+[11:25] <camelia> rakudo-moar 70c19d: OUTPUT«($foo, :$bar)␤»
+
+[11:25] <psch> m: say \($foo, :$bar) # yes "Variable ... is not declared"
+
+[11:25] <camelia> rakudo-moar 70c19d: OUTPUT«5===SORRY!5=== Error while compiling <tmp>␤Variable '$foo' is not declared␤at <tmp>:1␤------> 3say \(7⏏5$foo, :$bar) # yes "Variable ... is not ␤»
+
+[11:25] <psch> or "collection of known symbols", probably
+
+[11:26] *** wamba left
+[11:26] <Woodi> hmm... looks VERY similiar...
+
+[11:26] <psch> "uint8 x" and "int8 x" also look VERY similar vOv
+
+[11:27] <psch> eh, "int8* x" is probably the better second example :)
+
+[11:28] *** rkr joined
+[11:28] <AlexDaniel> ok, Edge bug was reproduced
+
+[11:28] <Woodi> psch: here you clearly have two different things just looking similiar. Captures and Signatures *are* same thing to me, just used a bit different... 
+
+[11:29] <psch> Woodi: they are not the same thing, you just don't want to recognize the difference
+
+[11:29] <psch> Woodi: they just look similar to you and thus you decide they must be the same
+
+[11:29] <Woodi> psch: ok, I'm convinced to read some more docs :)
+
+[11:30] <BrokenRobot> the bug is using Edge :p
+
+[11:30] <nine> Woodi: the relation is a bit like Class and Object
+
+[11:30] <AlexDaniel> BrokenRobot: please take a look at this: https://github.com/perl6/doc/issues/229
+
+[11:30] <Woodi> nine: ah, maybe "reusability" part make me to thinking wrongly...
+
+[11:31] <AlexDaniel> BrokenRobot: is it still relevant?
+
+[11:32] <BrokenRobot> Closed. Thanks. The current docs are accurate (updated last night)
+
+[11:32] <AlexDaniel> good.
+
+[11:32] <BrokenRobot> (and the mentioned bug also fixed last night)
+
+[11:33] <AlexDaniel> Zoffix++
+
+[11:34] * psch probably got a bit too heated there :|
+
+[11:38] *** stevieb left
+[11:40] *** breinbaas left
+[11:40] *** breinbaas joined
+[11:43] *** avalenn joined
+[11:48] *** kid51 left
+[11:51] <Woodi> one more thing, CPU have interrupts for hardware and traps/exceptions for errors in program... maybe exceptions in high level languages should use that CPU exceptions ? I wonder if current "exceptions" wasn't initially planned to use CPU traps...
+
+[11:54] <buharin> hello my friends :)
+
+[11:56] <Woodi> czesc :)
+
+[11:58] *** _mg_ left
+[11:58] *** abraxxa left
+[12:00] *** wamba joined
+[12:01] *** araujo_ joined
+[12:01] *** rkr left
+[12:02] *** araujo_ left
+[12:03] <buharin> Woodi: polish?
+
+[12:03] *** araujo_ joined
+[12:04] *** araujo left
+[12:05] *** _mg_ joined
+[12:07] *** araujo__ joined
+[12:08] <Woodi> yhy :)
+
+[12:09] *** araujo__ left
+[12:09] *** araujo__ joined
+[12:10] *** sortiz joined
+[12:10] *** sortiz left
+[12:10] *** araujo_ left
+[12:11] *** araujo__ left
+[12:12] *** araujo__ joined
+[12:12] *** rgrinberg joined
+[12:12] <buharin> me too
+
+[12:13] <buharin> how do you know that I am from Poland?
+
+[12:13] <buharin> ;d
+
+[12:13] *** araujo_ joined
+[12:16] <Woodi> buharin: I remember you saying that #here :)
+
+[12:17] *** araujo__ left
+[12:20] *** kerframil left
+[12:20] *** _mg_ left
+[12:22] *** domidumont left
+[12:35] * masak .oO( how do you know that I have some polish? )
+
+[12:35] <Woodi> yesterday's XKCD: option -R - run recursively on http://* ;)
+
+[12:42] *** yqt joined
+[12:44] <Xliff> Woodi: Option -y Yikes!
+
+[12:46] <dalek> doc: db08a29 | (Wenzel P. P. Peppmeyer)++ | doc/Type/Signature.pod:
+
+[12:46] <dalek> doc: more index entries for Signature
+
+[12:46] <dalek> doc: review: https://github.com/perl6/doc/commit/db08a294f3
+
+[12:46] <dalek> doc: af3764b | (Wenzel P. P. Peppmeyer)++ | doc/Type/Signature.pod:
+
+[12:46] <dalek> doc: change word for consistency
+
+[12:46] <dalek> doc: review: https://github.com/perl6/doc/commit/af3764ba57
+
+[12:46] <dalek> doc: 8ac1521 | (Wenzel P. P. Peppmeyer)++ | doc/Type/Signature.pod:
+
+[12:46] <dalek> doc: more index entries for Signature
+
+[12:46] <dalek> doc: review: https://github.com/perl6/doc/commit/8ac15219ee
+
+[12:46] *** skids joined
+[12:48] *** lizmat joined
+[12:48] *** aries_liuxueyang left
+[12:49] *** Sgeo left
+[12:50] *** aries_liuxueyang joined
+[12:51] *** rgrinberg left
+[12:52] *** sufrostico joined
+[13:01] *** cgfbee left
+[13:02] *** mr-foobar joined
+[13:03] *** pierrot joined
+[13:07] *** hoelzro joined
+[13:10] *** cgfbee joined
+[13:14] *** araujo__ joined
+[13:15] *** _mg_ joined
+[13:16] *** araujo_ left
+[13:17] *** domidumont joined
+[13:19] *** abruanese left
+[13:24] *** avenj joined
+[13:24] *** avenj left
+[13:24] *** avenj joined
+[13:27] *** _mg_ left
+[13:28] *** g4 left
+[13:29] *** _mg_ joined
+[13:36] *** melezhik left
+[13:36] *** _mg_ left
+[13:42] <geekosaur> [17 11:51] <Woodi> one more thing, CPU have interrupts for hardware and traps/exceptions for errors in program... maybe exceptions in high level languages should use that CPU exceptions ? I wonder if current "exceptions" wasn't initially planned to use CPU traps...
+
+[13:42] *** buharin left
+[13:42] <geekosaur> on the one hand yes, on the other this is the thinking that got older Windows GPFs
+
+[13:46] *** patrickz joined
+[13:46] *** Sgeo joined
+[13:47] <geekosaur> on the gripping hand there are languages (python, tcl, perl 6, ...) where exceptions have turned into "normal" flow control. and this is one reason you find older programmers who aren't comfortable with those languages
+
+[13:48] <hahainternet> is that really an accurate summary of 'exceptions as flow control'?
+
+[13:48] *** sufrostico left
+[13:51] *** _mg_ joined
+[13:52] <geekosaur> I'm not quite certain how to answer that
+
+[13:52] <geekosaur> it sounds backwards from the intent
+
+[13:53] <hahainternet> geekosaur: my point is, what is there in common between python and tcl with regard to flow control? the existence of try/catch?
+
+[13:53] <geekosaur> take a look at return(n)
+
+[13:54] <hahainternet> what about it?
+
+[13:54] <hahainternet> that would suggest a closer comparison with C, rather than Python
+
+[13:54] <hahainternet> in fact TCL sets a number of global variables when an error occurs, reminiscent of errno
+
+[13:55] <timotimo> errno was a big mistake :)
+
+[13:55] <geekosaur> you may be being confused by the fact that tcl kinda reduces everything to the tiniest possible footprint, so all control exceptions are variations of `return`
+
+[13:55] <timotimo> ("error: success")
+
+[13:55] *** _mg_ left
+[13:55] <jast> given the alternatives, errno wasn't so bad
+
+[13:56] <hahainternet> geekosaur: how is TCL_ERROR any different than returning -1 from C functions?
+
+[13:56] <geekosaur> it's not. but that's not the comparison
+
+[13:56] <hahainternet> well that's what i'm asking, i'm a little confused by your comparison
+
+[13:56] <geekosaur> the comparison is to raise() / longjmp() / signals
+
+[13:57] <geekosaur> which are modeled after, and often directly mapped to, hardware traps
+
+[13:57] <hahainternet> ok, but tcl doesn't have 'raise', it won't jump outside of the return or called function
+
+[13:57] <hahainternet> but both python and perl6 will
+
+[13:57] <hahainternet> meh, i don't want to argue :)
+
+[13:57] <hahainternet> just wanted to understand your position a little more
+
+[13:57] <hahainternet> i'm still a big fan of Go's error handling tbqh, i enjoy it
+
+[13:58] <geekosaur> right, but that means that like any other system that uses exceptions as normal flow control, it needs to do stack unwinding and it lives or dies by how efficient that is
+
+[13:59] *** acrussell joined
+[13:59] <geekosaur> it seems to me you have focused on the wrong part of my point
+
+[14:00] <geekosaur> if you want a better idea of what I'm getting at, go look at the history of perl 5's signal handling --- which is in many ways a history of trying to make a hardware trap-oriented system behave like control exceptions
+
+[14:01] <hahainternet> i quite like the Mill's concept of exceptions
+
+[14:01] *** sufrostico joined
+[14:01] <hahainternet> but that's neither here nor there
+
+[14:01] <geekosaur> the two concepts are actually quite different and you will always have an impedance mismatch somewhere when trying to conflate them
+
+[14:02] <hahainternet> and not really valuable for #perl6 :)
+
+[14:05] <geekosaur> and Woodi's musing sounds to me like someone from the world of control exceptions noticing the "odd parallel" between exceptions and hardware traps
+
+[14:06] <Woodi> geekosaur: about perl5 part: I think traps should go straight into threads :)
+
+[14:06] *** rubio joined
+[14:06] *** rubio is now known as RubioTerra
+
+[14:07] *** avenj left
+[14:07] <timotimo> unix signals are already exposed as a Supply
+
+[14:09] <Woodi> but looks GPF is still used in Windowses... thing look like we don't use half of the CPU but also signals+threads are... FUN :)
+
+[14:09] <Woodi> also I have impression that signals in C are somewhat/somehow limited&obscure...
+
+[14:10] <geekosaur> that is how they look if you are oriented toward exceptions being flow control, yes
+
+[14:10] <Woodi> geekosaur: exactly, I was just sniffing for parallels :)
+
+[14:11] <geekosaur> but in C exceptions are explicitly analogous to hardware traps because Unix signals are hardware traps reflected to user code
+
+[14:12] <timotimo> waaaait a minute, you consider that flow control?
+
+[14:12] <geekosaur> ...
+
+[14:12] <geekosaur> I think you just proved my point
+
+[14:13] <geekosaur> which is that it is NOT flow control
+
+[14:13] <Woodi> btw. epolls probably use signals and that makes them faster... so I am thinking about general usage
+
+[14:14] <Woodi> geekosaur: hardware -> interrupts; signals/traps -> fast communication (maybe)
+
+[14:14] <geekosaur> but the "modern" concept of exceptions thinks exceptions are naturally flow control and this leads to breakage when interacting with older exceptions, which are explicitly not flow control but modeled after hardware traps
+
+[14:14] <geekosaur> no
+
+[14:14] <geekosaur> ...
+
+[14:14] <geekosaur> mnever mindf
+
+[14:14] <geekosaur> the wall remains up
+
+[14:14] <geekosaur> maybe grows even taller
+
+[14:15] *** acrussell left
+[14:15] <Woodi> geekosaur: however you are probably right I think you are thinking in single threaded style...
+
+[14:16] <geekosaur> you still sound like someone trying to fit the older system into their tidy modern conceptions that do everything they can to hide the nasty ugly realities of hardware
+
+[14:16] *** acrussell joined
+[14:16] *** johnjohn101 left
+[14:16] <geekosaur> Woodi, hardware doesn't know about threads either
+
+[14:16] <Woodi> ok, OS know
+
+[14:17] <geekosaur> and again this same impedance mismatch between the hardware view and the software view, where from the standpoinr of hardware modern software goes through insane gyrations to cover up the asynchronous reality and make it all look pretty
+
+[14:18] <geekosaur> the problem being that, in the end, the pretty has to run on hardware
+
+[14:20] <Woodi> geekosaur: oki, need to think/read a bit on that. but I have some other theory to be potentially shooted down :)
+
+[14:21] <Woodi> what if CPU manage objects ? some malloc evolution ? :)
+
+[14:22] *** avenj joined
+[14:22] <jnthn> Woodi: I think some of the Java bytecode hardware implementations might have gone in that direction...but it's been a long time since I read anything on that.
+
+[14:23] *** johnjohn101 joined
+[14:24] <geekosaur> arguably jvm / clr / moar style virtualization has as a large point trying to produce "hardware" exceptions that behave like software flow control.. .which means the impedance mismatch is pushed down to the level where *you're* the one fighting with it :)
+
+[14:24] <b2gills> The problem is interrupts can interrupt a VM in the middle of running a single opcode
+
+[14:24] <Woodi> I just thinking what Alan Kay said: software is generalized and then should go into hardware... from that point we have very tragic computers stagnation...
+
+[14:26] <b2gills> I would love to see hardware that can handle String{*start,length} as a native type
+
+[14:26] <jnthn> It feels to me that trying to push complex operations into hardware hasn't really worked out so well... Even x86/x64 with relatively complex instructions is actually translated into simpler microcode in hardware for efficient execution.
+
+[14:27] <geekosaur> yep
+
+[14:27] <jnthn> Arguably it may be possible to say it's worth the trade-off 'cus you get smaller machine code by avoiding repeated sequences.
+
+[14:27] <b2gills> Some of the complex instructions were added to make it easier for assembly writers, and then never removed like the BCD instructions
+
+[14:27] <jnthn> But I've no idea if that argument holds any water whatsoever :)
+
+[14:28] <geekosaur> you sometimes see the claim that the battle between CISC and RISC hardware architecture was won by CISC, but the reality is both won; modern CISC is built on top of RISC
+
+[14:28] <jnthn> heh, I've been more exposed to the claim it was won by RISC :P
+
+[14:28] <johnjohn101> is rakudo perl the only way to get perl 6 on linux?
+
+[14:29] <b2gills> Rakudo Perl 6 is the only way to get Perl 6 anywhere currently
+
+[14:30] <b2gills> Except for some out of date implementations
+
+[14:30] <johnjohn101> so i have to install from source right now?
+
+[14:30] <b2gills> I use rakudobrew which makes it simple
+
+[14:30] <hahainternet> johnjohn101: yah just use rakudobrew, it is the easiest option
+
+[14:30] <geekosaur> you can find it in some package managersm but rakudo's been moving fast enough that most such are out of date at best
+
+[14:30] <hahainternet> surprisingly quick to compile on my old-ass machine too
+
+[14:30] <El_Che> or a docker image
+
+[14:31] <johnjohn101> i was watching larry wall's presentation, wow, perl 6 is neato
+
+[14:31] <hahainternet> johnjohn101: which one?
+
+[14:31] <El_Che> johnjohn101: or maybe Larry is just a good speaker :)
+
+[14:31] <johnjohn101> let me get the link
+
+[14:31] <hahainternet> El_Che: it can be both!
+
+[14:31] <johnjohn101> was interesting that he did his whole presentation in vi
+
+[14:32] <johnjohn101> https://www.youtube.com/watch?v=kwxHXgiLsFE   this is the presentation
+
+[14:32] <b2gills> http://perl6.org/downloads/
+
+[14:33] <hahainternet> johnjohn101: ah yes i remember this one :)
+
+[14:33] <johnjohn101> b2gills: what is the executable called?  p6?  i have a perl 5 enviroment i dont' want mucked with
+
+[14:34] <hahainternet> johnjohn101: perl6
+
+[14:34] <johnjohn101> hahainternet: larry wall is really really good at explaining why things are the way they are
+
+[14:34] <b2gills> we keep them separate because they are both active projects
+
+[14:34] <hahainternet> johnjohn101: i'm sure he'll be pleased to hear you say that
+
+[14:34] <geekosaur> jnthn, and from that level I would say that RISC only won at the lowest level; the problem, the same one missed by the IA64 folks, is that everyone working at higher levels wants the dirty stuff hidden as much as possible, so you end up with CISC wrappers around the RISC implementations.
+
+[14:34] <Woodi> jnthn: eg. AMD vs Intel: on one calculational benchmark AMD was much better; then Intel made AES in hardware and won benchmark :) so hardware is worth it. and I think objects can be treated as some protected memory part...
+
+[14:35] <hahainternet> Woodi: it's a lot more complicated than that
+
+[14:35] <hahainternet> 'protected memory part' sounds nice and simple
+
+[14:35] <hahainternet> but if you look at the costs involved compared with more 'traditional' methods
+
+[14:35] <johnjohn101> hahainternet: i'm sure the moarvm is getting more optimized all the time?
+
+[14:35] <b2gills> The main reason for CISC on X86 is for complete backwards compatibility, it still starts up in 16bit mode for example
+
+[14:35] <hahainternet> you'll see why CPU design is in a bind
+
+[14:35] <hahainternet> johnjohn101: indeed, jnthn blogs quite regularly with impressive details
+
+[14:35] <geekosaur> (Which is almost exactly the same principle going on as hardware trap exceptions vs. software flow control exceptions. Hide/abstract away the ugly parts that have to deal with reality so higher levels can pretend it doesn't exist)
+
+[14:36] <Woodi> hahainternet: but CPU are so _bored_ in last decades ! :)
+
+[14:36] <geekosaur> Intel has CPUs that don't start in 16 bit mode now
+
+[14:36] <geekosaur> this is why they're pushing UEFI so hard
+
+[14:36] <hahainternet> Woodi: I really like the ideas behind Mill, but a lot of people who know facts about real implementations seem to think it's vapourware. I don't know enough to make a positive judgement
+
+[14:36] <geekosaur> BIOS *must* start in 16 bit. UEFI lets them start in native mode
+
+[14:37] <hahainternet> geekosaur: you know, that's a funny thing, that if someone had thought to standardise an open bios 30 or 40 years ago, the whole computing world might be very different
+
+[14:37] <hahainternet> but as it stands, every motherboard is full of a dodgy hacky version of some uefi monstrosity that barely functions and just about boots windows
+
+[14:37] <geekosaur> you might think, yes. but then that whole thing is a downright weird bit of history
+
+[14:37] <b2gills> Even more reason for me to keep old computers around
+
+[14:37] <jnthn> geekosaur: Yeah, I'd agree with that. I guess tthe place I studied compsci had ARM pretty close by, so... ;-)
+
+[14:38] <hahainternet> indeed, the clone wars is a good name :D
+
+[14:38] <Woodi> geekosaur: killing BIOS would be such bad if only UEFI wasn't OS on its own :)
+
+[14:38] <geekosaur> ...
+
+[14:38] <geekosaur> it doesn't have much choice in the matter
+
+[14:38] <geekosaur> same impedance mismatch again
+
+[14:39] <geekosaur> hahainternet: IBM never did quite understand how they managed to shape an entire industry that they neither understand nor particularly want to deal with
+
+[14:40] *** cdg joined
+[14:40] <geekosaur> the IBM PC was intended to keep Apple II and CP/M machines out of their customers' shops. instead it started a revolution which led pretty much led to the opposite of their intentions
+
+[14:40] *** dalek joined
+[14:40] *** ChanServ sets mode: +v dalek
+
+[14:41] <Woodi> geekosaur: so... PC are just too cheap ??? ;)
+
+[14:41] <geekosaur> ...a revolution which ended up being shaped very oddly because everyone followed IBM even though IBM was pushing the opposite direction, trying to prevent that revolution from disturbing their prize market
+
+[14:43] <geekosaur> well, at lleast this is a *different* impedance mismatch :) IBM had one goal: keep their fortune 50 customers, which have always been their primary market where all the real money comes from, 100% IBM
+
+[14:44] <geekosaur> from IBM's POV the small computer market standardizing on the IBM PC was an utter disaster
+
+[14:44] <b2gills> Which explains why they sold of the Thinkpad to Lenovo
+
+[14:45] <jnthn> Where those two events some decades apart? :)
+
+[14:45] <hahainternet> 8 mins 30 secs to do build moar, on an ancient overloaded core2duo
+
+[14:45] <hahainternet> that's very respectable
+
+[14:46] <Woodi> b2gills: I don't think so... IMO they know tablets are coming... same for selling disks for Hitachi
+
+[14:46] <jnthn> hahainternet: clang or gcc? :)
+
+[14:47] <hahainternet> jnthn: gcc i expect unless clang is default now
+
+[14:47] <jnthn> hahainternet: oh wait, is that for all Rakudo/NQP/Moar?
+
+[14:47] <hahainternet> debian testing, nothing special passed
+
+[14:47] <hahainternet> that's for all i believe
+
+[14:47] <geekosaur> ...and from the standpoint of "rational design" that standardization looks completely bizarre, because IBM was pushing in the direction of a closed, limited market and designing hardware toward that goal, and the small computer market then took that and built open structures around it. and IBM sticking to the older hardware compat, mostly to (a) try to get the new kids to go away and (b) to suit F50 companies actively avoiding change as disruptiv
+
+[14:47] <geekosaur> e, caused the weirdly following small computer market to build newer stuff around that older core
+
+[14:47] <jnthn> Ah, OK. I thought you meant 8 mins 30 secs just for MoarVM. :)
+
+[14:47] <jnthn> And clang (or some versions of) take forever over interp.c
+
+[14:47] <hahainternet> jnthn: tbqh that would be perfectly reasonable too, under 10 minutes for compiling a compiler is excellent
+
+[14:48] <hahainternet> i should try it on my fast machine but it's currently set for average speed, not single core performance
+
+[14:48] <hahainternet> it's fast enough regardless
+
+[14:49] <geekosaur> you see this in other areas too, OS/2 was intended to keep Windows from getting into those all-IBM F50 shops and IBM had a collective heart attack when OS/2 v3 became popular.
+
+[14:50] <jnthn> hahainternet: Nice that something is! ;)
+
+[14:50] <geekosaur> (people from back then often blame Microsoft for the documented fact that OS/2 sales figures were not published for months after its introduction, despite it flying off the shelves. But it was IBM who refused to provide the sales figures, both because they had no interest in that market and because OS2 product support was initially managed by their mainframe division, which was absolutely *terrified* by OS/2 sales to non-mainframers.)
+
+[14:50] <hahainternet> jnthn: almost everyting about perl6 is so intensely satisfying, i only wish i could write more
+
+[14:52] *** wamba left
+[14:52] <johnjohn101> woohoo, perl6 on my machine!!
+
+[14:56] *** vibha left
+[14:59] <perlpilot> johnjohn101: congratulations  :)
+
+[14:59] <geekosaur> (so then IBM went the other direction with Smalltalk and *again* lost the bet; having successfully removed it from non-IBM shops, they couldn't find anyone who could program in it any more)
+
+[15:00] <geekosaur> (which is why they're so big into Java now)
+
+[15:00] <dalek> doc: 2776b19 | (Steve Mynott)++ | doc/Language/faq.pod:
+
+[15:00] <dalek> doc: import Patrick Michaud's suggested answer as-is
+
+[15:00] <dalek> doc: review: https://github.com/perl6/doc/commit/2776b195db
+
+[15:00] <dalek> doc: 33e9753 | (Steve Mynott)++ | doc/Language/faq.pod:
+
+[15:00] <dalek> doc: simplify answers
+
+[15:00] <dalek> doc: review: https://github.com/perl6/doc/commit/33e9753ccb
+
+[15:00] <dalek> doc: 8ebe4d4 | (Steve Mynott)++ | doc/Language/faq.pod:
+
+[15:00] <dalek> doc: add another question
+
+[15:00] <dalek> doc: review: https://github.com/perl6/doc/commit/8ebe4d4dff
+
+[15:09] *** girafe joined
+[15:12] <dalek> doc: 00fb6d4 | (Brad Gilbert)++ | doc/Language/faq.pod:
+
+[15:12] <dalek> doc: s/Haskall/Haskell/
+
+[15:12] <dalek> doc: review: https://github.com/perl6/doc/commit/00fb6d474a
+
+[15:12] *** eroux joined
+[15:19] <stmuk> oops
+
+[15:20] <BrokenRobot> oops? :)
+
+[15:21] *** ssotka joined
+[15:22] <geekosaur> the typo, presumably :p
+
+[15:22] *** girafe left
+[15:25] <dalek> Inline-Perl5: 92ba648 | jnthn++ | lib/Inline/Perl5.pm6:
+
+[15:25] <dalek> Inline-Perl5: Not all control exceptions are warnings.
+
+[15:25] <dalek> Inline-Perl5: 
+
+[15:25] <dalek> Inline-Perl5: This was potentially a problem before, and is certainly one now that
+
+[15:25] <dalek> Inline-Perl5: return is done as a control exception too.
+
+[15:25] <dalek> Inline-Perl5: review: https://github.com/niner/Inline-Perl5/commit/92ba648bf9
+
+[15:25] <dalek> Inline-Perl5: 081597d | lizmat++ | lib/Inline/Perl5.pm6:
+
+[15:25] <dalek> Inline-Perl5: Merge pull request #64 from jnthn/master
+
+[15:25] <dalek> Inline-Perl5: 
+
+[15:25] <dalek> Inline-Perl5: Not all control exceptions are warnings.
+
+[15:25] <dalek> Inline-Perl5: review: https://github.com/niner/Inline-Perl5/commit/081597dfed
+
+[15:43] *** huggable joined
+[15:44] *** wnh_ joined
+[15:46] *** donaldh joined
+[15:47] *** domidumont left
+[15:50] *** wamba joined
+[15:51] *** AlexDaniel left
+[15:54] <BooK> ok, I'm stupid: given @a and @b, how do I do the perl6 equivalent of push @a, @b
+
+[15:55] <moritz> @a.append(@b)
+
+[15:55] <perlpilot> @a.append: @b
+
+[15:55] <BooK> I end up with [ 1,2, (3,4) ] when I really want [1,2,3,4]
+
+[15:55] *** revdiablo joined
+[15:56] *** setty1 joined
+[15:56] <BrokenRobot> my @a = ^2; my @b = ^4; @a.append: @b; say @a; @a.push: @b; say @a
+
+[15:56] <BrokenRobot> m: my @a = ^2; my @b = ^4; @a.append: @b; say @a; @a.push: @b; say @a
+
+[15:56] <camelia> rakudo-moar 5ca43c: OUTPUT«[0 1 0 1 2 3]␤[0 1 0 1 2 3 [0 1 2 3]]␤»
+
+[15:56] <perlpilot> BooK: you could also do. @a.push: |@b
+
+[15:56] <BrokenRobot> BooK: ^ .push adds single-item 
+
+[15:58] <perlpilot> BooK: or "append @a, @b"  or "push @a,|@b" if you like that syntax.
+
+[16:00] *** zakharyas left
+[16:01] *** yqt left
+[16:04] <perlpilot> overheard in conversation at $work just now:  A: What we need to do is re-write <thing> in Perl 6.  B: I would be so happy with that!
+
+[16:05] <BrokenRobot> :o
+
+[16:05] <perlpilot> the only thing preventing that from happening seems to be that Rakudo isn't quite fast enough.
+
+[16:05] <BrokenRobot> Was person B you? :)
+
+[16:05] <perlpilot> no, I was not in this conversation.
+
+[16:05] <perlpilot> (But I would be happy if we rewrote stuff in Perl 6)
+
+[16:06] *** khw joined
+[16:09] *** yqt joined
+[16:09] <mst> perlpilot: if it's currently perl5, throw Moops at it to get as much shiny as is safe on the old VM
+
+[16:10] <Xliff> I wanna work at the same $work as perlpilot.
+
+[16:10] <perlpilot> mst: We're already using Moops and it's Moops weirdness that's causing problems.
+
+[16:10] <mst> ah
+
+[16:11] <mst> personally, I've been sticking with Moo+Type::Tiny+(maybe)Function::paramaters
+
+[16:11] <mst> perlpilot: also, I don't recall anybody asking on any of the relevant IRC channels about this
+
+[16:11] <mst> perlpilot: maybe you should teach your coworkers that irc.perl.org exists
+
+[16:11] <perlpilot> they know, they just don't IRC much
+
+[16:12] <mst> so you're having problems with weirdness in a module and ignoring the support channels in favour of rewriting it in a different language
+
+[16:12] <perlpilot> practically every chance I get I mention to them that IRC is an excellent resource though
+
+[16:12] <mst> the fact that it might end up as perl6 is the only part of this story that isn't stupid :P
+
+[16:12] <BooK> oh |
+
+[16:13] <BooK> so, I managed to fix my code, but it does not look good yet
+
+[16:13] <BooK> at least the 12000 test pass \o/
+
+[16:15] *** domidumont joined
+[16:19] *** Emeric1 joined
+[16:21] *** Emeric left
+[16:21] *** Emeric1 is now known as Emeric
+
+[16:23] *** eroux left
+[16:27] <dalek> doc: adf23cb | (Steve Mynott)++ | doc/Language/glossary.pod:
+
+[16:27] <dalek> doc: another definition for MoarVM
+
+[16:27] <dalek> doc: review: https://github.com/perl6/doc/commit/adf23cbfba
+
+[16:28] *** rkr joined
+[16:36] *** AlexDaniel joined
+[16:36] *** Emeric1 joined
+[16:37] <BrokenRobot> m: say 1+\\i
+
+[16:37] <camelia> rakudo-moar 5ca43c: OUTPUT«2␤»
+
+[16:39] *** Emeric left
+[16:39] *** Emeric1 is now known as Emeric
+
+[16:39] *** Emeric left
+[16:42] *** donaldh left
+[16:47] *** araujo__ left
+[16:49] <AlexDaniel> perlpilot: I don't think that |@b is a good idea
+
+[16:50] <BrokenRobot> How come?
+
+[16:50] <timotimo> if @b is big, you might run into trouble
+
+[16:50] <AlexDaniel> ↑ that
+
+[16:50] <BrokenRobot> Ah
+
+[16:50] <timotimo> m: my @a = 1 xx 1024; my @b; @b.append: |@a
+
+[16:50] <camelia> rakudo-moar 5ca43c: ( no output )
+
+[16:50] <timotimo> m: my @a = 1 xx 1024; my @b; @b.append: |@a; say @b.elems
+
+[16:50] <camelia> rakudo-moar 5ca43c: OUTPUT«1024␤»
+
+[16:50] <timotimo> m: my @a = 1 xx 9999; my @b; @b.append: |@a; say @b.elems
+
+[16:50] <camelia> rakudo-moar 5ca43c: OUTPUT«9999␤»
+
+[16:50] <timotimo> m: my @a = 1 xx 999999; my @b; @b.append: |@a; say @b.elems
+
+[16:50] <camelia> rakudo-moar 5ca43c: OUTPUT«Too many arguments in flattening array.␤  in block <unit> at <tmp> line 1␤␤»
+
+[16:50] <timotimo> m: my @a = 1 xx 99999; my @b; @b.append: |@a; say @b.elems
+
+[16:50] <camelia> rakudo-moar 5ca43c: OUTPUT«Too many arguments in flattening array.␤  in block <unit> at <tmp> line 1␤␤»
+
+[16:50] <AlexDaniel> /o\ ↑ that
+
+[16:50] <BrokenRobot> 0.o
+
+[16:51] <timotimo> oh, sorry, you meant @b.push: |@a
+
+[16:51] <timotimo> but it's the same deal
+
+[16:53] <AlexDaniel> https://github.com/perl6/doc/issues/602
+
+[16:54] *** donaldh joined
+[16:57] *** buharin joined
+[17:07] <perlpilot> AlexDaniel: For this specific case, it may not be a good idea  :)  But it's good for people to know about the tool/technique so that they will use it and we (as a community) can figure out "best practices" or if the code can/should be improved, etc.
+
+[17:08] *** firstdayonthejob joined
+[17:08] <perlpilot> AlexDaniel++ that was a very good point though
+
+[17:10] *** girafe joined
+[17:13] <perlpilot> AlexDaniel: btw, it looks like any number bigger than 65534 will cause that message
+
+[17:16] <BrokenRobot> m: say |(1 xx 65555)
+
+[17:16] <camelia> rakudo-moar 5ca43c: OUTPUT«Too many arguments in flattening array.␤  in block <unit> at <tmp> line 1␤␤»
+
+[17:16] <BrokenRobot> m: say (1 xx 65555).Slip
+
+[17:16] <camelia> rakudo-moar 5ca43c: OUTPUT«(1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 1 ...)␤»
+
+[17:17] <BrokenRobot> I though | and .Slip were the same?
+
+[17:17] <BrokenRobot> s/though/thought/;
+
+[17:17] *** rurban_ left
+[17:20] *** andreoss left
+[17:20] *** donaldh left
+[17:22] *** Actualeyes left
+[17:25] *** mr-foobar left
+[17:25] *** BrokenRobot joined
+[17:29] *** rindolf left
+[17:34] *** rindolf joined
+[17:36] *** rkr left
+[17:38] *** yqt left
+[17:39] <timotimo> not in argument lists
+
+[17:45] *** acrussell left
+[17:47] *** sufrostico left
+[17:52] *** domidumont left
+[17:54] <RubioTerra> Someone: Is there a shorter way to write 'flat @a Z @b'?
+
+[17:55] <BrokenRobot> looks pretty short as it is :P
+
+[17:56] <RubioTerra> yes... but you know, tmtowtdi
+
+[17:57] <RubioTerra> I imagined something like '@a |Z @b' could exist
+
+[17:58] <BrokenRobot> my @a = ^4; my @b = ^6; say @a Z&[prefix:<|>] @b
+
+[17:58] <BrokenRobot> m: my @a = ^4; my @b = ^6; say @a Z&[prefix:<|>] @b
+
+[17:58] <camelia> rakudo-moar 5ca43c: OUTPUT«5===SORRY!5=== Error while compiling <tmp>␤Two terms in a row␤at <tmp>:1␤------> 3 = ^4; my @b = ^6; say @a Z&[prefix:<|>]7⏏5 @b␤    expecting any of:␤        infix␤        infix stopper␤        postfix␤        statement end␤   …»
+
+[17:58] <nine> jnthn: how's the atmosphere in Chechia now? :)
+
+[17:59] *** fhorck joined
+[18:01] <BrokenRobot> m: sub m($a) { say $a.WHAT }; my @a = ^10; m @a.Slip; m |@a
+
+[18:01] <camelia> rakudo-moar 5ca43c: OUTPUT«(Slip)␤Too many positionals passed; expected 1 argument but got 10␤  in sub m at <tmp> line 1␤  in block <unit> at <tmp> line 1␤␤»
+
+[18:02] <BrokenRobot> I see
+
+[18:04] *** buharin left
+[18:05] <BrokenRobot> m: my @a = ^4; my @b = ^6; say {|@_}(@a Z @b)
+
+[18:05] <camelia> rakudo-moar 5ca43c: OUTPUT«(0 0 1 1 2 2 3 3)␤»
+
+[18:05] <BrokenRobot> RubioTerra: that's the shortest I could think of and it's not shorter and certainly not clearer than flat :P
+
+[18:06] <BrokenRobot> There's Z|, but it makes junctions
+
+[18:06] *** cdg left
+[18:07] <RubioTerra> BrokenRobot: thanks
+
+[18:07] <RubioTerra> flat is the way to go, then
+
+[18:09] <AlexDaniel> m: my @a = <a b c>; my @b = <1 2 3>; .say for (@a Z@b).map(*.Slip)
+
+[18:09] <camelia> rakudo-moar 5ca43c: OUTPUT«a␤1␤b␤2␤c␤3␤»
+
+[18:09] <AlexDaniel> look ma
+
+[18:09] <AlexDaniel> no flat
+
+[18:10] *** cpage_ left
+[18:10] <BrokenRobot> But it's not shorter :)
+
+[18:11] <BrokenRobot> Also, how come hyper instead of .map doesn't work?
+
+[18:11] <BrokenRobot> m: my @a = ^4; my @b = ^6; say (@a Z @b)».Slip
+
+[18:11] <camelia> rakudo-moar 5ca43c: OUTPUT«((0 0) (1 1) (2 2) (3 3))␤»
+
+[18:12] <BrokenRobot> m: my @a = ^4; my @b = ^6; say (@a Z @b)».Slip[0].WHAT
+
+[18:12] <camelia> rakudo-moar 5ca43c: OUTPUT«(Slip)␤»
+
+[18:12] <BrokenRobot> :S
+
+[18:12] <BrokenRobot> m: my @a = ^4; my @b = ^6; say @ = (@a Z @b)».Slip
+
+[18:12] <camelia> rakudo-moar 5ca43c: OUTPUT«[(0 0) (1 1) (2 2) (3 3)]␤»
+
+[18:13] *** buharin joined
+[18:18] <BrokenRobot> bisect: my @a = ^4; my @b = ^6; (@a Z @b)».Slip[0].^name eq 'Slip' or die
+
+[18:18] <bisectable> BrokenRobot: on both starting points the exit code is 0 and the output is identical as well
+
+[18:19] <BrokenRobot> .oO( how the hell does it check so fast... )
+
+[18:21] <BrokenRobot> m: my @a = ^3; @a[1] = slip 2, 3; say @a
+
+[18:21] <camelia> rakudo-moar 5ca43c: OUTPUT«[0 (2 3) 2]␤»
+
+[18:21] <BrokenRobot> Oh well. I guess it makes sense
+
+[18:25] <jnthn> nine: It got unexpectedly better ;-)
+
+[18:25] <BrokenRobot> m: my @a[4]; @a = (2, 3,4); @a[3] = slip(2, 3); say @a
+
+[18:25] <camelia> rakudo-moar 5ca43c: OUTPUT«This type cannot unbox to a native integer: P6opaque, Array␤  in block <unit> at <tmp> line 1␤␤»
+
+[18:25] <[Coke]> BrokenRobot: in that case, it only had to run 2 copies, both of which are already compiled.
+
+[18:29] <AlexDaniel> yes
+
+[18:30] <BrokenRobot> Well, the two checks on my box take .9s to run, add network latency, and it's kinda creepy that bot replies like... instantly :P
+
+[18:30] *** domidumont joined
+[18:31] <AlexDaniel> 0.172s to run each
+
+[18:32] <BrokenRobot> show off :P
+
+[18:32] <AlexDaniel> I'm also thinking about making it run some code for each commit
+
+[18:33] <AlexDaniel> that would take like 30s for the latest 1000 commits or so
+
+[18:33] *** cpage_ joined
+[18:35] *** cdg joined
+[18:35] <AlexDaniel> BrokenRobot: actually, it is possible to make it twice faster if I run these checks in parallel :D
+
+[18:36] <AlexDaniel> if it was written in perl 6 then it would have been a very easy change…
+
+[18:37] <AlexDaniel> BrokenRobot: by the way, how is your IRC::Client module going?
+
+[18:37] <BrokenRobot> heh
+
+[18:38] <BrokenRobot> AlexDaniel: I think I'm at a point where I need to figure out how to reconnect when one of the servers got disconnected without the client specifically .quit()ting
+
+[18:38] <BrokenRobot> And once that's solved, the rest is easy.
+
+[18:38] <BrokenRobot> Other than tests... tests are annoying
+
+[18:42] <BrokenRobot> So maybe after the longweekend it'll be done
+
+[18:42] <BrokenRobot> (Jul 3)
+
+[18:42] <AlexDaniel> BrokenRobot: well, just get the goddamn API stable and I'll be your travis
+
+[18:43] <AlexDaniel> :)
+
+[18:44] <hoelzro> a peculiarity with sets bit me the other day, and I thought I'd share it with the channel to see if we could have a warning or error or even just educational material to avoid it
+
+[18:45] *** avenj left
+[18:45] <hoelzro> I was tracking bad nodes in a grid in a set (my %bad-nodes = Set.new([3, 7], [4, 10]))
+
+[18:45] <hoelzro> when I wanted to know if a node was bad, I did this: say 'bad' if %bad-nodes{[$x, $y]}:exists;
+
+[18:45] <hoelzro> which did not DWIM
+
+[18:46] <hoelzro> it asked the set if $x or $y was in the set, but since it returns a non-empty list of (False, False), that's always truthy, so *every* node looked bad
+
+[18:46] <hoelzro> I corrected it to %bad-nodes{$[$x, $y]}:exists, but I'm wondering if there's something we could do to make things easier if users run across this
+
+[18:57] *** cdg left
+[18:58] *** avenj joined
+[19:01] *** kid51 joined
+[19:04] *** avenj left
+[19:07] *** yqt joined
+[19:09] *** domidumont left
+[19:18] *** RubioTerra left
+[19:18] <BrokenRobot> Well, it's a slice. There's probably no way to know whether $user wanted a slice or they're checking for a key that's an array
+
+[19:19] <BrokenRobot> m: my %bad-nodes = Set.new(3, 7, [4, 10]); dd %bad-nodes<3 7>:exists;
+
+[19:19] <camelia> rakudo-moar 5ca43c: OUTPUT«(Bool::True, Bool::True)␤»
+
+[19:19] <BrokenRobot> m: my %bad-nodes = Set.new(3, 7, [4, 10]); my @wat = 3, 7; dd %bad-nodes{@wat}:exists;
+
+[19:19] <camelia> rakudo-moar 5ca43c: OUTPUT«(Bool::True, Bool::True)␤»
+
+[19:19] *** avenj joined
+[19:25] *** TEttinger joined
+[19:33] *** darutoko left
+[19:36] *** domidumont joined
+[19:42] <hoelzro> it's odd to me that looking for the existence of a slice is always truthy
+
+[19:43] *** huggable left
+[19:43] <hoelzro> I'm wondering if something like (%h{$k_a}:exists, %h{$k_b}:exists) but any(%h{$k_a}:exists, %h{$k_b}:exists) would be a better result for slice existence checks
+
+[19:44] *** domidumont left
+[19:47] <BrokenRobot> m: my $res = (False, False) but any(False, False); "cool".say if $res
+
+[19:47] <camelia> rakudo-moar 5ca43c: OUTPUT«Unexpected named parameter 'value' passed␤  in block <unit> at <tmp> line 1␤␤»
+
+[19:47] <BrokenRobot> interesting
+
+[19:48] <BrokenRobot> m: my $x = 1 but Junction
+
+[19:48] <camelia> rakudo-moar 5ca43c: OUTPUT«Cannot mix in non-composable type Junction into object of type Int␤  in block <unit> at <tmp> line 1␤␤»
+
+[19:49] * geekosaur doesn't even know what that would mean...
+
+[19:52] *** rurban_ joined
+[19:53] <hoelzro> huh, that's...neat.
+
+[19:54] <b2gills> m: my $res = (False, False) but role { method Bool {so self.any} }; say $res; say so $res
+
+[19:54] <camelia> rakudo-moar 5ca43c: OUTPUT«(False False)␤False␤»
+
+[19:54] <Hotkeys> m: say "a̩".uninames
+
+[19:54] <camelia> rakudo-moar 5ca43c: OUTPUT«(LATIN SMALL LETTER A COMBINING VERTICAL LINE BELOW)␤»
+
+[19:55] <Hotkeys> is there a way to split this not by chars but by codes ^ 
+
+[19:55] *** dha joined
+[19:55] <Hotkeys> m: say "a̩".comb.elems
+
+[19:55] <camelia> rakudo-moar 5ca43c: OUTPUT«1␤»
+
+[19:55] <b2gills> m: say "a̩".NFC
+
+[19:55] <camelia> rakudo-moar 5ca43c: OUTPUT«NFC:0x<0061 0329>␤»
+
+[19:55] <b2gills> m: say "a̩".NFC».chr
+
+[19:55] <camelia> rakudo-moar 5ca43c: OUTPUT«(a ̩)␤»
+
+[19:56] *** jjido joined
+[19:56] <dha> So, install tools. would it be safe to say panda is the main install tool (somewhat similar to P5's cpan) while zef and redpanda are somewhat like cpanminus, but not as far along as panda?
+
+[19:57] <stmuk> dha: not quite
+
+[19:57] *** ufobat left
+[19:57] <dha> ok. How should I revise that?
+
+[19:58] * dha will be mentioning these things briefly in a talk at YAPC::NA
+
+[19:58] <stmuk> well I'd say panda was the main install tool and zef was the newcomer with a number of better features and more system support
+
+[19:59] <stmuk> zef for example allows modules to be uninstalled whereas panda doesn't
+
+[20:00] <stmuk> conversely, or at least last time I tried, panda had a better search
+
+[20:00] <dha> I do note that zef's description is "It's like [cpanm] wearing high heels with a tracksuit" :-)
+
+[20:01] <stmuk> I think zef tends to work better on windows as well
+
+[20:01] <dha> Ah. good to know.
+
+[20:01] <stmuk> panda comes with star
+
+[20:02] <[Coke]> panda was first to market; I don't think we as a community have really revisited things since.
+
+[20:02] <[Coke]> I tend to mainly use panda (because star), but zef seems good.
+
+[20:02] <stmuk> zef is perhaps more agressively developed and marketed
+
+[20:05] <stmuk> I don't know anything about redpanda
+
+[20:05] <dha> Ok, so panda - original install tool, included int R*. zef - up and coming competitor, may work better on windows.
+
+[20:06] <dha> redpanda - who knows?
+
+[20:06] <dha> s/int/in/
+
+[20:07] <Hotkeys> I've got a file with a bunch of lone combining characters and the grapheme stuff makes it a pain to split
+
+[20:07] <Hotkeys> jeepers
+
+[20:07] <stmuk> redpanda seems a new very small module installer
+
+[20:07] <Hotkeys> (because they combine with spaces)
+
+[20:07] <AlexDaniel> where's huggable again
+
+[20:07] <dha> ok, so... redpanda - lightweight installer
+
+[20:08] <AlexDaniel> m: say “p̷̢̖̤̙̬̞̙͉͕̲̺̮͎͖̆̄͒͛́͊̋ͣ͢ͅe͙͕̖͌͛̐ͨ̍ͬͮ̑̊̕͟​̥̜͚͕̥̮̹͓̥͇̯̫̺̯̹r̅ͪ̌̑̾̄ͬ̈҉̨̩̬̤̭̰̮͎̹̦̩̮̞̘̳͜͢​͈̩̠͉ḷ̡̦̳̹̻̪͇͈͕̼̙̦̞̝̬͎͚̙̿͌ͨ̽̂́6̊ͣ͌͋ͦͣ҉̛͓͔͘​̤̞̤͇͇̗̣̖͔͓̗̗͓”.comb.map(*.NFD[0].chr).join
+
+[20:08] <camelia> rakudo-moar 5ca43c: OUTPUT«pe​̥r​͈l6​̤␤»
+
+[20:08] <dha> I'm now wondering if I need to bother with this much detail.
+
+[20:09] <AlexDaniel> bisect: say “p̷̢̖̤̙̬̞̙͉͕̲̺̮͎͖̆̄͒͛́͊̋ͣ͢ͅe͙͕̖͌͛̐ͨ̍ͬͮ̑̊̕͟​̥̜͚͕̥̮̹͓̥͇̯̫̺̯̹r̅ͪ̌̑̾̄ͬ̈҉̨̩̬̤̭̰̮͎̹̦̩̮̞̘̳͜͢​͈̩̠͉ḷ̡̦̳̹̻̪͇͈͕̼̙̦̞̝̬͎͚̙̿͌ͨ̽̂́6̊ͣ͌͋ͦͣ҉̛͓͔͘​̤̞̤͇͇̗̣̖͔͓̗̗͓”.comb.map(*.NFD[0].chr).join
+
+[20:09] <bisectable> AlexDaniel: on both starting points the exit code is 0 and the output is identical as well
+
+[20:09] <AlexDaniel> okay
+
+[20:09] <AlexDaniel> then I'm pasting the wrong thing
+
+[20:10] <stmuk> I like the comment in https://github.com/tadzik/Module-Toolkit/blob/master/lib/Module/Toolkit/Installer.pm
+
+[20:10] <stmuk> which is used in redpanda
+
+[20:11] *** huggable joined
+[20:11] <BrokenRobot> huggable, there
+
+[20:11] <huggable> BrokenRobot, nothing found
+
+[20:12] <BrokenRobot> I like zef over panda. feel more solid
+
+[20:15] <BrokenRobot> AlexDaniel, u mad bro? http://m.imgur.com/twvA3Qs
+
+[20:15] <tadzik> :)
+
+[20:16] <dha> Oh good that random crap isn't showing up *just* in my client...
+
+[20:16] <AlexDaniel> well, I was trying to do this: https://irclog.perlgeek.de/perl6/2015-11-12#i_11522549
+
+[20:17] <AlexDaniel> but it does not seem to work as nicely nowadays
+
+[20:17] <dha> Anyway, I don't need to really get into details on the install options. It's not actually a P6 talk, per se.
+
+[20:20] <Hotkeys> is there an easy way to join non-whitespace chars in an array into strings?
+
+[20:21] *** rurban_ left
+[20:21] <Hotkeys> like if I have ['a', 'b', ' ', '\t', 'c', 'd' ...]
+
+[20:22] <BrokenRobot> map with two vars?
+
+[20:22] <BrokenRobot> I'd write but coding on a phone keyboard is night mare :p
+
+[20:22] <Hotkeys> I want ["ab", "cd" ...]
+
+[20:22] <Hotkeys> btw
+
+[20:22] <Hotkeys> not "abcd"
+
+[20:22] <Hotkeys> BrokenRobot: fair :p
+
+[20:22] *** kaare_ left
+[20:23] <BrokenRobot> rotor + map
+
+[20:24] <Hotkeys> the number of non-whitespace characters is arbitrary though
+
+[20:24] <Hotkeys> it could be ['a', 'b', 'c', ' ', 'd', '\t', '\t', ' ', 'e', 'f']
+
+[20:25] <BrokenRobot> join, split on \s+
+
+[20:25] <Hotkeys> I have lone combining characters in there otherwise I would
+
+[20:25] <Hotkeys> hence the previous question about splitting those up :p
+
+[20:26] <BrokenRobot> :p
+
+[20:26] <Hotkeys> that was my initial plan
+
+[20:26] <Hotkeys> but then p6 has to make everything use graphemes
+
+[20:26] <Hotkeys> so
+
+[20:26] <AlexDaniel> maybe you want bufs instead?
+
+[20:26] <Hotkeys> can you split those like a string?
+
+[20:27] <AlexDaniel> huggable: dunno
+
+[20:27] <huggable> AlexDaniel, ¯\_(ツ)_/¯
+
+[20:27] <AlexDaniel> Bufs are Stringy but that does not give you .split, I believe
+
+[20:27] <BrokenRobot> I'd likely just use a loop and concatente into a temp var that I'd pusb into a rresult array every time I get to whitespace
+
+[20:28] <AlexDaniel> BrokenRobot: ewww!
+
+[20:28] <AlexDaniel> but yes
+
+[20:29] <BrokenRobot> huggable, dunno
+
+[20:29] <huggable> BrokenRobot, ¯\_(ツ)_/¯
+
+[20:29] <BrokenRobot> :)
+
+[20:30] <Hotkeys> That was my other idea BrokenRobot but I was just wondering if there was a better way
+
+[20:30] <Hotkeys> I guess I'll go with that
+
+[20:31] <b2gills> bisect: exit “p̷̢̖̤̙̬̞̙͉͕̲̺̮͎͖̆̄͒͛́͊̋ͣ͢ͅe͙͕̖͌͛̐ͨ̍ͬͮ̑̊̕͟​̥̜͚͕̥̮̹͓̥͇̯̫̺̯̹r̅ͪ̌̑̾̄ͬ̈҉̨̩̬̤̭̰̮͎̹̦̩̮̞̘̳͜͢​͈̩̠͉ḷ̡̦̳̹̻̪͇͈͕̼̙̦̞̝̬͎͚̙̿͌ͨ̽̂́6̊ͣ͌͋ͦͣ҉̛͓͔͘​̤̞̤͇͇̗̣̖͔͓̗̗͓”.comb.map(*.NFD[0].chr).join eq 'perl6'
+
+[20:31] <bisectable> b2gills: on both starting points the exit code is 0 and the output is identical as well
+
+[20:32] <b2gills> m: say “p̷̢̖̤̙̬̞̙͉͕̲̺̮͎͖̆̄͒͛́͊̋ͣ͢ͅe͙͕̖͌͛̐ͨ̍ͬͮ̑̊̕͟​̥̜͚͕̥̮̹͓̥͇̯̫̺̯̹r̅ͪ̌̑̾̄ͬ̈҉̨̩̬̤̭̰̮͎̹̦̩̮̞̘̳͜͢​͈̩̠͉ḷ̡̦̳̹̻̪͇͈͕̼̙̦̞̝̬͎͚̙̿͌ͨ̽̂́6̊ͣ͌͋ͦͣ҉̛͓͔͘​̤̞̤͇͇̗̣̖͔͓̗̗͓”.chars
+
+[20:32] <camelia> rakudo-moar 5ca43c: OUTPUT«11␤»
+
+[20:32] <BrokenRobot> Hotkeys, there's probably a way with ritor + map, but it's hard for me to visualize it in my head :)
+
+[20:33] <AlexDaniel> m: my @a = [‘a’, ‘b’, ‘c’, ‘ ’, ‘d’, “\t”, “\t”, ‘ ’, ‘e’, ‘f’]; say @a.categorize: { state $w = 0; if /\w/ { $w } else { $w++; Empty } }
+
+[20:33] <camelia> rakudo-moar 5ca43c: OUTPUT«{0 => [a b c], 1 => [d], 4 => [e f]}␤»
+
+[20:34] <AlexDaniel> what about this? ↑
+
+[20:34] <BrokenRobot> :o
+
+[20:34] <AlexDaniel> stupid, I know, but…
+
+[20:35] <masak> .categorize *and* state !?
+
+[20:35] <AlexDaniel> :P
+
+[20:36] *** michiamodiego joined
+[20:37] *** buharin left
+[20:38] <michiamodiego> Hello, it has been a while since I used irc last time... To make everything more complicated and harder I am using windows phone
+
+[20:38] <dha> We admire your self-abuse of spartan proportions. :-)
+
+[20:38] <michiamodiego> Anyway my question is what is the command to show all the user in the room
+
+[20:38] <michiamodiego> Argghhh
+
+[20:40] <masak> michiamodiego: /names
+
+[20:41] *** pecastro left
+[20:42] <michiamodiego> Thanks ;)
+
+[20:42] *** juikuen joined
+[20:42] *** juikuen left
+[20:43] *** michiamodiego left
+[20:44] *** pecastro joined
+[20:46] *** michiamodiego joined
+[20:46] *** michiamodiego left
+[20:54] *** wamba left
+[20:59] <jnthn> ...apparently Windows phone can't handle that many names :P
+
+[20:59] *** michiamodiego joined
+[20:59] *** michiamodiego left
+[21:00] <masak> ETOOMANYNAMES
+
+[21:00] *** skids left
+[21:04] *** rindolf left
+[21:05] <MadcapJake> How do you pass NULL for a native sub's callback argument?
+
+[21:06] <jnthn> Just pass a type object
+
+[21:06] <jnthn> Callable perhaps
+
+[21:09] *** cpage_ left
+[21:09] *** pdcawley joined
+[21:10] *** cpage_ joined
+[21:12] <MadcapJake> is it possible to represent variadic functions with NativeCall?
+
+[21:13] <jnthn> Not yet, I'm afraid.
+
+[21:13] <jnthn> dyncall supports it, but nobody took it upon themselves to wire it up to a slurpy sig yet
+
+[21:14] *** AlexDaniel left
+[21:16] <MadcapJake> jnthn: what about va_list?
+
+[21:17] *** cdg joined
+[21:18] <jnthn> MadcapJake: Ummm.... :) I really don't know, I mean, technically I guess you can make that up somehow. But I'm not convinced it's going to be very portable.
+
+[21:18] <jnthn> *fake that up
+
+[21:21] <jnthn> (In fact, I'm fairly convinced it won't be. :))
+
+[21:22] <MadcapJake> bummer
+
+[21:24] * MadcapJake never realized dyncall was how NativeCall worked
+
+[21:24] *** donaldh joined
+[21:24] <jnthn> Under the hood.
+
+[21:25] <MadcapJake> right! cool stuff!
+
+[21:26] <jnthn> I just glanced the ABI docs for va_list and, well, tbh, I suspect anyone who can get that to work is probably at least as capable of getting the real varargs stuff wired up anyway. :P
+
+[21:26] *** jjido left
+[21:26] <MadcapJake> hehe yeah see I barely even understand how va_list/va_arg works :S
+
+[21:26] * MadcapJake is planning on taking http://mooc.fi/courses/2016/aalto-c/en/ to improve his C-fu
+
+[21:26] <jnthn> Cool!
+
+[21:27] <jnthn> I've never tried to use something like NativeCall without knowing C (by the time I ever used such a thing I was already comfortable programming C)...but I can imagine it's kinda confusing.
+
+[21:29] *** donaldh left
+[21:29] <MadcapJake> see my only exposure to C has been through writing NativeCall wrappers :D
+
+[21:30] *** donaldh joined
+[21:30] *** donaldh left
+[21:30] <jnthn> :D
+
+[21:30] <MadcapJake> the things that confuse me the most are macros and typedefs
+
+[21:30] <MadcapJake> oh and typecasts :)
+
+[21:31] <MadcapJake> AND function types (or whatever those are called)
+
+[21:31] <MadcapJake> basically the whole "C lets you pretend anything is anything" philosophy :D
+
+[21:31] <jnthn> Yeah, that's why C is totally awesome and totally awful
+
+[21:32] <jnthn> I mean, if you're writing a garbage collector you're in luck.
+
+[21:32] <jnthn> But the rest of the time... :-)
+
+[21:33] <jnthn> Macros *are* confusing 'cus they're a preprocessing step and so "don't exist" by runtime, meaning they're a nightmare to deal with in anything like NativeCall
+
+[21:33] <MadcapJake> yeah and C code makes you jump around so much just to figure out a line 4+ jumps ago
+
+[21:33] * kmwallio works with C daily and has no clue what he's doing
+
+[21:34] <MadcapJake> lol
+
+[21:34] <jnthn> Function types just have syntax that I find near impossible to remember, and I'm not sure I'm alone in finding them that way. :)
+
+[21:35] <MadcapJake> yeah I think C overuses parentheses e.g., type casts, function type names, order of ops, arg lists, probably more that I don't even know about
+
+[21:36] *** Zoffix left
+[21:37] <geekosaur> so C's parentheses are perl6's colons :p
+
+[21:38] *** trnh joined
+[21:38] <jnthn> :P
+
+[21:38] <jnthn> I quite enjoy writing C, though.
+
+[21:39] <jnthn> Reminds me sorta-ish how computers work (or at least, better than anything else I work in). :)
+
+[21:39] *** jjido joined
+[21:40] *** pdcawley left
+[21:41] <MadcapJake> yeah I'm thinking I will enjoy it more once I'm more comfortable.  I think the biggest difficulty for me is that I've learned all these languages that have C-like syntax but basically share nothing of what makes C so unique
+
+[21:41] *** AlexDaniel joined
+[21:42] *** michiamodiego joined
+[21:42] *** michiamodiego left
+[21:42] <jnthn> Yeah, having to manage memory yourself - and having such a raw view of it - is quite a difference.
+
+[21:45] <Xliff> I don't know why, but I've spent most of my perl6 career (if you can call it that) dealing with NativeCall
+
+[21:45] <MadcapJake> well right, I've got it in my head (from all these c-like syntax languages) that a string is a string, but in C, there's really no such thing iiuc, you have to think about all data from the perspective of memory rather than what you the data  *is* (not sure if I'm getting across what I'm thinking)
+
+[21:45] <Xliff> coz.... XML::LibXML <- current project
+
+[21:46] <Xliff> I don't know how I got roped into that, but lassoed, I did!
+
+[21:46] <Xliff> I think MadcapJake called me insane.
+
+[21:46] <Xliff> Tjat'
+
+[21:46] *** jjido left
+[21:46] <Xliff> er... That's probably not far from the truth.
+
+[21:47] <jnthn> I certainly find C makes me think my data structures through a good bit.
+
+[21:48] <jnthn> Though the brain melt only gets really bad for me when I start doing lock-free concurrent ones.
+
+[21:49] <MadcapJake> jnthn: see in some ways I think many languages (dynamic/scripting langauges esp.) let you get away with thinking about data structure barely at all (and if you do need to, you can just import a library that does the heavy thinking for you)
+
+[21:49] <MadcapJake> but that's the nature of abstraction, I suppose
+
+[21:51] <jnthn> I think data structures still matter, but yeah, I'm certainly more inclined to gradually evolve them through use-cases in a dynlang than sit down and carefully up-front design them.
+
+[21:51] <jnthn> I think that's as much a function of refactoring efficiency than anything else, though.
+
+[21:52] *** patrickz left
+[21:53] <MadcapJake> I guess my problem is that, being self-taught, I've never really learned data structures.  So I've just had to grasp at the little bits that show up in other materials
+
+[21:56] * MadcapJake wishes he could go back and get a programming degree :\
+
+[21:56] * MadcapJake is off to dinner
+
+[21:57] <jnthn> Enjoy dinner :)
+
+[21:59] <stmuk> RabidGravy: that Coding Academy 2016 UK magazine article is from http://www.mtsoukalos.eu/Perl-6-LXF-206
+
+[21:59] *** jack_rabbit joined
+[22:00] *** setty1 left
+[22:01] <RabidGravy> cool
+
+[22:05] <stmuk> it appears to be legally available for free at https://ia601303.us.archive.org/7/items/Linux_Format_UK_January_2016/Linux_Format_UK_January_2016.pdf
+
+[22:05] *** girafe left
+[22:06] <stmuk> page 84 .. I could have saved myself 13 quid :/
+
+[22:08] *** stevieb joined
+[22:09] *** fhorck_ joined
+[22:10] *** fhorck_ left
+[22:10] *** fhorck left
+[22:19] <stmuk> oh its 2013.12/parrot he is using
+
+[22:21] *** addison joined
+[22:40] *** hankache joined
+[22:46] *** TEttinger left
+[22:51] *** sortiz joined
+[22:51] <sortiz> \o #perl6
+
+[22:58] *** hankache left
+[23:07] *** firstdayonthejob left
+[23:08] *** trnh left
+[23:10] *** dha left
+[23:14] <stevieb> m: (1).WHAT.perl
+
+[23:14] <camelia> rakudo-moar 5ca43c: ( no output )
+
+[23:15] <stevieb> m: (1).WHAT.perl.say
+
+[23:15] <camelia> rakudo-moar 5ca43c: OUTPUT«Int␤»
+
+[23:15] <stevieb> m: (1,2,3).WHAT.perl.say
+
+[23:15] <camelia> rakudo-moar 5ca43c: OUTPUT«List␤»
+
+[23:15] <stevieb> so, a one-element list becomes an Int?
+
+[23:17] <kmwallio> m: (1,).WHAT.perl.say
+
+[23:17] <camelia> rakudo-moar 5ca43c: OUTPUT«List␤»
+
+[23:18] <stevieb> kmwallio: thanks, just found that
+
+[23:18] <stevieb> m: (1).List.perl.say
+
+[23:18] <camelia> rakudo-moar 5ca43c: OUTPUT«(1,)␤»
+
+[23:19] <stevieb> m: <a>.perl.say
+
+[23:19] <camelia> rakudo-moar 5ca43c: OUTPUT«"a"␤»
+
+[23:20] <stevieb> m:<a>.List.perl.say
+
+[23:20] <stevieb> m: <a>.List.perl.say
+
+[23:20] <camelia> rakudo-moar 5ca43c: OUTPUT«("a",)␤»
+
+[23:20] <stevieb> m: ('a',).WHAT.perl.say
+
+[23:20] <camelia> rakudo-moar 5ca43c: OUTPUT«List␤»
+
+[23:24] *** cdg left
+[23:26] *** RabidGravy left
+[23:27] <kmwallio> m: ((1) == 1).say
+
+[23:27] <camelia> rakudo-moar 5ca43c: OUTPUT«True␤»
+
+[23:27] <kmwallio> m: ((1,) == 1).say
+
+[23:27] <camelia> rakudo-moar 5ca43c: OUTPUT«True␤»
+
+[23:27] <kmwallio> m: ((1,2) == 1).say
+
+[23:27] <camelia> rakudo-moar 5ca43c: OUTPUT«False␤»
+
+[23:29] <stevieb> m: ((1,).elems == 1)).say
+
+[23:29] <camelia> rakudo-moar 5ca43c: OUTPUT«5===SORRY!5=== Error while compiling <tmp>␤Unexpected closing bracket␤at <tmp>:1␤------> 3((1,).elems == 1)7⏏5).say␤»
+
+[23:30] <stevieb> m: ((1,).elems == 1).say
+
+[23:30] <camelia> rakudo-moar 5ca43c: OUTPUT«True␤»
+
+[23:30] <stevieb> m: ((1,).so == 1).say
+
+[23:30] <camelia> rakudo-moar 5ca43c: OUTPUT«True␤»
+
+[23:39] *** stevieb left
+[23:46] *** stevieb joined
+[23:51] <timotimo> m: use NativeCall; say short
+
+[23:51] <camelia> rakudo-moar 5ca43c: OUTPUT«5===SORRY!5=== Error while compiling <tmp>␤Undeclared routine:␤    short used at line 1. Did you mean 'sort', 'spurt', 'shift'?␤␤»
+
+[23:52] <timotimo> how the F do i figure out how big a short is >_>
+
+[23:52] <timotimo> big sigh ...
+
+[23:52] <timotimo> ooooh, dwarfdump has it!
+
+[23:52] <timotimo> that's fantastic <3
+
+[23:58] *** AlexDaniel left

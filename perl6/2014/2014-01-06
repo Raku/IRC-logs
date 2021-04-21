@@ -1,0 +1,1933 @@
+[00:00] <jnthn> Well, no, the hard problem is you need to arrange an early return of the block that invoked the binder also.
+
+[00:00] <jnthn> Which probably needs a little C-level work...
+
+[00:01] <timotimo> ah, so that's something i know nothing about agani :)
+
+[00:01] <timotimo> again*
+
+[00:01] <jnthn> That's why it's not quite an LHF
+
+[00:01] <timotimo> where do i have to look to find the code that calls this specific piece of binder?
+
+[00:01] <colomon> jnthn!  \o/
+
+[00:01] <jnthn> It lives in BOOTSTRAP
+
+[00:01] <jnthn> Oh, that calls it? The moar version of Ops.nqp. That's where p6bindsig is generated from
+
+[00:02] <timotimo> OK
+
+[00:02] <jnthn> Oh, there's a non-C way...
+
+[00:02] <jnthn> Change the code-gen
+
+[00:02] <timotimo> i've done code-gen before, but not much for moar
+
+[00:02] <jnthn> If the thing p6bindsig calls returns non-null, immediately do a return_o on it.
+
+[00:02] <jnthn> Otherwise continue
+
+[00:02] <timotimo> that seems easy enough!
+
+[00:03] <jnthn> Then make the non-Junction path of the appropriate method in BOOTSTRAP return null
+
+[00:03] <jnthn> And done.
+
+[00:03] <timotimo> cool. consider it maybe perhaps done!
+
+[00:03] <jnthn> That is more robust than C hacking even if it's a couple of extra instructions...
+
+[00:03] <timotimo> o>
+
+[00:04] <timotimo> oh. is it enough to change the implementation of p6bindsig in Ops.nqp?
+
+[00:04] <timotimo> or do i have to go all the way into the QASTCompilerMAST?
+
+[00:05] <jnthn> Just in Ops.nqp
+
+[00:06] <timotimo> great
+
+[00:15] *** mohij left
+[00:18] <timotimo> jnthn: aren't we wasting a lot of performance by making binding a method call on the binder object?
+
+[00:18] <timotimo> or is a method call on a WVal compile-time-resolved?
+
+[00:19] <jnthn> timotimo: Method calls aren't *that* expensive.
+
+[00:20] <jnthn> timotimo: No, compile time isn't right, but that's the place where something like invokedynamic or Moar's type specializer stuff come in.
+
+[00:21] <jnthn> timotimo: Further, within a month or two I'll have many cases of binding doing something cheaper than the full-blown binder anyways...
+
+[00:21] <timotimo> right. cool :)
+
+[00:22] <timotimo> what :decl do i use for a local?
+
+[00:22] <timotimo> :decl('var')?
+
+[00:23] <timotimo> the return_o would be a QAST::VM.new( :mastop('return_o'), QAST::Var.new( ... ) ), yes?
+
+[00:24] <timotimo> ah, decl('var') is correct
+
+[00:25] <jnthn> timotimo: Oh, I'd do the code-gen a little more manually than that
+
+[00:25] <timotimo> yup, moarop
+
+[00:25] <timotimo> maybe at first i'll make it a QAST tree and then do the MAST out of it if it works?
+
+[00:25] <jnthn> That is, compile the existing thing we have, push those instructions onto a new list (see other ops for examples), then use fresh_o to get a temporary register, etc.
+
+[00:26] <jnthn> Well, could do, but this is hot/common enough to deserve being done without creating a full-on local...
+
+[00:26] <timotimo> how come there's :foo('bar') so often in that file rather than :foo<bar>?
+
+[00:27] <jnthn> Habbit, I guess. :)
+
+[00:27] <timotimo> oh, a local is more than one register?
+
+[00:27] <jnthn> It's one register, but it's lifetime is for the frame.
+
+[00:27] <timotimo> i put it into a Stmts in the hopes of getting fresh registers that way and have them deallocated afterwards
+
+[00:27] <jnthn> No, locals are per frame.
+
+[00:27] <timotimo> oops :)
+
+[00:28] <jnthn> Which is why I'm saying not to do it that way :)
+
+[00:28] <jnthn> Or, a reason... :)
+
+[00:28] <timotimo> it would perhaps be cool if we could do something on the QAST level that gets us registers instead of full locals if we can prove something or other
+
+[00:29] <timotimo> because at that level we already have an optimizer that can do stuff
+
+[00:29] <timotimo> also, that could explain why my "lexicals to locals" optimization made no performance difference whatsoever
+
+[00:30] <timotimo> i have to tell $qastcomp.as_mast what register to store its results in, right?
+
+[00:31] <jnthn> No, just make sure you pass :want($MVM_reg_obj) and then the object you get back will have a .result_reg
+
+[00:31] <jnthn> Various examples like this should exit
+
+[00:31] <jnthn> *exist
+
+[00:31] <timotimo> 'k
+
+[00:32] <timotimo> that way i won't even have to do the regalloc dance! :)
+
+[00:33] <jnthn> You still need to release that obj register
+
+[00:33] <jnthn> And you'll need a fresh_i temporary too for the result of isnull I guess... :)
+
+[00:33] <timotimo> oh? right.
+
+[00:34] <jnthn> Dance, regalloc monkey!
+
+[00:35] <timotimo> fresh_i will give me an int64? or should i get a smaller one?
+
+[00:35] <jnthn> Yeah, and that's what you want
+
+[00:35] <timotimo> good
+
+[00:38] *** Rotwang left
+[00:39] <timotimo> oh. the p6bindsig should probably return the result of the bind_sig method call, aye?
+
+[00:39] <timotimo> that means i shouldn't release the register, right?
+
+[00:39] <jnthn> No, p6bindsig is always in void context.
+
+[00:39] <timotimo> OK
+
+[00:40] <timotimo> what do i pass to the constructor of MAST::InstructionList then?
+
+[00:40] <jnthn> So you can hand back MAST::VOID or so instead of a register
+
+[00:40] <timotimo> just the @ops?
+
+[00:40] <timotimo> ah, ok
+
+[00:40] <jnthn> And I think there's an $MVM_reg_void for the kind
+
+[00:40] <timotimo> excellent. let me try to compile it
+
+[00:45] <timotimo> i had to copypaste $MVM_reg_void first, but now it could work
+
+[00:48] <jnthn> yay
+
+[00:49] <timotimo> This REPR cannot change type
+
+[00:49] <timotimo> not quite sure what i dun wrongs :|
+
+[00:49] <timotimo> oh, wait
+
+[00:49] <jnthn> wtf... :)
+
+[00:49] <timotimo> i'm not actually invoking the autothreader at all yet
+
+[00:49] <timotimo> i think i need to re-read how i'm supposed to implement this
+
+[00:49] <jnthn> hehe
+
+[00:50] *** hoverboard left
+[00:50] <timotimo> ah, i think i implemented it wrongly
+
+[00:50] <timotimo> i return nqp::null if it was a junction
+
+[00:50] <timotimo> where i should do Junction.AUTOTHREAD($caller, $sig), right? (or perhaps |$sig?)
+
+[00:52] <dalek> rakudo/moar_autothread: 63a4f5e | (Timo Paulssen)++ | src/ (2 files):
+
+[00:52] <dalek> rakudo/moar_autothread: first attempt at autothreading for moarvm
+
+[00:52] <dalek> rakudo/moar_autothread: review: https://github.com/rakudo/rakudo/commit/63a4f5e106
+
+[00:52] <timotimo> you can have a look at how i misunderstood you :P
+
+[00:53] <jnthn> You can't return nqp::null if it was a junction
+
+[00:53] <jnthn> You need to return the junction result!
+
+[00:53] <timotimo> isn't that what i did?
+
+[00:53] <jnthn>  < timotimo> i return nqp::null if it was a junction
+
+[00:53] <timotimo> yes, that's what i did wrong :)
+
+[00:53] <timotimo> look at the diff now
+
+[00:53] <timotimo> oh, haha
+
+[00:54] <timotimo> it's kinda late here %)
+
+[00:54] <jnthn> That nqp::null(); needs to be an extra level out
+
+[00:54] <jnthn> Well, or in an else, more like.
+
+[00:54] <timotimo> oh? i put a return in front of the Junction.... instead
+
+[00:54] <jnthn> Off the  if $bind_res {
+
+[00:54] <jnthn> But you don't return null if the bind is OK
+
+[00:54] *** finanalyst joined
+[00:54] <timotimo> ah, now i understand
+
+[00:54] <jnthn> That nqp::null is dead code as you have it.
+
+[00:55] <timotimo> it is! :)
+
+[00:55] <timotimo> and now: it was!
+
+[00:55] <finanalyst> jnthn: how do i get a perl6 using the jvm?
+
+[00:55] <jnthn> The code-gen looks right...
+
+[00:56] <timotimo> now i'm getting somewhere
+
+[00:56] <jnthn> finanalyst: Well, easy way is something like perl Configure.pl --backend=jvm --gen-nqp
+
+[00:56] <timotimo> i got through stage parse this time :)
+
+[00:56] <finanalyst> i've tried looking on the net, and read your blogs, but I couldnt find any info on the configure
+
+[00:57] <finanalyst> jnthn: thanx. Can i do this in the same rakudo star directory as the parrot one? i mean will this clobber perl6 under parrot?
+
+[00:57] <jnthn> finanalyst: You missed the "Building Rakudo on JVM" section of the README too? :P
+
+[00:57] <timotimo> jnthn: will there be any reason to have an op that never checks for null, instead knowing that no junction could have ever come here?
+
+[00:57] <jnthn> finanalyst: Oh...there's not a JVM-based Rakudo Star yet.
+
+[00:58] <jnthn> finanalyst: That's probably why you missed it. This is just for building a Rakudo on JVM...
+
+[00:58] <timotimo> timo@schmetterling ~/p/rakudo (moar_autothread)> ./perl6-m -e 'say 10|20|30'
+
+[00:58] <timotimo> any(10, 20, 30)
+
+[00:58] <timotimo> that's not quite it %)
+
+[00:58] <timotimo> oh
+
+[00:58] <timotimo> wait, it is!
+
+[00:58] <jnthn> timotimo: It is 'cus say gists junctions...
+
+[00:58] *** hoverboard joined
+[00:58] <jnthn> timotimo: Try say 1 + 2 | 3;
+
+[00:58] <timotimo> This type does not support elems at src/gen/m-CORE.setting:3204  (/home/timo/perl6/rakudo/../install/languages/perl6/runtime/./CORE.setting.moarvm:AUTOTHREAD:12)
+
+[00:58] <timotimo> this i can work with.
+
+[00:59] <timotimo> 1 + 2 | 3 gives me any(3, 3)
+
+[00:59] <timotimo> so .. that would be right?
+
+[00:59] <jnthn> What's 1 + (2 | 3) give? :)
+
+[00:59] <timotimo> the error seen above
+
+[00:59] <timotimo> i'll have a closer look
+
+[00:59] <timotimo> might be |$sig is wrong
+
+[01:00] <jnthn> moment...
+
+[01:01] <jnthn> timotimo: I think you're passing the wrong things...
+
+[01:01] <timotimo> yes, i might :|
+
+[01:01] <jnthn> Junction.AUTOTHREAD($caller, |$sig);
+
+[01:02] <timotimo> that's my current code, isn't it?
+
+[01:02] <jnthn> Yeah
+
+[01:02] <timotimo> OK
+
+[01:02] <jnthn> It's the capture you want though...
+
+[01:02] <timotimo> oh, i have to pass ... yeah
+
+[01:02] <timotimo> |ed?
+
+[01:02] <timotimo> it seems like AUTOTHREAD has |args in its signature
+
+[01:03] <timotimo> and deconts that and gets its $!list from the Capture class
+
+[01:03] <jnthn> Yeah, but I don't think you can just | it
+
+[01:03] <jnthn> You need to get the positional and hash bit of it I think...
+
+[01:03] <timotimo> i'll have to do the equivalent of parrot's implementation where it unshifts the ... oh?
+
+[01:03] <timotimo> i think i can do that
+
+[01:03] <jnthn> No, MVMCallCapture is not that mutable...
+
+[01:04] <jnthn> Getting the hash bit is easy, I think...
+
+[01:04] <timotimo> yeah, i can nqp::getattr the $!list and $!hash
+
+[01:04] <timotimo> from the Capture class
+
+[01:04] <jnthn> No, no...
+
+[01:04] <jnthn> $capture isn't one of those
+
+[01:05] <jnthn> It's a low-level MoarVM CallCapture thingy
+
+[01:05] <timotimo> oooh
+
+[01:05] <jnthn> nqp::capturenamedshash($capture) will get you the hash part.
+
+[01:05] <timotimo> thanks
+
+[01:06] <jnthn> See the code that fills up @pos_args starting around line 578 for how to extract the positionals, boxing them as you go.
+
+[01:06] <jnthn> Then that @pos_args, and the thing nqp::capturenamedshash gives you, are both things you can | into the arglist.
+
+[01:06] <timotimo> thanks
+
+[01:07] <timotimo> so i |@my_pos_args, |%(nqp::getnamedshash(...))?
+
+[01:09] <timotimo> Heap corruption detected: pointer 0x7f5d228d91f8 to past fromspace
+
+[01:09] <timotimo> >_<
+
+[01:10] <jnthn> Something like that...
+
+[01:10] <jnthn> eek
+
+[01:10] <jnthn> More torture needed, evidently...
+
+[01:10] * timotimo bisects
+
+[01:11] <timotimo> if i remove my loop, it's all fine and dandy
+
+[01:11] <timotimo> this happens when compiling the bootstrap, fwiw
+
+[01:11] <jnthn> I suspect it's heisenbug...
+
+[01:13] <timotimo> yes, seems heisenbugish
+
+[01:14] <timotimo> commenting out either one of the three push + box + captureposarg lines, it passes
+
+[01:17] *** jnap joined
+[01:28] *** cognominal left
+[01:28] *** cognominal joined
+[01:35] *** espadrine left
+[01:38] <dalek> rakudo/moar_autothread: 3ead913 | (Timo Paulssen)++ | src/ (2 files):
+
+[01:38] <dalek> rakudo/moar_autothread: first attempt at autothreading for moarvm
+
+[01:38] <dalek> rakudo/moar_autothread: review: https://github.com/rakudo/rakudo/commit/3ead9133e6
+
+[01:39] *** dayangkun joined
+[01:41] <jnthn> 'night, #perl6
+
+[01:41] <colomon> \o
+
+[01:44] *** Mouq left
+[01:54] <timotimo> Type check failed in bind; expected Str but got Str 1
+
+[01:54] <timotimo> that 1 there is the result of nqp::istype($got, $want)
+
+[01:54] <timotimo> m)
+
+[01:57] *** dayangkun left
+[02:05] *** Mouq joined
+[02:09] *** dayangkun joined
+[02:30] *** Mouq left
+[02:31] *** ssutch joined
+[02:32] *** ssutch left
+[02:38] *** Mouq joined
+[02:40] *** jnap left
+[03:38] *** xinming_ left
+[03:40] *** xinming joined
+[03:40] *** nnunley_ left
+[03:40] *** xinming left
+[03:44] *** pmurias left
+[03:45] *** finanalyst left
+[03:45] *** xinming joined
+[03:56] *** atroxaper joined
+[04:01] *** ssutch joined
+[04:26] *** ssutch left
+[04:37] *** preflex left
+[04:39] *** preflex joined
+[04:39] *** ChanServ sets mode: +v preflex
+
+[05:07] *** raiph left
+[05:17] *** Mouq left
+[05:31] *** test0123 joined
+[05:31] *** test0123 left
+[06:16] *** cibs joined
+[06:51] *** finanalyst joined
+[06:52] *** raiph joined
+[06:54] *** takesako joined
+[07:01] *** kaleem joined
+[07:01] *** MihaiPop joined
+[07:02] *** MihaiPop left
+[07:08] *** sqirrel joined
+[07:25] *** thou left
+[07:32] *** sqirrel left
+[07:34] *** darutoko joined
+[07:39] *** Guest65081 left
+[07:39] *** Guest65081 joined
+[07:39] *** sjohnson left
+[07:39] *** FROGGS left
+[07:48] *** torbjorn joined
+[07:48] *** hoelzro joined
+[07:48] *** yogan joined
+[07:48] *** Celelibi joined
+[07:48] *** pnu joined
+[07:48] *** japhb_ joined
+[07:48] *** rurban joined
+[07:48] *** tokuhirom joined
+[07:48] *** atrodo joined
+[07:48] *** dylanwh joined
+[07:48] *** zakalwe left
+[07:49] *** zakalwe joined
+[07:50] *** sqirrel joined
+[07:59] *** sjohnson joined
+[07:59] *** sjohnson left
+[07:59] *** sjohnson joined
+[08:03] <moritz> timotimo: containerization fail?
+
+[08:08] *** zakharyas joined
+[08:08] *** sqirrel left
+[08:15] <arnsholt> timotimo: How'd you get that result? That sounds really weird...
+
+[08:16] *** BenGoldberg left
+[08:17] *** slavik joined
+[08:18] *** baest_ is now known as baest
+
+[08:20] *** FROGGS joined
+[08:26] *** bibifuc left
+[08:34] *** raiph left
+[08:36] *** [particle] left
+[08:37] *** [particle] joined
+[08:43] <moritz> breaking the autothreader would do that :-)
+
+[08:44] *** erkan joined
+[08:44] *** erkan left
+[08:44] *** erkan joined
+[08:46] *** finanalyst left
+[08:46] *** espadrine joined
+[08:55] *** sqirrel joined
+[08:56] <masak> good morning, #perl6
+
+[08:56] <FROGGS> o/
+
+[08:58] *** finanalyst joined
+[09:08] <xfix> http://codegolf.stackexchange.com/a/17726/3103
+
+[09:08] <xfix> Interesting how Perl 6 can make nice code golf programs (but I still lost to GolfScript).
+
+[09:09] <xfix> rn: say [~] pick *,^9
+
+[09:09] <camelia> rakudo-parrot e5268b: OUTPUT«653170482␤»
+
+[09:09] <camelia> ..rakudo-jvm e5268b: OUTPUT«827341506␤»
+
+[09:09] <camelia> ..niecza v24-109-g48a8de3: OUTPUT«(timeout)[auto-compiling setting]␤»
+
+[09:09] <xfix> Uh oh. Timeout during compilation. This won't break stuff, right?
+
+[09:10] <masak> xfix: ^9 is 0 to 8, not 0 to 9
+
+[09:10] <xfix> lol, fail
+
+[09:11] <xfix> fixed
+
+[09:11] <xfix> rn: say [~] pick *,^9
+
+[09:11] <xfix> rn: say [~] pick *,^10
+
+[09:11] <camelia> rakudo-jvm e5268b: OUTPUT«037426815␤»
+
+[09:11] <camelia> ..niecza v24-109-g48a8de3: OUTPUT«(timeout)[auto-compiling setting]␤»
+
+[09:11] <camelia> ..rakudo-parrot e5268b: OUTPUT«861047523␤»
+
+[09:11] <camelia> rakudo-jvm e5268b: OUTPUT«8730126954␤»
+
+[09:11] <camelia> ..niecza v24-109-g48a8de3: OUTPUT«(timeout)[auto-compiling setting]␤»
+
+[09:11] <camelia> ..rakudo-parrot e5268b: OUTPUT«9145730628␤»
+
+[09:14] <xfix> rn: say [~]pick *,^10
+
+[09:15] <xfix> std: say [~]pick *,^10
+
+[09:15] *** mathw_ is now known as mathw
+
+[09:15] <camelia> rakudo-jvm e5268b: OUTPUT«[31m===[0mSORRY![31m===[0m Error while compiling /tmp/DyR3OxY2Eq␤Two terms in a row␤at /tmp/DyR3OxY2Eq:1␤------> [32msay [~][33m⏏[31mpick *,^10[0m␤    expecting any of:␤        argument list␤        postfix␤        infix stopper␤  …»
+
+[09:15] <camelia> ..niecza v24-109-g48a8de3: OUTPUT«(timeout)[auto-compiling setting]␤»
+
+[09:15] <camelia> ..rakudo-parrot e5268b: OUTPUT«[31m===[0mSORRY![31m===[0m Error while compiling /tmp/RbjR_FOk6e␤Two terms in a row␤at /tmp/RbjR_FOk6e:1␤------> [32msay [~][33m⏏[31mpick *,^10[0m␤    expecting any of:␤        argument list␤        postfix␤        infix stopper…»
+
+[09:15] <camelia> std 09dda5b: OUTPUT«[31m===[0mSORRY![31m===[0m␤Two terms in a row (listop with args requires whitespace or parens) at /tmp/3iNTbZlQNY line 1:␤------> [32msay [~][33m⏏[31mpick *,^10[0m␤    expecting any of:␤  POST␤   argument list␤  feed_separator␤ infix or meta-i…»
+
+[09:15] *** lestrrat left
+[09:17] *** lestrrat joined
+[09:17] *** atroxaper left
+[09:20] <hoelzro> morning #perl6!
+
+[09:20] <FROGGS> xfix: looks more like niecza is broken on the server where camelia is running
+
+[09:21] *** aindilis left
+[09:24] *** darutoko- joined
+[09:25] *** darutoko left
+[09:26] *** SamuraiJack joined
+[09:32] *** dakkar joined
+[09:37] *** yves joined
+[09:41] <jnthn> morning o/
+
+[09:43] <masak> jnthn! \o/
+
+[09:44] *** denis_boyun joined
+[09:46] *** [Sno] left
+[09:47] <FROGGS> morning jnthn 
+
+[09:47] *** [Sno] joined
+[09:48] *** darutoko joined
+[09:51] *** darutoko- left
+[09:53] *** mtj_ left
+[09:55] *** mtj_ joined
+[09:58] *** hoverboard left
+[10:01] *** Zitrus joined
+[10:01] *** Rotwang joined
+[10:04] <moritz> n: 42
+
+[10:04] <camelia> niecza v24-109-g48a8de3: OUTPUT«(timeout)[auto-compiling setting]␤»
+
+[10:09] *** Zitrus left
+[10:10] *** rjbs left
+[10:10] *** rjbs joined
+[10:20] *** sqirrel left
+[10:23] *** wooden left
+[10:25] *** daniel-s_ joined
+[10:31] *** grondilu joined
+[10:38] *** aindilis joined
+[10:59] *** mohij joined
+[11:10] *** SamuraiJack left
+[11:16] *** berekuk joined
+[11:19] <dalek> rakudo/moar-support: ccf4e13 | jnthn++ | src/Perl6/Metamodel/BOOTSTRAP.nqp:
+
+[11:19] <dalek> rakudo/moar-support: Fix optional array/hash params.
+
+[11:19] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/ccf4e13afd
+
+[11:19] <jnthn> That fixes the split tests, at least...
+
+[11:20] <FROGGS> jnthn++
+
+[11:45] <jnthn> j: my $a = nqp::null()
+
+[11:45] <camelia> rakudo-jvm e5268b: OUTPUT«java.lang.NullPointerException␤␤»
+
+[11:45] <jnthn> p: my $a = nqp::null()
+
+[11:45] <camelia> rakudo-parrot e5268b: OUTPUT«Cannot assign a non-Perl 6 value to a Perl 6 container␤  in block  at /tmp/MFHoaPyitD:1␤␤»
+
+[11:47] *** sqirrel joined
+[11:59] *** brother| is now known as brother
+
+[12:02] *** pmurias joined
+[12:02] <pmurias> how does the speed of nqp-moar compare to nqp-parrot?
+
+[12:02] *** darutoko- joined
+[12:03] <grondilu> pmurias: from what I've tried (not much), moar is a bit slower so far.
+
+[12:05] *** atroxaper joined
+[12:05] *** darutoko left
+[12:06] <jnthn> Probably depends what you do. It runs NQP "make test" faster at least...
+
+[12:06] *** darutoko joined
+[12:06] <jnthn> And parses CORE.setting faster. Loses out due to slow stage at the end, though...
+
+[12:07] <pmurias> I'm considering if it makes sense to switch nqp-js to use nqp-moar instead of nqp-parrot
+
+[12:07] <pmurias> jnthn: what's the slow stage?
+
+[12:07] <FROGGS> stage mast
+
+[12:07] <jnthn> pmurias: QAST -> MAST
+
+[12:07] <jnthn> code-gen
+
+[12:07] *** shinobicl joined
+[12:07] * grondilu tried only basic stuff, like counting in for loops.
+
+[12:08] <FROGGS> pmurias: you might want to wait another week, so more spectests pass
+
+[12:08] *** darutoko- left
+[12:09] <pmurias> nqp-js so the amount of spectests  nqp-moar passes isn't a big concern
+
+[12:09] <pmurias> jnthn: why is that so expensive?
+
+[12:10] <jnthn> pmurias: Dunno yet.
+
+[12:11] <jnthn> pmurias: More focused on getting stuff working at the moment...
+
+[12:18] <pmurias> seems resonable
+
+[12:18] *** darutoko left
+[12:22] <pmurias> :), nqp-js hasn't bitrotten recently
+
+[12:23] *** darutoko joined
+[12:26] <FROGGS> pmurias: good for you :o)
+
+[12:27] <FROGGS> when I leave v5 unattended for more than two weeks, it is broken most times
+
+[12:29] *** slavik left
+[12:31] *** Guest65081 left
+[12:39] *** daniel-s_ left
+[12:39] <pmurias> do we have NaN and infinities in nqp numbers?
+
+[12:40] <FROGGS> yes
+
+[12:41] <FROGGS> nqp: say(nqp::inf)
+
+[12:41] <camelia> nqp-moarvm, nqp-jvm, nqp-parrot: OUTPUT«Inf␤»
+
+[12:41] <FROGGS> nqp: say(nqp::isnanorif(nqp::inf))
+
+[12:41] <camelia> nqp-moarvm: OUTPUT«Error while compiling op isnanorif (source text: "nqp::isnanorif(nqp::inf)"): No registered operation handler for 'isnanorif'␤frame_name_1109␤»
+
+[12:41] <camelia> ..nqp-parrot: OUTPUT«Error while compiling op isnanorif (source text: "nqp::isnanorif(nqp::inf)"): No registered operation handler for 'isnanorif'␤current instr.: '' pc 57054 (gen/parrot/stage2/QAST.pir:21045) (gen/parrot/stage2/QAST.nqp:3631)␤»
+
+[12:41] <camelia> ..nqp-jvm: OUTPUT«Method 'type' not found for invocant of class 'NQPMu'␤  in coerce (gen/jvm/stage2/QAST.nqp:4205)␤  in as_jast (gen/jvm/stage2/QAST.nqp:2988)␤  in  (gen/jvm/stage2/QAST.nqp:3785)␤  in compile_all_the_stmts (gen/jvm/stage2/QAST.nqp:3773)␤  in as_jast (gen/jvm…»
+
+[12:41] <FROGGS> nqp: say(nqp::isnanorinf(nqp::inf))
+
+[12:41] <camelia> nqp-moarvm, nqp-jvm, nqp-parrot: OUTPUT«1␤»
+
+[12:42] *** ilbot_pg joined
+[12:43] *** ilbot_pg left
+[12:44] *** ilbot_pg joined
+[12:44] * arnsholt crosses fingers
+
+[12:44] <FROGGS> arnsholt: what's up?
+
+[12:44] *** cognominal left
+[12:45] <arnsholt> Trying a bit of a long shot at fixing NQP #46
+
+[12:45] *** cognominal joined
+[12:45] <colomon> arnsholt++
+
+[12:46] <arnsholt> But no =/
+
+[12:46] *** slavik joined
+[12:47] <FROGGS> :/
+
+[12:47] <jnthn> Well, in NQP I think it is syntactic about how it flattens (array vs hash)
+
+[12:48] <jnthn> May be an easier fix in Rakudo...
+
+[12:48] <pmurias> why do we have both log10 and log (which takes a base)?
+
+[12:49] * pmurias is fixing NQP #130
+
+[12:50] <arnsholt> jnthn: The reason it bugs me is that both the subrule call and the method call parse the argument list using the main arglist rule, and thus should have the same AST for it
+
+[12:51] <arnsholt> And there's the annoying hash flattening problem on JVM, which I'm not sure if is related or not (but probably not, I think)
+
+[12:51] <pmurias> nqp::log_n and nqp::ln_n appear to do the same thing
+
+[12:51] <pmurias> shouldn't we remove one?
+
+[12:53] <moritz> +1
+
+[12:54] <arnsholt> I agree
+
+[12:54] <pmurias> which one gets to stay?
+
+[12:54] *** xenoterracide left
+[12:56] <pmurias> nqp::log_n is used by rakudo, so it would be easier to remove nqp::ln_n
+
+[12:56] <jnthn> Yeah, if they're dupe, remove one.
+
+[12:56] <jnthn> And removing the one Rakudo ain't using is easiest. May be worth looking over the various backends to find the dupe.
+
+[12:56] <jnthn> If it's more widespread.
+
+[12:57] <arnsholt> I think all three backends have both ops
+
+[12:58] <dalek> rakudo/moar-support: 21a1699 | jnthn++ | src/vm/moar/ops/container.c:
+
+[12:58] <dalek> rakudo/moar-support: Disallow assigning null.
+
+[12:58] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/21a1699479
+
+[12:58] <dalek> rakudo/moar-support: 0397a49 | jnthn++ | src/core/ (2 files):
+
+[12:58] <dalek> rakudo/moar-support: Get runtime backtrace reporting working on Moar.
+
+[12:58] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/0397a490d2
+
+[12:58] <jnthn> [Coke]: 0397a49 should mean that today's run gives much more informative failure modes.
+
+[12:59] <FROGGS> jnthn++ # \o/
+
+[12:59] <dalek> nqp: 6d67680 | (Pawel Murias)++ | t/nqp/83-log.t:
+
+[12:59] <dalek> nqp: Add a test for nqp::log_n.
+
+[12:59] <dalek> nqp: review: https://github.com/perl6/nqp/commit/6d67680777
+
+[13:00] *** berekuk left
+[13:02] *** nebuchadnezzar left
+[13:03] <dalek> rakudo-js: bd301f6 | (Pawel Murias)++ | run_tests:
+
+[13:03] <dalek> rakudo-js: Switch to using nqp-p for running QAST tests.
+
+[13:03] <dalek> rakudo-js: review: https://github.com/pmurias/rakudo-js/commit/bd301f6e17
+
+[13:03] <dalek> rakudo-js: 1573742 | (Pawel Murias)++ | run_tests:
+
+[13:03] <dalek> rakudo-js: Remove comment.
+
+[13:03] <dalek> rakudo-js: review: https://github.com/pmurias/rakudo-js/commit/15737426f6
+
+[13:03] <dalek> rakudo-js: 6ba98c7 | (Pawel Murias)++ | nqp:
+
+[13:03] <dalek> rakudo-js: Update the submodule to newest nqp.
+
+[13:03] <dalek> rakudo-js: review: https://github.com/pmurias/rakudo-js/commit/6ba98c7678
+
+[13:03] <dalek> rakudo-js: fc92369 | (Pawel Murias)++ | / (3 files):
+
+[13:03] <dalek> rakudo-js: Implement nqp::log_n.
+
+[13:03] <dalek> rakudo-js: review: https://github.com/pmurias/rakudo-js/commit/fc92369962
+
+[13:04] <dalek> rakudo-js: 3b97d73 | (Pawel Murias)++ | run_tests:
+
+[13:04] <dalek> rakudo-js: Add passing test to run_tests.
+
+[13:04] <dalek> rakudo-js: review: https://github.com/pmurias/rakudo-js/commit/3b97d7330f
+
+[13:05] <nwc10> \o/ rakudo-js is back
+
+[13:05] *** xenoterracide joined
+[13:05] <nwc10> watch out MoarVM, the race is back on
+
+[13:05] <FROGGS> :P
+
+[13:06] *** espadrine left
+[13:07] *** berekuk joined
+[13:08] *** espadrine joined
+[13:09] *** kaleem left
+[13:12] *** nebuchadnezzar joined
+[13:17] *** camelia left
+[13:17] *** dmol joined
+[13:19] *** berekuk left
+[13:24] <dalek> perl6-roast-data: 5d56d9e | coke++ | / (3 files):
+
+[13:24] <dalek> perl6-roast-data: today (automated commit)
+
+[13:24] <dalek> perl6-roast-data: review: https://github.com/coke/perl6-roast-data/commit/5d56d9efac
+
+[13:24] *** camelia joined
+[13:26] *** ChanServ sets mode: +v camelia
+
+[13:34] *** xinming left
+[13:34] *** denis_boyun left
+[13:38] *** berekuk joined
+[13:39] <[Coke]> diakopter: fyi, I'm pushing the runtimes of the daily stuff on host06 earlier today, trying to get them towards your original request, which I think was "done before you wake up".
+
+[13:40] <jnthn> 78.42% \o/
+
+[13:40] <timotimo> jnthn: did you see the way moarvm + autothreader fails now?
+
+[13:40] <jnthn> timotimo: Ah, was gonna ask you what current state is... :)
+
+[13:40] <jnthn> How's it fail now?
+
+[13:40] <timotimo> i can tell you :P
+
+[13:41] <timotimo> the code it gens for p6bindassert looks like "get the value, then the type. run the istype op on it and if it returns 1, skip to success"
+
+[13:41] <timotimo> it doesn't skip to success and running nqp::istype on the values just like the codegen would returns 1
+
+[13:41] <timotimo> so ... heisenbug? missing root or something in istype?
+
+[13:41] <jnthn> Lemme look...
+
+[13:43] <jnthn> Ah...
+
+[13:47] *** ggoebel118 joined
+[13:50] *** kbaker joined
+[13:53] <dalek> rakudo/moar-support: 095c777 | jnthn++ | src/vm/moar/Perl6/Ops.nqp:
+
+[13:53] <dalek> rakudo/moar-support: Missing decont in p6bindassert.
+
+[13:53] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/095c777214
+
+[13:53] *** kaleem joined
+[13:53] <jnthn> timotimo: ^^
+
+[13:53] <timotimo> yay
+
+[13:53] <timotimo> i'll try that
+
+[13:54] <jnthn> say any(-1,2).abs # works with that :)
+
+[13:54] <timotimo> \o/
+
+[13:56] *** xinming joined
+[14:02] <xfix> Interesting. Ruby 2.1.0 has 1/3r syntax, which does what 1/3 does in Perl 6.
+
+[14:05] <timotimo> not ok 88 - an & junction right of a | junction will be autothreaded first
+
+[14:05] <timotimo> #      got: 'all(any("\x[64]\x[6f]\x[67]\x[20]\x[31]\x[20]\x[31]\x[30]", "\x[64]\x[6f]\x[67]\x[20]\x[32]\x[20]\x[31]\x[30]"), any("\x[64]\x[6f]\x[67]\x[20]\x[31]\x[20]\x[32]\x[30]", "\x[64]\x[6f]\x[67]\x[20]\x[32]\x[20]\x[32]\x[30]"))'
+
+[14:05] <timotimo> # expected: 'all(any("dog 1 10", "dog 2 10"), any("dog 1 20", "dog 2 20"))'
+
+[14:05] <timotimo> how did that happen? %)
+
+[14:05] <grondilu> r: say <1/3>.WHAT
+
+[14:05] <camelia> rakudo-parrot e5268b, rakudo-jvm e5268b: OUTPUT«(Str)␤»
+
+[14:05] <grondilu> n: say <1/3>.WHAT
+
+[14:06] <camelia> niecza v24-109-g48a8de3: OUTPUT«(timeout)[auto-compiling setting]␤»
+
+[14:06] <timotimo> i mean ... the string matches, but why is it escaped like that?
+
+[14:06] <xfix> timotimo, overescaping in `.perl`, perhaps.
+
+[14:06] <xfix> (but I agree, this is silly... considering it's almost impossible to debug this)
+
+[14:06] <timotimo> yeah, but the source is the same, how does moar get the idea that it *should*?
+
+[14:07] <xfix> I'm almost sure that if "p" function in Ruby would escape like that, nobody would use it.
+
+[14:08] <timotimo> maybe nqp::iscclass( nqp::const::CCLASS_PRINTING ) done goofed up?
+
+[14:08] <jnthn> timotimo: Potentially
+
+[14:09] <jnthn> timotimo: Does auto-threading now work in general?
+
+[14:09] <timotimo> it seems so! :D
+
+[14:10] <timotimo> but yeah, the iscclass gives 0 for "d", which is obviously not correct
+
+[14:10] * timotimo looks into it
+
+[14:10] <timotimo> also, i bet the perl method for Str could be much more efficient
+
+[14:10] <jnthn> timotimo: yay
+
+[14:10] * jnthn hopes timotimo++ will push the junction thing before today's roast run starts :)
+
+[14:11] <timotimo> oh. yeah sure i can rebase and push :)
+
+[14:13] <dalek> rakudo/moar-support: 279cb49 | (Timo Paulssen)++ | src/ (2 files):
+
+[14:13] <dalek> rakudo/moar-support: implement autothreading for junctions
+
+[14:13] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/279cb49174
+
+[14:15] <timotimo> ah, the PRINTING cclass isn't implemented in moarvm
+
+[14:17] <timotimo> jnthn: can has moarvm commit bit? :)
+
+[14:18] <dalek> nqp: 2eed549 | (Tobias Leich)++ | src/vm/moar/QAST/QASTOperationsMAST.nqp:
+
+[14:18] <dalek> nqp: return the encoding we set, so we return something
+
+[14:18] <dalek> nqp: review: https://github.com/perl6/nqp/commit/2eed549d5e
+
+[14:19] *** bluescreen10 joined
+[14:20] <dalek> rakudo/moar-support: 9d045f1 | (Tobias Leich)++ | src/core/control.pm:
+
+[14:20] <dalek> rakudo/moar-support: pass decontainerized ENV to shell/run and spawn
+
+[14:20] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/9d045f12bd
+
+[14:23] *** wooden joined
+[14:25] <timotimo> without an internet connection to my desktop it is surprisingly hard to find out the definition of printing characters in Unicode
+
+[14:26] <masak> just iterate over all of them an test them against [:print:]
+
+[14:26] <masak> :P
+
+[14:26] <timotimo> sounds like a great idea
+
+[14:29] <jnthn> timotimo: Commit bit given
+
+[14:30] *** johnmilton joined
+[14:44] *** kaleem left
+[14:44] *** kaleem joined
+[14:45] <timotimo> hum. libicu says printing is true for anything but the general category C
+
+[14:45] <timotimo> there is no UPV_C* constant in moarvm :(
+
+[14:47] * masak is back to looking at t4 submissions
+
+[14:47] * timotimo makes it so
+
+[14:48] *** ajr joined
+[14:49] <jnthn> [Coke]: Am just working on fixing the Test.pm mis-pre-compile so that hopefully JVM spectest will go faster
+
+[14:49] *** ajr is now known as Guest810
+
+[14:49] *** Guest810 is now known as ajr_
+
+[14:55] <[Coke]> jnthn: is it recompiling Test.pm so it builds each time? (that's got to be doubly slowo on the jvm)
+
+[14:55] <jnthn> yeah...got it fixed locally, it seems
+
+[14:56] <[Coke]> today's run just started, but the individual impls's don't checkout until it's there turn, so there's hope. :)
+
+[14:56] *** kaleem left
+[14:57] <dalek> rakudo-star-daily: c6402d0 | coke++ | log/ (5 files):
+
+[14:57] <dalek> rakudo-star-daily: today (automated commit)
+
+[14:57] <dalek> rakudo-star-daily: review: https://github.com/coke/rakudo-star-daily/commit/c6402d0b82
+
+[14:57] <timotimo> jnthn: how are you testing it? with a BEGIN say "omg it compiles!"? :)
+
+[14:57] <jnthn> timotimo: Well, just doing a spectest run to see we make it some way into it... :)
+
+[14:58] <timotimo> ah, hehe
+
+[14:58] *** ilbot_pg left
+[14:58] <dalek> rakudo/nom: 5669b2a | jnthn++ | tools/build/Makefile-JVM.in:
+
+[14:58] <dalek> rakudo/nom: Put Test.jar in the right place for spectest.
+
+[14:58] <dalek> rakudo/nom: 
+
+[14:58] <dalek> rakudo/nom: Should speed up the JVM spectest run a good bit.
+
+[14:58] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/5669b2a65a
+
+[14:58] <masak> TimToady++ # RENAME(1)
+
+[14:58] <timotimo> \o/
+
+[14:59] <FROGGS> RENAME(1) ?
+
+[14:59] <FROGGS> what is that about?
+
+[15:00] <diakopter> [Coke]: heh I didn't have a timeframe on my request :P
+
+[15:00] <masak> FROGGS: 'man rename'
+
+[15:00] <masak> FROGGS: think of it as multiplayer 'mv'
+
+[15:01] <moritz> mv with perl (5) expression support
+
+[15:01] <FROGGS> masak: I see :o)
+
+[15:01] <moritz> rename '$_=uc' *.txt
+
+[15:04] *** thou joined
+[15:04] *** ilbot_pg joined
+[15:08] *** raiph joined
+[15:11] <arnsholt> Wow. I had no idea it's really impractical to bundle JARs you depend on in your JAR
+
+[15:18] *** robinsmidsrod left
+[15:20] *** robinsmidsrod joined
+[15:24] *** sqirrel left
+[15:26] *** Vilas_M joined
+[15:26] *** shinobicl left
+[15:28] *** Vilas_M left
+[15:57] *** SamuraiJack joined
+[15:58] *** Psyche^_ joined
+[16:02] *** denis_boyun joined
+[16:03] *** Psyche^ left
+[16:10] *** jnap joined
+[16:10] *** pmurias left
+[16:13] *** Lorn joined
+[16:23] <sjn> hey, anyone here planning on going to FOSDEM?
+
+[16:23] <sjn> (other than lizmat and woolfy :)
+
+[16:23] <FROGGS> sjn: ask dagurval 
+
+[16:25] <sjn> wow, another Norwegian in #perl6? :)
+
+[16:25] <sjn> dagurval: you going? :)
+
+[16:26] *** d4l3k_ joined
+[16:26] *** dalek left
+[16:26] *** FROGGS left
+[16:26] *** d4l3k_ is now known as dalek
+
+[16:26] <dalek> rakudo/moar-support: 5896eaa | jnthn++ | src/vm/moar/ops/perl6_ops.c:
+
+[16:26] <dalek> rakudo/moar-support: Avoid invalid capturelex operations.
+
+[16:26] <dalek> rakudo/moar-support: 
+
+[16:26] <dalek> rakudo/moar-support: Fixes various (maybe not all) wrong-frame errors.
+
+[16:26] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/5896eaadda
+
+[16:30] <sjn> jnthn: if you're going, I'd like to direct your attention here: https://fosdem.org/2014/schedule/event/who_ate_my_battery/ :)
+
+[16:31] <masak> jnthn is going, AFAIK.
+
+[16:31] <sjn> ok, cool
+
+[16:31] <jnthn> Yeah...need to get hotel and flight done though...d'oh
+
+[16:32] <sjn> masak: how about you?
+
+[16:32] <sjn> jnthn: don't wait, it's filling up
+
+[16:33] *** sqirrel joined
+[16:34] <sjn> jnthn: I'm here; https://www.booking.com/hotel/be/nhatlanta.en-gb.html 
+
+[16:34] <sjn> s/here/staying here during FOSDEM/
+
+[16:38] <masak> sjn: I'm not coming this year. would be great fun, but... @stuff
+
+[16:40] <sjn> mm :-\
+
+[16:42] <masak> my modest aim this year is to make it to YAPC::EU.
+
+[16:43] <jnthn> .oO( See if from Sofia, not from the sofa! )
+
+[16:44] *** SamuraiJack left
+[16:48] *** sqirrel left
+[16:49] *** ajr joined
+[16:49] *** ajr_ left
+[16:50] *** ajr is now known as Guest56871
+
+[16:50] *** sqirrel joined
+[16:50] *** colomon left
+[16:51] *** sqirrel left
+[16:51] *** Guest56871 is now known as ajr_
+
+[16:52] *** colomon joined
+[16:54] <[Coke]> r: say 24356 - 22311
+
+[16:54] <camelia> rakudo-parrot 5669b2, rakudo-jvm 5669b2: OUTPUT«2045␤»
+
+[16:55] *** btyler joined
+[16:59] *** SamuraiJack joined
+[17:01] *** xinming left
+[17:02] *** xinming joined
+[17:02] *** lichtkind joined
+[17:04] <lichtkind> i have here a possible rakudo bug
+
+[17:04] <[Coke]> shoot.
+
+[17:07] *** jlaire left
+[17:08] <lichtkind> my class 	has @!sieb; but if i declare it as a 	has Array of Int @!sieb;  i get weird error msg that its an Array[Int] not an int but im assigning that int to one cell so it should be right
+
+[17:08] *** jlaire joined
+[17:08] *** FROGGS joined
+[17:08] <jnthn> lichtkind: You may just one has Int @!sieb;
+
+[17:09] <jnthn> lichtkind: The "array of" is implicit 'cus of the @ sigil
+
+[17:09] <lichtkind> ah
+
+[17:09] <lichtkind> thank you
+
+[17:09] <lichtkind> i dind know that maybe syn should be clearer on that
+
+[17:10] *** raiph left
+[17:10] *** REPLeffect joined
+[17:12] <lichtkind> jnthn: i currently restarted to do euler with perl 6 and rproduce some nice out of memory crashes because i cant have array with 4 mill elements :)
+
+[17:12] *** ajr_ left
+[17:13] *** ajr_ joined
+[17:19] *** raiph joined
+[17:20] *** raiph left
+[17:22] <masak> japhb_: ping
+
+[17:24] *** telex left
+[17:26] *** atroxaper left
+[17:29] <japhb> pong
+
+[17:30] <japhb> I felt a disturbance in the force ... I wasn't even caught up in logs.  :-)
+
+[17:30] <timotimo> someone here commented that moarvm is slower than parrot in the bytecode generation stage
+
+[17:30] <timotimo> that's not 100% accurate
+
+[17:30] <timotimo> after stage post/pir, there's a whole different process stage where parrot compiles the .pir file to a .pbc which takes quite a while, too
+
+[17:30] <moritz> parrot's bytecode generation include the call that compiles .pir to .pbc
+
+[17:31] <timotimo> it does? in that case, it does the thing twice.
+
+[17:31] *** telex joined
+[17:33] <japhb> Erm, masak?  You were looking for me?
+
+[17:35] *** ssutch joined
+[17:35] *** jnap left
+[17:39] *** jnap joined
+[17:41] <masak> japhb_: yes, you possess higher knowledge that I'd like to have.
+
+[17:41] <japhb> Uh ...
+
+[17:42] <japhb> That's just the opening line to a catastrophe.  ;-)
+
+[17:42] <masak> mwhahaha
+
+[17:42] <masak> jnthn tells me that you auto-generate classes in https://github.com/japhb/p6-pb
+
+[17:43] <jnthn> .oO( <masak> All I wanna do is eat your brain... )
+
+[17:43] <masak> :)
+
+[17:43] <japhb> Why yes, I do.
+
+[17:44] <masak> japhb_: do you know how, given a list of names like <foo bar baz>, to produce a class with those attributes?
+
+[17:44] <japhb> Yes.
+
+[17:44] <masak> \o/
+
+[17:44] <masak> hm, that's not even what I'm really after.
+
+[17:44] <masak> let me regroup and rephrase.
+
+[17:45] <japhb> masak: Start here: https://github.com/samuraisam/p6-pb/blob/master/lib/PB/Model/Generator.pm#L39
+
+[17:45] <japhb> That method is strong with the metamodel.
+
+[17:45] <timotimo> masak: maybe my ADT module is of a bit of help to you, too?
+
+[17:45] *** zakharyas left
+[17:46] <masak> given 'class C { has $.x }', how do I endow the attribute $.x with a Proxy that writes "fetch" on all fetches from it, and "store" on all stores.
+
+[17:47] *** berekuk left
+[17:47] <masak> I'm fine with an answer along the lines of "just give C this trait" -- what I want to avoid is doing things manually with each attribute.
+
+[17:47] <japhb> Erm.  Why not just do 'has $!x' and write your own accessor?
+
+[17:47] <moritz> in fact, for masak's requirement, there's even no need for an attribute
+
+[17:48] <japhb> For that particular use case, it feels a little like you're reaching for the big tool, when the little one will do just fine.
+
+[17:48] <moritz> you can just write a method x that returns a Proxy
+
+[17:48] *** mavcunha joined
+[17:48] <masak> moritz: yes, I guess so.
+
+[17:48] <japhb> moritz: I was assuming he needed to keep *some* sort of state, but you're right that it could just disappear into the closure.
+
+[17:48] <masak> moritz: but I have a lot of methods like that, and I want to hide all the boilerplate.
+
+[17:48] *** berekuk joined
+[17:48] <masak> closures ~~ objects :)
+
+[17:49] <moritz> masak: you can write that method once, and then .^add_method it as many times as you want.
+
+[17:49] <japhb> masak: <channelling diakopter> So does your mom.
+
+[17:49] <jnthn> If you're constructing the classes anyway, you could subclass Attribute, override compose (which does accessor generation) and use that attribute meta-object instead...
+
+[17:50] <japhb> And in fact, p6-pb does a lot of "subclass Attribute" type stuff.
+
+[17:51] *** jnap left
+[17:51] <masak> subclassing attribute would be quite nice, yes.
+
+[17:54] *** BenGoldberg joined
+[17:55] <lichtkind> is the a way to set an init vlue for an whole array?
+
+[17:56] <moritz> p: my @a is default(42); say @a[23]
+
+[17:56] <camelia> rakudo-parrot 5669b2: OUTPUT«42␤»
+
+[17:56] <moritz> lichtkind: ^^
+
+[17:57] <lichtkind> ver cool
+
+[17:57] <FROGGS> hi lichtkind 
+
+[17:57] <lichtkind> hai froogs
+
+[17:57] <FROGGS> :o)
+
+[17:57] <lichtkind> hope to see you in hannover
+
+[17:57] <FROGGS> I will be there
+
+[17:58] <lichtkind> i got Can't use unknown trait 'is default' in an attribute declaration.
+
+[17:59] <lichtkind> expecting any of:
+
+[17:59] <lichtkind>         rw
+
+[17:59] <lichtkind>         readonly
+
+[17:59] <lichtkind>         box_target
+
+[17:59] <lichtkind> maybe its not yet available for attributs
+
+[17:59] <jnthn> No, it's NYI for attributes
+
+[18:00] <[Coke]> huh. new run today really confused my script to find abort failures root causes. nifty.
+
+[18:00] <dalek> rakudo/moar-support: 88dbdac | jnthn++ | src/vm/moar/Perl6/Ops.nqp:
+
+[18:00] <dalek> rakudo/moar-support: Complete p6return op.
+
+[18:00] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/88dbdac0e5
+
+[18:03] *** xinming_ joined
+[18:03] <japhb> I must say, the r-m progress has been phenomenal to watch.  Y'all are kicking ass.
+
+[18:03] <colomon> +1
+
+[18:04] *** REPLeffect left
+[18:05] *** xinming left
+[18:09] <timotimo> r: my %esc = '$' => '\$', '@' => '\@'; say 'foo$ bar\$ baz@ quux\@'.comb(/%esc/);
+
+[18:09] <camelia> rakudo-parrot 5669b2, rakudo-jvm 5669b2: OUTPUT«␤»
+
+[18:09] <timotimo> r: my %esc = '$' => '\$', '@' => '\@'; say 'foo$ bar\$ baz@ quux\@'.comb(/@(%esc.keys)/);
+
+[18:09] <camelia> rakudo-parrot 5669b2, rakudo-jvm 5669b2: OUTPUT«$ $ @ @␤»
+
+[18:15] *** FROGGS[mobile] joined
+[18:17] *** dakkar left
+[18:17] <lichtkind> thanks jnthn
+
+[18:17] *** FROGGS[mobile] left
+[18:17] *** FROGGS[mobile] joined
+[18:20] <japhb> masak: Came across this in the logs: http://irclog.perlgeek.de/perl6/2014-01-03#i_8066095 -- What are Nomic, Dark, and secretary bot?
+
+[18:21] *** REPLeffect joined
+[18:21] <timotimo> r: say "foobar" ~~ / <[:Print:]>+ /
+
+[18:21] <camelia> rakudo-parrot 5669b2, rakudo-jvm 5669b2: OUTPUT«｢r｣␤␤»
+
+[18:21] <timotimo> r: say "foobar" ~~ / <[Print]>+ /
+
+[18:21] <camelia> rakudo-parrot 5669b2, rakudo-jvm 5669b2: OUTPUT«｢r｣␤␤»
+
+[18:21] <timotimo> how do i ...
+
+[18:22] <timotimo> r: say "foobar" ~~ / <:Print>+ /
+
+[18:22] <camelia> rakudo-parrot 5669b2, rakudo-jvm 5669b2: OUTPUT«｢foobar｣␤␤»
+
+[18:22] <timotimo> ah!
+
+[18:22] <benabik> japhb: I would assume nomic refers to a tracker for the game: http://en.wikipedia.org/wiki/Nomic
+
+[18:27] *** abnorman left
+[18:27] <timotimo> r: my %esc = '$' => '\$', '@' => '\@'; say 'foo$ bar\$ baz@ quux\@'.comb(/<-%esc.keys>/);
+
+[18:27] <camelia> rakudo-parrot 5669b2: OUTPUT«[31m===[0mSORRY![31m===[0m␤Unrecognized regex metacharacter < (must be quoted to match literally)␤at /tmp/REGOGxMzo7:1␤------> [32m'; say 'foo$ bar\$ baz@ quux\@'.comb(/<-[33m⏏[31m%esc.keys>/);[0m␤Unrecognized regex metacharacter - (mus…»
+
+[18:27] <camelia> ..rakudo-jvm 5669b2: OUTPUT«[31m===[0mSORRY![31m===[0m␤Unrecognized regex metacharacter < (must be quoted to match literally)␤at /tmp/tLaJRRTO21:1␤------> [32m'; say 'foo$ bar\$ baz@ quux\@'.comb(/<-[33m⏏[31m%esc.keys>/);[0m␤Unrecognized regex metacharacter - (must b…»
+
+[18:27] <timotimo> r: my %esc = '$' => '\$', '@' => '\@'; say 'foo$ bar\$ baz@ quux\@'.comb(/<-@(%esc.keys)>/);
+
+[18:27] <camelia> rakudo-jvm 5669b2: OUTPUT«[31m===[0mSORRY![31m===[0m␤Unrecognized regex metacharacter < (must be quoted to match literally)␤at /tmp/aruVVkKCVP:1␤------> [32m'; say 'foo$ bar\$ baz@ quux\@'.comb(/<-[33m⏏[31m@(%esc.keys)>/);[0m␤Unrecognized regex metacharacter - (mus…»
+
+[18:27] <camelia> ..rakudo-parrot 5669b2: OUTPUT«[31m===[0mSORRY![31m===[0m␤Unrecognized regex metacharacter < (must be quoted to match literally)␤at /tmp/hwhU_PfXo3:1␤------> [32m'; say 'foo$ bar\$ baz@ quux\@'.comb(/<-[33m⏏[31m@(%esc.keys)>/);[0m␤Unrecognized regex metacharacter - (…»
+
+[18:27] <timotimo> r: my %esc = '$' => '\$', '@' => '\@'; say 'foo$ bar\$ baz@ quux\@'.comb(/<-[@(%esc.keys)]>/);
+
+[18:27] <camelia> rakudo-parrot 5669b2, rakudo-jvm 5669b2: OUTPUT«f o o $   b a r \ $   b a z   q u u x \␤»
+
+[18:28] <timotimo> how do i? :\
+
+[18:28] <moritz> eval!
+
+[18:28] <moritz> or (.) <!{ %esc{$1}:exists}>
+
+[18:33] *** jnap joined
+[18:41] *** skyheights joined
+[18:41] <timotimo> i'm porting this from code to regex to improve performance
+
+[18:41] <timotimo> so i was hoping i could introduce the keys of the hash to the regex engine
+
+[18:42] <timotimo> because the regex engine is pretty fast
+
+[18:43] <timotimo> moritz: you think i could get any more performance out of JSON::Tiny by looking intently at the code and regex codegen and stuff?
+
+[18:48] *** skyheights left
+[18:49] *** ajr joined
+[18:49] *** ajr_ left
+[18:50] *** ajr is now known as Guest29902
+
+[18:50] *** Guest29902 is now known as ajr_
+
+[18:52] <lichtkind> hm even with simulated bit array i got memory error
+
+[18:57] <moritz> timotimo: I have no idea; might be worth trying
+
+[18:58] *** beastd joined
+[19:01] *** darutoko left
+[19:03] *** xinming joined
+[19:05] *** telex left
+[19:06] *** abnorman joined
+[19:06] *** raiph joined
+[19:06] *** xinming_ left
+[19:08] *** telex joined
+[19:11] *** ggoebel119 joined
+[19:12] *** ggoebel1110 joined
+[19:14] *** ggoebel118 left
+[19:15] <arnsholt>  t/nqp/83-log.t                          |   20 ++++++++++++++++++++ \o/
+
+[19:16] *** ggoebel119 left
+[19:17] *** ivan``_ left
+[19:19] <timotimo> arnsholt: you made a whole bunch of new tests?
+
+[19:20] <arnsholt> Nope. pmurias++ did
+
+[19:20] *** ivan`` joined
+[19:23] <colomon> sweet!
+
+[19:25] <masak> japhb: Nomic is a game in which a move is proposing a rule change and having it voted on. I made a sketch for a Perl 6 implementation, and I figure it's time to start implementing it.
+
+[19:26] <diakopter> masak: that's like meta-game meta-theory
+
+[19:26] <masak> Nomic is a very meta game.
+
+[19:26] <arnsholt> jnthn: Should I just remove nqp::ln_n, or would you prefer a bit more warning to (non-Rakudo) users?
+
+[19:26] <masak> japhb: Dark is a web engine (with one static and one dynamic part) based around feeds (as in Atom), operators on feeds, and projections from feeds into pages.
+
+[19:26] <diakopter> there's no I in meta
+
+[19:26] *** ajr_ left
+[19:27] <arnsholt> See also http://en.wikipedia.org/wiki/Nomic
+
+[19:27] <[Coke]> There is an I in meat pie, though.
+
+[19:27] <diakopter> there is a meat pie in I, too
+
+[19:28] *** sqirrel joined
+[19:29] <masak> japhb: secretary bot (occasionally named "mishu", but it's just a working name) is my attempt to (finally!) get an online agent. event-based, programmable, shouldn't ever need to be rebooted. it's a second system.
+
+[19:29] <masak> japhb: incidentally, the things I asked you about tonight were for Nomic.
+
+[19:30] <masak> japhb: here's the sketch. https://gist.github.com/masak/5237570 -- I think you'll be able to see why I need what I asked for. ;)
+
+[19:31] <tadzik> just a working name. It's funny because mishu is working
+
+[19:31] <masak> in fact, I'm going to make it tonight's mini-challenge.
+
+[19:31] <masak> write an attribute trait that will make an attribute "sense" when it's being read from and written to.
+
+[19:31] <masak> yes, you too can win... an Internet!
+
+[19:32] <diakopter> is sensible
+
+[19:32] <masak> :P
+
+[19:32] <tadzik> sub sight is sense
+
+[19:32] <masak> tadzik: "mishu" MI4SHU1 秘书 is Mandarin for "secretary".
+
+[19:33] <tadzik> yeah, that rings a bell, from PPW and YAPCEU talk :)
+
+[19:33] <masak> aye.
+
+[19:33] <tadzik> btw folks, PLPW 2014 registration is open
+
+[19:33] <masak> \o/
+
+[19:33] <tadzik> this time in Poznań, on the wild west
+
+[19:34] <diakopter> google wants me to PLOW 2014 instead
+
+[19:34] <tadzik> it's like twice as close to()from) germany as PLPW 2013 was!
+
+[19:35] *** ashleydev joined
+[19:35] <tadzik> what a bargain!
+
+[19:35] <masak> ss/twice as close/half as far/ :P
+
+[19:35] <tadzik> hey, I know better where it is! :P
+
+[19:39] <Rotwang> poznan is the worst city ever
+
+[19:39] <jnthn> arnsholt: I think we can just remove it...
+
+[19:39] <Rotwang> tadzik: have you given any thoughts to my pull request?
+
+[19:45] <masak> Rotwang: I like Poznan.
+
+[19:45] <masak> then again, I like anything that has pierogi in it :)
+
+[19:46] * arnsholt goes to remove nqp::ln_n
+
+[19:47] <colomon> pierogi++
+
+[19:53] <tadzik> Rotwang: I was mostly out of internet recently, let me see
+
+[19:54] * masak .oO( but you can win one, if you do the mini-challenge! )
+
+[19:54] <tadzik> ok, I have mixed feelings
+
+[19:54] <tadzik> 1st, it sort of defeats the purpose of Builder whatsoever
+
+[19:54] <masak> does anyone think http://blogs.perl.org/users/joel_berger/2014/01/ephemeral-methods-or-what-to-call-dispatch-to-a-variable-containing-a-subref.html could be done in Perl 6?
+
+[19:54] <masak> I don't think so, because you cannot do $!x or $.x outside of a class.
+
+[19:55] <tadzik> other than choosing a file to copy to blib
+
+[19:55] <tadzik> which may be a good thing 
+
+[19:55] *** felipe joined
+[19:55] <tadzik> but: do you have a particular usecase that this change will solve?
+
+[19:56] <tadzik> in other news, the first thing I want to do once I get back to rakudo hacking, is get us rid of manual precomp, forever
+
+[19:56] <jnthn> r: class A { has $.x }; my $m = method () { say self.x }; A.new().$m()
+
+[19:56] <camelia> rakudo-parrot 5669b2, rakudo-jvm 5669b2: OUTPUT«(Any)␤»
+
+[19:56] <tadzik> so panda can stop doing it wrong
+
+[19:56] *** laidback_01 joined
+[19:56] <jnthn> r: class A { has $.x }; my $m = method () { say self.x }; A.new(x => 42).$m()
+
+[19:56] <camelia> rakudo-parrot 5669b2, rakudo-jvm 5669b2: OUTPUT«42␤»
+
+[19:56] <jnthn> r: class A { has $.x }; my $m = method () { say $.x }; A.new(x => 42).$m()
+
+[19:56] <camelia> rakudo-parrot 5669b2, rakudo-jvm 5669b2: OUTPUT«42␤»
+
+[19:56] <jnthn> masak: Does work :)
+
+[19:56] <jnthn> $.x just needs a self 
+
+[19:56] <lichtkind> (rakudo devs)++
+
+[19:57] <jnthn> masak: It's $!x you can't do, which I think we want to keep that way :)
+
+[19:57] <lichtkind> the error messages are sometimes reall useful
+
+[19:58] <masak> oh, right, the 'method' keyword.
+
+[19:58] <masak> yes, I agree -- that's the right level of encapsulation.
+
+[19:58] <masak> I haven't seen someone play around with ad-hoc methods that way.
+
+[19:59] <dalek> nqp: 7245cb4 | (Arne Skjærholt)++ | src/vm/ (3 files):
+
+[19:59] <dalek> nqp: Remove superfluous nqp::ln_n op from all three backends.
+
+[19:59] <dalek> nqp: review: https://github.com/perl6/nqp/commit/7245cb4269
+
+[19:59] <Rotwang> tadzik: "manual precomp"?
+
+[20:03] *** ivan`` left
+[20:06] *** ivan`` joined
+[20:16] *** raiph left
+[20:16] *** Mouq joined
+[20:16] <dalek> nqp/replace-shift-with-control-in-strings: 8c8ff30 | masak++ | t/jvm/01-continuations.t:
+
+[20:16] <dalek> nqp/replace-shift-with-control-in-strings: s/shift/control/g in strings in 01-continuations.t
+
+[20:16] <dalek> nqp/replace-shift-with-control-in-strings: review: https://github.com/perl6/nqp/commit/8c8ff306e8
+
+[20:24] *** Guest65081 joined
+[20:28] <dalek> rakudo/moar-support: 7de1934 | jnthn++ | src/Perl6/Metamodel/BOOTSTRAP.nqp:
+
+[20:28] <dalek> rakudo/moar-support: Fix p6isbindable, fixing unpack-object.t.
+
+[20:28] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/7de193412f
+
+[20:29] *** rindolf joined
+[20:44] <masak> p: sub trait_mod:<is>(Attribute:D $attr, :$sensitive!) { say "how to I proceed from here?" }; class C { has $.x is sensitive }
+
+[20:44] <camelia> rakudo-parrot 5669b2: OUTPUT«how to I proceed from here?␤»
+
+[20:44] <masak> more exactly, how do I make $.x notice it's being read from and written to?
+
+[20:45] <FROGGS> I'd grep for FETCH and STORE in rakudo's source
+
+[20:46] <timotimo> class foobar { has @.feelings ... }@
+
+[20:46] <FROGGS> like src/Perl6/Metamodel/BOOTSTRAP.nqp:311:    Proxy.HOW.add_method(Proxy, 'FETCH', ($PROXY_FETCH := nqp::getstaticcode(sub ($cont) {
+
+[20:46] <FROGGS> maybe you can add that method to the attr?
+
+[20:49] <masak> I know about FETCH and STORE, and about proxies.
+
+[20:49] <masak> I just don't know how to tie the knot from an attribute trait_mod:<is> to a Proxy.
+
+[20:51] <jnthn> masak: I think you need a custom meta-attribute
+
+[20:52] <jnthn> masak: Oh, or not...
+
+[20:52] <jnthn> masak: I guess given you know your trait mod runs before accessor method generation, and accessor method generation is suppressed by installing a method...you can just beat it to install an accessor :)
+
+[20:53] <jnthn> masak: So really you want to be doing add_method or so :)
+
+[20:53] <tadzik> Rotwang: the fact that we have to explicitely precompile stuf, instead of rakud ohandling this for us
+
+[20:53] <tadzik> think python
+
+[20:54] <masak> jnthn: but I should do add_method to... the class HOW object, no?
+
+[20:54] <nwc10> so, do I stay up to watch the SpaceX launch? If I go to bed, is it less likely to be scrubbed?
+
+[20:55] <jnthn> masak: Yeah, you an get hold of what I think with .package on the Attribute instance you were passed.
+
+[20:57] <Rotwang> tadzik: indeed, so when is it supposed to happen?
+
+[20:57] <Rotwang> I'm wondering, because I have this module that compiles a native library in the Build.pm
+
+[20:58] <Rotwang> after installation the module is supposed to find the library searching through @*INC at compile time
+
+[20:58] <Rotwang> so currently it is not possible to install the module with panda, or at least I think so
+
+[21:02] *** dayangkun left
+[21:05] *** FROGGS[mobile] left
+[21:05] *** FROGGS[mobile] joined
+[21:06] *** raiph joined
+[21:10] *** grondilu left
+[21:11] *** grondilu joined
+[21:11] <masak> p: sub trait_mod:<is>(Attribute:D $attr, :$sensitive!) { my $name = $attr.name.substr(2); my $class := $attr.package; $class.HOW.add_method($class, $name, sub ($c) { say "it tickles!"; $attr.get_value($c) }) }; class C { has $.x is sensitive }; my $c = C.new(:x(5)); say $c.x
+
+[21:11] <camelia> rakudo-parrot 5669b2: OUTPUT«it tickles!␤5␤»
+
+[21:12] <masak> ok, I can definitely work with this.
+
+[21:12] <masak> jnthn++
+
+[21:17] *** dayangkun joined
+[21:21] <timotimo> plpw is only 9 hours away from me. via train.
+
+[21:21] <nwc10> before I forget
+
+[21:21] <timotimo> only costs 100 euros
+
+[21:21] <nwc10> if there is a plan to have a hackathon at the German Perl Workshop, could it be decided soon
+
+[21:21] <nwc10> before I book travel and hotel
+
+[21:21] <nwc10> please :-)
+
+[21:22] <dalek> rakudo/moar-support: 6ce3436 | (Tobias Leich)++ | src/ (2 files):
+
+[21:22] <dalek> rakudo/moar-support: implement p6decodelocaltime and make $*TZ available
+
+[21:22] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/6ce343655c
+
+[21:24] <masak> seems there is only one mention of FETCH and STORE methods on the whole spec.
+
+[21:25] <masak> and in that example, the sub for STORE has *one* parameter, whereas the examples I see in Rakudo have *two*.
+
+[21:25] <masak> spec wrong?
+
+[21:25] <jnthn> FROGGS: We get some more tests out of that? :)
+
+[21:25] <japhb_> masak: Thanks for explaining the projects.  :-)
+
+[21:26] *** Rotwang left
+[21:27] <masak> p: sub trait_mod:<is>(Attribute:D $attr, :$sensitive!) { my $name = $attr.name.substr(2); my $class := $attr.package; $class.HOW.add_method($class, $name, sub ($c) { Proxy.new(FETCH => { say "read"; $attr.get_value($c) }, STORE => -> $, $v { say "write"; $attr.set_value($c, $v) }) }) }; class C { has $.x is sensitive }; my $c = C.new(:x(5)); $c.x = 42; say $c.x
+
+[21:27] <camelia> rakudo-parrot 5669b2: OUTPUT«write␤read␤read␤read␤read␤read␤read␤42␤»
+
+[21:27] <masak> \o/
+
+[21:28] <FROGGS> jnthn: 187
+
+[21:28] <masak> except... why does it print 'read' 6 times?
+
+[21:28] <moritz> masak: try  say ~$c.x
+
+[21:29] <moritz> it might be read for the multi dispatch, for the type check, a few times in .gist, ...
+
+[21:29] *** sqirrel left
+[21:31] <masak> p: sub trait_mod:<is>(Attribute:D $attr, :$sensitive!) { my $name = $attr.name.substr(2); my $class := $attr.package; $class.HOW.add_method($class, $name, sub ($c) { Proxy.new(FETCH => { say "read"; $attr.get_value($c) }, STORE => -> $, $v { say "write"; $attr.set_value($c, $v) }) }) }; class C { has $.x is sensitive }; my $c = C.new(:x(5)); $c.x = 42; say ~$c.x
+
+[21:31] <camelia> rakudo-parrot 5669b2: OUTPUT«write␤read␤read␤read␤read␤read␤read␤read␤read␤read␤42␤»
+
+[21:31] <masak> 9 times!?
+
+[21:31] <masak> anyway, it's no biggie.
+
+[21:31] <Mouq> seems efficient
+
+[21:31] <masak> it's just going to result in a bunch of over-firings.
+
+[21:32] <timotimo> i'll probably go to the gpw2014
+
+[21:32] <timotimo> since it's so close
+
+[21:32] <japhb_> Elephant in room is an elephant.
+
+[21:32] *** raiph left
+[21:33] <japhb_> That kind of thing is why it would be nice to coalesce profile call counts by classification of routine -- generated accessor, other generated method, hand-written method, sub, pointy, etc.
+
+[21:33] <masak> aye.
+
+[21:34] <masak> I'm almost tempted to report this as a rakudobug.
+
+[21:34] <diakopter> heh, put continuation shifts in those lolol
+
+[21:34] <japhb_> masak: I understand both your reasoning and your hesitation.
+
+[21:35] <jnthn> You can't rely on that, really...
+
+[21:35] <moritz> masak: if you submit it as a rakudobug, prepared for the question "how many reads are OK, exactly?"
+
+[21:35] <moritz> *be prepared
+
+[21:35] <masak> diakopter: I had a feeling it wasn't right. I'll delete the branch, then.
+
+[21:35] <japhb_> rely on what, jnthn?
+
+[21:35] <masak> moritz: I'd expect 1.
+
+[21:35] <jnthn> japhb_: How many times it'll decont...
+
+[21:35] <diakopter> masak: er
+
+[21:35] <masak> or else Proxy is less useful.
+
+[21:35] <diakopter> masak: I wasn't addressing the branch
+
+[21:36] <FROGGS> timotimo: \o/
+
+[21:36] <moritz> masak: but you do notice that you've passed this as an argument to a named routine, which needs the value for type checking and multi dispatch and all that fancy stuff?
+
+[21:36] * japhb_ wonders if we need BFWs for all the things rakudo's design just assumes are very cheap.
+
+[21:36] <masak> p: class C { method x { Proxy.new(FETCH => { say "read"; 2 }, STORE => -> $, $v { say "write $v" }) } }; given C.new { .x = 5; say .x }
+
+[21:36] <camelia> rakudo-parrot 5669b2: OUTPUT«write 5␤read␤read␤read␤read␤read␤read␤2␤»
+
+[21:36] <jnthn> japhb_: Well, thing is, a decont normally *is* very cheap (pointer de-ref)
+
+[21:37] <masak> moritz: yes, I see what you are saying.
+
+[21:37] <masak> moritz: I just know that there is a preferred way in which I would want Proxy to work.
+
+[21:37] <moritz> so doing it in one fetch would require *another* layer of indirection
+
+[21:37] *** FROGGS[mobile] left
+[21:37] <masak> yes :/
+
+[21:37] <moritz> the cocontainer :-)
+
+[21:37] <japhb_> jnthn, Well, I can turn it around and say "BFW on Proxy that it breaks [one or more] assumptions that certain things are really fast, so Proxy is likely to have disproportionately large effects on performance"
+
+[21:38] <masak> moritz: no, but nice try :P
+
+[21:38] <masak> well, there are other parts of Perl 6 that promise to calculate the value only once and then cache it. '5 < $x < 10' comes to mind.
+
+[21:38] <masak> so it *is* possible, in some sense.
+
+[21:38] <masak> question is whether it is in this case, and if so, at what cost.
+
+[21:39] <moritz> be wary of "calculate the value only once"
+
+[21:39] <diakopter> masak: count how many the chained comparator does ;)
+
+[21:39] <moritz> the spec says that if $x is an expression, it is only evaluated once
+
+[21:39] <japhb_> Under concurrency, beware of "recalculating is pure"
+
+[21:39] <moritz> but fetching a thing from its container isn't the same as evaluating an expression
+
+[21:40] <japhb_> Sure, no argument.
+
+[21:40] <masak> moritz: yes, you're right.
+
+[21:40] <jnthn> Note that you can probably dump a backtrace in each FETCH call if you're curious where they're happening...
+
+[21:40] <masak> moritz: also, I can live with this behavior. Nomic (and the engine that drives it) will still work fine as-is, it'll just be slightly inefficient.
+
+[21:40] <japhb_> I just never like finding out that things that in theory should have relatively minor effect really won't.
+
+[21:41] <masak> I won't submit a rakudobug.
+
+[21:41] <japhb_> It's worth asking if there will ever be redundant *writes*.
+
+[21:41] <masak> but I would like to note for the record that my expectation was 1 'read'.
+
+[21:41] * moritz goes to sleep less troubled
+
+[21:41] <japhb_> o/  # "less troubled" sleep is best sleep
+
+[21:42] <lue> masak: is your Nomic game just a normal one written in Perl 6, or are the submitted rules bits of Perl 6 code?
+
+[21:42] <jnthn> masak: I'm surprised it's so many, but not really at all surprised it's multiple...
+
+[21:44] <masak> lue: the submitted rules are patches to the Perl 6 code that (currently) makes up the game.
+
+[21:44] *** ilbot_pg left
+[21:44] <lue> that should be mind-bendingly fun :D
+
+[21:44] <masak> lue: that is, you're using the *same* application to propose rule changes, discuss them, and then change the actual rules.
+
+[21:48] *** bluescreen100 joined
+[21:49] *** bluescreen10 left
+[21:53] *** FROGGS[mobile] joined
+[21:53] <[Coke]> IO::Handle.copy is deprecated.  Please use IO::Path.copy instead. -- this probably needs to be updated to the new DEPRECATED. Also, it's in roast.
+
+[21:53] <[Coke]> S32-io/copy.t
+
+[21:53] *** kbaker left
+[21:56] *** hoverboard joined
+[21:56] <timotimo> right
+
+[21:58] <masak> diakopter: oh, I thought you were talking about the branch.
+
+[21:59] <masak> diakopter: did you see it?
+
+[21:59] <masak> diakopter: was it what you wanted?
+
+[21:59] <masak> diakopter: should I merge it?
+
+[21:59] <tadzik> bah, Rotwang's gone
+
+[22:00] *** Mouq left
+[22:00] <tadzik> preflex, tell Rotwang as soon as it's needed, so it may happen the first time someone runs a program that uses a module
+
+[22:00] <preflex>  Consider it noted.
+
+[22:00] <nwc10> T -6 minutes, if anyone is interested: http://www.spacex.com/webcast/
+
+[22:01] <masak> oh boy oh boy
+
+[22:05] <nwc10> T -1
+
+[22:06] <masak> woooooooooooow
+
+[22:07] <jnthn> nice!
+
+[22:07] <masak> I love that it traveled 6 km in one minute.
+
+[22:07] <masak> ...and THEN passed the sound barrier!
+
+[22:08] *** lichtkind left
+[22:09] <masak> not such a good view of the planet this time around.
+
+[22:09] <masak> still, that's clearly ours.
+
+[22:09] <masak> *sniff*
+
+[22:10] <PerlJam> at least until the aliens come down and take it from us.
+
+[22:10] <nwc10> they seem to have a new camera for stage 2, showing the engine from the side, I think as IR
+
+[22:11] <masak> yeah.
+
+[22:11] <masak> maybe that's what we saw last time too, though.
+
+[22:11] <masak> yes, it seems to be flipping back and forth.
+
+[22:12] <colomon> dang, didn't look down at the IRC window in time to notice and watch the launch.  :(
+
+[22:12] <[Coke]> what's with the all the pixelated video? they clearly need more bandwith. :)
+
+[22:13] * masak finds himself wishing the vehicle could go around the planet so that the planet obscures that bright nearby star
+
+[22:13] <nwc10> yeah, the full colour live stream from the *rocket in flight* is a bit mangled. #firstworldproblem :-)
+
+[22:13] *** thou left
+[22:13] <nwc10> oh, and it's not HD
+
+[22:13] <masak> yeah, if space has that bad connectivity, I'm not sure it's worth it.
+
+[22:13] <masak> I'm glad I found this out *before* I moved!
+
+[22:14] <[Coke]> not HD? pshaw!
+
+[22:14] *** thou joined
+[22:14] <nwc10> and the frame rate seems a bit low
+
+[22:15] <masak> that's a nice red glow.
+
+[22:15] <masak> something must have made it very hot recently. :P
+
+[22:16] <lue> I just decided to check out that webcast link, and to my infinite surprise it needs flash :/
+
+[22:16] <colomon> look at all those people in space!
+
+[22:18] <masak> colomon: :D
+
+[22:18] <masak> I thought the day couldn't get any better, but then I saw a live stream of human engineers *propelling an object into orbit*.
+
+[22:19] <masak> 'night, #perl6
+
+[22:19] <colomon> \o
+
+[22:20] <lue> does anyone else experience problems with Moar's CFLAGS somehow overriding Parrot's? Because I can make a pull request after a while with a fix for that.
+
+[22:23] *** berekuk left
+[22:26] <dalek> nqp: 79c72d8 | jnthn++ | src/vm/moar/QAST/QASTOperationsMAST.nqp:
+
+[22:26] <dalek> nqp: Don't take a null dispatcher.
+
+[22:26] <dalek> nqp: review: https://github.com/perl6/nqp/commit/79c72d843e
+
+[22:28] *** rindolf left
+[22:28] <dalek> rakudo/moar-support: 3f17cbf | jnthn++ | src/vm/moar/ops/perl6_ops.c:
+
+[22:28] <dalek> rakudo/moar-support: Implement p6finddispatcher.
+
+[22:28] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/3f17cbfe3c
+
+[22:29] *** berekuk joined
+[22:33] *** berekuk left
+[22:34] *** ajr joined
+[22:35] *** ajr is now known as Guest3914
+
+[22:35] *** Guest3914 is now known as ajr_
+
+[22:42] *** ssutch left
+[22:42] *** berekuk joined
+[22:54] <dalek> roast: 83e0589 | (Timo Paulssen)++ | S02-literals/quoting.t:
+
+[22:54] <dalek> roast: skip quoting tests requiring openpipe on moarvm
+
+[22:54] <dalek> roast: review: https://github.com/perl6/roast/commit/83e05896f9
+
+[22:54] <dalek> roast: ac60f26 | (Timo Paulssen)++ | .gitignore:
+
+[22:54] <dalek> roast: ignore rakudo.moar fudged test files
+
+[22:54] <dalek> roast: review: https://github.com/perl6/roast/commit/ac60f264a4
+
+[22:54] <timotimo> that gives us about 40 more tests
+
+[22:55] <timotimo> i wonder why version comparisons b0rk
+
+[22:55] <timotimo> ah, hehe
+
+[22:57] * timotimo is probably about to make another 24 tests pass that used to fail
+
+[22:59] <jnthn> src/vm/moar/ops/perl6_ops.c(609) : error C2079: 'tm' uses undefined struct 'tm'
+
+[22:59] <jnthn> :(
+
+[23:00] *** johnmilton left
+[23:01] <timotimo> :(
+
+[23:06] *** beastd left
+[23:09] *** mohij left
+[23:10] <dalek> rakudo/moar-support: cf92e81 | jnthn++ | src/vm/moar/ops/perl6_ops.c:
+
+[23:10] <dalek> rakudo/moar-support: Fix p6decodelocaltime build on Win32.
+
+[23:10] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/cf92e8161f
+
+[23:10] <dalek> rakudo/moar-support: a94270c | jnthn++ | src/vm/moar/ops/perl6_ops.c:
+
+[23:10] <dalek> rakudo/moar-support: Implement p6argsfordispatcher.
+
+[23:10] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/a94270c1a8
+
+[23:10] <jnthn> timotimo: Fine, though it's better we don't start fudging too much too soon...
+
+[23:15] <diakopter> jnthn: needz an asterisk after tm?
+
+[23:17] <jnthn> diakopter: In the decl?
+
+[23:17] <jnthn> No, it's stack allocated
+
+[23:17] <jnthn> um
+
+[23:17] <jnthn> (&tm)->tm_sec
+
+[23:17] <diakopter> I thoguht that was the error you got if you nested a struct inside itself instead of a pointer to a struct
+
+[23:17] <jnthn> ....that should be tmp.tm_sec...
+
+[23:18] <jnthn> (should as in, "it's shorter and means the same")
+
+[23:30] <dalek> rakudo/moar-support: afac8b6 | jnthn++ | src/Perl6/Metamodel/BOOTSTRAP.nqp:
+
+[23:30] <dalek> rakudo/moar-support: Fix native auto-unboxing of params.
+
+[23:30] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/afac8b6e81
+
+[23:30] <dalek> rakudo/moar-support: 78e9800 | jnthn++ | src/Perl6/Metamodel/BOOTSTRAP.nqp:
+
+[23:30] <dalek> rakudo/moar-support: Complain about excess args.
+
+[23:30] <dalek> rakudo/moar-support: review: https://github.com/rakudo/rakudo/commit/78e98009f2
+
+[23:33] *** denis_boyun left
+[23:36] *** ssutch joined
+[23:39] <dalek> perl6-roast-data: dfb2456 | coke++ | / (4 files):
+
+[23:39] <dalek> perl6-roast-data: today (automated commit)
+
+[23:39] <dalek> perl6-roast-data: review: https://github.com/coke/perl6-roast-data/commit/dfb245663e
+
+[23:40] <[Coke]> If you fudge a roast ticket for moarvm, be sure to open a ticket.
+
+[23:40] <[Coke]> otherwise we'll end up with more of the mess I created with all the "nom regression" todos.
+
+[23:45] <jnthn> [Coke]: Was JVM test run less awfully slow today?
+
+[23:50] *** mavcunha left
+[23:52] <lue> perl6-m still doesn't work outside the git repo :( [rakudo commit 7de193412]
+
+[23:52] <[Coke]> not by much, it felt. probably swamped by lack of eval server.
+
+[23:53] * [Coke] kicks off another run of moar to improve the test abort list.
+
+[23:54] <jnthn> [Coke]: hang on...
+
+[23:54] *** mavcunha joined
+[23:54] <lue> The specific error is "Missing or wrong version of dependency 'gen/moar/stage2/QRegex.nqp'", for those interested.
+
+[23:54] <jnthn> [Coke]: OK, just pushed. Use latest Moar now :)
+
+[23:54] <preflex>  jnthn: you have 1 new message. '/msg preflex messages' to read it.
+
+[23:54] <jnthn> [Coke]: Just fixed all the tests that depend on custom operators... :)
+
+[23:58] *** baest_ joined
+[23:58] *** ggoebel1111 joined

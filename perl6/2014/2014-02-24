@@ -1,0 +1,2571 @@
+[00:01] <Mouq> Basically the parser pretends its a Perl 6 grammar, taking the .compile_time_value of *everything*
+
+[00:01] <Mouq> I mean...
+
+[00:03] <Mouq> No, I'm overthinking this
+
+[00:04] <[Coke]> colomon: any word from sorear lately
+
+[00:04] <[Coke]> ?
+
+[00:05] <Mouq> Anyway, lue, what exactly would M<> do and how would it fix your problem?
+
+[00:06] <lue> M<backlink:file:line> would do all the work of htmlifying for me, of course :)
+
+[00:06] * lue suspects he would be the one to write this module, by the way.
+
+[00:06] <Mouq> Hm.
+
+[00:08] <Mouq> So.. According to spec, that would generate a Pod6::FormattingCode::Name::backlink.new(typename<backlink>, contents<file:line>)
+
+[00:08] <lue> ::Named:: , but yes, that's what it would be.
+
+[00:09] <Mouq> And then....?
+
+[00:09] <lue> https://github.com/perl6/Pod-To-HTML/blob/master/lib/Pod/To/HTML.pm#L385  <--- I wonder if this would handle ::Named::backlink already
+
+[00:10] <lue> content processing would happen within the class, presumably?
+
+[00:10] <Mouq> That's what I don't get
+
+[00:10] <Mouq> Does the class have to custom handle each case of $?DOC ?
+
+[00:11] <lue> I think that function I linked to needs to explicitly support the M code, but that's it for ::HTML.
+
+[00:11] <Mouq> Is the class called by Pod::To::* ?
+
+[00:11] <lue> $?DOC ?
+
+[00:11] <Mouq> http://perlcabal.org/syn/S26.html#How+Pod+is+parsed+and+processed
+
+[00:11] <Mouq> so perl6 --doc=HTML would have a $?DOC eq 'HTML'
+
+[00:12] <lue> Mouq: M<> (and custom-named blocks) feel to me like a situation where you only use them in specific situations.
+
+[00:13] <lue> so yeah, the class itself would be checking $?DOC
+
+[00:14] *** perigrin_ left
+[00:15] <lue> r: =begin pod␤M<ok:hello>␤=end pod␤say $=pod;
+
+[00:15] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«Pod::Block::Named("name" => "pod").hash␤  Pod::Block::Para␤␤    Pod::FormattingCode("type" => "M").hash␤      ok:hello␤␤␤»
+
+[00:15] *** perigrin joined
+[00:15] <lue> looks like we need some support for M<> in rakudo
+
+[00:15] <Mouq> mmhm
+
+[00:16] *** pippo joined
+[00:16] <Mouq> What if we did this:
+
+[00:18] * lue suspects DOC use might be easier to implement than DOC <phaser>, but is only guessing
+
+[00:18] *** pippo left
+[00:18] <Mouq> =config M<> { my ($file,$line) = .split(':'); qq[<a href='…] }
+
+[00:19] <lue> would that work in current rakudo?
+
+[00:19] <Mouq> Because there's this whole chain of APIs that we'd need to construct this feature
+
+[00:19] <Mouq> lue: Not right now :P
+
+[00:19] <Mouq> I'm guessing it would parse-fail
+
+[00:20] <lue> I should note that I'm just fine doing it the way the P5 generator does it, no need to make M<> and related work RIGHT NOW or anything :)
+
+[00:21] <Mouq> lue: What it would require is that instead of building the Perl 6 Pod::* objects in NQP, we build ASTs that build it for us
+
+[00:21] <Mouq> Which would simplify everything dramatically, I think
+
+[00:22] <lue> ASTs are likely the way to go when you go beyond simple document markup :)
+
+[00:24] <Mouq> But it requires some serious thought
+
+[00:25] <lue> My two remaining goals for syngen are to place backlinks on a more granular level (i.e. interpret fragments and use them), and dramatically speeding up the HTML generation process
+
+[00:25] <Mouq> lue: How well would my cheat work for you?
+
+[00:26] <Mouq> r: say $=pod.perl;␤␤=pod abcd
+
+[00:26] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«Array.new(Pod::Block::Named.new(name => "pod", config => ().hash, content => Array.new(Pod::Block::Para.new(config => ().hash, content => Array.new("abcd")))))␤»
+
+[00:26] <Mouq> ^^ should that work?
+
+[00:26] <Mouq> I mean, conceptually
+
+[00:27] <Mouq> That $=pod gets the Pod after it, because the documents Pod is constructed compile-time
+
+[00:27] <lue> I don't know; it's currently a <div class="smartlink"> surrounding a <p class="smartlink-file">
+
+[00:28] <lue> (the div should contain multiple p elements, though I haven't bothered getting that working yet, if ever)
+
+[00:29] <lue> a Pod6 way of generating the backlink list might make the multiple <p> per <div> easier though :D
+
+[00:29] <lue> =for backlinks\n=backlink L<>\n=backlink ...
+
+[00:30] <Mouq> Hm
+
+[00:30] <Mouq> "It'd be really helpful to have a module providing a generic ay to walk a Pod tree and invoke callbacks on each node"
+
+[00:31] <lue> (then again, detecting when that multiple backlinks per paragraph thing happens should be equally complex with Pod6 constructs or PUA unicode chars...)
+
+[00:32] *** dayangkun joined
+[00:32] *** dmol left
+[00:32] <Mouq> lue: With my cheat it's just =begin pod :class<smartlink>␤=pod :class<smartlink-file> L<linkylink>␤=pod :class<smartlink-file>␤=end pod
+
+[00:33] <Mouq> and then the css adds display: block; to .smartlink
+
+[00:33] <lue> yeah, that's essentially what I wrote, except with less syntax sugar :)
+
+[00:33] * lue is more concerned with the Pod->HTML chokepoint at the moment :/
+
+[00:34] <Mouq> lue: Well, true, but mine's more generalizable :P and I think that the Pod conversion should be easier to extend
+
+[00:34] <lue> yeah, :class<> would be way more useful, at least in ::HTML land
+
+[00:35] <Mouq> So that you could do `perl6 --doc=HTML,CustomHTML file.pod`
+
+[00:36] <Mouq> And the results of Pod::To::HTML and Pod::To::CustomHTML could be merged. It would just require setting up some kind of API
+
+[00:36] <Mouq> like I said
+
+[00:36] <Mouq> :P
+
+[00:36] * lue is trying to see how https://github.com/perl6/doc/blob/master/htmlify.pl does inline HTML conversion
+
+[00:39] *** pdcawley_ joined
+[00:39] *** pdcawley left
+[00:42] <lue> yech, htmlify does too much to the $pod it constructs for me to see clearly what's going on.
+
+[00:42] <Mouq> Huh. Pod::To::HTML can display images written '=Image http://i.imgur.com/YrZrpZj.jpg'
+
+[00:43] <lue> yeah, just noticed that :) .
+
+[00:44] <lue> That means if/when I get around to writing a sub parameters tutorial thing, I can use a pretty picture at one part instead of ASCII art.
+
+[00:46] *** stevan__ joined
+[00:48] *** lee_ joined
+[00:49] *** pdcawley joined
+[00:49] <lue> Come to think of it, when I last ran htmlify it wasn't much faster at making HTML docs that my way... so except for those using my thing with perl6-j, it appears to be more a rakudo/Pod::To::HTML issue.
+
+[00:49] *** pdcawley_ left
+[00:49] *** dayangkun left
+[00:49] *** stevan_ left
+[00:49] *** mavcunha left
+[00:49] *** ruoso left
+[00:49] *** Mouq left
+[00:49] *** [Sno] left
+[00:49] *** yihshih left
+[00:49] *** lee left
+[00:49] *** orevdiabl left
+[00:49] *** go|dfish left
+[00:50] *** dayangkun joined
+[00:50] *** ruoso joined
+[00:50] *** Mouq joined
+[00:50] *** [Sno] joined
+[00:50] *** yihshih joined
+[00:50] *** orevdiabl joined
+[00:50] *** go|dfish joined
+[00:52] *** mavcunha joined
+[00:54] <Mouq> lue: Would this work for you? https://gist.github.com/Mouq/9179799
+
+[00:54] <colomon> [Coke]: I haven't heard anything from sorear++ recently.
+
+[00:54] <Mouq> Aw, lue got netsplit
+
+[00:55] <Mouq> lue: Maybe?
+
+[00:56] <lue> Mouq: no, *you* got netsplit! :)
+
+[00:56] <Mouq> lue: Fair enough :)
+
+[00:57] <lue> looks like it'd work, though I like being able to specify I want a div tag or a p tag .oO(=for Div ?)
+
+[00:58] <lue> <{$node.config<tag>} class="{$node.config<class>}">    :P
+
+[00:58] <Mouq> lue: I don't really feel like that's in the spirit of Pod..
+
+[01:00] <lue> I feel like being able to at least choose div or span, or maybe using div instead of span (this ain't an inline block element in Pod6, after all) would be better that just span
+
+[01:00] <lue> s/that just/than just/
+
+[01:01] <Mouq> lue: Span is as un-opinionated as it gets, and you can always use CSS to make it act like a div
+
+[01:01] <Mouq> I'm trying to keep as much of this out of the actual Pod as possible
+
+[01:01] *** _thou left
+[01:02] <lue> Seems like this could require more than just us two discussing :) . For now I'm fine with doing it the way that I have it, though eventually getting rid of an entire stage of the process would be nice.
+
+[01:03] * lue is, again, more concerned with the startling lack of speed in converting Pod to HTML, as that's now the longest stage in the process by far.
+
+[01:05] <Mouq> lue: Yeah…
+
+[01:05] <lue> File::Find::find is another timehog in the process.
+
+[01:08] <Mouq> How does one profile Perl6 code?
+
+[01:08] *** pmurias left
+[01:09] <lue> with --profile, 2>filename, and kcachegrind
+
+[01:10] <Mouq> raydiak++ doc links fixed :D
+
+[01:10] <raydiak> colomon: I just PR'd you a partial fix for a URI::Escape unicode issue
+
+[01:11] *** rurban joined
+[01:11] <raydiak> unbreak all the things!
+
+[01:11] <colomon> raydiak++
+
+[01:11] <colomon> raydiak: should I trust you?
+
+[01:11] <raydiak> colomon: that's a very abstract question
+
+[01:11] <Mouq> "No profiling support"
+
+[01:12] <raydiak> people you can't trust always say "absolutely" to that question :)
+
+[01:12] <colomon> raydiak: feeling lazy enough tonight to do your pull request without testing.  :)
+
+[01:12] <lue> Mouq: it works on perl6-p at least, don't know about -j and -m
+
+[01:12] <raydiak> colomon: oh, yeah I'm pretty confident in this one
+
+[01:12] <lue> (IIRC -m fails, don't know -j)
+
+[01:12] <colomon> raydiak: done
+
+[01:13] <colomon> raydiak: it looked solid, though I have no real clue what's going on at that line.  :)
+
+[01:13] <raydiak> colomon: it says "if this char is lower ascii", but assumes ordinals > 255 don't exist
+
+[01:14] <colomon> right, figured that was what was wrong with the old version
+
+[01:14] * lue afk
+
+[01:14] <raydiak> specifically, it checks the highest bit of an 8-bit byte
+
+[01:15] <raydiak> well, 1-byte char...you know what I mean :)
+
+[01:15] <colomon> raydiak: thanks for pinging me, I see so many pull requests for p6 things I usually just ignore them.
+
+[01:16] <raydiak> Mouq, moritz, anyone else who syncs the html docs to feather: make sure to get a fresh URI::Encode and Pod::To::HTML before htmlifying and syncing again
+
+[01:16] <colomon> actually, as I read it, it was just testing the byte #7, right?  So it would have gotten like half of the higher valued Unicode code points.
+
+[01:16] <Mouq> raydiak: will do
+
+[01:16] <colomon> bit #7, not byte, sigh.
+
+[01:17] *** rurban_ joined
+[01:17] <Mouq> raydiak: Also, do you have all the css etc. you have in doc pushed to github? The font seemed larger after you sync'd
+
+[01:18] <raydiak> colomon: yes, it still would have evaluated correctly for many unicode chars, we were just lucky enough to find a failing one :)
+
+[01:19] <raydiak> Mouq: everything looks to be committed and pushed and so forth
+
+[01:19] <Mouq> raydiak: ok
+
+[01:24] *** klapperl_ left
+[01:25] <raydiak> Mouq: possibly links I changed going from purple to blue have tricked your eyes?
+
+[01:26] *** klapperl joined
+[01:26] *** hoverboard left
+[01:26] <raydiak> I just went and looked and said "well, it does kinda look bigger in places", but then realized it was just the darker color of unvisited links adding visual weight
+
+[01:29] *** hoverboard joined
+[01:30] <Mouq> raydiak: Maybe
+
+[01:32] <raydiak> Mouq: if you notice anything definite let me know; I didn't (intentionally) do any design work recently
+
+[01:33] <raydiak> oh, and been meaning to say thanks Mouq++ for all the awesome doc work lately
+
+[01:34] <Mouq> np :)
+
+[01:35] <Mouq> Thank you for your work making it awesomer
+
+[01:36] <raydiak> np :) it's exciting to do things that people actually see
+
+[01:37] <Mouq> I have trouble believing that htmlify used to run quite this slow I just didn't notice
+
+[01:38] <raydiak> you aren't running it under moar, are you?
+
+[01:38] <Mouq> I am
+
+[01:39] <raydiak> idk how it compares w/parrot, but it's at least 1 or 2 orders of magnitude slower than doing it w/jvm
+
+[01:39] <Mouq> Huh... I was switching between them last week and thought it was comparable.
+
+[01:40] <Mouq> But I didn't pay as much attention as I should have/timed it
+
+[01:41] <raydiak> the last time I accidentally started a timed run under moar, I lost patience and ^C'd after 40 minutes
+
+[01:41] <Mouq> :|
+
+[01:41] <raydiak> on the same machine jvm does it in 8
+
+[01:41] <Mouq> Do you have a recent MoarVM?
+
+[01:42] <raydiak> yeah, was from nom within the past week
+
+[01:43] <raydiak> oh, and the vm itself was rebuilt at the same time
+
+[01:44] <Mouq> r: say 'infix:<(|)>' ~~ /<!after \\ > '|'/
+
+[01:44] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«｢|｣␤␤»
+
+[01:44] <Mouq> r: say 'infix:<(\|)>' ~~ /<!after \\ > '|'/
+
+[01:44] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«Nil␤»
+
+[01:45] <Mouq> r: say 'infix:<(\|)>|routine/infix:<(|)>.html' ~~ /<!after \\ > '|'/
+
+[01:45] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«｢|｣␤␤»
+
+[01:45] <Mouq> r: say ('infix:<(\|)>|routine/infix:<(|)>.html' ~~ /<!after \\ > '|'/).prematch
+
+[01:45] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«infix:<(\|)>␤»
+
+[01:49] <TimToady> <!after \\ > is two-pass parsing
+
+[01:50] <TimToady> what if there's a \\ before the \\ 
+
+[01:50] <TimToady> ?
+
+[01:56] <Mouq> TimToady: Yeah... thank you
+
+[02:02] * Mouq points out that perl6-m --target=ast doesn't work and hasn't for a while
+
+[02:02] <Mouq> or maybe ever
+
+[02:08] <Mouq> TimToady: Do you think my $level = 15;␤=begin item :numbered{$level}␤… should work?
+
+[02:08] <Mouq> *:numbered($level)
+
+[02:09] <Mouq> TimToady: Just at first glance with what you think Perl6 should be capable of
+
+[02:13] <Mouq> Well. Hm
+
+[02:14] <Mouq> Maybe BEGIN my $level = 15; maybe makes more sense
+
+[02:16] <lue> Mouq: http://perlcabal.org/syn/S26.html#Delimited+blocks
+
+[02:16] <lue> "All option keys and values must, of course, be constants since Pod is a specification language, not a programming language. Specifically, option values cannot be closures. See Synopsis 2 for details of the various Perl 6 pair notations."
+
+[02:16] <Mouq> Aww
+
+[02:16] <Mouq> Ok
+
+[02:17] <Mouq> That's probably for the best
+
+[02:17] <lue> makes things easier for rakudo at least :)
+
+[02:19] *** klapperl_ joined
+[02:22] *** klapperl left
+[02:23] <Mouq> r: my @*ABCD;
+
+[02:23] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: ( no output )
+
+[02:23] <Mouq> nqp: my @*ABCD;
+
+[02:23] <camelia> nqp-moarvm, nqp-jvm, nqp-parrot: ( no output )
+
+[02:26] *** fridim_ left
+[02:29] <lue> I'd like to find out what's causing the slowdown in Pod->HTML, but I can't get anything out of kcachegrind :(
+
+[02:31] <Mouq> lue: How fast is syngen with perl6-j?
+
+[02:31] <lue> Haven't checked recently, all I know is perl6-m is ≈1200 seconds. I can try to run it on perl6-j though.
+
+[02:32] * Mouq complied perl6-p to be able to use its profiler; has no idea how to read it
+
+[02:33] <lue> you have to use something like kcachegrind
+
+[02:34] <Mouq> lue: My OSX is too new for Valgrind TT_TT
+
+[02:34] <lue> kcachegrind doesn't require valgrind, I don't think...
+
+[02:39] <Mouq> lue: I did push :class<> -> <span> to Pod::To::HTML btw
+
+[02:39] <lue> ok
+
+[02:40] <Mouq> dalek: hi
+
+[02:43] * lue wishes he were better at interpreting what kcachegrind was telling him
+
+[02:50] <lue> For some reason I'm join() comes up as the offending function. I'm not sure if I should trust that finding though.
+
+[02:55] <Mouq> lue: Join is gonna be called all the time, that seems accurate
+
+[02:56] <lue> or perhaps it's gimme... I seriously don't know how to read all this :/ I'll leave it alone for now, perhaps someone more knowledgeable can help out later.
+
+[03:01] *** skids joined
+[03:13] *** pdcawley left
+[03:13] *** pdcawley joined
+[03:16] <Mouq> nqp: my @a = ['a','b','c']; for @a.kv -> $idx, $letter { say($idx, $letter) }
+
+[03:16] <camelia> nqp-jvm: OUTPUT«Assignment ("=") not supported in NQP, use ":=" instead at line 2, near " ['a','b',"␤  in panic (gen/jvm/stage2/NQPHLL.nqp:378)␤  in infix:sym<=> (gen/jvm/stage2/NQP.nqp)␤  in !protoregex (gen/jvm/stage2/QRegex.nqp:784)␤  in infix (gen/jvm/stage2/NQPHLL.nqp)…»
+
+[03:16] <camelia> ..nqp-moarvm: OUTPUT«Assignment ("=") not supported in NQP, use ":=" instead at line 2, near " ['a','b',"␤   at gen/moar/stage2/NQPHLL.nqp:369  (/home/p6eval/rakudo-inst-1/languages/nqp/lib/NQPHLL.moarvm:panic:120)␤ from <unknown>:1  (/home/p6eval/rakudo-inst-1/languages/nqp/lib/n…»
+
+[03:16] <camelia> ..nqp-parrot: OUTPUT«Assignment ("=") not supported in NQP, use ":=" instead at line 2, near " ['a','b',"␤current instr.: 'panic' pc 15934 (gen/parrot/stage2/NQPHLL.pir:5941) (gen/parrot/stage2/NQPHLL.nqp:425)␤»
+
+[03:16] <Mouq> nqp: my @a := ['a','b','c']; for @a.kv -> $idx, $letter { say($idx, $letter) }
+
+[03:16] <camelia> nqp-parrot: OUTPUT«Method 'kv' not found for invocant of class 'QRPA'␤current instr.: '' pc 81 ((file unknown):52) (/tmp/tmpfile:1)␤»
+
+[03:16] <camelia> ..nqp-moarvm: OUTPUT«Cannot find method 'kv'␤   at /tmp/tmpfile:1  (<ephemeral file>::40)␤ from gen/moar/stage2/NQPHLL.nqp:1090  (/home/p6eval/rakudo-inst-1/languages/nqp/lib/NQPHLL.moarvm::94)␤ from gen/moar/stage2/NQPHLL.nqp:1076  (/home/p6eval/rakudo-inst-1/languages/nqp/lib/…»
+
+[03:16] <camelia> ..nqp-jvm: OUTPUT«Method 'kv' not found for invocant of class 'NQPArray'␤  in  (/tmp/tmpfile:1)␤  in  (gen/jvm/stage2/NQPHLL.nqp:1099)␤  in eval (gen/jvm/stage2/NQPHLL.nqp:1085)␤  in evalfiles (gen/jvm/stage2/NQPHLL.nqp:1291)␤  in command_eval (gen/jvm/stage2/NQPHLL.nqp:1195…»
+
+[03:30] *** rurban left
+[03:30] <TimToady> turns out that @a.kv has to calculate keys first, which calls self.end, which forces finite semantics
+
+[03:31] <TimToady> if we invert all the .kv-ish methods to map the values rather than the keys, they can become properly lazy, and maybe run faster too
+
+[03:35] <Mouq> r: my @a = <a b c d e>; @a X, (my$)++
+
+[03:35] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: ( no output )
+
+[03:35] <Mouq> r: my @a = <a b c d e>; say @a X, (my$)++
+
+[03:35] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«a 0 b 0 c 0 d 0 e 0␤»
+
+[03:35] <lue> Mouq: what are you working on, ooc?
+
+[03:35] <Mouq> Oh, duh, X isn't blocky
+
+[03:36] <Mouq> lue: I finally convinced myself to work on getting tables to work right
+
+[03:36] <lue> Mouq: by the way, perl6-j on syngen takes 3601.609 seconds.
+
+[03:37] <Mouq> r: my @a = <a b c d e>; say gather for @a { take (state$)++; take $_}
+
+[03:37] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«0 a 1 b 2 c 3 d 4 e␤»
+
+[03:37] <Mouq> lue: Aww. And Moar++ :)
+
+[03:38] <lue> I think if I were using eval-server or whatever it might run faster...
+
+[03:39] <Mouq> lue: Are you still "$*EXECUTABLE …"?
+
+[03:39] <lue> yes, it runs whatever you ran the main script with.
+
+[03:40] <Mouq> I really don't know how to get around that... I imagine in that case the eval-server might help a lot
+
+[03:40] *** rurban joined
+[03:41] <lue> If Pod::To::HTML came with a way to parse pod files in-script instead of through shell(), then it would definitely be faster for JVM.
+
+[03:42] <Mouq> lue: Pod::To::HTML::pod2html?
+
+[03:42] <lue> don't you need to build up your own object (as I understand from doc/htmlify.pl)?
+
+[03:44] <Mouq> You have to convice perl6 to parse whatever you're looking at as Pod and put it in $=pod (which is a compile-time variable...)
+
+[03:44] <lue> I'd much prefer if there was a HTML::podfile or something
+
+[03:45] <Mouq> s/compile-time variable/variable that has to be known at compile-time/
+
+[03:45] <lue> seems like the kind of thing that's not unreasonable for the module to do instead of me. :)
+
+[03:47] *** klapperl_ left
+[03:48] <Mouq> lue: I don't think it would be too difficult to take the Pod stuff from Rakudo and turn it into a Perl 6 grammar+actions, if that's what you mean
+
+[03:49] *** klapperl joined
+[03:49] <Mouq> That could actually be pretty useful
+
+[03:49] <Mouq> But none of the Pod things except <colonpair> reach back out into the rest of the Grammar AFAIK
+
+[03:50] <lue> :/ I'd love to avoid code duplication like that though. It'd preferable to do something like  STD.parsefile($file, :rule<pod_doc>), though I think we're quite a ways away from that.
+
+[03:56] *** molaf_ left
+[04:00] <Mouq> r: DOC use ABCD
+
+[04:00] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: ( no output )
+
+[04:03] *** kurahaupo_mobile joined
+[04:06] *** hoverboard left
+[04:08] <dalek> rakudo/nom: e8cea1d | larry++ | src/core/List.pm:
+
+[04:08] <dalek> rakudo/nom: List.end Considered Harmful
+
+[04:08] <dalek> rakudo/nom: 
+
+[04:08] <dalek> rakudo/nom: All the .pairs-like list methods calculated .keys first, then looked
+
+[04:08] <dalek> rakudo/nom: up everything using at_pos.  Unfortunately, to determine the key list,
+
+[04:08] <dalek> rakudo/nom: the .keys method called self.end, which enforces finite semantics.  This
+
+[04:08] <dalek> rakudo/nom: seems a bit suboptimal in a language that professes to support infinite
+
+[04:08] <dalek> rakudo/nom: lists.  So now instead of mapping the keys, we map the values, and create
+
+[04:08] <dalek> rakudo/nom: the keys as needed.  Performance seems roughly the same.
+
+[04:08] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/e8cea1d5e2
+
+[04:09] *** hoverboard joined
+[04:10] <TimToady> actually, the main difference is the performance on lists that are big but not known to be infinite
+
+[04:10] <lue> that difference is for the better, right? :)
+
+[04:10] <TimToady> for ('a'..'zzzzzz').pairs -> $p {...} no longer hangs forever precalculating the list
+
+[04:10] <TimToady> that's the big win
+
+[04:11] *** kaleem joined
+[04:11] <Mouq> TimToady++ awsummm
+
+[04:11] * TimToady should hunt down the rest of the .end calls to see if any of them make sense
+
+[04:13] <TimToady> r: .say for ('a'..'zzzzzz').pairs
+
+[04:14] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«(timeout)»
+
+[04:14] <TimToady> in an hour, that should return the initial values
+
+[04:15] *** kurahaupo_mobile left
+[04:17] <Mouq> r: say ('a'..'zzzzzz')[40]
+
+[04:17] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«ao␤»
+
+[04:18] <Mouq> r: say ('a'..'zzzzzz')[40]:delete
+
+[04:18] <camelia> rakudo-parrot 1b5b32: OUTPUT«Can not remove elements from a Range␤  in method gist at gen/parrot/CORE.setting:12260␤  in method gist at gen/parrot/CORE.setting:1042␤  in sub say at gen/parrot/CORE.setting:13157␤  in block  at /tmp/tmpfile:1␤␤»
+
+[04:18] <camelia> ..rakudo-moar 1b5b32: OUTPUT«===SORRY!===␤Can not remove elements from a Range␤»
+
+[04:18] <camelia> ..rakudo-jvm 1b5b32: OUTPUT«Can not remove elements from a Range␤  in method gist at gen/jvm/CORE.setting:12239␤  in method gist at gen/jvm/CORE.setting:1039␤  in sub say at gen/jvm/CORE.setting:13118␤  in block  at /tmp/tmpfile:1␤␤»
+
+[04:18] <Mouq> r: say Array.new('a'..'zzzzzz')[40]
+
+[04:18] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«ao␤»
+
+[04:18] <Mouq> r: say Array.new('a'..'zzzzzz')[40]:delete
+
+[04:19] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«(timeout)»
+
+[04:25] *** kurahaupo_mobile joined
+[04:35] *** rurban left
+[04:37] *** kaleem left
+[04:41] <Mouq> r: .say for ('a'..'zzzzzz').reduce({$^a,$^b})
+
+[04:41] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«(timeout)»
+
+[04:48] *** Ben_Goldberg is now known as BenGoldberg
+
+[04:49] <BenGoldberg> rn: for (gather { .take for 1..10; say 'end' }) { .say; last }; say 'after'
+
+[04:50] <camelia> rakudo-jvm 1b5b32: OUTPUT«(timeout)»
+
+[04:50] <camelia> ..rakudo-parrot 1b5b32, rakudo-moar 1b5b32, niecza v24-109-g48a8de3: OUTPUT«1␤after␤»
+
+[04:50] <BenGoldberg> \o/
+
+[04:51] * TimToady bows
+
+[04:51] <BenGoldberg> TimToady++
+
+[04:52] *** rurban joined
+[04:52] <BenGoldberg> j: say 'alive'
+
+[04:52] <camelia> rakudo-jvm 1b5b32: OUTPUT«alive␤»
+
+[04:52] * BenGoldberg wonders why it timed out on jakudo...
+
+[04:54] <Mouq> rn: for (gather { .take for 1..10; say 'end' }) { .say; last }; say 'after'
+
+[04:54] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32, niecza v24-109-g48a8de3: OUTPUT«1␤after␤»
+
+[04:57] *** hoverboard left
+[04:57] *** hoverboard joined
+[04:57] <BenGoldberg> rn: print do { ((state $ = 'a') ^= 'b') ?? 'foo' !! 'bar' }
+
+[04:57] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«bar»
+
+[04:57] <camelia> ..niecza v24-109-g48a8de3: OUTPUT«Stack overflow: IP: 0x50322a, fault addr: (nil)␤Stacktrace:␤  at Niecza.Kernel.UnboxAny<T> (Niecza.P6any) <0x0002b>␤  <...>␤  at Niecza.CtxJunctionBool.Get (Niecza.Variable) <0x00117>␤  at Niecza.CtxJunctionBool.Get (Niecza.Variable) <0x0025…»
+
+[04:58] * Mouq still doesn't understand what you're trying to accomplish with ^=
+
+[04:59] *** kurahaupo_mobile left
+[04:59] <lue> it's not updated yet though, is it?
+
+[04:59] <lue> r: .say for ('a'..'zzzzzz').pairs
+
+[04:59] <Mouq> lue: nope
+
+[05:00] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«(timeout)»
+
+[05:00] * BenGoldberg was just golfing down a bug to the shortest line that exhibits it.
+
+[05:00] *** araujo left
+[05:00] <BenGoldberg> n: print do { ((state $ = 'a') |= 'b') ?? 'foo' !! 'bar' }
+
+[05:00] <camelia> niecza v24-109-g48a8de3: OUTPUT«Stack overflow: IP: 0x56fd20, fault addr: (nil)␤Stacktrace:␤  at Niecza.Kernel.UnboxAny<T> (Niecza.P6any) <0x0002b>␤  <...>␤  at Niecza.CtxJunctionBool.Get (Niecza.Variable) <0x00117>␤  at Niecza.CtxJunctionBool.Get (Niecza.Variable) <0x002b…»
+
+[05:02] <Mouq> n: (state $ = False) | True
+
+[05:02] <camelia> niecza v24-109-g48a8de3: ( no output )
+
+[05:02] <Mouq> n: say so (state $ = False) | True
+
+[05:02] <camelia> niecza v24-109-g48a8de3: OUTPUT«True␤»
+
+[05:02] <Mouq> n: (state $ = False) |= True
+
+[05:02] <camelia> niecza v24-109-g48a8de3: ( no output )
+
+[05:02] <Mouq> n: say so ((state $ = False) |= True)
+
+[05:02] <camelia> niecza v24-109-g48a8de3: OUTPUT«Stack overflow: IP: 0x40797a86, fault addr: (nil)␤Stacktrace:␤  at Niecza.Kernel.UnboxAny<T> (Niecza.P6any) <0x0002b>␤  <...>␤  at Niecza.CtxJunctionBool.Get (Niecza.Variable) <0x00117>␤  at Niecza.CtxJunctionBool.Get (Niecza.Variable) <0x00…»
+
+[05:09] *** sftp_ joined
+[05:10] *** skids left
+[05:11] *** sftp left
+[05:18] *** hoverboard left
+[05:22] *** hoverboard joined
+[05:24] <Mouq> nqp: my@t:=[[1,2,3],[4,5,6],[7,8,9]]; say([].push(@t)[0][1]);
+
+[05:24] <camelia> nqp-moarvm, nqp-jvm: OUTPUT«2␤»
+
+[05:24] <camelia> ..nqp-parrot: OUTPUT«3␤»
+
+[05:26] <Mouq> nqp: my@t:=[[1,2,3],[4,5,6],[7,8,9]]; my @x; @x.push(@t); say(@x[0][1][1]) # much better
+
+[05:26] <camelia> nqp-moarvm, nqp-jvm, nqp-parrot: OUTPUT«5␤»
+
+[05:30] *** [Sno] left
+[05:42] <TimToady> r: .say for ('a'..'zzzzzz').pairs
+
+[05:42] <camelia> rakudo-parrot 1b5b32, rakudo-jvm 1b5b32, rakudo-moar 1b5b32: OUTPUT«(timeout)»
+
+[05:43] *** hoverboard left
+[05:50] *** kurahaupo_mobile joined
+[05:55] *** kurahaupo__ joined
+[05:56] *** kurahaupo_mobile left
+[06:00] *** kurahaupo__ left
+[06:05] *** kurahaupo_mobile joined
+[06:06] <BenGoldberg> r: ('a'..'zzzzzz').pairs.infinite.say
+
+[06:06] <camelia> rakudo-parrot e8cea1, rakudo-jvm e8cea1, rakudo-moar e8cea1: OUTPUT«Nil␤»
+
+[06:06] <Mouq> Updated :)
+
+[06:06] <BenGoldberg> r: for( ('a'..'zzzzzz').pairs ) { .say; last }
+
+[06:06] <camelia> rakudo-parrot e8cea1, rakudo-jvm e8cea1, rakudo-moar e8cea1: OUTPUT«[31m===[0mSORRY![31m===[0m␤Word 'for' interpreted as 'for()' function call; please use whitespace instead of parens␤at /tmp/tmpfile:1␤------> [32mfor[33m⏏[31m( ('a'..'zzzzzz').pairs ) { .say; last }[…»
+
+[06:06] <BenGoldberg> r: for ( ('a'..'zzzzzz').pairs ) { .say; last }
+
+[06:06] <camelia> rakudo-parrot e8cea1, rakudo-jvm e8cea1, rakudo-moar e8cea1: OUTPUT«0 => "a"␤»
+
+[06:07] <BenGoldberg> r: for ( ('a'..'zzzzzz').pairs ) { .say; last if $_ ge 'aa' }
+
+[06:07] <camelia> rakudo-moar e8cea1: OUTPUT«(timeout)0 => "a"␤1 => "b"␤2 => "c"␤3 => "d"␤4 => "e"␤5 => "f"␤6 => "g"␤7 => "h"␤8 => "i"␤9 => "j"␤10 => "k"␤11 => "l"␤12 => "m"␤13 => "n"␤14 => "o"␤15 => "p"␤16 => "q"␤17 => "r"␤18 => "s"␤19 => "t"␤20 => "u"␤21 =>…»
+
+[06:07] <camelia> ..rakudo-jvm e8cea1: OUTPUT«(timeout)0 => "a"␤1 => "b"␤2 => "c"␤3 => "d"␤4 => "e"␤5 => "f"␤6 => "g"␤7 => "h"␤8 => "i"␤9 => "j"␤10 => "k"␤11 => "l"␤12 => "m"␤13 => "n"␤14 => "o"␤15 => "p"␤16 => "q"␤17 => "r"␤18 => "s"␤19 => "t"␤20 => "u"␤21 => …»
+
+[06:07] <camelia> ..rakudo-parrot e8cea1: OUTPUT«(timeout)0 => "a"␤1 => "b"␤2 => "c"␤3 => "d"␤4 => "e"␤5 => "f"␤6 => "g"␤7 => "h"␤8 => "i"␤9 => "j"␤10 => "k"␤11 => "l"␤12 => "m"␤13 => "n"␤14 => "o"␤15 => "p"␤16 => "q"␤17 => "r"␤18 => "s"␤19 => "t"␤20 => "u"␤21 …»
+
+[06:08] <TimToady> r: .say for ('a'..'zzzzzz').pairs
+
+[06:08] <camelia> rakudo-parrot e8cea1: OUTPUT«(timeout)0 => "a"␤1 => "b"␤2 => "c"␤3 => "d"␤4 => "e"␤5 => "f"␤6 => "g"␤7 => "h"␤8 => "i"␤9 => "j"␤10 => "k"␤11 => "l"␤12 => "m"␤13 => "n"␤14 => "o"␤15 => "p"␤16 => "q"␤17 => "r"␤18 => "s"␤19 => "t"␤20 => "u"␤21 …»
+
+[06:08] <camelia> ..rakudo-jvm e8cea1: OUTPUT«(timeout)0 => "a"␤1 => "b"␤2 => "c"␤3 => "d"␤4 => "e"␤5 => "f"␤6 => "g"␤7 => "h"␤8 => "i"␤9 => "j"␤10 => "k"␤11 => "l"␤12 => "m"␤13 => "n"␤14 => "o"␤15 => "p"␤16 => "q"␤17 => "r"␤18 => "s"␤19 => "t"␤20 => "u"␤21 => …»
+
+[06:08] <camelia> ..rakudo-moar e8cea1: OUTPUT«(timeout)0 => "a"␤1 => "b"␤2 => "c"␤3 => "d"␤4 => "e"␤5 => "f"␤6 => "g"␤7 => "h"␤8 => "i"␤9 => "j"␤10 => "k"␤11 => "l"␤12 => "m"␤13 => "n"␤14 => "o"␤15 => "p"␤16 => "q"␤17 => "r"␤18 => "s"␤19 => "t"␤20 => "u"␤21 =>…»
+
+[06:11] <BenGoldberg> r: for ( ('a'..'zzzzzz').pairs ) { .say; last if .value eq 'aa' }
+
+[06:11] <TimToady> r: for ('a'..'zzzzzz').pairs { .say; last if .value ge 'aa' }
+
+[06:11] <BenGoldberg> :)
+
+[06:11] <camelia> rakudo-parrot e8cea1, rakudo-jvm e8cea1, rakudo-moar e8cea1: OUTPUT«0 => "a"␤1 => "b"␤2 => "c"␤3 => "d"␤4 => "e"␤5 => "f"␤6 => "g"␤7 => "h"␤8 => "i"␤9 => "j"␤10 => "k"␤11 => "l"␤12 => "m"␤13 => "n"␤14 => "o"␤15 => "p"␤16 => "q"␤17 => "r"␤18 => "s"…»
+
+[06:11] <camelia> rakudo-parrot e8cea1, rakudo-jvm e8cea1, rakudo-moar e8cea1: OUTPUT«0 => "a"␤1 => "b"␤»
+
+[06:11] <TimToady> 'b' ge 'aa' :)
+
+[06:12] <TimToady> and you don't need the supersitious parens :P
+
+[06:13] <TimToady> a method doesn't require (), unlike, say, lines()
+
+[06:14] *** SamuraiJack_ joined
+[06:21] *** darutoko joined
+[06:25] *** berekuk joined
+[06:29] *** BenGoldberg left
+[06:36] *** xenoterracide left
+[06:39] *** rurban left
+[06:41] *** mavcunha left
+[06:49] *** kurahaupo_mobile left
+[06:55] *** [Sno] joined
+[06:56] <Mouq> lue: "Blocks whose names contain at least one uppercase and one lowercase letter are assumed to be destined for specialized renderers or parser plug-ins." I hadn't seen this, reconsidering "=for Div" etc.
+
+[07:02] *** kurahaupo_mobile joined
+[07:03] *** dmol joined
+[07:10] *** rurban joined
+[07:15] *** rurban left
+[07:15] *** aborazmeh joined
+[07:21] *** FROGGS joined
+[07:31] <FROGGS> masak: do you think this should be specced to work? my regex foo { aaa }; say "aaa" ~~ foo # perhaps same for grammars
+
+[07:31] *** berekuk left
+[07:35] *** aborazmeh left
+[07:36] <TimToady> r: my regex foo { aaa }; say "aaa" ~~ &foo
+
+[07:36] <camelia> rakudo-jvm e8cea1: OUTPUT«(timeout)»
+
+[07:36] <camelia> ..rakudo-parrot e8cea1, rakudo-moar e8cea1: OUTPUT«｢aaa｣␤␤»
+
+[07:36] <TimToady> you need the noun form, not the verb form
+
+[07:38] <TimToady> otherwise it's going to try to call foo() first, then do the ~~
+
+[07:41] <[Coke]> std: my $s = 'abcd'; while $s ~~ m:g/(.)/ { print $0 };
+
+[07:41] <camelia> std 09dda5b: OUTPUT«ok 00:01 129m␤»
+
+[07:41] *** kurahaupo_mobile left
+[07:41] <FROGGS> TimToady++
+
+[07:41] <[Coke]> ^^ RT #77144 is a request for that to warn.
+
+[07:41] <synopsebot> Link: https://rt.perl.org/rt3//Public/Bug/Display.html?id=77144
+
+[07:41] <FROGGS> masak: that is what you want perhaps :o) ----- ^
+
+[07:42] <FROGGS> (not the RT link though)
+
+[07:42] *** berekuk joined
+[07:51] <TimToady> [Coke]: detecting list/scalar context confusion is going to be hard in a language that handles context lazily
+
+[07:52] <[Coke]> Then I'll reject the ticket, hokay?
+
+[07:53] <[Coke]> Here's another ticket that requires a ruling, and perhaps a rethink in the 3.5 years since it was opened: RT #77340
+
+[07:53] <synopsebot> Link: https://rt.perl.org/rt3//Public/Bug/Display.html?id=77340
+
+[07:53] *** Quom joined
+[07:54] *** robinsmidsrod joined
+[07:57] *** sftp joined
+[07:58] *** yihshih__ joined
+[07:58] <TimToady> given current understanding of how things itemize, I think Pm has it right, and we should reject the ticket
+
+[07:58] <TimToady> except that @%h<abc> can't work
+
+[07:58] *** ruoso_ joined
+[07:58] <TimToady> must be either @(%h<abc>) or %h<abc>.list or %h<abc>[]
+
+[07:59] <[Coke]> TimToady++
+
+[07:59] *** pdcawley_ joined
+[08:01] <[Coke]> r: say say $*PERL
+
+[08:01] <camelia> rakudo-moar e8cea1: OUTPUT«("name" => "rakudo", "compiler" => {"name" => "rakudo", "ver" => "2014.02-18-ge8cea1d", "release-number" => "", "build-date" => "2014-02-24T06:25:33Z", "codename" => ""}).hash␤True␤»
+
+[08:01] <camelia> ..rakudo-parrot e8cea1: OUTPUT«("name" => "rakudo", "compiler" => {"name" => "rakudo", "ver" => "2014.02-18-ge8cea1d", "release-number" => "", "build-date" => "2014-02-24T06:32:25Z", "codename" => ""}).hash␤True␤»
+
+[08:01] <camelia> ..rakudo-jvm e8cea1: OUTPUT«("name" => "rakudo", "compiler" => {"codename" => "", "name" => "rakudo", "release-number" => "", "ver" => "2014.02-18-ge8cea1d", "build-date" => "2014-02-24T05:12:38Z"}).hash␤True␤»
+
+[08:01] <[Coke]> r: say $*PERL
+
+[08:01] <camelia> rakudo-parrot e8cea1: OUTPUT«("name" => "rakudo", "compiler" => {"name" => "rakudo", "ver" => "2014.02-18-ge8cea1d", "release-number" => "", "build-date" => "2014-02-24T06:32:25Z", "codename" => ""}).hash␤»
+
+[08:01] <camelia> ..rakudo-moar e8cea1: OUTPUT«("name" => "rakudo", "compiler" => {"name" => "rakudo", "ver" => "2014.02-18-ge8cea1d", "release-number" => "", "build-date" => "2014-02-24T06:25:33Z", "codename" => ""}).hash␤»
+
+[08:01] <camelia> ..rakudo-jvm e8cea1: OUTPUT«("name" => "rakudo", "compiler" => {"codename" => "", "name" => "rakudo", "release-number" => "", "ver" => "2014.02-18-ge8cea1d", "build-date" => "2014-02-24T05:12:38Z"}).hash␤»
+
+[08:02] <[Coke]> urk. I expected that to fail, so resent.
+
+[08:02] <[Coke]> r: say $*PERL<version>
+
+[08:02] <camelia> rakudo-parrot e8cea1, rakudo-jvm e8cea1, rakudo-moar e8cea1: OUTPUT«(Any)␤»
+
+[08:03] *** FROGGS left
+[08:03] *** sftp_ left
+[08:03] *** pdcawley left
+[08:03] *** dayangkun left
+[08:03] *** ruoso left
+[08:03] *** Mouq left
+[08:03] *** yihshih left
+[08:03] *** orevdiabl left
+[08:03] *** go|dfish left
+[08:04] *** revdiablo joined
+[08:08] <[Coke]> rakudo: my Int (Str $x); say $x.WHAT # unspecced behavior?
+
+[08:08] <camelia> rakudo-parrot e8cea1, rakudo-jvm e8cea1, rakudo-moar e8cea1: OUTPUT«(Int)␤»
+
+[08:09] <[Coke]> rakudo: sub foo() { return 1,2,:c<3> }; say foo().perl
+
+[08:09] <camelia> rakudo-parrot e8cea1, rakudo-jvm e8cea1, rakudo-moar e8cea1: OUTPUT«(1, 2, "c" => Mu)␤»
+
+[08:09] <[Coke]> rakudo: say [1,2] X~ <a b> 
+
+[08:09] <camelia> rakudo-parrot e8cea1, rakudo-jvm e8cea1, rakudo-moar e8cea1: OUTPUT«1a 1b 2a 2b␤»
+
+[08:11] <[Coke]> rakudo: my $*a = 42; foo; sub foo { say $*a; my $*a }
+
+[08:11] <camelia> rakudo-parrot e8cea1, rakudo-jvm e8cea1, rakudo-moar e8cea1: OUTPUT«(Any)␤»
+
+[08:11] *** go|dfish joined
+[08:12] *** FROGGS joined
+[08:15] <[Coke]> nom: class A { eval 'has $.x' }; say A.new(x => 3).x
+
+[08:15] <camelia> rakudo-parrot e8cea1, rakudo-jvm e8cea1: OUTPUT«===SORRY!===␤No such method 'name' for invocant of type 'NQPMu'␤Saw 1 call to deprecated code during execution.␤================================================================================␤Sub eval (from GLOBAL) called at:…»
+
+[08:15] <camelia> ..rakudo-moar e8cea1: OUTPUT«===SORRY!===␤Cannot find method 'name'␤»
+
+[08:15] *** kaleem joined
+[08:15] <[Coke]> nom: class A { EVAL 'has $.x' }; say A.new(x => 3).x
+
+[08:15] <camelia> rakudo-parrot e8cea1, rakudo-jvm e8cea1: OUTPUT«===SORRY!===␤No such method 'name' for invocant of type 'NQPMu'␤»
+
+[08:15] <camelia> ..rakudo-moar e8cea1: OUTPUT«===SORRY!===␤Cannot find method 'name'␤»
+
+[08:16] <[Coke]> nom: class A { BEGIN eval 'has $.x' }; say A.new(x => 3).x
+
+[08:16] <[Coke]> nom: class A { BEGIN EVAL 'has $.x' }; say A.new(x => 3).x
+
+[08:16] <moritz> .oO( we still have a 'nom' target? :-)
+
+[08:16] <camelia> rakudo-jvm e8cea1: OUTPUT«(timeout)»
+
+[08:16] <camelia> ..rakudo-parrot e8cea1: OUTPUT«===SORRY!===␤No such method 'name' for invocant of type 'NQPMu'␤Saw 1 call to deprecated code during execution.␤================================================================================␤Sub eval (from GLOBAL) called at:␤  /tmp/tmpfile, l…»
+
+[08:16] <camelia> ..rakudo-moar e8cea1: OUTPUT«===SORRY!===␤Cannot find method 'name'␤»
+
+[08:16] <camelia> rakudo-jvm e8cea1: OUTPUT«(timeout)»
+
+[08:16] <camelia> ..rakudo-parrot e8cea1: OUTPUT«===SORRY!===␤No such method 'name' for invocant of type 'NQPMu'␤»
+
+[08:16] <camelia> ..rakudo-moar e8cea1: OUTPUT«===SORRY!===␤Cannot find method 'name'␤»
+
+[08:16] <[Coke]> nom: has $.x
+
+[08:17] <camelia> rakudo-parrot e8cea1, rakudo-jvm e8cea1, rakudo-moar e8cea1: OUTPUT«[31m===[0mSORRY![31m===[0m Error while compiling /tmp/tmpfile␤You cannot declare attribute '$.x' here; maybe you'd like a class or a role?␤at /tmp/tmpfile:1␤------> [32mhas $.x[33m⏏[31m<EOL>[0m␤   …»
+
+[08:18] <[Coke]> whoops, meant for all that to go to a private window.
+
+[08:18] <FROGGS> :o)
+
+[08:19] <[Coke]> ok, only 83 more tickets that haven't been touched in 2+ years.
+
+[08:20] <[Coke]> up to 34 testneeded tickets - those are often LHF for people looking to contribute. Feel free to grab one and submit a test. (usually the code is in the ticket.)
+
+[08:25] <FROGGS> I have some left in my inbox that I want to do
+
+[08:27] *** berekuk left
+[08:28] <dalek> rakudo/nom: 299d708 | larry++ | src/core/List.pm:
+
+[08:28] <dalek> rakudo/nom: combinations didn't itemize when k == 0
+
+[08:28] <dalek> rakudo/nom: 
+
+[08:28] <dalek> rakudo/nom: The null set was omitted from the powerset.
+
+[08:28] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/299d708224
+
+[08:28] <moritz> m: say (^5).list.keys; say (^5).list.keys;
+
+[08:28] <camelia> rakudo-moar e8cea1: OUTPUT«0 1 2 3 4␤0 1 2 3 4␤»
+
+[08:31] <dalek> roast: 2582eed | moritz++ | S32-exceptions/misc.t:
+
+[08:31] <dalek> roast: Tests for RT #67554
+
+[08:31] <dalek> roast: review: https://github.com/perl6/roast/commit/2582eed4dc
+
+[08:31] <synopsebot> Link: https://rt.perl.org/rt3//Public/Bug/Display.html?id=67554
+
+[08:35] <[Coke]> moritz++
+
+[08:41] *** rindolf joined
+[08:44] *** rurban joined
+[08:49] *** rurban left
+[08:49] *** sunnavy_ is now known as sunnavy
+
+[08:53] *** salv0 joined
+[09:06] *** denis_boyun joined
+[09:06] *** rindolf left
+[09:09] *** zakharyas joined
+[09:16] *** denis_boyun left
+[09:18] *** Alula left
+[09:23] *** Alula joined
+[09:31] *** rindolf joined
+[09:33] *** grondilu joined
+[09:35] *** fhelmberger joined
+[09:35] <grondilu> on http://rosettacode.org/wiki/Almost_prime#Perl_6, TimToady wrote about a factors routine: « (to be included manually until we decide where in the distribution to put it) ».  Couldn't it just be a Int method? 
+
+[09:40] *** mavcunha joined
+[09:50] *** mavcunha_ joined
+[09:52] *** mavcunha left
+[09:53] *** dakkar joined
+[09:55] *** Quom left
+[10:18] *** pecastro left
+[10:19] *** zakharyas left
+[10:28] *** pecastro joined
+[10:32] *** Alula left
+[10:32] *** Alula joined
+[10:35] <nwc10> is this known to happen:
+
+[10:35] <nwc10> rn: say 1.is-prime
+
+[10:35] <camelia> rakudo-parrot 299d70, rakudo-jvm 299d70, rakudo-moar 299d70, niecza v24-109-g48a8de3: OUTPUT«False␤»
+
+[10:35] <nwc10> oh, wait. so something screwed locally. hmmm
+
+[10:35] <nwc10> live demo fail! :-)
+
+[10:37] <jnthn> Never happens to me :P
+
+[10:38] <jnthn> Comes out False on my local too, fwiw.
+
+[10:38] <nwc10> I might have inconsistent versions of stuff
+
+[10:38] <jnthn> My local is on moar-conc, which is bleading in different ways than nom :)
+
+[10:43] *** zakharyas joined
+[10:44] <moritz> nwc10: maybe your 1 was twice as large as the usual 1 :-)
+
+[10:46] *** kaleem left
+[10:47] *** kaleem joined
+[10:48] <jnthn> r: multi infix:<==>(2, 1) { True }; say 2 == 1
+
+[10:48] <camelia> rakudo-parrot 299d70, rakudo-jvm 299d70, rakudo-moar 299d70: OUTPUT«True␤»
+
+[10:48] <moritz> jnthn: you are EVAL, erm, evil :-)
+
+[10:54] <jnthn> True evil is sneaking that into a module and adding "is export" :P
+
+[10:54] <moritz> aren't multis supposed to be exported by default anyway? :-)
+
+[10:54] <jnthn> S11 may well argue for that :)
+
+[10:55] <jnthn> It's a little more magic than I like tbh.
+
+[10:55] <moritz> same here
+
+[10:55] <jnthn> As in, it's not unusual to use multis inside a module as an implementation detail.
+
+[10:55] <nwc10> i
+
+[10:56] <jnthn> nwc10: Most complex message so far today...
+
+[10:56] <nwc10> yes, and it was meant for mutt
+
+[10:57] <moritz> [Coke]++ just quoted S11 for a ticket
+
+[10:57] <moritz> Any C<proto> declaration that is not declared C<my> is exported by default.
+
+[10:57] <moritz> Any C<multi> that depends on an exported C<proto> is also automatically
+
+[10:57] <moritz> exported.  Any autogenerated C<proto> is assumed to be exported by default.
+
+[10:58] <moritz> are protos in the setting exported automatically?
+
+[10:58] <moritz> if not, adding a multi a setting proto from a module wouldn't export it
+
+[10:59] <jnthn> Well, that's debatable. It sitll has to generate a proto in the nested scope.
+
+[10:59] <jnthn> *still
+
+[10:59] <jnthn> That is, it copies the outer proto with its candidate list and then appends to it.
+
+[11:03] *** _sri left
+[11:05] *** breinbaas joined
+[11:05] *** _sri joined
+[11:09] *** grondilu_ joined
+[11:10] *** pecastro_ joined
+[11:17] <timotimo> lue: are you running the pod-to-html stuff on moarvm?
+
+[11:17] *** grondilu left
+[11:17] *** pdcawley_ left
+[11:17] *** bjz left
+[11:17] *** silug__ left
+[11:17] *** silug__ joined
+[11:18] *** pdcawley joined
+[11:18] *** robinsmidsrod left
+[11:20] *** bjz joined
+[11:20] *** robinsmidsrod joined
+[11:21] *** pecastro left
+[11:25] * timotimo doesn't have the patience for a full backlog right now :|
+
+[11:26] *** donaldh joined
+[11:26] *** donaldh left
+[11:28] *** donaldh joined
+[11:37] *** lizmat joined
+[11:41] <timotimo> [Coke]++ # amazing amounts of bug triage
+
+[11:46] *** dmol left
+[11:48] <masak> good afternoon, #perl6
+
+[11:48] * masak is teaching Python today
+
+[11:48] * masak .oO( hssssSSSS! )
+
+[11:48] <nwc10> heresy! :-)
+
+[11:49] <masak> strangely enough, it feels very little like heresy.
+
+[11:50] * jnthn will be teaching lots of C# in March. Doesn't feel like heresy either. :)
+
+[11:51] <jnthn> Though I do keep missing things from Perl 6. :)
+
+[11:51] <masak> think of us as scouts doing forays into other communities :)
+
+[11:51] <jnthn> The .Net folks are oddest generally, in so far as they tend to do .Net stuff and nothing else...
+
+[11:52] <masak> I hear COBOL folks are much the same :P
+
+[11:52] <jnthn> They've too much to write to have time to do anything else :P
+
+[11:53] <masak> bet it pays well, too.
+
+[11:53] <jnthn> Yeah, well. The 2038 bug will pay our generation's retirement well too. :)
+
+[11:53] <masak> "don't you dare die! then who will maintain our legacy bank software?"
+
+[11:53] <masak> jnthn: all we need to do is to create a massive 2038 scare :)
+
+[11:53] <masak> challenge accepted!
+
+[11:54] <jnthn> masak: Easy enough. Bad news sells. :)
+
+[11:54] * masak .oO( "Ten things you wouldn't believe about our eventual destruction in the year 2038" )
+
+[11:54] <jnthn> 32 things, surely?
+
+[11:55] <masak> :P
+
+[11:55] <masak> -- signed, int
+
+[11:55] <masak> or is that 'signed, long' ?
+
+[11:55] <jnthn> Platform specific, naturally... :)
+
+[11:59] <masak> :)
+
+[12:04] <timotimo> moritz: would like support for "/today/" and "/yesterday/" as well as those"/summary/" URLs in the irclogs
+
+[12:05] <donaldh> today works, no?
+
+[12:06] <jnthn> yeah, today already does.
+
+[12:06] <timotimo> not in combination with /summary/
+
+[12:07] <donaldh> ah :)
+
+[12:08] *** zakharyas left
+[12:10] <moritz> timotimo: https://github.com/moritz/ilbot/issues/33 same problem with /text/
+
+[12:11] <moritz> timotimo: maybe add it to the ticket? (or even pull-request? :-)
+
+[12:12] <timotimo> thank you
+
+[12:12] <moritz> (all URLs are handled in ilbot.psgi)
+
+[12:13] <timotimo> i'd like the CSRF error for the rakudo.org/tickets links to go away
+
+[12:15] <moritz> CSRF error?
+
+[12:15] <donaldh> oh, panda bootstrap fails on JVM on OS X. Is it known to work / not work on JVM on other platforms?
+
+[12:15] <timotimo> RT has detected a possible cross-site request forgery for this request, because the Referrer header supplied by your browser (rakudo.org:80) is not allowed by RT's configured hostname (rt.perl.org:443) or whitelisted hosts (www.bitcard.org:443, www.bestpractical.com:443). A malicious attacker may be trying to modify or access a search on your behalf. If you did not initiate this request, then you should alert
+
+[12:15] <timotimo> your security team.
+
+[12:15] <moritz> eeks
+
+[12:16] <moritz> oh, and some of the search URLs produce other RT errors
+
+[12:23] <timotimo> http://p6weekly.wordpress.com/?p=68&shareadraft=530b399b58b78 - first draft of today's p6weekly post
+
+[12:23] <nwc10> donaldh: not sure. hoelzro I think was working on it
+
+[12:25] <moritz> timotimo: not super exciting, but there are some new docs on doc.perl6.org
+
+[12:26] <timotimo> that's cool. which ones?
+
+[12:26] <timotimo> ah, i'll just look at the commit log
+
+[12:26] <moritz> IO::Handle, IO::FileTestable, Mix, MixHash, Mixy, QuantHash, Set, SetHash, Setty, regexes
+
+[12:26] <moritz> Mouq++ did most of those (I only did regexes)
+
+[12:26] <timotimo> thank you!
+
+[12:26] <moritz> http://doc.perl6.org/language/regexes # ouch, something very wrong with table parsing or rendering
+
+[12:28] <jnthn> timotimo: "The most noticeable thing still missing is ThreadPool and its Scheduler."
+
+[12:28] <jnthn> timotimo: Actually ThreadPoolScheduler is working now, for non-time-based scheduling.
+
+[12:28] <timotimo> oh!
+
+[12:28] <jnthn> timotimo: So we're onto Promise itself.
+
+[12:28] <timotimo> excellent!
+
+[12:28] <timotimo> thanks for the correction
+
+[12:29] <jnthn> timotimo: Also, didn't you contribute something to this effort as well as me and JimmyZ? ;)
+
+[12:29] <timotimo> only tiny bits
+
+[12:29] * timotimo doesn't like tooting his own horn too much :P
+
+[12:29] <jnthn> Still helpful bits :)
+
+[12:31] <jnthn> timotimo: In what's cooking, I expect I'll have promises working on Moar, and likely channels too, during the next week.
+
+[12:31] <timotimo> damnit!
+
+[12:31] <jnthn> timotimo: Probably supplies too. I think not the timer bits, though. :)
+
+[12:32] <jnthn> I know. Bloody progress. :P
+
+[12:32] <timotimo> i just lost most of the text >_<
+
+[12:32] <timotimo> changed from "Text" to "Visual" and hit ctrl-z
+
+[12:32] <timotimo> very much not recommended at all
+
+[12:32] <nwc10> it's the old "this week" problem :-)
+
+[12:33] <jnthn> timotimo: I still have it in a tab here?
+
+[12:33] <jnthn> timotimo: Do you want the text or the HTML?
+
+[12:33] <timotimo> i still have that tab, too
+
+[12:33] <jnthn> ah, ok :)
+
+[12:33] <timotimo> i was able to copy the text + formatting into the wysiwyg editor
+
+[12:34] * jnthn figures its lunch time...
+
+[12:34] <timotimo> bon appetit :)
+
+[12:40] <timotimo> http://p6weekly.wordpress.com/?p=68&shareadraft=530b3d9e6bc6d - updated with hopefully all corrections
+
+[12:42] <timotimo> http://p6weekly.wordpress.com/?p=68&shareadraft=530b3e4a495bf - more changes
+
+[12:43] <jnthn> "Mouq and lue have been working on Pod6 support" - may be worth saying "working on improving Pod6 support", so it's clear we aren't just getting started on it :)
+
+[12:44] <moritz> timotimo: regexes.pod is meant as reference more than a tutorial
+
+[12:44] <timotimo> ah, yes!
+
+[12:44] <timotimo> i had that change before i lost my stuff
+
+[12:44] <moritz> (I started of writing it as a tutorial, but it becomes more of a ref now)
+
+[12:45] <grondilu_> std: my $x = 1; say $x*$x<=1
+
+[12:45] <camelia> std 09dda5b: OUTPUT«[31m===[0mSORRY![31m===[0m␤Unable to parse quote-words subscript; couldn't find right angle quote at /tmp/Ek__fzleho line 1:␤------> [32mmy $x = 1; say $x*$x<[33m⏏[31m=1[0m␤    expecting escape␤Parse failed␤FAILED 00:01 125m␤»
+
+[12:45] <grondilu_> :/
+
+[12:46] *** grondilu_ is now known as grondilu
+
+[12:46] *** grondilu left
+[12:46] *** grondilu joined
+[12:46] <grondilu> std: my $x = 1; say $x*$x <= 1
+
+[12:46] <camelia> std 09dda5b: OUTPUT«ok 00:01 124m␤»
+
+[12:46] <grondilu> std: my $x = 1; say $x*$x <=1
+
+[12:46] <camelia> std 09dda5b: OUTPUT«ok 00:01 124m␤»
+
+[12:46] <grondilu> std: my $x = 1; say $x*$x<= 1
+
+[12:46] <camelia> std 09dda5b: OUTPUT«[31m===[0mSORRY![31m===[0m␤Unable to parse quote-words subscript; couldn't find right angle quote at /tmp/91VugElieO line 1:␤------> [32mmy $x = 1; say $x*$x<[33m⏏[31m= 1[0m␤    expecting escape␤Parse failed␤FAILED 00:01 125m␤»
+
+[12:47] <timotimo> http://p6weekly.wordpress.com/?p=68&shareadraft=530b3f3db24d3 - most up to date by far!
+
+[12:49] * timotimo recommends to click the "save draft" button regularly in wordpress' editor
+
+[12:49] <masak> timotimo: changing to "Visual" is very much not recommended at all. :)
+
+[12:50] <timotimo> aye.
+
+[12:50] <masak> timotimo: I tend to hit "Preview".
+
+[12:50] <masak> WYSIWYG is a big lie, *especially* when there's an underlying textual representation.
+
+[12:50] <grondilu> std: $_*$_<= 1
+
+[12:50] <camelia> std 09dda5b: OUTPUT«[31m===[0mSORRY![31m===[0m␤Unable to parse quote-words subscript; couldn't find right angle quote at /tmp/7Quo3EsW6h line 1:␤------> [32m$_*$_<[33m⏏[31m= 1[0m␤    expecting escape␤Parse failed␤FAILED 00:01 124m␤»
+
+[12:50] <masak> grondilu: whitespace.
+
+[12:50] <moritz> grondilu: "use whitespace around infix operators"
+
+[12:51] <masak> grondilu: if you skip the whitespace before an infix, it *becomes* a postfix or postcircumfix.
+
+[12:51] <grondilu> I thought this was only a best practice, not mandatory
+
+[12:51] <masak> grondilu: it's only best practice
+
+[12:51] <masak> but for a good reason :)
+
+[12:52] <moritz> grondilu: it's a best practise you should follow, because if not, you always need to be aware of potential ambiguties
+
+[12:52] <timotimo> http://p6weekly.wordpress.com/?p=68&shareadraft=530b4074773d7 <- mentioned the lack of rakudo star release manager
+
+[12:52] <moritz> https://github.com/moritz/perl6-wtop/blob/master/practices.pod
+
+[12:53] <grondilu> shouldn't LTM fall back to the only interpretation that actually parses or something?  I mean, there is no > so the < should not be interpreted as the beginning of a postfix, should it?
+
+[12:53] <timotimo> why have i never heard of perl6-wtop before?
+
+[12:53] <masak> grondilu: no, LTM doesn't work like that.
+
+[12:53] <jnthn> grondilu: LTM isn't a magic unicorn :P
+
+[12:54] * timotimo notices he doesn't have any bread in the home
+
+[12:54] <masak> grondilu: think of it as being greedy on individual tokens.
+
+[12:54] <moritz> grondilu: that would be backtracking
+
+[12:54] <jnthn> grondilu: It works at *token* level.
+
+[12:54] <moritz> and backtracking usually leads to very unintuitive behavior
+
+[12:54] <grondilu> ok
+
+[12:55] *** tgt joined
+[12:55] <timotimo> moritz: can you use definition lists for the section "backslashed, predefined character classes" perhaps?
+
+[12:56] <moritz> timotimo: I don't know how to write those in pod6
+
+[12:56] <timotimo> OK
+
+[12:56] * timotimo is AFK for a bit and would be happy about more feedback to the post
+
+[13:00] *** tgt left
+[13:01] * timotimo added numeric formatting test suite to the LHF
+
+[13:05] *** daniel-s_ joined
+[13:07] *** denis_boyun joined
+[13:12] *** zakharyas joined
+[13:20] *** btyler joined
+[13:28] *** colomon joined
+[13:29] <nwc10> timotimo: I think your wording for "You can safely disregard the huge Cross Site Request Forgery warning that may pop up and just “click here to resume your request”" is unfortunate
+
+[13:31] <nwc10> I think something more exact like "we are aware that you may get a warning about a Cross Site Request Forgery from rakudo.org to rt.perl.org. We're working on how to avoid this happening, but for now please use “click here to resume your request” for this specific warning"
+
+[13:32] <nwc10> because it reads like you're telling people to ignore that warning always. Which you aren't, but "people are stupid"
+
+[13:32] <nwc10> or at least, play stupid on TV.
+
+[13:32] *** kst`` joined
+[13:33] *** DrEeevil joined
+[13:33] *** Shozan joined
+[13:34] *** Kelder joined
+[13:34] *** araujo joined
+[13:34] *** araujo left
+[13:34] *** araujo joined
+[13:35] *** yath_ joined
+[13:35] *** kshannon_ joined
+[13:35] *** JimmyZ_ joined
+[13:35] *** dagurval_ joined
+[13:35] *** cxreg2 joined
+[13:35] *** segomos_ joined
+[13:35] *** cosimo_ joined
+[13:35] *** BooK_ joined
+[13:35] *** Psyche^_ joined
+[13:35] *** pmichaud_ joined
+[13:38] *** exodist_ joined
+[13:39] *** eternaleye_ joined
+[13:40] *** btyler_ joined
+[13:40] *** genehack_ joined
+[13:40] <timotimo> http://p6weekly.wordpress.com/?p=68&shareadraft=530b4bbec4c9e
+
+[13:40] <timotimo> thanks
+
+[13:40] *** Khisanth left
+[13:40] *** yves left
+[13:40] *** BooK left
+[13:40] *** genehack left
+[13:40] *** geekosaur left
+[13:40] *** Bucciarati left
+[13:40] *** pmichaud left
+[13:40] *** yath left
+[13:40] *** mathw left
+[13:40] *** Ayiko left
+[13:40] *** atrodo left
+[13:40] *** mathw joined
+[13:41] *** colomon left
+[13:42] *** eternaleye_ is now known as eternaleye
+
+[13:44] *** Alina-malina left
+[13:46] *** woolfy1 joined
+[13:46] *** yogan_ joined
+[13:46] *** geekosaur joined
+[13:46] *** Bucciarati joined
+[13:46] *** atrodo joined
+[13:47] *** avuserow3 joined
+[13:47] *** yves_ joined
+[13:47] *** denis_boyun left
+[13:47] *** btyler left
+[13:47] *** pdcawley left
+[13:47] *** _sri left
+[13:48] *** denis_boyun_ joined
+[13:48] *** _sri joined
+[13:48] *** lue joined
+[13:48] *** Alina-malina joined
+[13:49] <hoelzro> morning, #perl6
+
+[13:49] *** atta joined
+[13:49] *** Khisanth joined
+[13:49] *** ajr joined
+[13:50] *** ajr is now known as Guest17304
+
+[13:50] *** Shozan is now known as SHODAN
+
+[13:50] *** Guest17304 is now known as ar_
+
+[13:50] *** ar_ is now known as ajr_
+
+[13:51] *** pdcawley joined
+[13:51] *** kaare_ left
+[13:53] <masak> hoelzro! \o/
+
+[13:54] *** xenoterracide joined
+[13:56] <nwc10> hoelzro: offhand, do you know the answer to:  oh, panda bootstrap fails on JVM on OS X. Is it known to work / not work on JVM on other platforms?
+
+[13:56] <nwc10> which was http://irclog.perlgeek.de/perl6/2014-02-24#i_8335189
+
+[13:56] <hoelzro> nwc10: I haven't worked on panda yet
+
+[13:56] <hoelzro> I did work to make ufo work on the different backends, though
+
+[13:56] <donaldh> Ah, panda bootstrap is recursively copying .work when running local-fetch for panda itself.
+
+[13:57] <nwc10> hoelzro: sorry, I didn't realise that.
+
+[13:57] <hoelzro> np =)
+
+[13:57] <nwc10> I'm very pleased that people are working on this stuff
+
+[13:57] <nwc10> (as I've got too much other stuff on the go)
+
+[13:57] <donaldh> Failed to create directory '.work/1393250114_7//.work/1393250114_7/.work/1393250114_7/.work/ ....... : File name too long
+
+[13:58] <donaldh> I'll work on a fix.
+
+[13:59] <hoelzro> donaldh: I think someone reported that dir() returns relative (rather than absolute) paths on various backends
+
+[13:59] <hoelzro> iirc, it's supposed to return absolute
+
+[14:00] <hoelzro> that sounds like it could result in that recursion issue
+
+[14:01] <moritz> iirc it's supposed to return Path objects
+
+[14:01] <hoelzro> timotimo++ # post
+
+[14:01] <hoelzro> moritz: it does
+
+[14:01] *** yoleaux joined
+[14:01] *** ChanServ sets mode: +v yoleaux
+
+[14:02] <hoelzro> someone mentioned something about abs vs rel, though
+
+[14:08] *** kbaker_ joined
+[14:09] *** virtualsue joined
+[14:09] *** colomon joined
+[14:12] <FROGGS> donaldh: have a look at the patch in my comment: https://github.com/tadzik/panda/pull/68
+
+[14:13] *** smls joined
+[14:13] <FROGGS> donaldh: and also have a look at this for the .work problem: 
+
+[14:14] <FROGGS> https://gist.github.com/Mouq/cd9363ce6f20c699af77
+
+[14:14] *** jnap joined
+[14:14] <donaldh> FROGGS: Thanks. Yeah, I suspected lazy.
+
+[14:14] <FROGGS> donaldh: if you have time to fix it please go ahead
+
+[14:17] <timotimo> https://p6weekly.wordpress.com/2014/02/24/changes-since-release-2014-02/ - published
+
+[14:22] <JimmyZ_> timotimo++
+
+[14:22] *** JimmyZ_ is now known as JImmyZ
+
+[14:22] *** JImmyZ is now known as JimmyZ
+
+[14:24] * timotimo pokes perlbug-admin again about the CSRF issue
+
+[14:24] *** skids joined
+[14:28] <smls> Hi
+
+[14:28] <yoleaux> 16 Feb 2014 01:00Z <japhb> smls: That mockup looks really good.  Aside from my general feeling that the green has been a bit too chartreuse for a while, I think it's excellent work.  +1 to make it so.
+
+[14:28] <yoleaux> 16 Feb 2014 18:40Z <raydiak> smls: I think you did an awesome job, though I also would consider a different book icon.  also, the colors are still up in the air, so feel free to play more with them. many people don't like the current combinations, and I'm not very sold on them myself. make sure you get moritz++'s input too. smls++!
+
+[14:28] <yoleaux> 16 Feb 2014 18:41Z <raydiak> smls: as for the structure, layout, etc, my first impression is that it is quite well-considered :)
+
+[14:28] <yoleaux> 17 Feb 2014 03:01Z <raydiak> smls: I changed the colors today, in case that affects anything you are/will be working on
+
+[14:29] <smls> oh, feedback
+
+[14:29] <timotimo> smls! :D
+
+[14:30] <smls> Has raydiak done any more doc.perl6.org style related work in the meantime?
+
+[14:33] <smls> I think I'll have a go at implementing those mockups in HTML/CSS this week, and while I'm at it try to make it look a bit more professional too (cf. the book icon and menu).
+
+[14:33] <timotimo> much appreciated!
+
+[14:33] *** salv0 left
+[14:33] <timotimo> i'm glad to see all areas of our documentation (at least those that exist already, excluding perl6-book) are getting some love right now
+
+[14:34] <timotimo> lue: moarvm is known to be horribly, horribly, horribly slow at concatenating strings
+
+[14:34] <smls> about the colors, I actually didn't mind the previous green/yellow scheme
+
+[14:34] <smls> but we can always have some more color bikeshedding later, once it's in HTML/CSS ;P
+
+[14:35] <smls> on a completely unrelated note:
+
+[14:35] <smls> perl6: my $a = 5; my $b = \$a; $$b = 10; say $a
+
+[14:35] <camelia> niecza v24-109-g48a8de3: OUTPUT«10␤»
+
+[14:35] <camelia> ..rakudo-parrot 299d70, rakudo-jvm 299d70, rakudo-moar 299d70: OUTPUT«5␤»
+
+[14:36] <smls> ^^ do Capture's no longer provide P5 reference-like syntrax for simple cases?
+
+[14:36] <smls> how would I write that instead?
+
+[14:36] <FROGGS> perl6: my $a = 5; my $b := $a; $b = 10; say $a
+
+[14:36] <camelia> rakudo-parrot 299d70, rakudo-jvm 299d70, rakudo-moar 299d70, niecza v24-109-g48a8de3: OUTPUT«10␤»
+
+[14:37] <FROGGS> even one char shorter :o)
+
+[14:37] <timotimo> https://www.youtube.com/watch?v=85LJh4sFi_M   -  oooh beautiful and stunning!
+
+[14:37] <smls> ok
+
+[14:38] <smls> what are Capture's used for now?
+
+[14:39] <timotimo> they represent the result of applying a list of things to a signature, iiuc
+
+[14:39] <smls> this doc suggest they're basically references on steroids: http://search.cpan.org/~lichtkind/Perl6-Doc-0.36/lib/Perl6/Doc/FAQ/Capture.pod
+
+[14:39] <smls> but it seems outdated
+
+[14:39] <timotimo> This ReleasePerl6-Doc-0.36 [Download] [Browse] 19 Mar 2008
+
+[14:39] <timotimo> Latest ReleasePerl6-Doc-0.47 [Download] [Browse] 05 Dec 2010
+
+[14:40] <timotimo> the current release doesn't contain the Capture FAQ document any more
+
+[14:40] *** salv0 joined
+[14:40] <smls> ok
+
+[14:40] <timotimo> but even that one is pretty outdated
+
+[14:41] <timotimo> perl6 has been moving a lot since 2010
+
+[14:42] <timotimo> i wonder at what point a LTS release of rakudo would be interesting
+
+[14:44] *** virtualsue left
+[14:46] <nwc10> how L is the Long in LTS?
+
+[14:46] <nwc10> It's been talked about privately for Perl 5. I don't think that it works. All the distros use different dates for their own LTSes
+
+[14:47] <nwc10> so either you'll never get them actually syncing to the release you'd like them to be LTS
+
+[14:47] *** virtualsue joined
+[14:47] <nwc10> or you just add more lag on distribution update, because they aren't using this year's, but the upstream LTS from 18 months ago
+
+[14:48] <[Coke]> Parrot tried having LTS releases, and I think there was a disconnect between bundlers and developers. And rakudo is *still* changes often enough that I wouldn't recommend it until we hit 6.0.0"
+
+[14:49] <[Coke]> er, I was trying to edit that to "Perl 6 1.0"
+
+[14:49] *** zakharyas left
+[14:50] *** shinobicl joined
+[14:50] <timotimo> mhm
+
+[14:51] <nwc10> I think no sooner than 6.0.0
+
+[14:51] <nwc10> and quite possibly give it a year or so to shake down after that
+
+[14:51] <timotimo> the idea would be to only merge performance improvements and obvious bugfixes, but no spec-change-related things or stuff that likely breaks compatibility with user's programs
+
+[14:51] <masak> what [Coke]++ said.
+
+[14:52] *** SamuraiJack_ left
+[14:52] <moritz> atm it would also imply LTS versions of panda and essential modules
+
+[14:52] <timotimo> aye
+
+[14:52] <moritz> and you really don't want to do that right now :-)
+
+[14:52] <nwc10> I thought that the *design* of Perl 6 was that the language was lexically modifiable
+
+[14:52] <timotimo> yes, i agree that "right now" is much too soon
+
+[14:52] <timotimo> in half a year, though ... ;)
+
+[14:53] <nwc10> meaning that the parser can easily support more than one version of the language concurrently
+
+[14:53] <timotimo> oh. like ... "use backwardscompatible '2014.06'"?
+
+[14:53] <nwc10> I thought it was more use v6.1.0
+
+[14:53] <nwc10> or at least, v6.0.0 was meaning "keep me on the v6.0.0 spec"
+
+[14:54] <timotimo> i completely forgot about that feature for a moment
+
+[14:57] *** rurban joined
+[15:01] <[Coke]> I wonder if we need spec version/implementation version.
+
+[15:01] <[Coke]> spec version cannot be sufficient to say what code you want to run, I imagine.
+
+[15:02] <vendethiel> timotimo: are you boldly guessing a perl6.0.0 release date ? :d
+
+[15:02] <timotimo> :P
+
+[15:07] *** vendethiel left
+[15:07] *** vendethiel joined
+[15:10] *** ajr_ left
+[15:10] *** ajr joined
+[15:10] *** ajr is now known as Guest96668
+
+[15:11] *** Guest96668 is now known as ajr_
+
+[15:15] *** _thou joined
+[15:19] *** zakharyas joined
+[15:29] *** [Sno] left
+[15:38] *** virtualsue left
+[15:38] *** rurban left
+[15:41] *** pmurias joined
+[15:46] *** rurban joined
+[15:50] *** xinming joined
+[15:50] *** ajr_ left
+[15:50] *** rurban left
+[15:51] *** ajr_ joined
+[16:05] *** yihshih joined
+[16:05] *** yihshih__ left
+[16:06] *** zakharyas left
+[16:08] *** rurban joined
+[16:09] *** zakharyas joined
+[16:11] *** rurban left
+[16:13] *** zakharyas left
+[16:20] *** treehug88 joined
+[16:23] *** nebuchadnezzar joined
+[16:23] *** mtk left
+[16:25] *** mtk joined
+[16:27] *** takadonet joined
+[16:27] <takadonet> morning
+
+[16:28] *** telex left
+[16:28] *** dmol joined
+[16:29] *** rurban joined
+[16:30] *** telex joined
+[16:32] *** denis_boyun_ left
+[16:38] *** clsn joined
+[16:42] *** smls left
+[16:42] <[Coke]> timotimo: (bug triage) and yet it never ends.
+
+[16:42] *** smls joined
+[16:43] * [Coke] ponders a mini doc on helping out with the bug queue.
+
+[16:43] <[Coke]> (in the mean time, feel free to ping me if you want to help)
+
+[16:43] *** zakharyas joined
+[16:43] <[Coke]> you==not timotimo specifically.
+
+[16:44] *** BenGoldberg joined
+[16:44] <[Coke]> the XSS error happens when you are NOT logged into RT, I think.
+
+[16:45] <[Coke]> nwc10: do you know what fivers do with their spam tickets? Is it something other than clicking the big S?
+
+[16:45] * [Coke] is happy to hit their recent spam tickets also when he's in there.
+
+[16:46] <nwc10> pretty sure it's "click the big S"
+
+[16:46] <nwc10> and yes, clicking S is appreciated
+
+[16:46] <nwc10> kid51 is usually the most active on this
+
+[16:47] <[Coke]> nwc10: done.
+
+[16:58] *** yihshih__ joined
+[16:58] *** kshannon joined
+[16:58] *** segomos joined
+[16:59] *** kaleem left
+[17:00] *** smls left
+[17:00] *** clsn left
+[17:00] *** dmol left
+[17:00] *** mtk left
+[17:00] *** nebuchadnezzar left
+[17:00] *** yihshih left
+[17:00] *** ajr_ left
+[17:00] *** shinobicl left
+[17:00] *** xenoterracide left
+[17:00] *** segomos_ left
+[17:00] *** kshannon_ left
+[17:00] *** SHODAN left
+[17:00] *** dakkar left
+[17:00] *** ggoebel1117 left
+[17:00] *** raydiak left
+[17:00] *** Yappo__________7 left
+[17:00] *** ingy1 left
+[17:00] *** xfix left
+[17:00] *** BenGoldberg left
+[17:00] *** telex left
+[17:00] *** _thou left
+[17:00] *** salv0 left
+[17:00] *** colomon left
+[17:00] *** yoleaux left
+[17:00] *** avuserow3 left
+[17:00] *** eternaleye left
+[17:00] *** exodist_ left
+[17:00] *** BooK_ left
+[17:00] *** JimmyZ left
+[17:00] *** yath_ left
+[17:00] *** bjz left
+[17:00] *** go|dfish left
+[17:00] *** rurban_ left
+[17:00] *** lee_ left
+[17:00] *** lizmat left
+[17:00] *** breinbaas left
+[17:00] *** mavcunha_ left
+[17:00] *** FROGGS left
+[17:00] *** revdiablo left
+[17:00] *** ruoso_ left
+[17:00] *** sftp left
+[17:00] *** darutoko left
+[17:00] *** klapperl left
+[17:00] *** pnu left
+[17:00] *** zamolxes_ left
+[17:00] *** tokuhirom left
+[17:00] *** aindilis left
+[17:00] *** itz left
+[17:00] *** ribasushi left
+[17:00] *** nwc10 left
+[17:00] *** sunnavy left
+[17:00] *** pochi_ left
+[17:00] *** erkan left
+[17:00] *** dylanwh left
+[17:01] *** fhelmberger left
+[17:02] *** zakharyas left
+[17:02] *** ggherdov left
+[17:03] *** xenoterracide joined
+[17:05] <TimToady> p6: say [1,2] X~ <a b>
+
+[17:05] <camelia> niecza v24-109-g48a8de3: OUTPUT«1 2a 1 2b␤»
+
+[17:05] <camelia> ..rakudo-parrot 299d70, rakudo-jvm 299d70, rakudo-moar 299d70: OUTPUT«1a 1b 2a 2b␤»
+
+[17:06] *** lizmat joined
+[17:06] *** breinbaas joined
+[17:06] *** mavcunha_ joined
+[17:06] *** FROGGS joined
+[17:06] *** revdiablo joined
+[17:06] *** ruoso_ joined
+[17:06] *** sftp joined
+[17:06] *** darutoko joined
+[17:06] *** klapperl joined
+[17:06] *** pnu joined
+[17:06] *** zamolxes_ joined
+[17:06] *** tokuhirom joined
+[17:06] *** aindilis joined
+[17:06] *** itz joined
+[17:06] *** ribasushi joined
+[17:06] *** nwc10 joined
+[17:06] *** sunnavy joined
+[17:06] *** pochi_ joined
+[17:06] *** erkan joined
+[17:06] *** dylanwh joined
+[17:06] *** Shozan joined
+[17:06] *** clsn joined
+[17:06] *** BenGoldberg joined
+[17:06] *** telex joined
+[17:06] *** _thou joined
+[17:06] *** salv0 joined
+[17:06] *** colomon joined
+[17:06] *** yoleaux joined
+[17:06] *** avuserow3 joined
+[17:06] *** eternaleye joined
+[17:06] *** exodist_ joined
+[17:06] *** BooK_ joined
+[17:06] *** JimmyZ joined
+[17:06] *** yath_ joined
+[17:06] *** bjz joined
+[17:06] *** go|dfish joined
+[17:06] *** rurban_ joined
+[17:06] *** lee_ joined
+[17:06] *** kornbluth.freenode.net sets mode: +v yoleaux
+
+[17:06] <TimToady> I assume that one is still considered a rakudobug
+
+[17:06] *** kshannon_ joined
+[17:06] *** xinming_ joined
+[17:06] *** telex left
+[17:07] <[Coke]> I just saw that bug yesterday, yes.
+
+[17:07] <[Coke]> https://rt.perl.org/rt3/Ticket/Display.html?id=74072
+
+[17:07] <TimToady> I assumed you were testing for still-bughood, but then you said something about test-neededs
+
+[17:07] <TimToady> so I wasn't sure
+
+[17:07] *** xfix joined
+[17:07] <[Coke]> ETOOMANYTESTS
+
+[17:08] <[Coke]> that one already has a test, even. t/spec/S03-metaops/cross.t
+
+[17:08] <TimToady> muchos gracias
+
+[17:08] <[Coke]> <nod>
+
+[17:09] <TimToady> hmm, was just looking at that code yesterday, maybe I can figure something out...
+
+[17:09] *** ggherdov joined
+[17:09] <[Coke]> m: say $] 
+
+[17:09] <camelia> rakudo-moar 299d70: OUTPUT«[31m===[0mSORRY![31m===[0m Error while compiling /tmp/_cHikCl3Xj␤Unsupported use of $] variable; in Perl 6 please use $*PERL_VERSION␤at /tmp/_cHikCl3Xj:1␤------> [32msay [33m⏏[31m$][0m␤    expecting any of:␤        argument list␤     …»
+
+[17:11] *** kshannon left
+[17:11] *** xinming left
+[17:11] *** Alina-malina left
+[17:11] <timotimo> $PERL_VERSION?
+
+[17:11] *** pmurias left
+[17:11] <timotimo> not $*PERL<version>?
+
+[17:12] <[Coke]> https://rt.perl.org/Ticket/Display.html?id=120996 is a dupe, merged it.
+
+[17:12] *** colomon left
+[17:16] *** pmurias joined
+[17:19] *** telex joined
+[17:20] *** salv0 left
+[17:29] *** japhb_ joined
+[17:37] *** bluescreen100 joined
+[17:37] <vendethiel> r: my $*a = 1; sub b { $*a = 2; c(); }; sub c { $*a = 3; say "c: {$*a.perl}"; }; say $*a.perl; b(); say $*a.perl;
+
+[17:37] <camelia> rakudo-parrot 299d70, rakudo-jvm 299d70, rakudo-moar 299d70: OUTPUT«1␤c: 3␤3␤»
+
+[17:37] <vendethiel> uw0t
+
+[17:38] *** Alina-malina joined
+[17:38] *** FROGGS left
+[17:39] <timotimo> why does this confuse you?
+
+[17:40] *** takadonet left
+[17:40] <TimToady> if you want the subs to establish their own dynamic scope, you have to say 'my $*a = 3'
+
+[17:41] <TimToady> or 'temp $*a;'
+
+[17:41] <vendethiel> I'd expect the subs not to run before I call them
+
+[17:42] <vendethiel> as opposed to, say, a simple block
+
+[17:43] <geekosaur> ... what
+
+[17:44] *** hoverboard joined
+[17:44] *** nebuchadnezzar joined
+[17:44] *** SAAJWDK joined
+[17:44] *** kurahaupo_mobile joined
+[17:44] *** dmol joined
+[17:44] *** mtk joined
+[17:44] *** dakkar joined
+[17:44] *** ggoebel1117 joined
+[17:44] *** raydiak joined
+[17:44] *** Yappo__________7 joined
+[17:44] *** ingy1 joined
+[17:45] <segomos> vendethiel: it ran in the order you called for
+
+[17:45] *** spider-mario joined
+[17:45] <vendethiel> geekosaur: is this a question of some sorts?
+
+[17:45] <vendethiel> I'm just blind, apparently
+
+[17:45] <vendethiel> definitely
+
+[17:46] <geekosaur> I cannot figure out why you think it ran before you called them
+
+[17:46] <segomos> it output 1, you called b which called c and output 'c: 3' and then output 3
+
+[17:46] <vendethiel> geekosaur, segomos : [18:45] <14vendethiel> I'm just blind, apparently # my bad
+
+[17:47] <segomos> me too
+
+[17:47] <vendethiel> r: my $*a = 1; sub b { my $*a = 2; c(); }; sub c { $*a = 3; say "c: {$*a.perl}"; }; say $*a.perl; b(); say $*a.perl;
+
+[17:47] <camelia> rakudo-parrot 299d70, rakudo-jvm 299d70, rakudo-moar 299d70: OUTPUT«1␤c: 3␤1␤»
+
+[17:47] <vendethiel> i liek it
+
+[17:47] <segomos> interesting
+
+[17:48] <vendethiel> expected
+
+[17:48] *** colomon joined
+[17:49] <segomos> that is similar to the 'this' confusion people have in javascript
+
+[17:49] *** denis_boyun joined
+[17:51] <masak> not really, no.
+
+[17:52] <masak> well, depends on your threshold for similarity, I guess :P
+
+[17:53] <jnthn> Mars looks close tonight, so I'll svn ci
+
+[17:53] <jnthn> uh, wrong window
+
+[17:53] <masak> segomos: the main confusion people have about 'this' in JavaScript is that each individual routine invocation gets its own 'this', and so you cannot simply use 'this' from an inner function in a method, for example.
+
+[17:53] <masak> jnthn: *lol*
+
+[17:53] <segomos> it's scoping $*a to 'sub b', its caller.  in js people have confusion over 'this' being scoped to whatever called the function (which could be anything)
+
+[17:53] <jnthn> ...boy must that one look weird without context :)
+
+[17:53] <masak> jnthn: don't you dare try to explain!
+
+[17:53] <masak> jnthn: it's funnier this way :P
+
+[17:53] <tadzik> jnthn: ...what is a right window for that? :D
+
+[17:53] <segomos> lol
+
+[17:54] <jnthn> I think this is the first time lag has turned out to be a positive :P
+
+[17:54] <masak> segomos: no, 'this' is still scoped to the callee in JS.
+
+[17:54] <masak> segomos: are you sure you have the right definition of 'caller' in you mind?
+
+[17:55] <masak> segomos: or maybe you're completely misunderstanding how dynamic lookup works -- I cannot tell.
+
+[17:59] *** FROGGS joined
+[18:00] <dalek> specs: 5ef5f5c | larry++ | S32-setting-library/Containers.pod:
+
+[18:00] <dalek> specs: Add Range.sample for TheDamian++
+
+[18:00] <dalek> specs: review: https://github.com/perl6/specs/commit/5ef5f5ca42
+
+[18:01] <[Coke]> docs.perl.org - it would be nice if you got an indication that a search returned no results.
+
+[18:01] <moritz> raydiak: ^^
+
+[18:01] <[Coke]> er, http://doc.perl6.org/
+
+[18:02] <[Coke]> also, I'd like to be able to hit "ord<enter>" in the search box and have it go somewhere.
+
+[18:02] *** dakkar left
+[18:02] *** awwaiid left
+[18:03] <moritz> TimToady: it seems your last spec commit added much more than Range.sample
+
+[18:03] <moritz> TimToady: like, duplicated the Buf section
+
+[18:03] <segomos> masak: no i get what you're saying, but 'this' in js isn't always equal to .caller
+
+[18:03] <TimToady> oops
+
+[18:03] *** telex left
+[18:04] *** pmurias left
+[18:04] <masak> segomos: there is some weapons-grade confusion going on here. why would 'this' be equal to .caller?
+
+[18:04] <segomos> i'm generalizing the way the scope of a variable works
+
+[18:05] *** SamuraiJack_ joined
+[18:05] <masak> yes, that is probably where we need to begin.
+
+[18:05] <segomos> masak: i think because i'm half assedly paying attention -
+
+[18:05] <masak> segomos: 'lexical lookup' vs 'dynamic lookup' -- do these terms sound familiar?
+
+[18:05] <segomos> yea
+
+[18:05] <masak> segomos: well, the thing with 'this' is that it does neither. it's simply invocation-specific. that is, the *invocation* sets 'this'.
+
+[18:06] <masak> sometimes to a sensible object (like with methods and constructors), sometimes to the global object (like with functions), and sometimes to something you specify (like with call/apply).
+
+[18:06] *** berekuk joined
+[18:06] <segomos> yea i'm familiar with how it works
+
+[18:06] <masak> ok.
+
+[18:07] <masak> then I was hoping you would also say that it's nothing like dynamic lookup :)
+
+[18:07] <masak> food &
+
+[18:07] <dalek> specs: 73c60fc | larry++ | S32-setting-library/Containers.pod:
+
+[18:07] <dalek> specs: remove accidental duplication
+
+[18:07] <dalek> specs: review: https://github.com/perl6/specs/commit/73c60fc5fe
+
+[18:07] *** pmurias joined
+[18:08] *** molaf joined
+[18:09] *** telex joined
+[18:11] <segomos> masak: ahh :) sorry, I'm getting frustrated with this SAP soap thing and only half reading (apparently)
+
+[18:14] *** synopsebot left
+[18:14] *** synopsebot joined
+[18:14] <FROGGS> segomos: I'll fell the joy (pain, really) of SAP soap in near future too :o)
+
+[18:19] <masak> segomos: s'ok. I wasn't sure which one of us was confused, to be honest.
+
+[18:19] * moritz was confused
+
+[18:19] <moritz> :-)
+
+[18:20] *** SamuraiJack_ left
+[18:22] *** ajr joined
+[18:23] *** ajr is now known as Guest6564
+
+[18:23] *** Guest6564 is now known as ajr_
+
+[18:33] *** xragnar joined
+[18:39] *** tgt joined
+[18:42] *** Khisanth left
+[18:42] *** khisanth_ joined
+[18:44] *** ajr__ joined
+[18:44] *** pmurias left
+[18:44] *** khisanth_ is now known as Khisanth
+
+[18:44] *** ajr_ left
+[18:46] *** pmurias joined
+[18:53] <segomos> FROGGS: ahh, i think i just got BOBJ QAAWS working which means i can do web type development instead of using these hokey tools 
+
+[18:57] <FROGGS> segomos: my project will probably start in april or may, before that I'wont know what I am supposed to do
+
+[18:59] *** SamuraiJack_ joined
+[19:02] <nwc10> https://www.google-melange.com/gsoc/org2/google/gsoc2014/tpf
+
+[19:02] *** treehug88 left
+[19:02] *** treehug8_ joined
+[19:03] *** hoverboard is now known as EyeOfTheTiger
+
+[19:03] <timotimo> we wanted to get the peephole optimizer task removed from the ideas page
+
+[19:03] <timotimo> can someone do that?
+
+[19:03] *** kurahaupo_mobile left
+[19:04] <nwc10> surely it's a wiki, so anyone could?
+
+[19:04] <timotimo> ... i suppose at least registration is required?
+
+[19:04] <timotimo> i thought there'd probably be a requirement to hve some privileges
+
+[19:05] *** darutoko left
+[19:06] *** kurahaupo_mobile joined
+[19:07] *** EyeOfTheTiger is now known as hoverboard
+
+[19:09] *** ingy1 is now known as ingy
+
+[19:16] *** SamuraiJack_ left
+[19:19] *** Rotwang joined
+[19:25] <lue> timotimo: interesting. I was looking at join last night thinking to myself "kcachegrind says it's only called 4 times, it can't be what's *really* slowing everything down".
+
+[19:26] <timotimo> http://t.h8.lv/p6bench/2014-02-20-rakudo.html ← have a closer look
+
+[19:27] <timotimo> at some point we ought to have concurrency benchmarks, too :)
+
+[19:31] *** denis_boyun__ joined
+[19:31] <lue> You should probably leave parrot out of those, unless you want a depressing flatline on all the charts :)
+
+[19:31] *** denis_boyun left
+[19:32] * masak .oO( this... is a flatlined Parrot! )
+
+[19:32] <timotimo> parrot still beats out moarvm when it comes to string operations
+
+[19:32] <[Coke]> On the contrary, don't we want stats on parrot vs. moar?
+
+[19:32] <grondilu> moritz: in https://github.com/moritz/perl6-wtop/blob/master/practices.pod, you could possibly mention infix:<**> as an other exception to the rule about putting spaces around an infix operator.
+
+[19:32] <timotimo> and otherwise it's usually only like 2x faster
+
+[19:32] <nwc10> I thought that too
+
+[19:32] <lue> [Coke]: not for concurrency I don't think :)
+
+[19:32] <nwc10> and what's curious is why parrot wins on while_concat
+
+[19:32] <timotimo> it's not curious
+
+[19:33] <nwc10> OK. Why isn't it curious?
+
+[19:33] <timotimo> moar's way of concatenating strings is absolutely abysmally pessimized
+
+[19:33] <timotimo> our rope implementation is thoroughly troubled
+
+[19:33] <masak> grondilu: you mean infix:<**> in the Regex slang?
+
+[19:34] <grondilu> no, I mean the exponentiation operator.
+
+[19:34] <lue> jnthn mentioned just recently that the ropes are forced into being simple strings (because the ropey parts of the impl. are broken), which is apparently absolutely terrible for performance.
+
+[19:34] <grondilu> it's an infix, isn't it?
+
+[19:34] <timotimo> it's doing the pessimized "copy all the things" thing
+
+[19:34] *** rurban left
+[19:35] <timotimo> and also, we're forcing all strings to use 32bit codepoint storage even if it would fit into 8bit
+
+[19:35] <timotimo> i think parrot is better at that very point than moar
+
+[19:36] <jnthn> I don't think the 32-bit/8-bit is the big deal.
+
+[19:36] <jnthn> It's the building up an intricate data structure, only to throw it away again.
+
+[19:36] <timotimo> how about the way we're accessing the codepoints for copying?
+
+[19:37] <jnthn> timotimo: Yes, that is more the problem.
+
+[19:37] <timotimo> so, a fast path for two 32bit non-rope strings ought to be a bit of a help?
+
+[19:37] <timotimo> one that uses memcpy?
+
+[19:38] <jnthn> timotimo: Yes.
+
+[19:38] <timotimo> seems like an easy thing to whip up in a few minutes right now :)
+
+[19:38] *** kaare_ joined
+[19:38] <[Coke]> jnthn: do you have any need of curated tickets from RT to help you find things to work on, or are you (as I suspect) all set in the find stuff to do area?
+
+[19:40] <jnthn> [Coke]: I've got a fairly sizable bunch of things to do in the near future.
+
+[19:40] *** kurahaupo_mobile left
+[19:40] *** kurahaupo_mobile joined
+[19:40] <jnthn> [Coke]: At least one RT ticket being one of the most urgent.
+
+[19:41] <[Coke]> hokay.
+
+[19:41] *** molaf left
+[19:43] <[Coke]> Where did the node.js backend stuff end up?
+
+[19:43] *** dmol left
+[19:43] *** panchiniak joined
+[19:45] <FROGGS> jnthn: what is the sanest way to access a BOOThash on jvm?
+
+[19:45] <FROGGS> nqp::backendconfig()<foo> does not work
+
+[19:46] <FROGGS> "No such method 'at_key' for invocant of type 'BOOTHash'"
+
+[19:46] <jnthn> FROGGS: From perl 6 or nqp?
+
+[19:46] <jnthn> Oh, then Perl6
+
+[19:46] <jnthn> Well, nqp::atkey(.., 'foo')
+
+[19:46] <FROGGS> in rakudo's core_epilog.pm to be exact
+
+[19:46] <FROGGS> hmmm, I think I tried that....
+
+[19:46] <jnthn> Try it righter
+
+[19:46] <jnthn> :P
+
+[19:46] <FROGGS> yeah :P
+
+[19:48] <dalek> rakudo-star-daily: 5029d43 | coke++ | log/ (5 files):
+
+[19:48] <dalek> rakudo-star-daily: today (automated commit)
+
+[19:48] <dalek> rakudo-star-daily: review: https://github.com/coke/rakudo-star-daily/commit/5029d43dd7
+
+[19:48] <FROGGS> [Coke]: btw, I tried to fix that EVAL for pugs... but I gave up after a while
+
+[19:49] *** tgt left
+[19:51] *** rindolf left
+[19:51] <FROGGS> jnthn: seems to work(-ish), there are more accesses that need to be nqp::atkey, likely that I've just not seen that the first change succeeded
+
+[19:54] <[Coke]> FROGGS: me too, which is why I opened a ticket. :)
+
+[19:54] <FROGGS> yeah
+
+[19:54] <[Coke]> eval looks special. (other stuff, it was a simple mod to Prim.hs)
+
+[19:54] <FROGGS> :/
+
+[19:54] * [Coke] casts "Summon au"
+
+[19:54] <FROGGS> expecto au?
+
+[20:00] *** tgt joined
+[20:01] *** rindolf joined
+[20:05] *** pdcawley left
+[20:05] <masak> you can only cast au if the thought you're holding is happy enough.
+
+[20:06] <timotimo> %)
+
+[20:08] *** pdcawley joined
+[20:09] *** kivutar joined
+[20:09] <FROGGS> *g*
+
+[20:09] <FROGGS> so, flying on a broomstick doesn't ount, ehh?
+
+[20:09] <FROGGS> count*
+
+[20:09] <FROGGS> I need to reparo my keyboard -.-
+
+[20:10] * masak .oO( we all knew that au was brilliant, but we hadn't realized until now she's a patronus )
+
+[20:17] <masak> pmurias: another thing that's usually written in all-caps: heredoc terminating strings.
+
+[20:18] <masak> by the way, it's an interesting language evolution that heredoc is spelled "here-doc" in perldoc.
+
+[20:18] *** tgt left
+[20:18] *** tgt joined
+[20:26] *** Sqirrel joined
+[20:29] <timotimo> lue: i have a moarvm patch that you can try with your pod6 htmlify stuff - shouldn't need to re-build rakudo or nqp or the module.
+
+[20:29] <lue> I'd be willing to try it. Do I need latest MoarVM?
+
+[20:30] <timotimo> it's based on MoarVM master, but it should apply cleanly to older MoarVM as well
+
+[20:30] *** kurahaupo_mobile left
+[20:30] <timotimo> the branch you want to use is flatten_fastpath in moarvm
+
+[20:31] <lue> oh, so I can just switch to it then, no manual patch application like I was thinking :) .
+
+[20:31] <timotimo> that's right
+
+[20:31] <timotimo> i figured that'd be much nicer for everyone
+
+[20:35] <timotimo> can't tell if the spectests are clean yet.
+
+[20:40] <lue> O.O before: about 1246.0347964 seconds  after: 244.9768101 seconds. (Most of that is hung up in File::Find::find; all steps after the last use of find() blinked past before I knew what was happening :D)
+
+[20:40] <lue> timotimo++ ! \o/
+
+[20:40] <lue> Huh, all of a sudden I get links pointing to https://github.com/perl6/roast/blob/master//S17-async/syntax.t#L33\  (notice the backslash) can't tell if that's me or the MVM patch.
+
+[20:41] <timotimo> sounds good
+
+[20:41] <timotimo> hm. interesting.,
+
+[20:41] <FROGGS> interesting\
+
+[20:41] <FROGGS> :P
+
+[20:41] <timotimo> could you be so kind as to golf it?
+
+[20:42] <lue> I'll revert to pre-patch moar, and see if it comes up again.
+
+[20:43] <lue> (that'll take about 15 minutes to run through though)
+
+[20:43] <timotimo> hah
+
+[20:43] <timotimo> can you reduce the workload?
+
+[20:44] <lue> Yes, actually. I'll just have to copy over a single synopsis to use.
+
+[20:44] <timotimo> spectests are clean, annoyingly
+
+[20:45] <timotimo> so if it's my patch that's to blame, we could really use a spectest
+
+[20:45] <timotimo> well, a regression test really
+
+[20:47] <lue> *headdesk* "Obtained 0 synopses." well, no wonder it went by so fast :P  This also means the backslashes are my fault, almost surely.
+
+[20:47] <timotimo> huh?
+
+[20:47] <timotimo> so the performance measurement was improper, too?
+
+[20:48] <lue> I forgot to switch back to the pod6ify branch of specs before testing you patch. Sorry :(
+
+[20:48] <timotimo> hehehe
+
+[20:48] <timotimo> that's fine. it should still give improved performance
+
+[20:48] <timotimo> i'll run the proper benchmarks soon
+
+[20:49] <lue> The backslash is because, as I thought, it's a leftover from moving from double quotes to a heredoc :)
+
+[20:50] <lue> (link still points to the correct line and file, interestingly)
+
+[20:51] <masak> lue: did you know heredocs can be double-quoted, too? :)
+
+[20:52] <lue> what do you mean?
+
+[20:52] *** araujo left
+[20:52] <masak> qq:to/FOO/
+
+[20:52] <lue> ah, I just meant a literal "" :)
+
+[20:52] <masak> yeah, I figured.
+
+[20:53] *** zaydon joined
+[20:54] *** mcglk joined
+[21:02] *** panchiniak is now known as sovaco-de-cobra
+
+[21:03] *** sovaco-de-cobra is now known as panchiniak
+
+[21:04] *** araujo joined
+[21:13] <lue> timotimo: 1246.0347964 seconds  vs.  1222.1842851 seconds (can't tell if that's significant; a previous pre-patch run was at 1237.8338873)
+
+[21:14] <timotimo> ho-hum.
+
+[21:16] *** araujo left
+[21:16] <timotimo> in that case, something else should be a bit slower
+
+[21:16] <timotimo> could be that you use join and that doesn't hit the fast path
+
+[21:16] *** araujo joined
+[21:17] <timotimo> and string_repeat doesn't usually hit the fast path either
+
+[21:17] <lue> I think I tossed out my kcachegrind stuff at some point, couldn't make much of it anyway. [at least, *I* couldn't :)]
+
+[21:19] <timotimo> i have the same problem
+
+[21:19] *** d4l3k_ joined
+[21:20] *** Pleiades` joined
+[21:20] <lue> I think at some point it's just going to take time processing the synopses, though hopefully less than the 10 or so minutes it does currently take.
+
+[21:21] *** dalek left
+[21:21] *** d4l3k_ is now known as dalek
+
+[21:22] <lue> Oh, dur. I've been using perl6-p for the profiling stuff. If perl6-m actually had profiling support, I'd get actually useful data from there :) .
+
+[21:22] <timotimo> you can still cachegrind that :P
+
+[21:23] *** rindolf left
+[21:23] <lue> I tried using callgrind once, IIRC it was useless (could try again though)
+
+[21:23] <timotimo> yeah :(
+
+[21:24] <timotimo> diakopter has been getting opinions/input on what people need for a profiler for moarvm, so at some point he'll have something for us to work with
+
+[21:29] <lue> I just want something that'll show off bottlenecks in code. Not sure how useful that suggestion is though :)
+
+[21:29] <timotimo> lue: can you tell if you're using join more often than concatenate?
+
+[21:29] <lue> If my attempt to run callgrind on perl6-m --doc=HTML fails, I'll profile perl6-p and tell you.
+
+[21:31] <timotimo> thank you
+
+[21:32] <timotimo> how often MVM_string_repeat happens would also be interesting
+
+[21:32] <timotimo> those would all require individual fastpaths unfortunately
+
+[21:32] <lue> maybe to the point where a better string impl is needed, perhaps? :)
+
+[21:33] <timotimo> yes.
+
+[21:33] <timotimo> please make a better string impl if you can :P
+
+[21:33] <lue> I just read about ropes not too long ago (to better know the more technical bits), so I don't know how good I'd be :P
+
+[21:34] *** virtualsue joined
+[21:35] <lue> This perl6-m callgrind might take a while :)
+
+[21:35] <timotimo> yeah, probably :(
+
+[21:36] <lue> Perhaps I shouldn't've picked S02, the largest of the synopses...
+
+[21:36] <timotimo> heh :)
+
+[21:37] <lue> It takes ≈1m30s on perl6-m, so add into that the 20..50x slowdown I read valgrind taking, and I expect at least 10 more minutes to go into this.
+
+[21:39] <masak> r: "foo" ~~ /(bar)? foo/; say ~$0
+
+[21:39] <camelia> rakudo-jvm 299d70, rakudo-moar 299d70: OUTPUT«use of uninitialized value of type Any in string context␤␤»
+
+[21:39] <camelia> ..rakudo-parrot 299d70: OUTPUT«use of uninitialized value of type Any in string context  in block  at /tmp/tmpfile:1␤␤␤»
+
+[21:39] <masak> r: "foo" ~~ /(bar)? foo/; say $0.^name
+
+[21:39] <camelia> rakudo-parrot 299d70, rakudo-jvm 299d70, rakudo-moar 299d70: OUTPUT«Any␤»
+
+[21:39] <masak> r: "foo" ~~ /(bar)? foo/; say ~($0 // "")
+
+[21:39] <camelia> rakudo-parrot 299d70, rakudo-jvm 299d70, rakudo-moar 299d70: OUTPUT«␤»
+
+[21:39] <timotimo> hm, should that be Nil?
+
+[21:42] <moritz> r: say so "foo" ~~ /(bar)? foo/;
+
+[21:42] <camelia> rakudo-parrot 299d70, rakudo-jvm 299d70, rakudo-moar 299d70: OUTPUT«True␤»
+
+[21:44] *** d4l3k_ joined
+[21:45] <lue> timotimo: trying my hand at ropes could possibly be interesting, but not only do I need to be familiar with the MVM codebase, I also would much prefer experimenting in a separate, useless project first :) [Also, if I must use C, that's another thing...]
+
+[21:45] <timotimo> you'd have to be using C, aye
+
+[21:45] *** dalek left
+[21:45] <timotimo> and the code for ropes is kinda complicated
+
+[21:45] *** d4l3k_ is now known as dalek
+
+[21:46] <timotimo> it uses the visitor pattern to work on ropes, which is pretty nice
+
+[21:46] <timotimo> but it's not obvious how exactly things work
+
+[21:46] <timotimo> and especially where the gremlins are
+
+[21:47] <lue> Not saying I couldn't use C, just that it'd take some time to beat the C++11 outta me :P
+
+[21:48] <timotimo> hah
+
+[21:48] <timotimo> also you can't use C99
+
+[21:48] *** awwaiid joined
+[21:49] <lue> Yeah, I caught that in #moarvm. That means none of that mixing declarations and code I got bitten by in some project I had to repair a while ago, right?
+
+[21:50] <timotimo> yeah, declaration has to be at the beginning of blocks :(
+
+[21:50] <timotimo> i've made that mistake quite often
+
+[21:51] <lue> Good thing I'm not in charge of moar, else I'd say "use a better compiler" :P
+
+[21:51] <timotimo> hah
+
+[21:51] <timotimo> msvc++ could in theory be "better"
+
+[21:52] <timotimo> allegedly, MS's response to "MSVC is lagging far behind the standards!" is "use msvc++ instead, dummies"
+
+[21:54] <moritz> can anybody tell me what's wrong with this table?
+
+[21:54] <moritz> https://github.com/perl6/doc/blob/master/lib/regexes.pod#L253
+
+[21:54] *** treehug8_ left
+[21:54] <moritz> it's not rendered as a table at all, neither by Pod::To::Text nor by Pod::To::HTML
+
+[21:55] <timotimo> does it get confused by initial empty lines?
+
+[21:56] <moritz> removing it doesn't unconfuse it
+
+[21:56] <timotimo> also, i think the table above that for the short and long unicode thingies ought to have many more empty lines
+
+[21:56] <moritz> let's start with the simpler one :-)
+
+[21:56] <timotimo> since i believe seeing at least one empty line in between puts it into "one row per paragraph" mode rather than "one row per line" mode
+
+[21:57] <masak> 'night, #perl6
+
+[21:57] <timotimo> 'night masak
+
+[21:57] <lue> ♞ masak o/
+
+[21:57] <lue> moritz: did you remove the final empty line too?
+
+[21:57] <moritz> lue: yes
+
+[21:57] <moritz> fwiw the table in lib/Whatever.pod works fine
+
+[21:58] <moritz> and it also has newlines before and after the table body
+
+[21:59] <timotimo> hmm
+
+[21:59] <moritz> aaaargh
+
+[21:59] <lue> Oh! Try wrapping | and + in V<>s ! (may need :allow<V> on the table)
+
+[22:00] <moritz> if I add an 'a' before each row "fixes" it
+
+[22:00] <timotimo> does :allow actually work in tables now?!
+
+[22:00] <lue> maybe -
+
+[22:00] <lue> timotimo: it does in code blocks at least, not sure if it works everywhere though
+
+[22:00] *** zakharyas joined
+[22:00] <lue> (theoretically every cell is a nested =para, so you shouldn't need :allow)
+
+[22:00] <lue> *maybe - too
+
+[22:00] *** colomon left
+[22:01] <moritz> what is V<>?
+
+[22:01] <timotimo> "verbatim"
+
+[22:01] <timotimo> lue: not in the implementation i've seen :)
+
+[22:01] <moritz> how does it differ from C<>?
+
+[22:01] *** colomon joined
+[22:01] <timotimo> doesn't change formatting
+
+[22:01] <moritz> when I add V<...> around the first column, it's rendered as a table, including the V<>
+
+[22:02] <lue> the point is to not have whitespace on at least one side of the symbol, because they're looked at as cell dividers here.
+
+[22:02] <timotimo> yes, as i said, formatting codes inside tables are sadly NYI
+
+[22:02] <timotimo> really sad about that :(
+
+[22:02] <timotimo> so maybe use "+" instead?
+
+[22:02] <timotimo> that'll be rendered for "humans", but it at least won't look weird
+
+[22:02] <moritz> so, currently there's no way to render a table that has | as a column?
+
+[22:03] <moritz> timotimo: use + where?
+
+[22:03] <lue> not one surrounded by whitespace at least
+
+[22:03] <timotimo> V<...> would counter that problem, but is NYI
+
+[22:03] <timotimo> moritz: use \" around the operators
+
+[22:04] * lue thinks Pod6 tables need some refactoring in general; there're too many styles to say "Pod6 will figure it out, don't worry"
+
+[22:05] <tadzik> that's how I wrote it, heh
+
+[22:05] <tadzik> timotimo has a much saner implementation
+
+[22:05] <timotimo> somewhat
+
+[22:05] <tadzik> it's interpreting S26 differently, but correcter I think
+
+[22:05] <timotimo> tadzik: did you see i showed it to Mouq++ and he liked it?
+
+[22:05] <moritz> timotimo: then I have \" around the operators in the output :(
+
+[22:06] <tadzik> timotimo: didn't notice, no
+
+[22:06] *** skids left
+[22:06] <timotimo> moritz: yes, you will. but it won't be as confusing to the user as having a visible V<..> around it
+
+[22:06] <timotimo> hm. how do &foo; get treated there?
+
+[22:06] <timotimo> would that perhaps work as a blatant hack?
+
+[22:06] <moritz> it's not *that* kind of an operator
+
+[22:07] <moritz> but rather regex unicode class combination operators
+
+[22:07] <moritz> as in <:alpha+:digit>
+
+[22:07] <timotimo> i know.
+
+[22:07] <moritz> found a hack!
+
+[22:07] <moritz> using non-breaking spaces around the operator :-)
+
+[22:07] <timotimo> hah, clever
+
+[22:07] <moritz> a sad kind of clever
+
+[22:07] <timotimo> agreed
+
+[22:08] <dalek> doc: fbc8306 | moritz++ | lib/regexes.pod:
+
+[22:08] <dalek> doc: [regexes] fix tables / work around rakudo limitations
+
+[22:08] <dalek> doc: review: https://github.com/perl6/doc/commit/fbc83068ab
+
+[22:09] <lue> .oO( =begin table :tablespec<+-+|+-+|+++++>  / :tablespec<┏━┓┃┛━┗┃┳┫┻┣╋> ...)
+
+[22:09] <timotimo> %)
+
+[22:10] *** Sqirrel left
+[22:14] *** zaydon left
+[22:18] *** bluescreen100 left
+[22:25] *** Rotwang left
+[22:26] *** kbaker_ left
+[22:32] *** Mouq joined
+[22:34] <Mouq> moritz: "so, currently there's no way to render a table that has | as a column?" :/ sorry
+
+[22:35] <Mouq> moritz: It's also a problem I've noticed e.g. there's no way to do L<infix:<(\|)> | infix ∪ > or whatever
+
+[22:35] <Mouq> The parsing just needs to be better
+
+[22:36] <lue> timotimo: I just got callgrind output for perl6-m --doc=HTML S02-bits.pod6 (took just over 1h), and I got a lot of stuff on MVM, but it looks like no perl6-specific stuff
+
+[22:37] <Mouq> I won't have time tonight, but I'm working on getting timotimo's table implementation into Rakudo
+
+[22:37] <Mouq> Actually, I may as well commit and push to a branch
+
+[22:37] <Mouq> It at least builds
+
+[22:37] <lue> Mouq: in that case, I don't think you space around the L<> bar
+
+[22:38] <lue> *you need space
+
+[22:39] <Mouq> lue: The problem is that the Pod::To::* modules have to parse the inside of L<>, and that's stupid
+
+[22:39] <lue> oh, is that what the \| is for?
+
+[22:39] *** zakharyas left
+[22:40] <Mouq> L<> should produce a Pod::FormattingCode(type<L>, link<whatev>, content([Pod::*]))
+
+[22:40] *** dmol joined
+[22:41] *** rurban joined
+[22:41] <Mouq> This isn't something that S26 says, but I can't imagine an argument to the contrary
+
+[22:42] <lue> Mouq: would L<infix:<(\|)>|infix ∪> break things?
+
+[22:43] <Mouq> lue: With Pod::To::HTML it produces content => 'infix:<(\', link => ')>|infix ∪'
+
+[22:44] <lue> couldn't you use V<|> or E<0x7C> where needed?
+
+[22:45] <Mouq> Unfortunately no.
+
+[22:45] <Mouq> Not with the way things are now, anyway.
+
+[22:46] <Mouq> I mean
+
+[22:46] *** pippo joined
+[22:46] <Mouq> yes, that would be the way to do it, rather than \|
+
+[22:46] <Mouq> but it still wouldn't work
+
+[22:50] <dalek> rakudo/pod-table: 25761c4 | Mouq++ | src/Perl6/ (2 files):
+
+[22:50] <dalek> rakudo/pod-table: WIP, converting timotimo++'s pod-table parser to the necessary NQP
+
+[22:50] <dalek> rakudo/pod-table: review: https://github.com/rakudo/rakudo/commit/25761c4814
+
+[22:50] <lue> not even E<> ? That's unfortunate.
+
+[22:57] <Mouq> r: say "\c[NL]"
+
+[22:57] <camelia> rakudo-parrot 299d70, rakudo-jvm 299d70, rakudo-moar 299d70: OUTPUT«[31m===[0mSORRY![31m===[0m Error while compiling /tmp/tmpfile␤Unrecognized character name NL␤at /tmp/tmpfile:1␤------> [32msay "\c[NL[33m⏏[31m]"[0m␤»
+
+[22:57] <Mouq> r: say "\c[NEL]"
+
+[22:57] <camelia> rakudo-parrot 299d70, rakudo-jvm 299d70, rakudo-moar 299d70: OUTPUT«[31m===[0mSORRY![31m===[0m Error while compiling /tmp/tmpfile␤Unrecognized character name NEL␤at /tmp/tmpfile:1␤------> [32msay "\c[NEL[33m⏏[31m]"[0m␤»
+
+[22:57] *** virtualsue left
+[22:58] <Mouq> r: say "\c[INTERROBANG]"
+
+[22:58] <camelia> rakudo-parrot 299d70, rakudo-jvm 299d70, rakudo-moar 299d70: OUTPUT«‽␤»
+
+[23:01] *** colomon left
+[23:03] <Mouq> r: my $code = 'INTERROBANG'; say nqp::codepointfromname($code)
+
+[23:03] <camelia> rakudo-parrot 299d70, rakudo-jvm 299d70, rakudo-moar 299d70: OUTPUT«8253␤»
+
+[23:04] <Mouq> r: my $code = 'INTERROBANG'; say chr(nqp::codepointfromname($code))
+
+[23:04] <camelia> rakudo-parrot 299d70, rakudo-jvm 299d70, rakudo-moar 299d70: OUTPUT«‽␤»
+
+[23:04] <Mouq> Any other way to do this?
+
+[23:04] *** pdcawley left
+[23:05] *** btyler_ left
+[23:06] *** pdcawley joined
+[23:06] <lue> r: say nqp::namefromcodepoint(8253);
+
+[23:06] <camelia> rakudo-jvm 299d70: OUTPUT«===SORRY!===␤No such method 'jast' for invocant of type 'NQPMu'␤»
+
+[23:06] <camelia> ..rakudo-parrot 299d70, rakudo-moar 299d70: OUTPUT«===SORRY!===␤Error while compiling op namefromcodepoint: No registered operation handler for 'namefromcodepoint'␤»
+
+[23:06] <lue> Aw :)
+
+[23:06] *** treehug88 joined
+[23:07] *** berekuk left
+[23:13] *** ajr__ left
+[23:13] *** vendethiel left
+[23:15] *** colomon joined
+[23:17] *** rurban left
+[23:20] *** vendethiel joined
+[23:21] *** tgt left
+[23:28] *** hoverboard left
+[23:44] *** spider-mario left
+[23:45] *** skids joined
+[23:47] *** hoverboard joined
+[23:49] *** dmol left
+[23:53] *** kivutar left

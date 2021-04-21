@@ -1,0 +1,1442 @@
+[00:09] *** svetlins joined
+[00:13] *** sjn left
+[00:14] <sorear> TimToady: ping
+
+[00:17] *** araujo left
+[00:21] <TimToady> pang
+
+[00:27] *** meraxes left
+[00:31] *** svetlins left
+[00:32] *** meraxes joined
+[00:36] <supernovus> Well I'm off for the day. Anyway, it's far from finished, but the first version of Flower is now available on Github. Petal templates come to Perl 6 :-)
+
+[00:36] <sorear> TimToady: Can you reflect on the meaning of 'sub foo { bar }; BEGIN { foo }; sub bar { }' for me?
+
+[00:37] <sorear> I think a lot of my questions about BEGIN are wrapped up in the interpretation of that
+
+[00:37] *** supernovus left
+[00:38] * jnthn will be curious to see the reflections :-)
+
+[00:40] <TimToady> that should successfully call foo from the BEGIN, but fail to find a definition for bar
+
+[00:40] <TimToady> at most there would be a stub saying "we saw this name but we don't know what it means yet"
+
+[00:40] <sorear> What if I wrote 'sub foo { bar if 0 }; BEGIN { foo }; sub bar { }' ?
+
+[00:40] <TimToady> that would be fine
+
+[00:40] <sorear> The big question with stubs is where to put them
+
+[00:41] <TimToady> well, STD doesn't use stubs at all for that
+
+[00:41] <TimToady> it keeps a list of mysteries, and resolves them at CHECK time
+
+[00:41] <TimToady> so in STD, if it could do BEGIN, it wouldn't find bar at all, not even a stub
+
+[00:42] <TimToady> I think Perl 5 puts a stub, iirc
+
+[00:42] <TimToady> but tracks whethere a body has showed up yet
+
+[00:43] <sorear> Well
+
+[00:43] <sorear> std: sub foo { bar }; BEGIN { foo }; sub bar { } # This passes
+
+[00:44] <p6eval> std : OUTPUT«ok 00:01 116m␤»
+
+[00:44] <sorear> std: BEGIN { bar if 0 }; sub bar { } # This doesn't
+
+[00:44] <p6eval> std : OUTPUT«[31m===[0mSORRY![31m===[0m␤Undeclared routine:␤   'bar' used at line 1␤Check failed␤FAILED 00:01 117m␤»
+
+[00:44] <sorear> What's the difference?
+
+[00:44] <TimToady> BEGIN does its own CHECK for mysteries
+
+[00:45] <TimToady> and determines there's been no def for bar yet
+
+[00:45] <sorear> Why doesn't BEGIN check for mysteries in foo?
+
+[00:45] <TimToady> because foo doesn't have to run immediately
+
+[00:46] *** whiteknight left
+[00:47] <sorear> so you're saying that 'sub foo { bar if 0 }; BEGIN { foo }; sub bar { }' should work, but 'BEGIN { bar if 0 }; sub bar { }' should not?
+
+[00:47] <sorear> what is the rationale for this?
+
+[00:49] <TimToady> foo runs in the context of the whole compilation unit, BEGIN can only run in the context of what has been defined so far
+
+[00:49] <sorear> But BEGIN has a static dependency on foo.
+
+[00:50] <TimToady> I don't see what that has to do with anything
+
+[00:51] *** orafu left
+[00:51] <sorear> Both BEGIN and foo have to run before bar is seen
+
+[00:51] *** orafu joined
+[00:51] <sorear> They're no different
+
+[00:51] <sorear> jnthn?
+
+[00:52] *** PerlJam left
+[00:52] *** thundergnat left
+[00:52] *** thundergnat joined
+[00:53] <TimToady> it makes no sense to mention something that hasn't been defined yet at BEGIN, but it does make sense to mention something in foo that hasn't been defined yet.   BEGIN is in some sense functioning as its own compilation unit, and the preceding text is its setting.
+
+[00:54] <TimToady> though it's more like a prelude
+
+[00:56] <TimToady> the same would be true of any macro body that has to run at compile time that refers to something that hasn't been defined yet
+
+[00:56] *** nymacro joined
+[00:56] *** PerlJam joined
+[00:57] <TimToady> the main point of macros and BEGIN is to capture control at that point of the compilation, so they can't depend on the later code that depends on them
+
+[00:59] <jnthn> TimToady: My concern with BEGIN calling subs that are outside of the BEGIN block is that we can't treat the whole file as a single compilation unit. We may have to do a chunk of compilation and then fix things up later on.
+
+[01:00] <jnthn> TimToady: It's all well and good if you're writing an interpreter, like Perl 5. But it's hell for compilers.
+
+[01:00] <sorear> I don't have issues with the "two compilation units" thing
+
+[01:00] <jnthn> I do.
+
+[01:01] <jnthn> I really don't like it.
+
+[01:01] <sorear> What bothers *me* is that I might have to call subs with unresolved lexicals
+
+[01:01] <jnthn> It means you have to go and do a load of fixing things up later on.
+
+[01:01] <jnthn> It may be worse than that. (more)
+
+[01:01] <jnthn> Imagine that I have
+
+[01:02] <jnthn> multi foo(T $x) { stuff }; BEGIN { foo(S.new) }; multi foo(S $x) { stuff }; # where S is a subtype of T
+
+[01:02] <sorear> I need to know, at compile time, how many pads up the definition of bar is
+
+[01:03] <jnthn> At the point of doing the call in the BEGIN we've only seen half of the candidates.
+
+[01:03] *** thundergnat left
+[01:03] *** thundergnat joined
+[01:03] <jnthn> sorear: Well, there may not even *be* a bar defined later too
+
+[01:04] <sorear> I wouldn't even mind supporting 'sub bar { ... }; sub foo { bar if 0 }; BEGIN { foo }; sub bar { }'
+
+[01:04] <jnthn> We just don't know at that point
+
+[01:04] <TimToady> well, multi is kinda beside the point, insofar as a call is always to the proto, though adding candidates is certainly an issue
+
+[01:04] <jnthn> Well, the call can be a dynamic lookup through the outer chain if we don't have an entry to hand to compile it more optimally
+
+[01:05] <sorear> jnthn: Oh, I had forgotten about the possiblity of dynamic lookup
+
+[01:05] <TimToady> as soon as we have a call, we already know statically if we have a target
+
+[01:05] <sorear> That will certainly wokr
+
+[01:05] <jnthn> The multiple compilation unit-y thing and having to merge them all is what bothers me more though.
+
+[01:06] <TimToady> std: sub foo {}; BEGIN { foo; sub foo {} }
+
+[01:06] <p6eval> std : OUTPUT«[31m===[0mSORRY![31m===[0m␤Lexical symbol '&foo' is already bound to an outer symbol (see line 1);␤  the implicit outer binding at line 1 must be rewritten as OUTER::<&foo>␤  before you can unambiguously declare a new '&foo' in this scope at /tmp/U9VYNVssRa line 1:␤------> [32…
+
+[01:06] <TimToady> see, it's already looked up BEGIN's foo call
+
+[01:07] <TimToady> I think at worst you have to scrap any temporary candidate lists for protos
+
+[01:07] <jnthn> TimToady: You're still addressing specific issues rather than my overall dislike of having to compile up to a certain point, with lexical scopes left open so we can modify them further on.
+
+[01:08] <TimToady> well, I don't see how that's negotiable if we ever want macros
+
+[01:09] <TimToady> BEGIN is just a particularly stupid macro
+
+[01:09] <jnthn> TimToady: macros are rather more self-contained though, I figured?
+
+[01:09] <TimToady> macros can see their scopes too
+
+[01:10] <TimToady> in fact, we have to be tricky to be careful which scope they're using at any spot
+
+[01:10] <TimToady> hence :COMPILING and such
+
+[01:10] <TimToady> and lift
+
+[01:10] <jnthn> *sigh*
+
+[01:10] <TimToady> BEGIN at least has the non-problem that it is defined and executed in the same scope
+
+[01:13] *** flatwhatson_ left
+[01:18] *** lichtkind joined
+[01:19] <sorear> jnthn: if it was just leaving lexical scopes open, I could handle that
+
+[01:19] <sorear> easily
+
+[01:19] <jnthn> sorear: I suspect it's more than that.
+
+[01:20] <jnthn> sorear: Well, maybe I could do, if I could actually, you know, just go and fix the darn lexical implementation.
+
+[01:20] <sorear> what about
+
+[01:20] <lichtkind> jnthn: o/
+
+[01:20] *** thundergnat left
+[01:20] <sorear> #`( 1000 subs go here ); BEGIN { eval $unpredictable-string }
+
+[01:20] <sorear> which subs need to be code-generated before BEGIN?
+
+[01:21] <jnthn> Well, probably all of them to be on the safe side...
+
+[01:21] *** thundergnat joined
+[01:21] <jnthn> Trouble is, we're compiling them with incomplete knowledge of what lies ahead
+
+[01:21] <jnthn> e.g. suppose we have more multi-candidates ahead after the BEGIN. 
+
+[01:22] <jnthn> We thus didn't know what candidates we had when we compiled those 1000 subs after all
+
+[01:22] <lichtkind> jnthn: excuse to disturb you will be in vienna?
+
+[01:22] <jnthn> So we can't apply any of the optimizations to avoid the mutli dispatcher.
+
+[01:22] <jnthn> lichtkind: No, I don't plan to be there.
+
+[01:22] <Util> [S32]/Containers/Hash says: "With C<pairs> the values are references back to the original containers".
+
+[01:22] <Util> perl6: my %h = A => 1, B => 2; .value = 9 for %h.pairs; %h.values.sort.say;
+
+[01:22] <p6eval> rakudo a204ba: OUTPUT«12␤»
+
+[01:22] <p6eval> ..pugs: OUTPUT«99␤»
+
+[01:22] <jnthn> It'd be fun, but budget/time, etc.
+
+[01:22] <Util> Is this a bug in Rakudo, or just a well-known "not implemented yet"?
+
+[01:23] <lichtkind> jnthn: i do was so good last time with you all :)
+
+[01:23] <jnthn> lichtkind: Enjoy. :-)
+
+[01:23] <jnthn> Util: Something looks wrong there either way.
+
+[01:24] <jnthn> Util: pmichaud++ is planning some work on hashes and it would likely help with this.
+
+[01:24] <lichtkind> jnthn: im not quit shure what my talks will be aboput, will presenting enhanced version of my rebol talk, maybe some perl 6 stuff too
+
+[01:24] <lichtkind> if you will not be there nobiody can correct me :)
+
+[01:24] <sorear> lichtkind: hi
+
+[01:24] <lichtkind> sorear: hi
+
+[01:24] <sorear> you were looking for me on Tuesday
+
+[01:24] <sorear> but you were only on the channel the exact hours I have class
+
+[01:25] <jnthn> lichtkind: Well, you're just going to have to be right about everything then, aren't you. :-)
+
+[01:25] <lichtkind> jnthn: aaaah
+
+[01:25] <lichtkind> sorear: you mena me?
+
+[01:25] <lichtkind> sorear: yes i anted ask you about your implementation i guess
+
+[01:26] <sorear> lichtkind: you are called lichtkind, yes?
+
+[01:26] <lichtkind> but im now heading toward bed
+
+[01:26] <lichtkind> sorear: i think i should be now be visible as lichtkind too
+
+[01:26] <sorear> lichtkind: which of the 168 hours in the UTC week do you want to talk to me?
+
+[01:27] <sorear> jnthn: In general I think that if the user drops a BEGIN in the middle of a large scc of subs they should get what's coming to them
+
+[01:28] <lichtkind> sorear: what about in 10 hours?
+
+[01:28] <sorear> "the call can be a dynamic lookup through the outer chain" was exactly the insight I needed
+
+[01:28] <sorear> lichtkind: that will be 4:30 am local time...
+
+[01:28] <Util> jnthn: thanks!
+
+[01:30] <jnthn> sorear: Happy to help. ;-)
+
+[01:30] <jnthn> sorear: I'm in more of a bind because Rakudo's current compilation model is rather more tied to the single compilation unit approach and closed lexical pads etc
+
+[01:31] *** lichtkind_ joined
+[01:31] <lichtkind_> sorear: please repeat had an 24h disconnect
+
+[01:32] <sorear> jnthn: so is niecza's current compilation model; I'm trying to build a new one which can do everything Perl6 needs
+
+[01:32] <sorear> lichtkind: which of the 168 hours in the UTC week do you want to talk to me?
+
+[01:32] <sorear> lichtkind: that will be 4:30 am local time...
+
+[01:32] <jnthn> sorear: Right, similar for 6model
+
+[01:32] <sorear> 6model seems to be focusing mostly on ClassHOW
+
+[01:33] <sorear> what I'm doing is more of a Sub overhaul
+
+[01:33] <lichtkind_> sorear: allrigth the i have nothing missen
+
+[01:33] *** lichtkind left
+[01:33] <lichtkind_> what about 9:30 yor local time?
+
+[01:33] *** lichtkind_ is now known as lichtkind
+
+[01:33] <jnthn> sorear: Aye, but I expect what I'm working on to be the foundation of porting Rakudo to .Net and beyond.
+
+[01:33] <sorear> lichtkind: problematic.  10:30 or 11:30 would work much better
+
+[01:34] <jnthn> sorear: My point more is that I can't really just decide "oh, I'll go and do X change to lexpads" because that lives inside Parrot.
+
+[01:34] <sorear> 2:30-3:30 would also work, although you'll have to excuse any grumpiness :)
+
+[01:35] <lichtkind> :)
+
+[01:35] <sorear> jnthn: I expect that in the long run Rakudo will need to treat Parrot like a more-dynamic JVM or CLR
+
+[01:35] <lichtkind> nop here
+
+[01:36] <sorear> so when?
+
+[01:36] <lichtkind> but 9:30 pm here (11:30 am for you) fould be fine
+
+[01:36] <lichtkind> i have questions regardiing  niecza for my articles and my docs
+
+[01:37] <lichtkind> jnthn: some regarding 6model i have too :)
+
+[01:37] <jnthn> lichtkind: OK, catch me tomorrow.
+
+[01:37] <sorear> I think I have a fairly solid understanding of 6model at this point
+
+[01:37] <jnthn> :-)
+
+[01:37] <sorear> SMOP is my big todo now
+
+[01:37] <jnthn> sorear: I hope it was reasonably penetrable.
+
+[01:39] <jnthn> 6model took some inspiration from SMOP
+
+[01:39] <jnthn> Quite a bit, in fact.
+
+[01:39] <jnthn> Though does some things quite differently.
+
+[01:40] <lichtkind> is smop still active?
+
+[01:41] *** synth left
+[01:41] *** synth joined
+[01:41] *** ZadYree left
+[01:41] * jnthn sleeps
+
+[01:41] *** mtve joined
+[01:41] <lichtkind> good night
+
+[01:41] <sorear> jnthn: I see Parrot's inner interpreter and pmc/dispatch system as potentially (post-lorito) much better than the JVM/CLR for Perl6
+
+[01:41] <sorear> jnthn: but the standard PMC types are all junk
+
+[01:42] <lichtkind> sorear: what is lorito?
+
+[01:43] <sorear> lichtkind: code name for a large set of parrot refactors aimed at reducing the coupling between parrot's core and libraries
+
+[01:44] <sorear> to #parrot, a small core means maintainability and the ability to make a JIT with less than 100 man-years
+
+[01:44] <lichtkind> sorear: thank you
+
+[01:44] <lichtkind> bye
+
+[01:45] <sorear> to me, lorito means not having to use a bunch of pmcs designed by the PSF ;)
+
+[01:47] *** exodist_ is now known as Exodist
+
+[01:47] <lichtkind> :)
+
+[01:47] *** lichtkind left
+[01:48] *** meppl left
+[01:52] *** thundergnat left
+[01:54] *** molaf_ joined
+[01:56] *** amkrankruleuen left
+[01:57] *** molaf left
+[02:25] *** nymacro left
+[02:27] *** nymacro joined
+[02:31] *** clkao_ joined
+[02:31] *** lue left
+[02:36] *** nymacro left
+[02:48] *** araujo joined
+[02:48] *** araujo left
+[02:48] *** araujo joined
+[02:48] *** felipe__ joined
+[02:48] *** felipe__ left
+[02:49] *** leprevost joined
+[02:50] *** petdance joined
+[02:59] *** satyavvd joined
+[03:01] *** orafu left
+[03:01] *** orafu joined
+[03:01] *** LaVolta joined
+[03:08] *** gfldex left
+[03:09] *** gfldex joined
+[03:10] *** masonkramer left
+[03:10] *** makkksimal left
+[03:16] *** makkksimal joined
+[03:17] *** satyavvd left
+[03:19] *** nymacro joined
+[03:26] *** szabgab left
+[03:26] *** szabgab joined
+[03:27] *** envi^home joined
+[03:29] *** makkksimal left
+[03:30] *** makkksimal joined
+[03:32] *** bluescreen left
+[03:33] *** flussence left
+[04:01] *** satyavvd joined
+[04:04] *** pythonian4000 is now known as pythonian4000afk
+
+[04:05] *** pythonian4000afk is now known as pythonian4000
+
+[04:05] *** pythonian4000 is now known as pythonian4000afk
+
+[04:05] *** pythonian4000afk is now known as pythonian4000
+
+[04:15] *** petdance left
+[04:17] *** pythonian4000 is now known as pythonian4000afk
+
+[04:17] *** pythonian4000afk is now known as pythonian4000
+
+[04:17] *** pythonian4000 is now known as pythonian4000afk
+
+[04:17] *** pythonian4000afk is now known as pythonian4000
+
+[04:21] *** pythonian4000 is now known as pythonian4000afk
+
+[04:21] *** pythonian4000afk is now known as pythonian4000
+
+[04:33] *** gfx joined
+[04:55] *** Chillance left
+[04:55] *** satyavvd left
+[04:58] *** nymacro left
+[05:03] *** satyavvd joined
+[05:13] *** jaldhar left
+[05:14] *** jaldhar joined
+[05:27] *** araujo left
+[05:33] *** Guest23195 joined
+[05:39] *** orafu left
+[05:39] *** orafu joined
+[05:46] *** orafu left
+[05:46] *** satyavvd_ joined
+[05:46] *** orafu joined
+[05:48] *** satyavvd left
+[05:48] *** satyavvd_ is now known as satyavvd
+
+[06:07] <dalek> 6model: 3f1d29b | mberends++ | java/runtime/Rakudo/Metamodel/SharedTable.java:
+
+[06:07] <dalek> 6model: [java] finish the last todo items in SharedTable (calling Runtime.Ops)
+
+[06:07] <dalek> 6model: review: http://github.com/jnthn/6model/commit/3f1d29b63f1d64ffca59f0fbefc5c622f8332df2
+
+[06:09] <mberends> market &
+
+[06:15] *** frettled joined
+[06:20] *** am0c^ left
+[06:22] *** hercynium left
+[06:23] *** icwiener joined
+[06:26] *** pythonian4000 is now known as pythonian4000afk
+
+[06:27] *** nymacro joined
+[06:37] *** satyavvd_ joined
+[06:38] *** satyavvd left
+[06:38] *** satyavvd_ is now known as satyavvd
+
+[06:53] *** nymacro left
+[06:57] *** satyavvd left
+[07:00] *** agentzh joined
+[07:00] <dalek> niecza: 8743f45 | sorear++ | src/Metamodel.pm:
+
+[07:00] <dalek> niecza: Start prototyping a BEGIN-time metamodel
+
+[07:00] <dalek> niecza: review: http://github.com/sorear/niecza/commit/8743f459acca445426384a702f71f0855fc6835f
+
+[07:00] <dalek> niecza: eb45fca | sorear++ | / (2 files):
+
+[07:00] <dalek> niecza: [mm] First runnable prototype
+
+[07:00] <dalek> niecza: review: http://github.com/sorear/niecza/commit/eb45fca341db04cff7c796ef761935b824d5d1f0
+
+[07:01] *** xinming left
+[07:01] *** xinming joined
+[07:42] *** tadzik joined
+[07:43] *** standz joined
+[07:48] <standz> Irssi 0.8.12 (20071006) - http://irssi.org/
+
+[07:50] <sorear> upgrade
+
+[07:50] *** satyavvd joined
+[07:58] <standz> Sat Sep 18 08:57:46 BST 2010
+
+[07:58] *** ChanServ sets mode: +o sorear
+
+[07:58] *** standz was kicked by sorear (Your client is malfunctioning and spamming the channel))
+[07:58] *** sorear sets mode: -o sorear
+
+[08:41] *** tadzik left
+[09:00] *** gfx left
+[09:02] *** wamba joined
+[09:10] *** baest_ joined
+[09:12] *** baest left
+[09:14] * sorear out
+
+[09:20] <moritz_> http://www.perlmonks.org/?node_id=860609 ideas for good replies welcome
+
+[09:20] <phenny> moritz_: 17 Sep 22:49Z <diakopter> tell moritz_ I sigtermed your pugssvn on feather3; sorry if I wasn't supposed to
+
+[09:20] <moritz_> diakopter++
+
+[09:31] *** jhuni joined
+[09:32] *** JimmyZ joined
+[09:32] * JimmyZ replies it.
+
+[09:50] *** M_o_C joined
+[09:51] *** M_o_C left
+[09:51] *** icwiener left
+[09:51] *** icwiener joined
+[09:57] *** M_o_C joined
+[10:02] *** M_o_C left
+[10:04] *** M_o_C joined
+[10:04] *** M_o_C left
+[10:06] *** M_o_C joined
+[10:10] *** M_o_C left
+[10:11] *** satyavvd left
+[10:11] *** JimmyZ left
+[10:13] *** M_o_C joined
+[10:23] *** masak joined
+[10:23] <masak> y0, #perl6!
+
+[10:24] <masak> I wonder if http://twitter.com/2mad4milk/status/24759067704 is representative of a common sentiment among Perl 5 developers. :)
+
+[10:32] *** timbunce joined
+[10:32] *** pythonian4000afk is now known as pythonian4000
+
+[10:35] *** whiteknight joined
+[10:37] * moritz_ likes   for %hash { and then using .key and .value }
+
+[10:37] <masak> I like it too, but I keep forgetting about it :)
+
+[10:38] <moritz_> that's why I remind you :-)
+
+[10:38] <masak> thank you :)
+
+[10:47] <masak> today's plan: finish the conversion of the blog content, write skeleton outlines for my two talks at OSDC.fr, sniff at Web.pm in order to become less averse to digging into the last week of it.
+
+[10:55] *** flatwhatson joined
+[10:56] *** Trashlord left
+[10:59] *** Trashlord joined
+[11:01] <masak> I'm looking for a "this line is too long but shouldn't really be broken here" symbol. I found ↩ -- any other suggestions?
+
+[11:13] <moritz_> .u #
+
+[11:13] <phenny> U+0023 NUMBER SIGN (#)
+
+[11:13] <moritz_> .u ↩
+
+[11:13] <phenny> U+21A9 LEFTWARDS ARROW WITH HOOK (↩)
+
+[11:13] <moritz_> masak: you could take a look at what the book uses
+
+[11:13] <moritz_> might be the same
+
+[11:13] <masak> good idea; I will.
+
+[11:21] *** kuzuha joined
+[11:22] *** araujo joined
+[11:29] <masak> didn't find any line continuation characters in the book.
+
+[11:31] *** icwiener left
+[11:31] *** icwiener joined
+[11:33] *** flussence joined
+[11:48] <mberends> masak: digging into Web.pm is what I had in mind for our Swedish-Dutch Perl6 Summit :)
+
+[11:48] <masak> excellent. I'm all for that.
+
+[11:49] <masak> best I can do to prepare that is probably to get as much talk prepping out of the way as possible before that.
+
+[11:49] <mberends> ok, wfm
+
+[11:50] *** agentzh left
+[11:50] <mberends> I bottled out of giving a talk at osdc.fr, btw :/
+
+[11:52] <masak> 'bottle out of'?
+
+[11:52] <mberends> 'chickened out'
+
+[11:53] <masak> oh, ok.
+
+[11:53] <mberends> british colloquialism
+
+[11:56] <masak> you seem to have been busy-ish lately; more difficult to plan talks then, perhaps.
+
+[11:56] *** M_o_C left
+[11:59] <mberends> aye, but October 2-10 is reserved exclusively for Perl 6
+
+[12:00] <flussence> my sticking-spectest_smolder-in-a-crontab idea didn't work so well :(
+
+[12:01] <flussence> the box froze half an hour after starting apparently
+
+[12:04] *** zulon joined
+[12:11] <moritz_> flussence: I strongly recommend a script that sets an ulimit, and only the spectests
+
+[12:13] <flussence> I'd probably be better off doing them on my desktop instead, that's got more RAM than I know what to do with...
+
+[12:14] *** ruoso joined
+[12:17] <moritz_> finnaly I wrote a reply: http://www.perlmonks.org/?node_id=860630
+
+[12:23] <masak> moritz_++ # I agree.
+
+[12:24] *** zulon left
+[12:24] <masak> more generally, Perl 6 likes to put very powerful tools just out of reach of the oneliner scripter, to be used when you need them. OO, grammars, slangs, meta-OO...
+
+[12:24] <Juerd> Besides that, proper OO in modules makes writing those 300 line scripts easier too.
+
+[12:26] <masak> that said, Perl 6 does trade a little bit of looseness on the low end for gains further on.
+
+[12:26] <masak> things like "don't put an infix '<' next to a term, because Perl 6'll think it's a postcircumfix"
+
+[12:28] <Juerd> But with the mandatory whitespace it does *look* a lot looser :)
+
+[12:28] <Juerd> I'll be happy to see less tight crammed code
+
+[12:29] <masak> maybe "looser" in the sense of "more air".
+
+[12:29] <Juerd> Yes :)
+
+[12:29] <masak> but not "looser" in the sense of "I can write whatever I want".
+
+[12:29] <Juerd> Well, you can't make stuff up and expect it to work, so that was never possible anyway.
+
+[12:30] <masak> I'm not complaining, mind. I'm just talking about tradeoffs.
+
+[12:30] <moritz_> colomon: re http://justrakudoit.wordpress.com/2010/09/18/regretting-my-actions/ I think you could factor out a deep_flatten sub or so
+
+[12:31] <moritz_> colomon: which flattens the first level of itemized arrays from a slurpy arg
+
+[12:31] <moritz_> rakudo: my @a = [1, 2], [3, 4]; say @a>>.flat.perl
+
+[12:31] <p6eval> rakudo a204ba: OUTPUT«([1, 2], [3, 4])␤»
+
+[12:31] <moritz_> rakudo: my @a = [1, 2], [3, 4]; say @a>>.list.perl
+
+[12:32] <p6eval> rakudo a204ba: OUTPUT«([1, 2], [3, 4])␤»
+
+[12:32] <moritz_> rakudo: my @a = [1, 2], [3, 4]; say @a.map({@($_)}).flat.perl
+
+[12:32] <Juerd> rakudo: my @a = [1, 2], [3, 4]; say @a.flat.perl
+
+[12:32] <p6eval> rakudo a204ba: OUTPUT«(1, 2, 3, 4)␤»
+
+[12:32] <p6eval> rakudo a204ba: OUTPUT«[[1, 2], [3, 4]]␤»
+
+[12:33] <Juerd> Now to find out which output belongs to which code :)
+
+[12:33] <Juerd> Yours first, I guess
+
+[12:33] <moritz_> indeed
+
+[12:33] * Juerd apparently doesn't understand what .flat does
+
+[12:33] <moritz_> .flat on an array or capture only flattens parcels
+
+[12:34] <Juerd> Oh
+
+[12:34] <moritz_> rakudo: say (<a b>, <c d>).perl
+
+[12:34] <moritz_> rakudo: say (<a b>, <c d>).flat.perl
+
+[12:34] <p6eval> rakudo a204ba: OUTPUT«(("a", "b"), ("c", "d"))␤»
+
+[12:34] <p6eval> rakudo a204ba: OUTPUT«("a", "b", "c", "d")␤»
+
+[12:34] <moritz_> however I thougth that [1, 2].flat.perl would return (1, 2)
+
+[12:34] <moritz_> *thought
+
+[12:34] <moritz_> rakudo: say [1, 2].flat.perl
+
+[12:35] <p6eval> rakudo a204ba: OUTPUT«[1, 2]␤»
+
+[12:37] *** icwiener left
+[12:38] *** icwiener joined
+[12:42] *** ruoso left
+[12:43] *** patspam joined
+[12:46] *** icwiener left
+[12:46] *** icwiener joined
+[12:51] *** jaldhar left
+[12:56] *** satyavvd joined
+[12:58] *** leprevost left
+[13:09] *** colomon left
+[13:13] *** colomon joined
+[13:13] *** orafu left
+[13:13] <colomon> rakudo: my @a = [1, 2], [3, 4]; say @a>>.iterator>>.list.flat.perl
+
+[13:13] <p6eval> rakudo a204ba: OUTPUT«(1, 2, 3, 4)␤»
+
+[13:13] *** orafu joined
+[13:17] *** Patterner left
+[13:17] *** colomon left
+[13:22] *** Mowah joined
+[13:22] *** colomon joined
+[13:23] <jnthn> ahojte, #perl6
+
+[13:23] <colomon> \o
+
+[13:27] *** thundergnat joined
+[13:27] <moritz_> oh hai
+
+[13:28] <thundergnat> hi perl6
+
+[13:28] *** Psyche^ joined
+[13:28] *** Psyche^ is now known as Patterner
+
+[13:29] <thundergnat> moritz_: there is a minor typo in the perl6 book in subs-and-sigs.
+
+[13:29] <moritz_> thundergnat: which one?
+
+[13:29] <thundergnat> In the Pairs table, beverage is spelled 'tea' and 'tee'
+
+[13:30] *** rgr` joined
+[13:30] <colomon> reminds me, there is a repeated paragraph in the grammar section of the book.  (or at least, there was as of the last PDF.)
+
+[13:30] <moritz_> indeed, thanks
+
+[13:30] <moritz_> thundergnat: thanks, fixed
+
+[13:31] <moritz_> colomon: PerlJam++ did a sweep through that chapter recently; might be worth checking whether he fixed it
+
+[13:31] <thundergnat> Also, the code markup for Pair in the table legend is being passed through to the pdf.
+
+[13:31] <colomon> starts "Regexes inside a grammar do not need a scope declarator,"
+
+[13:32] <thundergnat> rendering as C<Pair>
+
+[13:33] <moritz_> colomon: that sentence doesn't seem to be in the source at all
+
+[13:33] *** wamba left
+[13:33] <moritz_> at HEAD
+
+[13:33] <colomon> latest PDF (that I've found anyway) must be behind HEAD.  :)
+
+[13:33] <moritz_> indeed
+
+[13:33] <moritz_> I'll boot my Debian/Squeeze box later today and build a fresh one
+
+[13:34] <moritz_> can't build on my laptop :(
+
+[13:35] <dalek> book: 4ac3d50 | moritz++ | src/subs-n-sigs.pod:
+
+[13:35] <dalek> book: [subs-n-sigs] typo noticed by thundergnat++
+
+[13:35] <dalek> book: review: http://github.com/perl6/book/commit/4ac3d50a997271987cca7a57b1fdfaf5d012839f
+
+[13:36] *** pythonian4000 is now known as pythonian4000afk
+
+[13:39] *** colomon left
+[13:41] *** satyavvd left
+[13:48] *** rgr` left
+[13:48] *** rgr` joined
+[13:51] <LaVolta> did someone submit this article (http://www.riffraff.info/2007/5/20/a-spell-corrector-in-perl6-part-3) to reddit or * :)
+
+[13:52] *** rgr` left
+[13:54] *** hercynium joined
+[13:59] <moritz_> http://www.reddit.com/r/programming/comments/1s5m6/a_spell_corrector_in_perl6_part_3/?already_submitted=true
+
+[14:00] <moritz_> I've also submitted it the perl reddit now: http://www.reddit.com/r/perl/comments/dfmq2/a_spell_corrector_in_perl_6_part_3_of_3/
+
+[14:01] *** risou joined
+[14:07] <LaVolta> cool :)
+
+[14:07] *** Mowah left
+[14:09] *** Mowah joined
+[14:12] *** colomon joined
+[14:13] <masak> I must confess that that blog post looks more like 2010 Perl 6 than 2007 Perl 6.
+
+[14:13] *** colomon left
+[14:13] *** colomon joined
+[14:13] <colomon> stupid wi-fi
+
+[14:14] <LaVolta> yes it is...and it's still a valuable post, i guess Peter Norvig should put that under "Perl 6" :)
+
+[14:15] <masak> I guess what I'm wondering is... how come the date both in the URL and the post itself is 2007?
+
+[14:19] <moritz_> maybe updated?
+
+[14:20] *** colomon_ joined
+[14:20] *** colomon left
+[14:20] *** colomon_ is now known as colomon
+
+[14:20] <gfldex> std: sub infix:<>>-<<>(Hash %a, Hash %b){ return Mu; };
+
+[14:20] <p6eval> std : OUTPUT«Use of uninitialized value $starter in concatenation (.) or string at /opt/perl-5.12.1/lib/site_perl/5.12.1/CursorBase.pm line 2754.␤Use of uninitialized value $stopper in concatenation (.) or string at /opt/perl-5.12.1/lib/site_perl/5.12.1/CursorBase.pm line 2754.␤Use of uninitial…
+
+[14:21] *** hercynium left
+[14:21] <gfldex> how do i overload >>-<< ?
+
+[14:24] *** colomon_ joined
+[14:24] *** colomon left
+[14:24] *** colomon_ is now known as colomon
+
+[14:25] <masak> gfldex: use » « outermost.
+
+[14:25] <gfldex> std: sub infix:>>>>-<<<<(Hash %a, Hash %b){ return Mu; };
+
+[14:25] <p6eval> std : OUTPUT«[31m===[0mSORRY![31m===[0m␤Malformed block at /tmp/f3ufkwbXFP line 1:␤------> [32msub infix:[33m⏏[31m>>>>-<<<<(Hash %a, Hash %b){ return Mu; [0m␤    expecting any of:␤     coloncircumfix␤   signature␤Parse failed␤FAILED 00:01 116m␤»
+
+[14:26] <masak> gfldex: sorry, meant « ». the important thing is not to use the same symbols as inside.
+
+[14:27] <gfldex> std: sub infix:<<>>-<<>>(Hash %a, Hash %b){ return Mu; };
+
+[14:27] <p6eval> std : OUTPUT«Use of uninitialized value $starter in concatenation (.) or string at /opt/perl-5.12.1/lib/site_perl/5.12.1/CursorBase.pm line 2754.␤Use of uninitialized value $stopper in concatenation (.) or string at /opt/perl-5.12.1/lib/site_perl/5.12.1/CursorBase.pm line 2754.␤Use of uninitial…
+
+[14:27] <gfldex> rakudo: sub infix:<<>>-<<>>(Hash %a, Hash %b){ return Mu; };
+
+[14:28] <p6eval> rakudo a204ba: OUTPUT«===SORRY!===␤Unable to parse postcircumfix:sym<( )>, couldn't find final ')' at line 22␤»
+
+[14:28] <colomon> gfldex: why do you want to overload >>-<<?
+
+[14:29] <moritz_> gfldex: try infix:«>>-<<»
+
+[14:29] <gfldex> it would simplyfy a lot what i am doing
+
+[14:30] <gfldex> moritz_: does not work either
+
+[14:32] <moritz_> if you overload infix:<->, and mark your operator as 'our', the >>-<< should pick up your operator
+
+[14:33] <gfldex> i will try that
+
+[14:36] *** jhuni left
+[14:36] <gfldex> moritz_: Nominal type check failed for parameter '%a'; expected Associative[Hash] but got Num instead
+
+[14:36] <gfldex> :(
+
+[14:37] *** pythonian4000afk is now known as pythonian4000
+
+[14:37] <moritz_> it's a bit hard to diagnose without seeing the full code
+
+[14:39] *** LaVolta left
+[14:42] <gfldex> moritz_: i want to do something like this: http://gist.github.com/585725
+
+[14:43] <gfldex> if i could overload the hyperoparator i could handle all cases myself
+
+[14:53] <moritz_> hm
+
+[14:55] <gfldex> i could try to overload infix:<*,-,+,/> too but that feels kinda wrong
+
+[14:59] * moritz_ doesn't have a good idea at the moment
+
+[14:59] *** pythonian4000 is now known as pythonian4000afk
+
+[15:01] <gfldex> is there a spectest for overloading hyperoperators?
+
+[15:02] *** thundergnat left
+[15:03] <flussence> trying to add -1 «*« %stock doesn't work either :(
+
+[15:04] <flussence> well it works, but any key not listed in %stock vanishes from the list entirely
+
+[15:05] *** whiteknight left
+[15:05] *** thundergnat joined
+[15:11] <moritz_> rakudo: say (^-2)
+
+[15:11] <p6eval> rakudo a204ba: OUTPUT«␤»
+
+[15:13] *** thundergnat left
+[15:13] *** M_o_C joined
+[15:14] *** thundergnat joined
+[15:20] <masak> just found this: http://lolcathost.org/b/intro-p6/IntroPerl6.html
+
+[15:20] <masak> looks like a nice summary.
+
+[15:21] * jnthn was just about to point out that masak had pasted a link to localhost...
+
+[15:22] <masak> if it were, I sure hope I'd have recognized the page :)
+
+[15:23] <jnthn> :)
+
+[15:25] <jnthn> oh noes, hunger strikes!
+
+[15:25] * jnthn pauses the solo hackfest to get some noms
+
+[15:25] *** WinstonSmith joined
+[15:26] *** jaldhar joined
+[15:34] <TimToady> colomon: don't need temp arrays--something like:  make do for @( $<line_of_music> )>>.ast -> @line { @line }
+
+[15:35] <TimToady> for loops return their list of values already
+
+[15:35] * moritz_ likes "make do for"
+
+[15:36] * TimToady is thinking about generalizing make to set the return value of any function without actually returning
+
+[15:36] *** thundergnat left
+[15:36] * colomon has no idea why he didn't at least do gather / take instead of ugly push.
+
+[15:37] <moritz_> because push is actually faster? :-)
+
+[15:37] <TimToady> most of the gather/takes in rosettacode have turned out to be redundant with the loop's return value
+
+[15:41] *** zulon joined
+[15:45] *** sECuRE joined
+[15:46] <sECuRE> before i do some unnecessary work: are you aware that in parrot/rakudo from rakudo-star 2010.08 there is no IPv6 support? do you accept patches for that or is there already some work in progress?
+
+[15:47] <moritz_> we are aware; we'll surely accept patches to Rakudo
+
+[15:47] *** s1n left
+[15:47] <sECuRE> i’d need to modify parrot aswell
+
+[15:47] <moritz_> and I also heard that the parrot folks think that IPv6 support is a laudable goal
+
+[15:47] <moritz_> so I think the chances are pretty good
+
+[15:48] <sECuRE> alright, let’s start hacking :)
+
+[15:48] <moritz_> there's a #parrot on irc.perl.org
+
+[15:48] *** s1n joined
+[15:50] <masak> sECuRE++
+
+[16:00] <pmichaud> good morning, #perl6
+
+[16:02] <masak> morning, pmichaud 
+
+[16:02] <jnthn> oh hai, pmichaud 
+
+[16:18] *** dual left
+[16:19] *** zby left
+[16:22] *** lue joined
+[16:23] <lue> o hai o/
+
+[16:24] <jnthn> o/ lue 
+
+[16:25] <masak> lue: \o
+
+[16:37] <lue> .oO[ Once Perl 6 can use Ruby files, I'd be glad do help out with Diaspora :) ]
+
+[16:37] <masak> Rakudo could, once.
+
+[16:41] *** no2 joined
+[16:43] <dalek> ecosystem: da9bc8f | supernovus++ | projects.list:
+
+[16:43] <dalek> ecosystem: Fixed exemel definition, added the rest of my active projects.
+
+[16:43] <dalek> ecosystem: review: http://github.com/perl6/ecosystem/commit/da9bc8fa537b6ccfadeccc49604d68bab30d26b6
+
+[16:44] <lue> .oO[ Or I could learn Ruby itself... nah, language learning takes too long, and it'd only be for one thing ]
+
+[16:44] *** makkksimal is now known as makkksimal_off
+
+[16:44] <lue> I'm guessing it could in its alpha days?
+
+[16:44] *** makkksimal_off is now known as makkksimal
+
+[16:50] <lue> afk
+
+[16:56] <masak> it was during the alpha days, but I think it might have stopped working again before the big switch to ng.
+
+[17:01] *** dual joined
+[17:02] *** cj left
+[17:04] *** cj joined
+[17:08] *** no2 left
+[17:13] *** makkksim1l joined
+[17:14] *** makkksimal is now known as makkksimal_off
+
+[17:14] *** makkksim1l left
+[17:15] *** rgrau_` joined
+[17:17] *** cj left
+[17:17] *** cj joined
+[17:20] *** cotto left
+[17:22] *** cotto joined
+[17:23] *** cottoo joined
+[17:24] *** cj left
+[17:24] *** cottoo left
+[17:40] <moritz_> seen KyleHa
+
+[17:40] <aloha> KyleHa was last seen in #perl6 13 days 16 hours ago saying "I was thinking http://en.wikipedia.org/wiki/Roast_(comedy)".
+
+[17:41] *** cj joined
+[17:45] * masak .oO( famous last words... )
+
+[17:45] <dalek> roast: 280ebde | moritz++ | S32-list/reverse.t:
+
+[17:45] <dalek> roast: test for RT #77914, .reverse shoudl flatten parcels
+
+[17:45] <dalek> roast: 
+
+[17:45] <dalek> roast: Also removes some non-informative Pod
+
+[17:45] <dalek> roast: review: http://github.com/perl6/roast/commit/280ebdecb2c27f6e27a9c74140c91f461b95f10e
+
+[17:45] <dalek> roast: 8c3cfd3 | moritz++ | S02-builtin_data_types/hash.t:
+
+[17:45] <dalek> roast: test for RT #75868, Match objects as Hash keys
+
+[17:45] <dalek> roast: review: http://github.com/perl6/roast/commit/8c3cfd3736de11047d6041384bfa9c8e043c7533
+
+[17:49] <sECuRE> ok, first step done:
+
+[17:49] <sECuRE> Connecting to [::1]:5984
+
+[17:49] <sECuRE> HTTP/1.1 200 OK
+
+[17:50] *** rgrau_` left
+[17:50] *** rgrau_`` joined
+[17:51] <dalek> roast: 5ca3dae | moritz++ | S02-builtin_data_types/array.t:
+
+[17:51] <dalek> roast: test for RT #57790, scalars indexed with [1] should return a Failure
+
+[17:51] <dalek> roast: review: http://github.com/perl6/roast/commit/5ca3dae8bbf33a3e051a2e5389bea2c68c1b3448
+
+[17:51] <moritz_> \o/
+
+[17:51] <moritz_> sECuRE: ship it!
+
+[17:51] <sECuRE> nah, still a lot missing ;)
+
+[17:51] <sECuRE> i want to have at least bind() and accept() working aswell
+
+[17:51] <moritz_> release early, release often :-)
+
+[17:51] <sECuRE> yes, but at the moment it’s only getaddrinfo and connect
+
+[17:52] <sECuRE> and testcases are missing
+
+[17:52] <moritz_> rakudo: my $x; $x &&= 5; say $x
+
+[17:52] <p6eval> rakudo a204ba: OUTPUT«5␤»
+
+[17:52] <moritz_> somebody please confirm that this is wrong
+
+[17:53] <moritz_> rakudo: my $x; $x = $x && 5;
+
+[17:53] <p6eval> rakudo a204ba:  ( no output )
+
+[17:53] <moritz_> rakudo: my $x; $x = $x && 5; say $x
+
+[17:53] <p6eval> rakudo a204ba: OUTPUT«Any()␤»
+
+[17:53] <flussence> && is the same as in p5, right?
+
+[17:53] <moritz_> yes
+
+[17:53] <jnthn> moritz_: Looks wrong to me.
+
+[17:53] *** zulon left
+[17:53] <flussence> rakudo: my $x; say ?$x;
+
+[17:53] <p6eval> rakudo a204ba: OUTPUT«0␤»
+
+[17:53] <flussence> looks wrong to me.
+
+[17:55] *** hirschnase joined
+[17:56] *** envi^home left
+[17:56] <dalek> roast: 519bef8 | moritz++ | S03-operators/short-circuit.t:
+
+[17:56] <dalek> roast: some basic tests for RT #77864, &&=, ||= etc. One of them fails
+
+[17:56] <dalek> roast: review: http://github.com/perl6/roast/commit/519bef8c25fae4227ae9676f84da410b39291357
+
+[17:58] *** rgrau_`` left
+[18:01] <moritz_> I see KyleHa++ has switched his mail reporter to 'roast' already
+
+[18:02] <dalek> roast: 6a09536 | moritz++ | S03-operators/binding-scalars.t:
+
+[18:02] <dalek> roast: test for RT #77462: binding should have list assignment precedence
+
+[18:02] <dalek> roast: review: http://github.com/perl6/roast/commit/6a095360415445b153a46db4eb3c892876a0659f
+
+[18:02] *** cj left
+[18:03] *** cj joined
+[18:03] *** rgrau joined
+[18:03] <moritz_> 8 remaining tickets that needs test, but could be closed otherwise
+
+[18:04] *** bluescreen joined
+[18:04] *** nexusone joined
+[18:07] *** lichtkind joined
+[18:11] *** cj left
+[18:11] <masak> nom &
+
+[18:11] *** masak left
+[18:13] *** cj joined
+[18:18] *** Mowah left
+[18:21] <moritz_> Carcassonne &
+
+[18:24] *** jfried joined
+[18:26] *** patspam1 joined
+[18:26] *** patspam1 left
+[18:27] *** risou left
+[18:29] *** patspam left
+[18:30] *** mariano__ joined
+[18:33] *** bluescreen left
+[18:38] *** mariano__ left
+[18:47] *** wamba joined
+[18:56] <dalek> 6model: 3ccafcd | jnthn++ | parrot/src/ (5 files):
+
+[18:56] <dalek> 6model: Remove all the Parrot sketching stuff from 6model reop; everything that could be extracted from here has been, and development is now taking place in nom branch of the nqp-rx repository.
+
+[18:56] <dalek> 6model: review: http://github.com/jnthn/6model/commit/3ccafcdce726be328279ec101bd5f2e6c499fb33
+
+[18:57] *** rgrau left
+[19:00] *** makkksimal_off is now known as makkksimal
+
+[19:05] *** nperez_ is now known as nperez
+
+[19:10] <sorear> good * #perl6
+
+[19:11] <sorear> lichtkind: ping.  sorry I'm late
+
+[19:13] <lichtkind> sorear: everything is fine
+
+[19:13] <lichtkind> so we talk later?
+
+[19:13] <sorear> not now?
+
+[19:14] <lichtkind> sorear: i thought you are now late for something else
+
+[19:14] <lichtkind> moritz_: would it be possible to set up a chatbot for wiki changes?
+
+[19:15] <sorear> No, I'm late for you.
+
+[19:15] <sorear> We agreed on an hour ago.
+
+[19:16] <lichtkind> sorear: yes but i was writing currently anyway
+
+[19:16] <lichtkind> im always busy
+
+[19:17] *** amkrankruleuen joined
+[19:18] <lichtkind> so how you came up with the name?
+
+[19:20] *** wamba left
+[19:20] *** timbunce left
+[19:23] <lichtkind> sorear: i mean you :)
+
+[19:25] *** nexusone left
+[19:26] *** timbunce joined
+[19:27] <sorear> I asked masak++
+
+[19:31] <sorear> after a few minutes of brainstorming, he mentioned 'nie mas čas', and I butchered it into niecza
+
+[19:36] <lichtkind> sorear: but thats slovak and masak comes from somewhere in north i thought :)
+
+[19:38] <jnthn> lichtkind: There was a joke video masak++ showed me on Youtube once where a Czech song had been annotated with Swedish words that they sounded like.
+
+[19:39] <jnthn> lichtkind: We've since made endless puns based around this. "my mame čas" was mis-heard as "nemame čas" by me when I first listended to the video, and I think the name niecza was derived from that. :-)
+
+[19:40] <jnthn> (Yes, I know, it's insane. :-))
+
+[19:40] * lichtkind understands now
+
+[19:40] <lichtkind> not insane
+
+[19:40] <lichtkind> but not as funny as zavolaj
+
+[19:41] <jnthn> Zavolaj is only the imperative form of "to call" :P
+
+[19:42] <lichtkind> yes but it stand for native call interface
+
+[19:42] *** M_o_C left
+[19:42] <jnthn> Thus the name :-)
+
+[19:42] <lichtkind> and while you where in bratislave the natives called "zavolaj"
+
+[19:42] <lichtkind> it was her communication interface
+
+[19:42] <lichtkind> genious
+
+[19:43] <jnthn> lol, you just managed to do a Slovak case declension while writing english. :-D
+
+[19:43] <jnthn> (in bratislave)++ :-)
+
+[19:43] <lichtkind> its my mother tonge !
+
+[19:43] <lichtkind> english is just my third lang
+
+[19:44] <jnthn> :-)
+
+[19:44] *** PhatEddy joined
+[19:45] <lichtkind> indeed funny :)
+
+[19:45] <lichtkind> sorear: still around?
+
+[19:45] *** fab_ joined
+[19:46] <sorear> yes
+
+[19:46] <lichtkind> great so name is clear even the cz in it leads the way
+
+[19:47] <lichtkind> so i read its about runtime improvements
+
+[19:47] *** fab_ left
+[19:47] <lichtkind> you tring out a new architecture?
+
+[19:48] <lichtkind> trying
+
+[19:48] <PhatEddy> The rakudo.org web site seems to be down.  I can ping the domain but safari complains the "the server unexpectedly dropped the connection".
+
+[19:50] *** alester left
+[19:51] *** Kodi joined
+[19:51] <Kodi> rakudo: say (+(0.Int)).WHAT; say (+(0.Int + 0.Int)).WHAT;
+
+[19:51] <p6eval> rakudo a204ba: OUTPUT«Int()␤Num()␤»
+
+[19:51] <Kodi> Is that a bug? If so, is it known?
+
+[19:55] <sorear> lichtkind: no, I'm using i386 like nearly everyone else here
+
+[19:56] <lichtkind> sorear: no i mean software architecture of niecza
+
+[19:56] <lichtkind> i mean the german sense of the word architecture :)
+
+[19:56] <sorear> I don't really have one
+
+[19:56] <sorear> Or rather, I'm changing it daily
+
+[19:56] <lichtkind> meaning the logical structure of the compiler
+
+[19:56] <sorear> I'm not stuck to a single underlying layout like Rakudo is
+
+[19:57] <lichtkind> so you searching more for single ideas
+
+[19:57] <lichtkind> not to proof a concept
+
+[19:57] <sorear> I'm trying to build a working compiler.  The structure is secondary
+
+[19:58] <sorear> often I have to change the structure to get things done
+
+[19:58] <lichtkind> but then you could join rakuda do
+
+[19:58] <sorear> I tried that once.  Didn't work out.
+
+[19:58] <lichtkind> :)
+
+[20:07] *** nexusone joined
+[20:18] <sECuRE> alright, now i can get the effective remote socket address :)
+
+[20:20] <lichtkind> sorear: i cant comprehent how niecza cant have an architecture?
+
+[20:21] <sorear> lichtkind: it has one, but it's not an important part of the plan
+
+[20:21] <sorear> Rakudo has an externally imposed architecture which it must follow
+
+[20:21] <sorear> niecza's architecture is an internal thing, and I like to change it often
+
+[20:22] <lichtkind> interesting
+
+[20:22] *** hercynium joined
+[20:33] *** nexusone left
+[20:33] *** PhatEddy left
+[20:36] *** timbunce left
+[20:43] *** timbunce joined
+[20:48] *** icwiener left
+[20:51] *** hirschnase left
+[20:53] *** hirschnase joined
+[20:55] *** pythonian4000afk is now known as pythonian4000
+
+[20:56] <lichtkind> but nieczka uses rakudo as platform or something else?
+
+[20:56] *** hirschnase left
+[20:57] *** hirschnase joined
+[21:01] *** whiteknight joined
+[21:01] <flussence> lichtkind: niecza uses .Net
+
+[21:02] <dalek> rakudo: 12088a8 | KodiB++ | src/core/Temporal.pm:
+
+[21:02] <dalek> rakudo: [core/Temporal] Fixed RT #77910 (DateTime attributes like .hour should always be Ints).
+
+[21:02] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/12088a851a737270bdd286513039a2c0b9995fd4
+
+[21:02] <flussence> nothing to do with rakudo/parrot at all
+
+[21:02] *** Mowah joined
+[21:04] <lichtkind> flussence: so .net has also some lex/yacc tools?
+
+[21:06] <dalek> roast: a32217d | KodiB++ | S32-temporal/DateTime.t:
+
+[21:06] <dalek> roast: [DateTime.t] Added tests for RT #77910.
+
+[21:06] <dalek> roast: review: http://github.com/perl6/roast/commit/a32217d59ab879347a7f6773faa8a39b7249ec03
+
+[21:06] <flussence> I don't think it does, better to ask someone who knows it...
+
+[21:07] <jnthn> I believe Niecza uses its own grammar engine, just as Rakudo does (e.g. the one in nqp-rx)
+
+[21:08] *** rbuels left
+[21:09] <lichtkind> jnthn: thanks
+
+[21:26] *** timbunce left
+[21:29] *** flatwhatson left
+[21:32] *** flatwhatson joined
+[21:33] *** whiteknight left
+[21:33] <moritz_> rakudo: say ~(1..6).roll(10)
+
+[21:33] <p6eval> rakudo a204ba: OUTPUT«5 3 4 4 6 3 4 3 5 1␤»
+
+[21:35] *** rurban joined
+[21:36] <rurban> rakudo.org down?
+
+[21:37] <moritz_> yep
+
+[21:37] <rurban> only for short?
+
+[21:38] <moritz_> it's the first report I've heard
+
+[21:40] <moritz_> Kodi++ # datetime hacking
+
+[21:40] <moritz_> rurban++ # rakudo packaging
+
+[21:40] <moritz_> sECuRE++ # IPv6 hacking
+
+[21:41] <moritz_> enough karma give for today :-)
+
+[21:41] <rurban> I thought it should be time for a new star release somewhen. and I'm just testing the new icu-4.5.1
+
+[21:41] <rurban> Before I only had libicu38
+
+[21:42] <jnthn> BTW, a lot of my commits over the coming weeks are going to be to the branch http://github.com/perl6/nqp-rx/commits/nom
+
+[21:42] <moritz_> jnthn: then we should track that...
+
+[21:42] <jnthn> If there's interest, it could be added to the things dalek reports on by $people-with-ability
+
+[21:42] <moritz_> jnthn: you are one of them :-)
+
+[21:42] <jnthn> Oh?
+
+[21:42] <moritz_> rurban: I guess on Thursday there'll be another Star release
+
+[21:43] <moritz_> jnthn: it's not yet documented properly, but there's a config file in the mu repo that controls dalek
+
+[21:43] <rurban> good. parrot is fine with my new icu, but I wanted to test rakudo-star also
+
+[21:44] <jnthn> moritz_: ah, oik
+
+[21:44] <jnthn> er, ok :-)
+
+[21:44] <jnthn> moritz_: I'm deep in meta-model hackery at the moment, but feel free to add now or I can later :-)
+
+[21:44] <moritz_> jnthn: I will
+
+[21:46] *** Mowah left
+[21:47] <moritz_> rakudo: say Q:PIR { %r = box 5 }
+
+[21:47] <p6eval> rakudo a204ba: OUTPUT«5␤»
+
+[21:47] <moritz_> sECuRE: see above
+
+[21:47] <sECuRE> alright
+
+[21:48] <dalek> mu: b65de19 | moritz++ | misc/dalek-conf.json:
+
+[21:48] <dalek> mu: [dalek] track nqp-rx/nom
+
+[21:48] <dalek> mu: review: http://github.com/perl6/mu/commit/b65de19458b7ea9eb9c46ac3d491a23b5d811f3e
+
+[21:52] *** meppl joined
+[21:53] <moritz_> rakudo: enum A <b c>; enum A <b c>;
+
+[21:53] <p6eval> rakudo a204ba: OUTPUT«===SORRY!===␤Contextual $*PKGDECL not found␤»
+
+[21:53] <moritz_> std: enum A <b c>; enum A <b c>;
+
+[21:53] <p6eval> std : OUTPUT«[31m===[0mSORRY![31m===[0m␤Illegal redeclaration of symbol 'A' (see line 1) at /tmp/nv2tUGIUEQ line 1:␤------> [32menum A <b c>; enum A[33m⏏[31m <b c>;[0m␤Illegal redeclaration of symbol 'b' (see line 1) at /tmp/nv2tUGIUEQ line 1:␤------> [32menum A <b c>; enum A <b c>[33…
+
+[21:53] * moritz_ submits rakudobug
+
+[21:53] <moritz_> sECuRE++ found it
+
+[21:55] <moritz_> rakudo: sub a { }; sub a { };
+
+[21:55] <p6eval> rakudo a204ba: OUTPUT«===SORRY!===␤Can not re-declare sub &a without declaring it multi at line 22, near ";"␤»
+
+[22:07] * moritz_ should wait for the spectest to finish before pushing patches :-)
+
+[22:08] <jnthn> moritz_: I've pushed a couple of patches to the branch - we'll see if dalek spots 'em.
+
+[22:08] <dalek> rakudo: e59e96d | moritz++ | src/Perl6/Actions.pm:
+
+[22:08] <dalek> rakudo: check name clashes for enum names
+
+[22:08] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/e59e96d24e7aee6f3b441af11ff68d6669e26d6a
+
+[22:10] <moritz_> jnthn: I don't know how often the config file is read, so even if it doesn't pick up the feed yet, it might do so tomorrow
+
+[22:10] <jnthn> moritz_: aha, OK
+
+[22:14] <dalek> rakudo: ccde8dc | moritz++ | t/spectest.data:
+
+[22:14] <dalek> rakudo: run enums/basic.t
+
+[22:14] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/ccde8dc0d0ba784c6c857b68506fee7fb3b3b91c
+
+[22:14] <dalek> roast: 895d239 | moritz++ | S12-enums/basic.t:
+
+[22:14] <dalek> roast: fudge enums/basic.t for rakudo
+
+[22:14] <dalek> roast: review: http://github.com/perl6/roast/commit/895d239b96ff27de3d0831ec808dffb287dff3b0
+
+[22:15] * moritz_ -> sleep
+
+[22:15] <sECuRE> sleep tight
+
+[22:15] *** hercynium left
+[22:16] <sECuRE> "Could not find sub !YOU_ARE_HERE" < what exactly does this error message mean? (i’m compiling rakudo after changes to IO/Socket/INET.pm
+
+[22:19] *** hercynium joined
+[22:19] *** hercynium left
+[22:19] *** hercynium joined
+[22:22] *** LoRe left
+[22:22] *** LoRe joined
+[22:24] *** M_o_C joined
+[22:24] *** M_o_C left
+[22:24] *** M_o_C joined
+[22:26] *** Guest23195 left
+[22:28] *** hirschnase left
+[22:38] *** renormalist joined
+[22:47] <TimToady> YOU_ARE_HERE is what the setting thinks your mainline code is called
+
+[22:48] <dalek> nqp-rx/nom: f8aeada | jnthn++ | build/Makefile.in:
+
+[22:48] <dalek> nqp-rx/nom: Stub in stuff to build dynops and dynpmcs in the Makefile.in.
+
+[22:48] <dalek> nqp-rx/nom: review: http://github.com/perl6/nqp-rx/commit/f8aeada43595937f38007d7dfa2abc1a73a0dc78
+
+[22:48] <dalek> nqp-rx/nom: f8a9b8b | jnthn++ | src/ (2 files):
+
+[22:48] <dalek> nqp-rx/nom: Stub in STable structure and PMC.
+
+[22:48] <dalek> nqp-rx/nom: review: http://github.com/perl6/nqp-rx/commit/f8a9b8b5d8cf8460fbdaa9213ae42e3564cd7fa6
+
+[22:48] <dalek> nqp-rx/nom: a87a3a3 | jnthn++ | src/pmc/ (2 files):
+
+[22:48] <dalek> nqp-rx/nom: Stub in REPR and RakudoObject PMCs. Also group name should be nqp.
+
+[22:48] <dalek> nqp-rx/nom: review: http://github.com/perl6/nqp-rx/commit/a87a3a32014b25e4136b17a78e081afd5af8ef31
+
+[22:48] <dalek> nqp-rx/nom: 4f0ee8c | jnthn++ | src/pmc/repr.pmc:
+
+[22:48] <dalek> nqp-rx/nom: Oops, forgot REPR stub in last commit.
+
+[22:48] <dalek> nqp-rx/nom: review: http://github.com/perl6/nqp-rx/commit/4f0ee8c07ca13dfef32c8437d39d873c28eda2cd
+
+[22:48] *** dalek left
+[22:48] *** dalek joined
+[22:48] *** ChanServ sets mode: +v dalek
+
+[22:49] <jnthn> d'oh, it tried to report everything from this morning. :-)
+
+[22:54] *** Chillance joined
+[23:00] *** amkrankruleuen left
+[23:13] *** Kodi left
+[23:24] *** Alias left
+[23:24] *** Alias joined
+[23:34] <dalek> nqp-rx/nom: af90644 | jnthn++ | src/metamodel/knowhow_bootstrapper.c:
+
+[23:34] <dalek> nqp-rx/nom: Implement (representation-polymorphic) type creation by KnowHOWs. Also implement add_method and find_method in the KnowHOW meta-object. This means we can create KnowHOWs, add methods do them and dispatch to them.
+
+[23:34] <dalek> nqp-rx/nom: review: http://github.com/perl6/nqp-rx/commit/af906441aa25cd9b905fd87ec8edad78770013ba
+
+[23:35] <jnthn> *to them :-)
+
+[23:51] <dalek> nqp-rx/nom: f13c33a | jnthn++ | src/metamodel/knowhow_bootstrapper.c:
+
+[23:51] <dalek> nqp-rx/nom: Add .^compose for KnowHOWs.
+
+[23:51] <dalek> nqp-rx/nom: review: http://github.com/perl6/nqp-rx/commit/f13c33a2d49c2dcdf2389a204e10795663b7aeb9
+
+[23:56] *** risou joined

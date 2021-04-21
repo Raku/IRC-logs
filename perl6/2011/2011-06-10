@@ -1,0 +1,3627 @@
+[00:00] <pmichaud> the point being that in a dynamic language, one cannot simply look at local variables when deciding to inline.
+
+[00:00] <jnthn> But $_, $! and $/ are all (or some are anyway) contextual-y or outer-visible-y
+
+[00:00] <jnthn> pmichaud: You locally know if you have any is context ones, other than the magicals, though.
+
+[00:00] <pmichaud> jnthn: for Perl 6, yes.
+
+[00:01] <pmichaud> my larger point is that Parrot's tree optimizations appear to be optimized for static languages.
+
+[00:01] <jnthn> Ah, OK
+
+[00:01] <jnthn> Yes, I was talking about Perl6::Optimizer ;-)
+
+[00:01] <jnthn> Anyway, the analysis is decidedly non-trivial.
+
+[00:01] <pmichaud> and much more than "do we have some local variables"
+
+[00:02] <pmichaud> we also have to be careful of things like  MY::
+
+[00:02] <pmichaud> as well as stuff like     my $a;  if test() { my $a; ... }
+
+[00:03] <jnthn> *nod*
+
+[00:03] <pmichaud> yes, that's a pretty standard inlining test... but if we have any sort of introspection on $a that lets us get to its name, then we have to be aware of that
+
+[00:03] <jnthn> That too
+
+[00:04] <jnthn> oh
+
+[00:04] <jnthn> Though $a is the Scalar container which has the name
+
+[00:04] <jnthn> But yes, if we want to drop containers too...we'd need that.
+
+[00:04] <jnthn> That's even harder though
+
+[00:04] <jnthn> You gotta know nothing you're calling has "is rw" params.
+
+[00:04] <jnthn> Which means method calls soon hose that.
+
+[00:05] <sorear> niecza avoids most of the problems you're describing by having a LetScope node type, which creates a namespace for variables *inside* a sub
+
+[00:06] *** envi_laptop left
+[00:12] <jnthn> sorear: How does that help exactly? How is it used in compilation?
+
+[00:13] <sorear> jnthn: the inliner pass doesn't substitute the raw body of the inner sub, it gets wrapped in a LetScope
+
+[00:15] <sorear> this means that my $x; if 1 { my $x } doesn't pose an issue
+
+[00:15] <jnthn> sorear: ah, you have lexpads not tied to blocks?
+
+[00:15] <dalek> niecza/immediate: 68b5b15 | sorear++ | src/niecza:
+
+[00:15] <dalek> niecza/immediate: Remplement blocks, pointy blocks, conditional and loopy statements
+
+[00:15] <dalek> niecza/immediate: review: https://github.com/sorear/niecza/commit/68b5b15aca
+
+[00:16] <pmichaud> jnthn: how about a de-null-pmc opcode?
+
+[00:16] <jnthn> pmichaud: mumble
+
+[00:16] <jnthn> pmichaud: Use case?
+
+[00:16] <pmichaud> something like    foo $P0, $P1
+
+[00:16] <sorear> jnthn: the low-level lexpad maps integers to references, and there's only one per low-level frame object
+
+[00:16] <pmichaud> returns $P0 if it's not null, $P1 otherwise
+
+[00:17] <sorear> jnthn: however, each low-level code object can have more than one string->int name mapping
+
+[00:17] <jnthn> pmichaud: OK...what are you wanting it for?
+
+[00:17] <pmichaud> my use case at the moment is that I'm retrieving values from a RPA that might be null and need to easily convert them to some other type (Any)
+
+[00:17] <pmichaud> I'm wondering if there are other places it'd be useful for working with parrot types
+
+[00:18] <pmichaud> in particular, I could write    pir::foo(pir::something(), Any)
+
+[00:18] <jnthn> pmichaud: The usual thing that makes me nervous about that setup is that you tend to end up paying the cost of fetching the Any whether you need it for not.
+
+[00:18] <jnthn> s/for/or/
+
+[00:18] <pmichaud> troo
+
+[00:18] <pmichaud> without it, though, I have to pay the cost of fetching the result of pir::something() twice
+
+[00:19] <pmichaud> so I still have a fetch.
+
+[00:19] <jnthn> Hmm, true.
+
+[00:19] <jnthn> Well, maybe true
+
+[00:19] <pmichaud> right now the closest I'm getting is
+
+[00:19] <pmichaud>     my $x := pir::something();
+
+[00:20] <pmichaud>     pir::isnull($x) ?? Any !! $x
+
+[00:20] <pmichaud> where I could be doing
+
+[00:20] <jnthn> pmichaud: Well, we could always do something macro-y
+
+[00:20] <pmichaud>     pir::foo(pir::something(), Any)
+
+[00:21] <jnthn> That is, it compiles to something more like the way you'd write it in PIR
+
+[00:21] <jnthn> nqp::fix_null(x, y)
+
+[00:21] <jnthn>     $P0 = x
+
+[00:21] <jnthn>     unless null $P0 goto foo
+
+[00:22] <jnthn>     x = y
+
+[00:22] <jnthn>   foo:
+
+[00:22] <jnthn> That's how we'd write it in PIR
+
+[00:22] <jnthn> Is there a PAST tree we can write that does something like that?
+
+[00:22] <pmichaud> we still end up with the lookup, though.
+
+[00:22] <pmichaud> (for y)
+
+[00:22] <jnthn> Yes but only if it's null
+
+[00:22] <pmichaud> oh, you mean an instruction that becomes an if
+
+[00:22] <jnthn> Right
+
+[00:22] <jnthn> That's what I was trying to imply by macro
+
+[00:23] <pmichaud> sure, that's just :pasttype<if>
+
+[00:23] *** thou left
+[00:23] <pmichaud> well, almost.
+
+[00:23] <jnthn> Well, nearly...that won't check nullness
+
+[00:23] <jnthn> It's more like def_or
+
+[00:23] <jnthn> But we want null_or :)
+
+[00:23] <jnthn> (I think it's def_or that // compiles to, anyway...)
+
+[00:24] <pmichaud> actually we want notnull_or :)
+
+[00:24] <jnthn> er, yes :)
+
+[00:25] <pmichaud> might be worthwhile to create  nqp::if()  and nqp::unless()  while we're at it
+
+[00:26] <pmichaud> so we have low-level ways to do if/unless
+
+[00:26] <pmichaud> heck, we could get most of the pasttypes in place
+
+[00:26] <pmichaud> that would avoid issues with while loop bodies for a while, too :)
+
+[00:26] <pmichaud> well, maybe.  :-)
+
+[00:26] <jnthn> \o/
+
+[00:26] * jnthn likes :)
+
+[00:26] <sorear> that's what I do
+
+[00:27] <pmichaud> nqp::while( $text, (body; body; body ...))
+
+[00:27] <pmichaud> (note: no block)
+
+[00:27] <jnthn> I'd like that
+
+[00:27] <pmichaud> cheap form of inlining :)
+
+[00:27] <sorear> pmichaud: (body; body; $body) while $test
+
+[00:28] <pmichaud> I don't remember if while statement modifier topicalizes anything
+
+[00:28] <sorear> AFAIK it doesn't
+
+[00:28] <jnthn> Don't think so either.
+
+[00:28] <sorear> only "for" and "given" topicalize
+
+[00:29] <pmichaud> anyway,  nqp::if()  also makes it possible to do if/else trees cheaply :)
+
+[00:30] *** cooper|ipad left
+[00:31] *** cooper|ipad joined
+[00:34] *** Jason_ni joined
+[00:36] <dalek> rakudo/nom: 0cf7367 | jnthn++ | src/Perl6/ (2 files):
+
+[00:36] <dalek> rakudo/nom: Get handling of $?CLASS fixed up so we can have a shot at composed methods and attributes working. Not quite there yet...
+
+[00:36] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/0cf736750b
+
+[00:36] <dalek> rakudo/nom: 38f9ee7 | jnthn++ | src/Perl6/Metamodel/GenericHOW.pm:
+
+[00:36] <dalek> rakudo/nom: Fix a silly thinko.
+
+[00:36] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/38f9ee7158
+
+[00:36] <dalek> rakudo/nom: bf3b966 | jnthn++ | src/Perl6/SymbolTable.pm:
+
+[00:36] <dalek> rakudo/nom: Make type captures work again. With this, methods composed from a role work (no role summation to do multiple roles yet, though).
+
+[00:36] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/bf3b9662ad
+
+[00:37] <sorear> What do type captures have to do with roles, jnthn?
+
+[00:37] <TimToady> role Foo[::T] I suppose
+
+[00:38] <perigrin> parameterized roles 
+
+[00:38] <jnthn> What TimToady said.
+
+[00:38] <sorear> and they are required for methods and attributes?
+
+[00:38] *** dukeleto left
+[00:38] <jnthn> All roles are inherently parametric.
+
+[00:38] <jnthn> So yes.
+
+[00:39] *** dukeleto joined
+[00:39] <jnthn> Rakudo master got away with it, but Rakudo master's roles have some nasty issues.
+
+[00:39] <jnthn> It took me practically telling masak how to construct it, but you can very quickly get yourself into really weird semantics in Rakudo master with composed multi-methods.
+
+[00:40] <jnthn> s/it, /it to get somebody to find it and RT it,/
+
+[00:40] <perigrin> you know if you could make all roles paramedics too ... we could possibly get funding in the health care industry easily
+
+[00:40] <jnthn> I guess I could always doctor the implementation to make it look that way...
+
+[00:41] <perigrin> sure ... nurse that pun ... 
+
+[00:42] * sorear needs to implement roles soon...
+
+[00:42] <jnthn> sorear: It's fun. They're probably the trickiest thing I've done since the 6model core... :)
+
+[00:42] <jnthn> Of course, I have the benefit of having written 3 other implementations of roles. :)
+
+[00:43] <jnthn> Each one has been steadily better than the last.
+
+[00:46] <colomon> practice++
+
+[00:48] <jnthn> oops, nearly 3am
+
+[00:48] *** ccc joined
+[00:51] <pmichaud> jnthn: do class predeclarations work?    i.e.,   "class Parcel { ... }"
+
+[00:51] <jnthn> pmichaud: Yes; add in stubs.pm
+
+[00:51] <jnthn> (not because they'll only work there, just because that's where I've been collecting them :-))
+
+[00:52] <pmichaud> and it's okay if I redeclare the class later?
+
+[00:52] <pmichaud> stubs.pm doesn't look like what I'm looking for
+
+[00:53] <jnthn> pmichaud: I believe stubs work...lemme check
+
+[00:54] <pmichaud> List needs to know about Parcel... and Parcel needs to know about List.
+
+[00:55] <pmichaud> (they only need to know that the other exists... it's okay for the details to defer)
+
+[00:55] <jnthn> yeah
+
+[00:55] <jnthn> oh, hmm
+
+[00:55] <jnthn> They should work but there's an odd bug
+
+[00:59] <jnthn> oh, regression
+
+[00:59] <pmichaud> yeah
+
+[00:59] <jnthn> jnthn--
+
+[01:00] <pmichaud> http://gist.github.com/1018075
+
+[01:00] <pmichaud> I'm being called to dinner so will try it later.
+
+[01:00] <pmichaud> oh, wait.
+
+[01:00] <pmichaud> nm, syntax error in that one.
+
+[01:01] <pmichaud> oh, it seems to be working locally
+
+[01:01] <pmichaud> I'll have to look at it later and try it a bit later
+
+[01:01] <pmichaud> I'll see if I can golf it down a bit.
+
+[01:01] <pmichaud> afk, dinner
+
+[01:02] *** ccc left
+[01:05] <jnthn> pmichaud: For when you're back, fixed the issue, and this works now: https://gist.github.com/1018081
+
+[01:05] *** wooden left
+[01:07] <jnthn> pmichaud: Also note that if you comemnt out the actual definition of Foo, you'll get a compile time error telling you that you stubbed something but didn't define it. :)
+
+[01:07] <dalek> rakudo/nom: 06322a3 | jnthn++ | src/Perl6/Actions.pm:
+
+[01:07] <dalek> rakudo/nom: Unbust ... stubbing of packages.
+
+[01:07] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/06322a3132
+
+[01:07] * sorear ponders recognizing { foo }; in the grammar
+
+[01:08] <TimToady> very diffult before statement reduction
+
+[01:08] <TimToady> *c
+
+[01:08] <TimToady> *ic
+
+[01:08] *** mtk left
+[01:09] <sorear> niecza/master has a semantic rule that certain types of blocks do not get separate runtime pads
+
+[01:09] <sorear> mainlines, bare blocks, and package bodies (recursively)
+
+[01:10] <sorear> setting the flag on blocks is proving rather snaggy in /immediate
+
+[01:11] <TimToady> the 1st and 3rd are unlikely to be on a hotpath, and the 2nd is unlikely to be correct :)
+
+[01:11] <jnthn> sleep, night o/
+
+[01:12] <TimToady> o/
+
+[01:12] <sorear> why not correct?
+
+[01:12] <sorear> it's not just an optimization
+
+[01:12] <sorear> this is what makes { my $x; say $x; INIT $x = 1;  } work
+
+[01:15] <TimToady> and what does my $x; { my $x; say $x; INIT $x = 1; }; say $x say?
+
+[01:15] <sorear> 1\nAny()\n
+
+[01:16] <TimToady> okay, so it's still scoped
+
+[01:17] *** mtk joined
+[01:17] <TimToady> and do OUTERs in an eval still count correctly?
+
+[01:18] <sorear> yes; this isn't about inlining the pad into the OUTER pad
+
+[01:18] <sorear> it's about combining the pad and the protopad
+
+[01:18] <TimToady> okay; sounds a bit like P5 pads :)
+
+[01:19] <sorear> sub foo($x) { END say $x } # this will not work, because &foo lacks the "unified pad" bit
+
+[01:19] <sorear> hmm
+
+[01:19] <sorear> it works in P5.  *wonders how*
+
+[01:32] *** donri left
+[01:34] <dalek> niecza/immediate: e383d0a | sorear++ | / (3 files):
+
+[01:34] <dalek> niecza/immediate: Reimplement bare blocks, {YOU_ARE_HERE}
+
+[01:34] <dalek> niecza/immediate: review: https://github.com/sorear/niecza/commit/e383d0a622
+
+[01:34] *** yinyin joined
+[01:36] <sorear> /immediate can now run -I. -e 'say "Hello, world"'
+
+[01:36] <sorear> with a hacked setting...
+
+[01:53] *** whiteknight left
+[02:11] *** donri joined
+[02:12] *** woosley joined
+[02:13] *** Ali_h joined
+[02:15] *** cooper|ipad left
+[02:16] *** cooper|ipad joined
+[02:22] *** cotto left
+[02:22] *** donri left
+[02:22] *** donri joined
+[02:23] *** cotto joined
+[02:37] <pmichaud> phenny: tell jnthn class stub failure: http://gist.github.com/1018148
+
+[02:37] <phenny> pmichaud: I'll pass that on when jnthn is around.
+
+[02:42] *** donri left
+[02:47] *** Ali_h left
+[02:48] *** Ali_h joined
+[02:54] <dalek> niecza/immediate: a23b506 | sorear++ | src/ (4 files):
+
+[02:54] <dalek> niecza/immediate: Partial mergeback
+
+[02:54] <dalek> niecza/immediate: review: https://github.com/sorear/niecza/commit/a23b506906
+
+[02:54] <dalek> niecza/immediate: 29063d3 | sorear++ | src/niecza:
+
+[02:54] <dalek> niecza/immediate: Reimplement enums
+
+[02:54] <dalek> niecza/immediate: review: https://github.com/sorear/niecza/commit/29063d35df
+
+[03:19] *** hudnix left
+[03:20] *** lichtkind left
+[03:23] *** Su-Shee_ joined
+[03:24] *** daemon_ is now known as daemon
+
+[03:26] *** Su-Shee left
+[03:26] *** satyavvd joined
+[03:36] *** envi_laptop joined
+[03:37] *** shachaf joined
+[03:50] *** molaf joined
+[03:54] *** scottp joined
+[04:34] *** molaf left
+[04:38] <dalek> niecza/immediate: 804c737 | sorear++ | src/ (2 files):
+
+[04:38] <dalek> niecza/immediate: Kill several now-unused op types
+
+[04:38] <dalek> niecza/immediate: review: https://github.com/sorear/niecza/commit/804c737bf1
+
+[04:38] <dalek> niecza/immediate: 327d588 | sorear++ | src/ (3 files):
+
+[04:38] <dalek> niecza/immediate: Loopy operators, $! fixes, eval fixes
+
+[04:38] <dalek> niecza/immediate: review: https://github.com/sorear/niecza/commit/327d588f3b
+
+[05:18] *** cooper is now known as starcatfish
+
+[05:19] *** starcatfish is now known as planetcatfish
+
+[05:20] *** planetcatfish left
+[05:26] <dalek> niecza/immediate: 70e5354 | sorear++ | src/niecza:
+
+[05:26] <dalek> niecza/immediate: Fix enum and block-term handling
+
+[05:26] <dalek> niecza/immediate: review: https://github.com/sorear/niecza/commit/70e5354514
+
+[05:26] <sorear> now it runs with a considerably less hacked setting, notably including the correct definitons of Bool and Parcel
+
+[05:29] *** cognominal left
+[05:30] *** cooper joined
+[05:30] *** cooper left
+[05:37] *** [particle] joined
+[05:38] *** cooper|ipad left
+[05:38] *** cooper|ipad joined
+[05:40] *** cooper|ipad is now known as fish|ipad
+
+[05:40] *** y3llow left
+[05:41] *** y3llow joined
+[05:43] <sorear> std: "{ $^a }"
+
+[05:43] <p6eval> std 37a0cdd: OUTPUT«[31m===[0mSORRY![31m===[0m␤Placeholder variable $^a may not be used here because the surrounding block takes no signature at /tmp/YkxuEohKd0 line 1:␤------> [32m"{ [33m⏏[31m$^a }"[0m␤Check failed␤FAILED 00:01 113m␤»
+
+[05:45] *** wamba joined
+[05:45] <dalek> niecza/immediate: 00b71e5 | sorear++ | src/niecza:
+
+[05:45] <dalek> niecza/immediate: Fix general loops, blast
+
+[05:45] <dalek> niecza/immediate: review: https://github.com/sorear/niecza/commit/00b71e59e4
+
+[05:45] <dalek> niecza/immediate: 808ab79 | sorear++ | src/niecza:
+
+[05:45] <dalek> niecza/immediate: Reimplement embeddedblock
+
+[05:45] <dalek> niecza/immediate: review: https://github.com/sorear/niecza/commit/808ab79c9b
+
+[05:46] *** wtw joined
+[05:47] *** kboga joined
+[05:58] *** wamba left
+[06:01] <dalek> niecza/immediate: 1cf951a | sorear++ | src/ (2 files):
+
+[06:01] <dalek> niecza/immediate: Implement package-scoped variable references
+
+[06:01] <dalek> niecza/immediate: review: https://github.com/sorear/niecza/commit/1cf951ac5a
+
+[06:38] *** noganex joined
+[06:41] *** noganex_ left
+[06:55] *** fhelmberger joined
+[06:59] *** envi_|2 joined
+[07:02] *** envi_laptop left
+[07:02] *** cognominal joined
+[07:10] *** mattp_ joined
+[07:11] *** Gothmog_ joined
+[07:21] *** mj41 joined
+[07:22] <dalek> niecza/immediate: 686aabc | sorear++ | src/ (2 files):
+
+[07:22] <dalek> niecza/immediate: Implement package stubbing (using jnthn++ nom semantics)
+
+[07:22] <dalek> niecza/immediate: review: https://github.com/sorear/niecza/commit/686aabcb23
+
+[07:22] *** jfried joined
+[07:24] *** Su-Shee_ is now known as Su-Shee
+
+[07:28] *** fish|ipad_ joined
+[07:31] *** fish|ipad left
+[07:31] *** fish|ipad_ is now known as fish|ipad
+
+[07:31] *** cognominal left
+[07:34] *** cognominal joined
+[07:36] *** flatwhatson left
+[07:37] *** lue left
+[07:37] *** lue joined
+[07:52] <mberends> hoping to tie up some loose ends about comparison and sorting led to the Unicode Collation Algorithm, a gorilla of a spec that relies on table lookups :-( If we ignore its rulings, it would be at our peril. http://www.unicode.org/reports/tr10/
+
+[07:53] <dalek> rakudo/nom: 5ca495b | moritz++ | src/CORE.setting/operators.pm:
+
+[07:53] <dalek> rakudo/nom: add (partially hacky) prefix:<+>
+
+[07:53] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/5ca495b15b
+
+[07:53] *** Gothmog_ left
+[07:54] <mathw> Unicode is complicated
+
+[07:54] <mathw> there's just no getting around it :(
+
+[07:54] <mathw> Too many writing systems in the world
+
+[07:58] *** cognominal left
+[07:58] *** Gothmog_ joined
+[07:58] <mberends> and because of that, large tables are unavoidable
+
+[08:00] * sorear calls it a night
+
+[08:00] *** cognominal joined
+[08:01] <sorear> tomorrow will be exciting
+
+[08:12] *** furryfish joined
+[08:15] <mberends> do tell!
+
+[08:16] <pmichaud> phenny: tell jnthn  I figured out the problem with stubs/ACCEPTS -- Bool didn't have a .Str method that could be printed.  Now fixed in 9874b46 (and my problem is resolved).
+
+[08:16] <phenny> pmichaud: I'll pass that on when jnthn is around.
+
+[08:17] *** scottp left
+[08:17] *** cognominal left
+[08:18] *** cognominal joined
+[08:19] <dalek> rakudo/nom: 850bffe | pmichaud++ | / (2 files):
+
+[08:19] <dalek> rakudo/nom: Add Bool.Str().  Temporarily remove List/Parcel/etc. from Makefile so I can develop them locally.
+
+[08:19] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/850bffe26e
+
+[08:19] <dalek> rakudo/nom: 9874b46 | pmichaud++ | src/CORE.setting/operators.pm:
+
+[08:19] <dalek> rakudo/nom: Merge branch 'nom' of github.com:rakudo/rakudo into nom
+
+[08:19] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/9874b468e7
+
+[08:22] <mberends> does the default nom 'make' verify that the NQP and Parrot revisions are sufficiently new?
+
+[08:23] <pmichaud> Configure does, yes.
+
+[08:23] <pmichaud> make does not.
+
+[08:24] <pmichaud> we could put something in 'make' to verify it.
+
+[08:24] <mberends> ok, so after pulling in a bunch of new commits, is there an easy way to tell whether a new Configure needs to run?
+
+[08:24] <pmichaud> need to run Configure if Makefile.in or NQP_REVISION has been modified
+
+[08:26] <mberends> understandable. It would be nice if the verify was always done automatically. I suppose we need to compare timestamps or archive a bit of state.
+
+[08:26] <mberends> I'll work on it if you point me in the right direction
+
+[08:27] <pmichaud> does git maintain file timestamps?
+
+[08:27] <pmichaud> I'm guessing no.
+
+[08:27] <mberends> probably not
+
+[08:27] <pmichaud> that's good, then.
+
+[08:28] <mberends> git doesn't trust the local OS very much
+
+[08:28] <pmichaud> so easiest is probably to write tools/build/check-versions.pl
+
+[08:28] <pmichaud> that script checks the timestamps of Makefile and Makefile.in, dies if Makefile.in is newer
+
+[08:29] <mberends> and the death terminates make?
+
+[08:29] <pmichaud> yes
+
+[08:29] <mberends> ok, will do it like that :)
+
+[08:30] <pmichaud> check-versions.pl should probably also accept the nqp script as an argument
+
+[08:30] <pmichaud> we can then do the nqp version check
+
+[08:30] <pmichaud> I can draft that one... just a sec
+
+[08:31] <mberends> would it make sense to locate the script in the nqp directories, to make it available for non-rakudo uses of nqp?
+
+[08:32] <pmichaud> probably not
+
+[08:32] *** cognominal left
+[08:32] <pmichaud> when building rakudo or other tools, can't assume we have an nqp checkout handy
+
+[08:33] <pmichaud> someday one could be building from a pre-compiled/pre-packaged nqp
+
+[08:33] <mberends> ok
+
+[08:34] <pmichaud> http://gist.github.com/1018467   # skeleton of checking for sufficiently new nqp
+
+[08:35] <mberends> thanks!
+
+[08:35] *** jfried left
+[08:36] <pmichaud> then add a "check-version" target and dependency to the "all:" target in the makefile
+
+[08:36] <mberends> oh, yes. keep it modular.
+
+[08:36] <pmichaud> someone wanting to build rakudo even if versions don't check can do "make xmas", which doesn't do the check.
+
+[08:37] <pmichaud> (we can also have a "nocheck" target if we need one.)
+
+[08:38] <mberends> there may be a use case for someone bisecting for a bug, or for someone gather historical benchmark trends.
+
+[08:39] <pmichaud> right
+
+[08:39] <pmichaud> there are times when I've wanted to disable the check
+
+[08:40] <mberends> this looks like enough basis to go on
+
+[08:46] *** daniel-s joined
+[08:50] <pmichaud> phenny: tell jnthn I'm unable to set attributes in a method that gets called from a derived class.  http://gist.github.com/1018497
+
+[08:50] <phenny> pmichaud: I'll pass that on when jnthn is around.
+
+[08:56] *** mtk left
+[08:57] <moritz> liskov fail :-)
+
+[08:57] *** tzhs joined
+[09:00] <moritz> is 0 and v the same in pir:: signatures?
+
+[09:01] *** scottp joined
+[09:01] <pmichaud> no
+
+[09:01] <pmichaud> v == opcode doesn't return any value
+
+[09:01] <pmichaud> 0 == use first operand as return value
+
+[09:02] *** jfried joined
+[09:02] <pmichaud> thus   pir::setattribute__0PPPs(self, ...)   sets the attribute of self and returns self as the result
+
+[09:02] <moritz> shouldn't it be pir::setattribute__vPPsP then?
+
+[09:02] <moritz> ah
+
+[09:03] <pmichaud> pir::setattribute__3PPsP(self, class, 'attr', value)   would set the attribute of self and return value as the result
+
+[09:03] <moritz> funky
+
+[09:03] <pmichaud> it's an easy way to chain multiple pir operations together, especially for those pir operations (like setattribute) that don't normally return a usable value
+
+[09:04] *** daniel-s left
+[09:04] *** mtk joined
+[09:09] *** daniel-s joined
+[09:15] *** ewemoa left
+[09:24] *** Jason_ni left
+[09:25] *** MayDaniel joined
+[09:29] *** Mowah joined
+[09:33] *** scottp left
+[09:33] <jnthn> morning, #perl6
+
+[09:33] <phenny> jnthn: 02:37Z <pmichaud> tell jnthn class stub failure: http://gist.github.com/1018148
+
+[09:34] <phenny> jnthn: 08:16Z <pmichaud> tell jnthn  I figured out the problem with stubs/ACCEPTS -- Bool didn't have a .Str method that could be printed.  Now fixed in 9874b46 (and my problem is resolved).
+
+[09:34] <phenny> jnthn: 08:50Z <pmichaud> tell jnthn I'm unable to set attributes in a method that gets called from a derived class.  http://gist.github.com/1018497
+
+[09:35] <pmichaud> jnthn: morning!  o/
+
+[09:36] <moritz> \o
+
+[09:36] <pmichaud> jnthn: would it bug you if I stubbed in Numeric/Real as classes until roles are ready?
+
+[09:36] <pmichaud> it should be easy to switch them to roles when that's ready
+
+[09:36] *** Su-Shee left
+[09:37] <jnthn> pmichaud: Yes
+
+[09:37] <jnthn> (as in, yes you can do it)
+
+[09:37] <pmichaud> okay, cool
+
+[09:37] <jnthn> Though
+
+[09:37] <jnthn> roles may already work enough for that :)
+
+[09:37] <jnthn> Try it with role Numeric { } first :)
+
+[09:37] <jnthn> The type checking part may not work yet, if you need that.
+
+[09:37] <pmichaud> can we augment Int with "does Real" somehow?
+
+[09:38] <jnthn> does works, but only for a class doing a single role (no summation yet)
+
+[09:38] <pmichaud> my plan was
+
+[09:38] <jnthn> That attributes bug is concerning...
+
+[09:38] <pmichaud> class Numeric is Cool { ... }
+
+[09:38] <pmichaud> class Real is Numeric { ... }
+
+[09:38] *** Su-Shee joined
+[09:38] <pmichaud> class Int is Real { ... }
+
+[09:38] *** amkrankruleuen left
+[09:38] <pmichaud> class Num is Real { ... }
+
+[09:39] <pmichaud> (all in Metamodel/BOOTSTRAP.pm)
+
+[09:39] *** amkrankruleuen joined
+[09:39] <jnthn> You can do that if you wish.
+
+[09:39] <jnthn> I probably will have roles done enough to switch them later on today, or tomorrow.
+
+[09:39] <pmichaud> I might just wait for that then
+
+[09:40] <jnthn> Up to you - depends how blocked you are on it.
+
+[09:40] <pmichaud> will Numeric/Real have to go into BOOTSTRAP, or will we be able to do "augment Int does Real { ... }"  like we do in master?
+
+[09:40] <pmichaud> I'm more blocked on the attribute thingy right now... I thought I'd work on Numeric and Stringy while waiting for that to unblock
+
+[09:41] *** daniel-s left
+[09:41] <jnthn> Everything in BOOTSTRAP is seen by CORE.setting as if it was stubbed previously
+
+[09:41] <jnthn> So no augment needed.
+
+[09:41] <pmichaud> so, Int does Real might work "today"?
+
+[09:42] <pmichaud> I might try that then :-)
+
+[09:42] *** icwiener joined
+[09:42] <jnthn> Int does Real probably will work today
+
+[09:42] <jnthn> Real does Numeric probably won't (I didn't do roles doing roles yet)
+
+[09:43] <pmichaud> okay
+
+[09:43] <pmichaud> it's not super-high priority for me
+
+[09:43] <pmichaud> I'm just using this to get more familiar with the overall setup
+
+[09:43] <pmichaud> very nice, btw.  I'm liking it more and more as I get into it.
+
+[09:43] <pmichaud> it was nice to be able to fix Bool.Str easily.
+
+[09:44] <jnthn> pmichaud: ah, I don't think this attributes one can be too deep. The code works in NQP.
+
+[09:49] *** daxim joined
+[09:49] *** pernatiy left
+[09:50] *** pernatiy joined
+[09:59] *** MayDaniel left
+[09:59] <jnthn> pmichaud: Looks like container-y issue.
+
+[09:59] <jnthn> pmichaud: Thus how it affects Rakudo and not NQP.
+
+[10:00] <jnthn> pmichaud: Here's a workaround patch: https://gist.github.com/1018574
+
+[10:01] <jnthn> (for your local development; I'm going to fix the issue at its source though)
+
+[10:02] <pmichaud> I probably won't pick up lists again until after I head to sleep; the workaround patch will do fine though.
+
+[10:02] *** furryfish left
+[10:03] *** fish|ipad left
+[10:03] <jnthn> OK. It's fairly likely that the real fix will be in by then anyway.
+
+[10:03] <bbkr_> hi. i'm looking for command that can convert unicode char to it's base char, for example ą => a, ó => o, etc. is there something built into P6 that can do this kind of magic?
+
+[10:03] <pmichaud> right.
+
+[10:04] <moritz> bbkr_: I don't think there's something built-in
+
+[10:04] <jnthn> pmichaud: oh, you used :D in the Bool patch :)
+
+[10:04] * jnthn wonders how many times those are gonna show up :)
+
+[10:04] <jnthn> pmichaud: I think that you may have wanted multi there though
+
+[10:04] <pmichaud> oh, perhaps
+
+[10:05] <pmichaud> doesn't it need :D there, though?
+
+[10:05] <moritz> bbkr_: once normalization forms are implemented, you can do somthing like converting to a decomposed normal form, and use the first codepoint
+
+[10:05] *** awoodland joined
+[10:05] <jnthn> pmichaud: It does need :D
+
+[10:05] <bbkr_> moritz: thanks
+
+[10:05] <jnthn> pmichaud: It just also needs multi
+
+[10:05] <moritz> bbkr_: that's how I'd to it in p5 too
+
+[10:05] <jnthn> pmichaud: Now "say Bool" is probably busted. :)
+
+[10:06] *** f00li5h joined
+[10:06] <pmichaud> probably :)
+
+[10:06] <pmichaud> yes.
+
+[10:06] <pmichaud> I'll fix it.
+
+[10:06] <jnthn> thanks :)
+
+[10:07] <pmichaud> has anyone mentioned that CORE.setting is an awful directory name to have to type?
+
+[10:07] <jnthn> pmichaud: I don't
+
+[10:07] <jnthn> src/c<tab>
+
+[10:07] <jnthn> :)
+
+[10:07] <pmichaud> pmichaud@kiwi:~/nom$ ./perl6
+
+[10:07] <pmichaud> > say Bool
+
+[10:07] <pmichaud> Bool()
+
+[10:07] <pmichaud> > say 1.Bool
+
+[10:07] <pmichaud> Bool::True
+
+[10:07] <jnthn> \o/
+
+[10:08] <pmichaud> for me it has to be src/<shift>C<tab>
+
+[10:08] <pmichaud> that shift is a bit of a pain
+
+[10:08] <pmichaud> also, I'm very used to being able to type src/core/ without needing the tab completion :)
+
+[10:08] <jnthn> Oh, you have one of *those* operating systems... :P
+
+[10:09] <jnthn> I'd not thought of the need for shift for others...I can see how it gets annoying.
+
+[10:09] <jnthn> Now we've shuffled all the other stuff into "old", we could I guess go back to just calling it core
+
+[10:09] <pmichaud> I might do that when it annoys me enough
+
+[10:09] <pmichaud> I'll do it while you're not in the midst of hacking though :)
+
+[10:09] <jnthn> :)
+
+[10:10] <pmichaud> Bool.Str (and other things) pushed.
+
+[10:13] <dalek> rakudo/nom: c88a41c | pmichaud++ | src/CORE.setting/ (3 files):
+
+[10:13] <dalek> rakudo/nom: Add Bool.Numeric and Str.Numeric.  Switch prefix:<+> to use .Numeric.
+
+[10:13] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/c88a41c985
+
+[10:13] <dalek> rakudo/nom: 5694d6e | pmichaud++ | / (5 files):
+
+[10:13] <dalek> rakudo/nom: Add Numeric and Real as classes for now -- we'll switch them to roles later.  Convert prefix:<+> to work with Numeric instead of Int/Num.
+
+[10:13] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/5694d6e04d
+
+[10:13] <dalek> rakudo/nom: 0dae6dd | pmichaud++ | src/CORE.setting/Bool.pm:
+
+[10:13] <dalek> rakudo/nom: Add multi to Bool.Str (jnthn++).
+
+[10:13] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/0dae6dd474
+
+[10:14] *** scottp joined
+[10:16] <moritz> pmichaud: any objections to changing s/eq/==/ in t/00-parrot/03-op-logic.t ?
+
+[10:17] <pmichaud> no objection.
+
+[10:19] <dalek> rakudo/nom: 0bea57f | pmichaud++ | src/CORE.setting/operators.pm:
+
+[10:19] <dalek> rakudo/nom: Add prefix:<?>.
+
+[10:19] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/0bea57f21f
+
+[10:19] <moritz> pmichaud: prefix:<?> argument type should be Mu, not Any
+
+[10:20] <moritz> now LHF: prefix:<so>
+
+[10:21] <pmichaud> fixing prefix:<?> to be Mu
+
+[10:21] *** pernatiy left
+[10:24] <dalek> rakudo/nom: d7d9348 | pmichaud++ | src/CORE.setting/Bool.pm:
+
+[10:24] <dalek> rakudo/nom: Add Bool.pred and Bool.succ.
+
+[10:24] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/d7d9348bc3
+
+[10:24] <dalek> rakudo/nom: 6c83b5c | moritz++ | t/00-parrot/03-op-logic.t:
+
+[10:24] <dalek> rakudo/nom: [t] remove useless coercion. We now pass 3 test files in t/00-parrot/
+
+[10:24] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/6c83b5c9c3
+
+[10:24] <dalek> rakudo/nom: c0e0cdd | pmichaud++ | src/CORE.setting/operators.pm:
+
+[10:24] <dalek> rakudo/nom: Parameter to prefix:<+> should be Mu, not Any.  (moritz++)
+
+[10:24] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/c0e0cddef6
+
+[10:24] <dalek> rakudo/nom: 525e56a | pmichaud++ | t/00-parrot/03-op-logic.t:
+
+[10:24] <dalek> rakudo/nom: Merge branch 'nom' of github.com:rakudo/rakudo into nom
+
+[10:24] *** woosley left
+[10:24] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/525e56a335
+
+[10:24] <pmichaud> do we have &return yet?
+
+[10:25] <moritz> seems not
+
+[10:25] <pmichaud> okay
+
+[10:26] <moritz> pmichaud: are you working on coercive infix ops (a la infix:<~>(Any, Any))?
+
+[10:26] <moritz> if not I might do that after lunch
+
+[10:26] <pmichaud> moritz: not yet.  but infix:<~> wants Stringy, so I was thinking of doing that.
+
+[10:28] <jnthn> no, no return yet
+
+[10:28] <pmichaud> is there a way to create "hidden subs" in the core?
+
+[10:29] <pmichaud> i.e, subs that the public ones can call but are invisible to others?
+
+[10:29] *** koban joined
+[10:32] <jnthn> Maybe there's a way to do it with lexical scoping or some such
+
+[10:32] <jnthn> Nested sub or something?
+
+[10:32] <pmichaud> well, it's factoring out common capability
+
+[10:33] <pmichaud> so it can't be nested in the public thingy
+
+[10:33] <jnthn> ah
+
+[10:34] <pmichaud> specifically,  &return, &take, &return-rw, &take-rw, &fail, &next, &last, etc.  all have a common underlying sub
+
+[10:34] <jnthn> If we had import working, we could put them all in some module, then things that wanted to call them could just import them
+
+[10:34] <pmichaud> I suppose I could hide it in a package
+
+[10:34] <jnthn> Or that, yes
+
+[10:34] <pmichaud> package Hidden { sub foo() { ... } };   sub public() { Hidden::foo() }
+
+[10:36] <pmichaud> > say Any
+
+[10:36] <pmichaud> Any()
+
+[10:36] <pmichaud> > say ~Any
+
+[10:36] <pmichaud>  
+
+[10:36] *** cognominal joined
+[10:38] <pmichaud> I put .Stringy into Mu, it might belong in Any (so that it will autothread)
+
+[10:38] <jnthn> pmichaud: Note it'd have to be our
+
+[10:38] <pmichaud> yes, our
+
+[10:38] <jnthn> pmichaud: Which probably means I should do our-scoped subs :)
+
+[10:38] <pmichaud> oh, yes, "our" doesn't work yet.
+
+[10:39] <pmichaud> it's no rush, I can have a visible private sub for now.
+
+[10:39] <pmichaud> I think I'll move Stringy to Any
+
+[10:39] <dalek> rakudo/nom: f7f3f27 | pmichaud++ | src/CORE.setting/ (2 files):
+
+[10:39] <dalek> rakudo/nom: First cut of .Stringy and prefix:<~> using .Stringy.
+
+[10:39] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/f7f3f27b01
+
+[10:39] <pmichaud> well, hmm
+
+[10:39] <pmichaud> I think I'll wait on that.
+
+[10:40] <jnthn> pmichaud: When I update NQP, should I bump something in Rakudo?
+
+[10:40] <pmichaud> tools/build/NQP_REVISION
+
+[10:45] <pmichaud> ...which maybe ought to be tools/build/NQP_VERSION now.  "REVISION" is left over from the svn days.
+
+[10:56] <pmichaud> oh, drat.
+
+[10:56] <pmichaud> I can't write &return in Perl 6 because the exception gets caught by the &return sub.
+
+[10:57] <pmichaud> did we have a way to indicate that a sub shouldn't have a return handler?
+
+[10:58] <pmichaud> I guess I could do    my &return := ...
+
+[10:58] <pmichaud> er,   my &return := { ... }
+
+[11:00] <jnthn> heh...hadn't seen that one coming :)
+
+[11:01] <jnthn> Maybe something like that will work
+
+[11:01] <jnthn> Currently there's not, afaik, a way to flag "no return handler"
+
+[11:03] <pmichaud> I think we discussed that there might be an "is xxx" trait for that
+
+[11:04] <pmichaud> oh well, using the blocks seems  to work
+
+[11:04] <frettled> is xxx?  I know of some content filters that would be happy to gain that feature.
+
+[11:05] <dalek> nqp: 53824c3 | jonathan++ | src/ (4 files):
+
+[11:05] <dalek> nqp: Move decontainerization logic into a place where it can be more easily re-used.
+
+[11:05] <dalek> nqp: review: https://github.com/perl6/nqp/commit/53824c3274
+
+[11:05] <dalek> nqp: b43dcd1 | jonathan++ | src/ (2 files):
+
+[11:05] <dalek> nqp: Add some missing decontainerization.
+
+[11:05] <dalek> nqp: review: https://github.com/perl6/nqp/commit/b43dcd14e3
+
+[11:07] <jnthn> pmichaud: Another silly question. How do I get the version identifier?
+
+[11:07] <pmichaud> git describe --match 2*
+
+[11:08] <pmichaud> you can also get it from nqp itself:   nqp --showconfig   or  nqp --version
+
+[11:08] <jnthn> Thanks
+
+[11:09] <jnthn> pmichaud: BTW, above patch fixes the issue you ran into with attributes
+
+[11:10] <jnthn> Decontainerizations are like write barriers: easier to put in up front than completely retroactively add :)
+
+[11:11] * tadzik has passed o/
+
+[11:11] *** scottp left
+[11:12] <frettled> tadzik: congrats!
+
+[11:13] <tadzik> 4 more to go
+
+[11:13] <jnthn> tadzik: \o/ congrats! Piwo time! ;)
+
+[11:13] <tadzik> yeah, that's a conflict of interests. Piwo or internet :)
+
+[11:13] <pmichaud> muwahahahaha IT WORKS
+
+[11:14] <pmichaud> http://gist.github.com/1018633   # hide your eyes before reading
+
+[11:14] <tadzik> oh nice
+
+[11:14] <jnthn> How can I read it if I hide my eys? :P
+
+[11:14] <tadzik> return is an exception?
+
+[11:15] <pmichaud> http://gist.github.com/1018634  # with results
+
+[11:15] <pmichaud> tadzik: yes, it's an exception (or at least a jump in control flow)
+
+[11:16] <pmichaud> and it can break out of multiple blocks
+
+[11:16] <tadzik> so a function call is a try?
+
+[11:16] <jnthn> pmichaud: Did := not work?
+
+[11:16] <pmichaud> jnthn: it did not.  I suspect nom doesn't know that &'s are scalars yet
+
+[11:17] <pmichaud> I get
+
+[11:17] <pmichaud> Cannot use bind operator with this LHS at line 2, near " -> \\$parc"
+
+[11:17] <pmichaud> or something like that
+
+[11:18] <pmichaud> something prevents := from working, at any rate.
+
+[11:18] <jnthn> Bad.
+
+[11:18] * jnthn will look
+
+[11:18] <jnthn> bind_op makes it look like it should work. :S
+
+[11:19] <jnthn> pmichaud: oh. :/
+
+[11:19] <jnthn> &foo compiles down to a PAST::Op node that uses find_sub_not_null__Ps
+
+[11:19] <jnthn> Rather than a PAST::Var
+
+[11:20] *** PacoLinux left
+[11:20] * jnthn ponders just making it compile to a PAST::Var node.
+
+[11:20] <jnthn> sub looks is purely lexical anyways.
+
+[11:20] <pmichaud> wfm
+
+[11:21] <dalek> rakudo/nom: a936de0 | jnthn++ | tools/build/NQP_REVISION:
+
+[11:21] <dalek> rakudo/nom: Bump NQP revision to get container fixes, which were keeping inherited attributes from working properly.
+
+[11:21] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/a936de02e9
+
+[11:21] * jnthn just deletes 10 lines of code and sees what happens :)
+
+[11:22] <pmichaud> when building new nqp I get
+
+[11:22] <pmichaud> sixmodelobject.c:50:14: error: static declaration of ‘decontainerize’ follows non-static declaration
+
+[11:22] <pmichaud> ../6model/sixmodelobject.h:204:7: note: previous declaration of ‘decontainerize’ was here
+
+[11:23] <pmichaud> hmm, my git fetch failed.
+
+[11:25] <tadzik> same error here
+
+[11:26] <dalek> rakudo/nom: 6b519cc | jnthn++ | src/Perl6/Actions.pm:
+
+[11:26] <dalek> rakudo/nom: Stop special-casing &foo style variable lookups. Unbreaks my &foo := ...
+
+[11:26] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/6b519ccfd8
+
+[11:26] *** scottp joined
+[11:26] <jnthn> pmichaud: wait, is that when building the PMC?
+
+[11:27] <pmichaud> yes.
+
+[11:27] <pmichaud> looks like when building the serializationcontext pmc
+
+[11:28] <pmichaud> oh, wait, no
+
+[11:28] <pmichaud> yes
+
+[11:28] <dalek> nqp: c6c1df5 | jonathan++ | src/pmc/sixmodelobject.pmc:
+
+[11:28] <dalek> nqp: Try and fix build breakage.
+
+[11:28] <dalek> nqp: review: https://github.com/perl6/nqp/commit/c6c1df5a5e
+
+[11:28] <jnthn> See if that helps
+
+[11:29] <pmichaud> yes, that seems to have fixed it.
+
+[11:29] <pmichaud> need to bump NQP_REVISION again
+
+[11:31] *** scottp left
+[11:33] <jnthn> done
+
+[11:33] <kboga> 3333333333333333333333
+
+[11:34] <pmichaud> http://gist.github.com/1018654  # &return works again
+
+[11:34] <jnthn> \o/
+
+[11:34] <jnthn> pmichaud++
+
+[11:35] <pmichaud> well, I want to do more work but the sun is coming up here and I should probably get some sleep since I'm having trouble seeing the screen :)
+
+[11:35] <pmichaud> I should be able to do Parcel/List/Array a bit later, and then maybe I'll do gather/take
+
+[11:36] <jnthn> :)
+
+[11:36] <jnthn> pmichaud: Yes, sleep is probably sensible. :)
+
+[11:36] <jnthn> I've gotta sort out a few errands here, then I'll get back to roles.
+
+[11:36] <pmichaud> I have Parcel/List working locally; I got blocked on Array not wanting to work with the attribute bug you just fixed
+
+[11:37] <dalek> rakudo/nom: 3d4de00 | jnthn++ | tools/build/NQP_REVISION:
+
+[11:37] <dalek> rakudo/nom: Bump NQP revision again to get build fix; pmichaud++, tadzik++ for noticing/testing.
+
+[11:37] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/3d4de009e3
+
+[11:37] <dalek> rakudo/nom: b22eefe | pmichaud++ | / (2 files):
+
+[11:37] <dalek> rakudo/nom: Add &return and &return-rw .
+
+[11:37] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/b22eefe266
+
+[11:38] <pmichaud> afk, sleep
+
+[11:38] <jnthn> sleep well o/
+
+[11:39] *** PacoLinux joined
+[11:54] *** yinyin left
+[11:57] *** scottp joined
+[12:02] *** zamolxes joined
+[12:04] *** scottp left
+[12:05] *** satyavvd left
+[12:06] *** daniel-s joined
+[12:07] <takadonet> morning all
+
+[12:08] *** daniel-s left
+[12:10] <jnthn> o/ takadonet 
+
+[12:11] <takadonet> jnthn: looks like nom is coming along 
+
+[12:12] <moritz> it is.
+
+[12:12] <jnthn> takadonet: Seems to be, yes :)
+
+[12:13] <pmichaud> can't sleep yet :(
+
+[12:13] <jnthn> ohnoes
+
+[12:13] <pmichaud> jnthn: is there a way to detect if something is in a Scalar container?
+
+[12:13] <takadonet> i was able to build it the last few days but I just tried now and I'm getting : 'NQP revision 2011.05-54-gc6c1df5 required (currently 2011.05-36-gc9a6dba).' when doing perl Configure.pl --gen-nqp
+
+[12:13] <jnthn> pmichaud: yes
+
+[12:13] <moritz> takadonet: try perl Configure.pl --gen-nqp
+
+[12:13] <moritz> takadonet: sorry, --gen-parrot
+
+[12:13] <takadonet> k
+
+[12:14] <jnthn> pmichaud: pir::is_container__IP($x)
+
+[12:14] <takadonet> i love the new startup time :) 0.2
+
+[12:14] <takadonet> 0.2 s
+
+[12:14] <jnthn> takadonet: yeah, though we didn't put everything back in the setting yet...
+
+[12:14] <jnthn> takadonet: Though this branch isn't really the "make startup fast" one :)
+
+[12:15] <takadonet> well as long as it does not reach 1 sec i will be happy
+
+[12:15] <jnthn> takadonet: We need the full-blown serialization stuff for that.
+
+[12:15] <takadonet> ya i know
+
+[12:15] <pmichaud> jnthn: will pir::is_container also return true for Array and Hash containers?
+
+[12:15] <takadonet> wonder how fast things will go with my real life bioinformatics script that I wrote a while back in p5 and p6
+
+[12:15] <jnthn> pmichaud: No
+
+[12:15] <pmichaud> excellent.
+
+[12:15] <pmichaud> just what I need then.
+
+[12:16] <jnthn> pmichaud: Not unless you give them a container spec.
+
+[12:16] <jnthn> pmichaud: Which we almost certainly don't want to do.
+
+[12:16] <jnthn> Basically, 6model/nqp has a mechanism for scalar container handling. You can tell it "this type is a container" and a few other bits.
+
+[12:17] <pmichaud> got it
+
+[12:17] <jnthn> So it's ready for languages other than Perl 6.
+
+[12:17] *** jfried left
+[12:17] <jnthn> And should interop just fine.
+
+[12:17] *** jfried joined
+[12:25] <takadonet> moritz: thanks that looks like it got it to work
+
+[12:28] *** scottp joined
+[12:29] <pmichaud> jnthn: any ideas about how we'll handle WHENCE closures?
+
+[12:33] *** jfried left
+[12:35] <jnthn> pmichaud: I've figured out lots of ways not to... :)
+
+[12:35] <jnthn> pmichaud: The spec is a tad busted, I fear.
+
+[12:35] <pmichaud> the general use case is that I need to be able to declare
+
+[12:35] <jnthn> pmichaud: Because it suggests Foo but WHENCE ...
+
+[12:35] <pmichaud>     my $z = Any but WHENCE({ ... })
+
+[12:35] <jnthn> Which is decidedly problematic 
+
+[12:36] <jnthn> Becuase Any is a type object. It has no state.
+
+[12:36] <pmichaud> it can't be cloned/instantiated?
+
+[12:36] <jnthn> So we can't mix in to it to add storage
+
+[12:36] <jnthn> It can be cloned
+
+[12:36] <jnthn> But that still doesn't give you any storage.
+
+[12:37] <jnthn> And if you instantiate it, it's not a type object any more...
+
+[12:37] <jnthn> And I figure that (Any but WHENCE({ ... })) should be undefined...
+
+[12:37] <pmichaud> yes, it should be.
+
+[12:37] <jnthn> Also, none of this deals with the fact that we need to handle:
+
+[12:37] <pmichaud> it's still Any for all intents and purposes
+
+[12:37] <jnthn> my $x = Any but WHENCE({ ... });
+
+[12:38] <jnthn> $x.foo; # uses the WHENCE
+
+[12:38] <jnthn> e.g. it auto-vivifies with the WHENCE there
+
+[12:38] *** jfried joined
+[12:38] <jnthn> Which really is a method cal interception.
+
+[12:38] <jnthn> *call
+
+[12:38] <pmichaud> master currently sticks the WHENCE closure in a property of a clone of the type object
+
+[12:39] <pmichaud> I can repeat that hack in nom, unless you have a better idea
+
+[12:39] <jnthn> I'd really like to think of a better idea. The Parrot property hash is...ew. :)
+
+[12:39] <pmichaud> it won't occur often
+
+[12:39] <jnthn> But I think the spec is probably bogus there too
+
+[12:39] <jnthn> Foo{ ... }
+
+[12:39] <jnthn> That's fine
+
+[12:39] *** hudnix joined
+[12:39] <jnthn> But it shoudln't desugar to a "but", I suspect.
+
+[12:40] <jnthn> I also pondered an extra S-Table slot (same place we store WHAT, HOW, etc)
+
+[12:40] *** scottp left
+[12:40] *** hudnix left
+[12:40] <jnthn> But then realized that gets us into S-Table cloning.
+
+[12:41] <jnthn> Which scares me a little.
+
+[12:41] <jnthn> Mostly on memory management, though I think we'd actually be OK.
+
+[12:42] <jnthn> It boils down to shallow cloning the s-table and using the presence of WHENCE to know how to free memory.
+
+[12:43] <jnthn> The reason it'll cause problems is because sometimes we may update the s-table's pointers
+
+[12:43] <gfldex> i know it is most dangerous to distract you from your most important work, but this is to funny: http://www.cnet.com/8301-30976_1-20068778-10348864.html
+
+[12:43] <jnthn> e.g. if we publish a new method cache
+
+[12:43] <jnthn> The WHENCE'd s-table would keep the old one.
+
+[12:43] <jnthn> Though we could just toss the caches...
+
+[12:44] <pmichaud> is it possible for type objects to have storage that is separate/different from the instances?
+
+[12:44] <jnthn> hm
+
+[12:45] <pmichaud> i.e., if something is a type object, it has "type object storage", if it's an instance, it has storage as determined by the details of the type?
+
+[12:45] <jnthn> The question is how we'd specify the "type object storage"
+
+[12:46] <pmichaud> well, the only thing that would go in there (so far) would be a WHENCE property :)
+
+[12:46] <jnthn> It doesn't really fit with the whole 6model repr approach to do taht though.
+
+[12:46] <jnthn> The definition of type object pretty much is "we didn't allocate storage".
+
+[12:46] *** hudnix joined
+[12:46] <jnthn> As in, it actually uses that as the way it implements "am I a type object".
+
+[12:46] <pmichaud> right
+
+[12:47] <jnthn> I suspet the s-table slot and the shallow cloning may be best.
+
+[12:47] <jnthn> It's evil but less evil than other options.
+
+[12:47] *** donri joined
+[12:47] <jnthn> Oh. Hm.
+
+[12:48] <jnthn> No, I think it's OK actually
+
+[12:48] * jnthn is worrying about a very unlucky case we could hit with GC non-ordering
+
+[12:48] <jnthn> But I think we get away with it.
+
+[12:49] <moritz> reading that, and being not very informed, it sounds to me as though that solution won't scale
+
+[12:50] <moritz> what if we need another slot like WHENCE eventually, which also requires cloning the S-Table?
+
+[12:50] <jnthn> moritz: Hm
+
+[12:50] <jnthn> Also I realized that it doesn't help us with the auto-viv really. :/
+
+[12:51] <jnthn> Plus copying all the stuff in the S-Table is hardly efficient.
+
+[12:51] <jnthn> Well, it's one memcpy I guess...
+
+[12:51] <pmichaud> fwiw, "WHENCE" could potentially be a property on the container for now.
+
+[12:51] <jnthn> Yeah, I think Niecza does it that way
+
+[12:52] <pmichaud> i.e.,  instead of   my $x = Any but WHENCE({...})
+
+[12:52] <pmichaud> it could be  (my $x = Any) but WHENCE { ... }
+
+[12:52] <jnthn> (my $x = Any) but WHENCE { ... }
+
+[12:52] <jnthn> gah
+
+[12:52] <jnthn> (my $x = Any).VAR but WHENCE { ... } # maybe better
+
+[12:52] <pmichaud> yeah
+
+[12:52] <pmichaud> for now I don't even mind
+
+[12:53] <pmichaud>     pir::set_whence(my $x, { ... })
+
+[12:53] <jnthn> Well, if you add $!whence to Scalar then your set_whence there is just setattribute :)
+
+[12:53] <pmichaud> that would be fine with me.
+
+[12:54] <jnthn> Seems workable for the time being.
+
+[12:55] <pmichaud> I'll go with that for now.
+
+[12:55] *** cognominal_ joined
+[12:58] *** cognominal left
+[13:01] <pmichaud> what does the set_attribute look like in that case?
+
+[13:03] <jnthn> pir::setattribute__0PPsP(my $x, Scalar, '$!whence', { ... }) I guess
+
+[13:04] <pmichaud> need to define class Scalar { }
+
+[13:04] <pmichaud> ?
+
+[13:04] <jnthn> pmichaud: ?
+
+[13:04] <jnthn> pmichaud: Oh, it's already in BOOTSTRAP
+
+[13:04] <pmichaud> otherwise it doesn't seem to know about Scalar
+
+[13:05] <jnthn> huh :S
+
+[13:05] <pmichaud> I've noticed this on several classes
+
+[13:05] <pmichaud> even if it's in bootstrap, to use it in a p6 program we also have to do "my class XYZ { }"
+
+[13:05] <pmichaud> (in the core setting)
+
+[13:05] <pmichaud> or maybe I'm observing something else and don't realize it
+
+[13:06] <jnthn> ohh
+
+[13:06] <jnthn> Yeah, it needs to get composed at some point.
+
+[13:06] <pmichaud> oh, it works
+
+[13:06] <pmichaud> even without declaring Scalar
+
+[13:06] <pmichaud> cool
+
+[13:06] <jnthn> Right, though we should declare Scalar anyway.
+
+[13:06] <jnthn> s/declare/define/
+
+[13:06] <jnthn> :)
+
+[13:07] <pmichaud> yes, I'll do that if you don't beat me to it at some point.
+
+[13:07] <jnthn> s/define/finish/ ;-)
+
+[13:07] <jnthn> OK
+
+[13:07] * jnthn needs to lunch now :)
+
+[13:07] <jnthn> forgot, and getting kinda hungry ;)
+
+[13:11] <pmichaud> http://gist.github.com/1018802  # works great
+
+[13:11] *** bluescreen10 joined
+[13:12] <moritz> ooh, nice
+
+[13:13] *** koban left
+[13:13] <PerlJam> good morning #perl6
+
+[13:14] <jnthn> containers being real objects FTW
+
+[13:14] <moritz> does .VAR work?
+
+[13:14] <jnthn> moritz: not yet
+
+[13:17] <jnthn> pmichaud: One important thing to remember: getting and binding attributes are one of the few operations that explicitly do *not* decontainerize.
+
+[13:18] <jnthn> (thus why this works :))
+
+[13:20] <pmichaud> what would be the code to invoke the whence property from C?   (Assume I already have the whence object)
+
+[13:20] <pmichaud> I can never remember the Parrot calling convention stuff
+
+[13:20] *** jfried left
+[13:21] <jnthn> pmichaud: Depends on context.
+
+[13:22] <pmichaud>        if (!PMC_IS_NULL(scalar->whence)) {
+
+[13:22] <pmichaud>             /* invoke the whence object */
+
+[13:22] <pmichaud>             scalar->whence = PMCNULL;
+
+[13:22] <pmichaud>         }
+
+[13:22] <jnthn> (e.g. if we need to use a nested runloop or can get away with it)
+
+[13:22] <pmichaud> this is in Rakudo_cont_store
+
+[13:23] <jnthn> ah, nested then
+
+[13:23] <jnthn> moment
+
+[13:23] *** jfried joined
+[13:23] <pmichaud> I could potentially do the whence handling (in PIR) before ever getting to Rakudo_cont_store.... but I think we should vivify only after typechecks and rw checks are performed, not before.
+
+[13:24] <jnthn> yeah
+
+[13:24] <jnthn> Does the closure get any args?
+
+[13:24] <pmichaud> no
+
+[13:24] <jnthn> OK
+
+[13:24] <jnthn> I think fastest way is:
+
+[13:24] <jnthn> PMC *cappy   = Parrot_pmc_new(interp, enum_class_CallContext);
+
+[13:25] <jnthn> Parrot_pcc_invoke_from_sig_object(interp, scalar->whence, cappy);
+
+[13:25] <jnthn> e.g. create an empty capture and invoke with it.
+
+[13:25] <jnthn> (Don't use Parrot_ext_call, it's slow.)
+
+[13:26] <pmichaud> ah, there's an example up above under "Invoke FETCH method"  :-)
+
+[13:27] <jnthn> ah :)
+
+[13:27] <jnthn> even better
+
+[13:27] <jnthn> You need a simpler version of that :)
+
+[13:27] <pmichaud> right
+
+[13:27] <pmichaud> trying it now
+
+[13:30] <pmichaud> http://gist.github.com/1018824   # way too simple
+
+[13:30] <pmichaud> http://gist.github.com/1018826 # the patch to make it work
+
+[13:31] <jnthn> :)
+
+[13:31] <jnthn> Wish the parametric roles were that easy :P
+
+[13:31] <pmichaud> jnthn++   # there needs to be a bigger increment here than just '++'
+
+[13:31] <moritz> jnthn += (^100).pick
+
+[13:32] <pmichaud> I was thinking of something like   jnthn+!
+
+[13:32] <pmichaud> jnthn★★
+
+[13:33] <pmichaud> jnthn☚☚
+
+[13:33] <moritz> .u ★
+
+[13:33] <phenny> U+2605 BLACK STAR (★)
+
+[13:33] <jnthn> .u ☚
+
+[13:33] <phenny> U+261A BLACK LEFT POINTING INDEX (☚)
+
+[13:34] *** slavik joined
+[13:35] *** Bzek left
+[13:35] *** Bzek joined
+[13:35] *** mkramer joined
+[13:39] <moritz> .u black belt
+
+[13:39] <phenny> moritz: Sorry, no results for 'black belt'.
+
+[13:40] <pmichaud> okay, let's try again for some sleep -- bbl
+
+[13:40] *** jaldhar left
+[13:40] *** jaldhar joined
+[13:42] *** perigrin joined
+[13:42] <dalek> rakudo/nom: 30faa78 | pmichaud++ | src/ (3 files):
+
+[13:42] <dalek> rakudo/nom: Add a simple $!whence slot for Scalar containers.
+
+[13:42] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/30faa78dc9
+
+[13:45] *** jaldhar left
+[13:54] *** mkramer left
+[13:56] *** jaldhar joined
+[13:57] * jnthn fills out visa application so we can go to the BJPW :)
+
+[13:58] *** mkramer joined
+[13:58] *** kboga left
+[14:12] *** awoodland left
+[14:15] <frettled> I assume that's not Big Japan Pro Wrestling.  :)
+
+[14:15] <jnthn> Beijing Perl Workshop :P
+
+[14:16] <frettled> Oooh, that will be interesting!
+
+[14:17] *** wtw left
+[14:21] *** MayDaniel joined
+[14:22] *** spq1 joined
+[14:24] *** mkramer left
+[14:24] *** [particle] left
+[14:26] <jnthn> frettled: Yes. I've never been to a Perl event there before.:)
+
+[14:27] *** [particle] joined
+[14:34] <frettled> jnthn: A life achievement award awaits you if you manage to visit a Perl workshop in every Chinese city with more than 5 million inhabitants.  ;)
+
+[14:35] *** jaldhar left
+[14:36] <moritz> http://www.wolframalpha.com/input/?i=number+of+cities+in+china+with+at+least+5+million+inhabitants # meh, not very informative
+
+[14:37] <frettled> Okay, it's not as bad as I feared, no cause for a life achievement award: http://en.wikipedia.org/wiki/List_of_cities_in_the_People's_Republic_of_China_by_population
+
+[14:38] <frettled> I was about to say "more than 1 million", but then I amended it as I typed it, because I thought there were many, many with more than 5 million.
+
+[14:39] <sjn> frettled: it's more than NINE THOUSAND!!1! o_O
+
+[14:39] <moritz> 12 if I can count
+
+[14:39] <sjn> :)
+
+[14:39] <sjn> that's all that matters. 'nuff said.
+
+[14:39] <frettled> :D
+
+[14:39] <sjn> oh
+
+[14:39] <sjn> maybe it goes "it's OVER NINE THOUSAND!"
+
+[14:39] * sjn isn't completely trained in internet memes
+
+[14:41] <PerlJam> moritz: they aren't necessarily in order by population by default.
+
+[14:42] <jnthn> :)
+
+[14:42] <jnthn> frettled: One in every country in the world would be a more fun thing to shoot for. :)
+
+[14:43] <PerlJam> jnthn: you're just saying that because you're ahead in that imaginary race.
+
+[14:43] <PerlJam> :-)
+
+[14:43] <frettled> jnthn: ooh, yes
+
+[14:43] <frettled> jnthn: and if noone is yet holding a workshop in that country, you can opt to do it yourself for extra credit
+
+[14:43] <jnthn> PerlJam: I'm certainly near the front if not at the front. :)
+
+[14:44] <jnthn> PerlJam: Andrew Shitov is probably my main "competitor" :)
+
+[14:44] <frettled> jnthn: so, have you been to Liechtenstein and Uzbekistan yet?
+
+[14:44] <PerlJam> frettled: organizing a perl conference/workshop in a country you've never been to would be some feat.
+
+[14:44] <jnthn> frettled: No :(
+
+[14:46] <frettled> PerlJam: or very easy, just saying «I'm going, and I'm holding a workshop with a hackathon, even if it's just me!»
+
+[14:46] <frettled> jnthn: aaw :(
+
+[14:46] <frettled> jnthn: those are the only two doubly-landlocked countries in the world
+
+[14:46] <PerlJam> frettled: that's cheating though :)
+
+[14:46] <frettled> PerlJam: yup
+
+[14:47] <frettled> PerlJam: could add the requirement that the workshop has to include at least three local people producing separate blog posts about it ;)
+
+[14:47] <PerlJam> an awesome award would be "perl conference farthest away from Earth's gravity well"
+
+[14:47] <PerlJam> perl conference in space anyone?
+
+[14:47] <frettled> Great idea!
+
+[14:48] <PerlJam> we'd probably have to settle for a perl conference at the top of a mountain though
+
+[14:48] <frettled> or in Tibet
+
+[14:48] <jnthn> ooh
+
+[14:48] <jnthn> Lhasa.pm :)
+
+[14:48] <jnthn> Jungfraujoch.pm :)
+
+[14:48] <frettled> jnthn: Tingri.pm!
+
+[14:48] <jnthn> :)
+
+[14:48] <frettled> PS: toilet facilities are not very good.
+
+[14:49] <PerlJam> heh
+
+[14:49] <frettled> PPS: bring your own power source for recharging laptops
+
+[14:50] <frettled> PPPS: the power source must run on diesel, as petrol engines don't work at that altitude
+
+[14:50] <frettled> ;)
+
+[14:50] <frettled> (okay, okay, solar power and wind power would probably work)
+
+[14:50] * PerlJam wonders if there ever was or will be interesting perl conference locations like: under ground, under water, in a volcano, on a glacier, in a jungle, etc.
+
+[14:51] <frettled> PerlJam: well, for a mere USD 70k or something like that, you can go visit the Titanic, so perhaps …
+
+[14:51] <frettled> That would be the conference _closest_ to the center of the Earth.
+
+[14:51] <PerlJam> "Here's the perl program I wrote to optimally rearrange the deck chairs on the Titanic"
+
+[14:51] <frettled> Well, now I've probably got jnthn drooling over the prospects instead of producing useful code, so, uhm.  :D
+
+[14:52] <frettled> PerlJam: \o/
+
+[14:52] <jnthn> :P
+
+[14:52] <sjn> PerlJam: LOL
+
+[14:52] * jnthn is actually trying to get his trip to China at least a little bit sorted out. :)
+
+[14:52] <jnthn> And NPW :)
+
+[14:53] <jnthn> Just one week until the pre-conference meetup :)
+
+[14:53] * sjn thinks frettled should come to NPW :)
+
+[14:53] <frettled> sjn: still the wrong dates for me :(
+
+[14:53] <sjn> frettled: you can always cancel the other stuff ;)
+
+[14:54] * frettled goes for an afternoon jog, cheerio, and happy weekend!
+
+[14:57] *** kst left
+[14:58] *** buddhabrot joined
+[15:00] *** buddhabrot left
+[15:05] *** mkramer1 joined
+[15:06] *** kst joined
+[15:06] *** mkramer1 left
+[15:06] *** mkramer1 joined
+[15:06] *** xinming joined
+[15:08] *** mkramer1 left
+[15:17] *** MayDaniel left
+[15:19] *** tzhs left
+[15:20] *** wamba joined
+[15:23] *** cognominal_ left
+[15:23] *** cognominal_ joined
+[15:24] *** stephanepayrard_ joined
+[15:28] *** cognominal_ left
+[15:32] *** kst left
+[15:32] *** kst joined
+[15:34] *** alester joined
+[15:37] *** kst left
+[15:37] *** mj41 left
+[15:42] <jnthn> researching pre-workshop venue's beer quality &
+
+[15:49] <tadzik> speaking of beer, what has this world come to. 4 PLN for a can o'beer!
+
+[15:56] *** REPLeffect joined
+[15:57] *** Chillance joined
+[16:09] *** thou joined
+[16:15] *** jedai_ joined
+[16:17] *** am0c joined
+[16:22] *** daxim left
+[16:25] *** jfried left
+[16:28] *** jfried joined
+[16:34] *** pamera joined
+[16:37] <mberends> researching dutch hackathon venue's beer quality (as a control group)
+
+[16:38] *** stephanepayrard_ left
+[16:38] *** stephanepayrard_ joined
+[16:38] <mberends> tadzik: is that including or excluding the drinking-in-public ticket? :P
+
+[16:39] <tadzik> mberends: no, that's a can o'beer in the local shop!
+
+[16:41] <tadzik> mberends: btw, my semiconductors are passed :)
+
+[16:42] <mberends> \o/ congrats!
+
+[16:44] <tadzik> 4 more exams to go :)
+
+[16:44] <tadzik> oh, github now has an option to re-own a repo
+
+[16:45] <tadzik> so we could possibly keep modules under some perl6-module-authors organization, 'cos everyone's hacking on everything anyway
+
+[16:45] <moritz> re-own?
+
+[16:45] <tadzik> change the owner of the repository
+
+[16:46] <tadzik> https://github.com/blog/876-repo-transfers
+
+[16:47] <moritz> is this much different from forking the repo into the new account, and deleting it in the old one?
+
+[16:48] <tadzik> dunno
+
+[16:49] <flussence> it probably updates all the forks to point to the new one
+
+[16:50] *** jfried left
+[17:00] *** molaf joined
+[17:13] <pmichaud> good afternoon, #perl6
+
+[17:14] <sjohnson> yo
+
+[17:15] <pmichaud> pmichaud@kiwi:~/nom$ git pull
+
+[17:15] <pmichaud> Already up-to-date.
+
+[17:16] <pmichaud> ...huh?  no commits while I was gone?
+
+[17:18] *** thou left
+[17:26] *** thou joined
+[17:29] *** envi_|2 left
+[17:31] <moritz> nope :/
+
+[17:35] *** Perl_ joined
+[17:35] <Perl_> hiii, someone here ?
+
+[17:35] <moritz> Perl_: no
+
+[17:35] <Perl_> lol
+
+[17:36] <Perl_> anyone can help me ?
+
+[17:36] <moritz> how can we know whether we can help you if we don't know what help you need?
+
+[17:37] <Perl_> maybe, i can explain...
+
+[17:37] <moritz> but if you need help with Perl 6, here's one of the best places on this planet
+
+[17:37] <Perl_> nice :D
+
+[17:37] <yath> moritz: did you mean "the only"? :)
+
+[17:37] <Perl_> i think i am in the best place
+
+[17:37] <moritz> yath: not at all. People in my office also get good Perl 6 help :-)
+
+[17:38] *** envi_laptop joined
+[17:38] <yath> moritz: okay, point for you :)
+
+[17:39] <Perl_> how can i redirect the *STDOUT to a subroutine ?
+
+[17:39] <yath> *STDOUT sounds like perl5
+
+[17:39] <moritz> Perl_: in Perl 6 that's spelled $*OUT
+
+[17:40] <Perl_> sorry...
+
+[17:40] <moritz> Perl_: and you can replace it with any object with print() and say() methods
+
+[17:40] <Perl_> its possible ?
+
+[17:41] <moritz> rakudo: class UCPrinter { method say(*@args) { pir::say(@args>>.uc.join) } }; $*OUT = UCPrinter.new; say 'foo'
+
+[17:41] <p6eval> rakudo 4a6d21: OUTPUT«FOO␤»
+
+[17:42] <moritz> Perl_: that's an example of intercepting a normal say() call, and doing something else with it (here, converting it upper case before actually printing it)
+
+[17:44] *** pamera left
+[17:45] *** hercynium joined
+[17:47] <Perl_> and it in PERL5 ?
+
+[17:47] <moritz> Perl_: ask in a Perl 5 channel (or read 'perldoc perlopentut')
+
+[17:47] <Perl_> harshhhh
+
+[17:47] <moritz> Perl_: not harsh, just trying to stay on topic
+
+[17:47] <flussence> no, he's asking about "PERL5", not Perl 5 :)
+
+[17:47] <yath> print-eval-read-loop?
+
+[17:48] <Perl_> can you give me the link of channe of perl 5?
+
+[17:48] <moritz> oh wait, you need Inline::PERL for that
+
+[17:48] <moritz> Perl_: #perl or #perl-help or so
+
+[17:48] <Perl_> i need more explain than the perl -help could give me
+
+[17:48] <Perl_> :)
+
+[17:49] <moritz> then read perldoc perlopentut
+
+[17:50] <Perl_> hmmm like linux
+
+[17:50] <Perl_> ^^
+
+[17:51] <colomon> what does $*OUT usually contain?  errr, or rather, how do you specifically specify std out?
+
+[17:51] <moritz> rakudo: say $*OUT.WHAT
+
+[17:51] <p6eval> rakudo 4a6d21: OUTPUT«IO()␤»
+
+[17:51] <moritz> rakudo: say $CORE::OUT.WHAT
+
+[17:51] <p6eval> rakudo 4a6d21: OUTPUT«Null PMC access in find_method('WHAT')␤  in main program body at line 2:/tmp/GSuk7AXCMp␤»
+
+[17:52] <moritz> rakudo: say $GLOBAL::OUT.WHAT
+
+[17:52] <p6eval> rakudo 4a6d21: OUTPUT«Null PMC access in find_method('WHAT')␤  in main program body at line 2:/tmp/fA243DueCC␤»
+
+[17:52] <moritz> rakudo: say $PROCESS::OUT.WHAT
+
+[17:52] <p6eval> rakudo 4a6d21: OUTPUT«IO()␤»
+
+[17:52] <moritz> that's it
+
+[17:54] <moritz> which in rakudo is IO.new(:PIO(pir::getstdout__P));
+
+[17:56] *** MayDaniel joined
+[17:58] <dalek> rakudo/nom: 3981965 | moritz++ | src/CORE.setting/ (3 files):
+
+[17:58] <dalek> rakudo/nom: implement infix<+>(Any, Any)
+
+[17:58] <dalek> rakudo/nom: 
+
+[17:58] <dalek> rakudo/nom: This is the same way as in master, through a .Bridge method
+
+[17:58] <dalek> rakudo/nom: which converts to a common numeric type if no direct multi
+
+[17:58] <dalek> rakudo/nom: is found.
+
+[17:58] <dalek> rakudo/nom: 
+
+[17:58] <dalek> rakudo/nom: I don't quite like the current factoring, because something
+
+[17:58] <dalek> rakudo/nom: like "3" + 4.4e0 goes through (Any, Any), then (Real, Real) and finally
+
+[17:58] <dalek> rakudo/nom: through (Num, Num) - three dispatches for a single, coercive multi.
+
+[17:58] <dalek> rakudo/nom: 
+
+[17:58] <dalek> rakudo/nom: Any suggestions on how to improve it (and still keep it extensible
+
+[17:58] <dalek> rakudo/nom: when the user adds enw Real types) are very welcome.
+
+[17:58] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/3981965146
+
+[17:59] *** molaf left
+[17:59] *** thou left
+[17:59] <colomon> hmmmm
+
+[18:00] *** kst joined
+[18:00] <colomon> rakudo: "3".Numeric.WHAT.say
+
+[18:00] <p6eval> rakudo 4a6d21: OUTPUT«Num()␤»
+
+[18:00] *** kanishka joined
+[18:00] <pmichaud> in nom that will be Int()
+
+[18:01] <colomon> it certainly should be
+
+[18:02] <colomon> I suppose you could implement infix:<+>(Real, Num)
+
+[18:03] *** Reaganomicon joined
+[18:03] *** furryfish joined
+[18:04] <colomon> or do something like the Niecza approach: have a bunch of the default approaches coded right in infix:<+>(Real, Real).  
+
+[18:04] <colomon> guess it probably depends on how efficient dispatch is
+
+[18:07] *** Eevee joined
+[18:08] <pmichaud> is .Bridge mainly a way of saying "convert to Num"?
+
+[18:09] <benabik> NQP Question:  Does NQP handle multiple return values?
+
+[18:09] *** kanishka left
+[18:09] <pmichaud> benabik: it can return a list, yes.
+
+[18:09] <pmichaud> it doesn't unpack into a list
+
+[18:10] *** kanishka joined
+[18:10] <pmichaud> $a := foo();    # if foo returns multiple values, then $a will be a RPA
+
+[18:10] <colomon> The idea of it is that it doesn't have to be Num, because what you want to convert to by default depends on what you want to do.  But with current Rakudo, it's "convert to Num".
+
+[18:10] <pmichaud> what would be an example of converting to something other than Num ?
+
+[18:11] <colomon> Depending on what you're trying to do, Rat or FatRat may be more appropriate
+
+[18:11] <pmichaud> but Bridge can't know that, can it?
+
+[18:11] <pmichaud> you're saying that Bridge is context sensitive somehow...?
+
+[18:11] <colomon> not at all
+
+[18:11] <colomon> I'm say some implementations may want a different Bridge
+
+[18:12] *** huf joined
+[18:12] <pmichaud> I don't understand.  I need a better example.
+
+[18:13] *** jfried joined
+[18:14] <colomon> what happens if you say something like (2 ** 1000000) > (5/4) ** 20000?  If you convert both sides to Num, it's just Inf > Inf.
+
+[18:14] *** huf left
+[18:15] <pmichaud> it is?  why?
+
+[18:15] <pmichaud> I mean, why would one convert to Num there anyway?
+
+[18:15] <pmichaud> (in a "real Perl 6 implementation", at least)
+
+[18:16] <pmichaud> I guess because those values won't fit in Int or Rat?
+
+[18:16] <colomon> because -- at least in theory -- you don't want to write out comparison operators comparing every possible pair of numeric types.
+
+[18:16] <pmichaud> I understand that part, yes.
+
+[18:16] <pmichaud> does Bridge apply to anything other than the reals?
+
+[18:17] *** huf joined
+[18:17] <colomon> just reals
+
+[18:17] *** ymasory joined
+[18:18] <pmichaud> then why the abstraction layer?   if an implementation things that num is its best core numeric type, it should do    &infix:<+>(Real $x, Real $y) { $x.Num + $y.Num }
+
+[18:18] <pmichaud> *thinks
+
+[18:19] <colomon> the abstraction layer is so you can write code that doesn't care what the best core numeric type is.  code portable between different implementations of Perl 6, that is.
+
+[18:20] <pmichaud> for primitive ops, I suspect performance is much more important than portability.  Perhaps others disagree with me.
+
+[18:21] <colomon> for primitive types, it's entirely possible that doing it in the Perl 6 type system at all is a big disadvantage
+
+[18:21] <pmichaud> anyway, removing Bridge wouldn't resolve the problem that moritz++ notes in the commit message
+
+[18:21] <pmichaud> so it still needs some thinking
+
+[18:22] <colomon> Niecza's math operators do the dispatching between core types right in C#.  I'm guessing that is a huge performance win.
+
+[18:23] <pmichaud> well, yes -- rakudo's equivalent would be to do the dispatching in PIR  (*sigh* which is where we started)
+
+[18:23] <pmichaud> anyway, I'll let it pass for now.  I suspect a slightly different approach would be
+
+[18:24] <pmichaud>   sub &infix:<+>(Num $x, Real $y as Num) { ... }
+
+[18:24] <pmichaud> and 
+
+[18:24] <pmichaud>    sub &infix:<+>(Real $x as Num, Num $y) { ... }
+
+[18:24] <pmichaud> (modulo ambiguous dispatch)
+
+[18:25] <pmichaud> then "3" + 1e0  would avoid the extra dispatch to  &infix:<+>(Num, Num)
+
+[18:26] <pmichaud> or even just
+
+[18:26] <pmichaud>     sub &infix:<+>(Real $x as Num, Real $y as Num) { ... }
+
+[18:27] <pmichaud> and do a primitive Num add right there.
+
+[18:27] <colomon> is that (in theory) smart enough to avoid casting $x to Num if it already is a Num?
+
+[18:28] <pmichaud> well, presumably Num.Num returns self
+
+[18:28] <pmichaud> which is what Bridge currently does
+
+[18:28] <pmichaud> (for Nums)
+
+[18:28] <colomon> right
+
+[18:30] <pmichaud> I don't remember if "as XYZ" avoids the cast... but I think it does.
+
+[18:31] <pmichaud> basically,  "ABC $x as XYZ"  means to typecheck based on ABC, but then cast to XYZ.  Presumably one could check for XYZ-ness before doing the cast.
+
+[18:31] <colomon> is there any practical functional difference between infix:<+>(Real $x, Real $y) and infix:<+>(Real $x as Num, Real $y as Num)?  From a dispatching point of view, I mean.
+
+[18:32] <pmichaud> depends on where you put the Num+Num logic
+
+[18:32] <pmichaud> the second one doesn't require a separate  &infix:<+>(Num, Num)
+
+[18:33] <sorear> pmichaud: niecza has an extension "is return-pass" which can be applied to subs to disable the return handler
+
+[18:33] <pmichaud> sorear: good to know, thanks
+
+[18:33] <colomon> pmichaud: Right, but will it always match the same calls?  (Seems like yes, but I don't know for sure.)
+
+[18:34] *** Perl_ left
+[18:34] <pmichaud> colomon: I don't know... I'm somewhat hesitant about "always" when talking about dispatch :)
+
+[18:35] <flussence> I have a silly-sounding question (is there a FAQ for these?): why is the literal «1e0» a Num instead of Int?
+
+[18:35] <colomon> flussence: because that's how we defined it.  :)
+
+[18:35] <flussence> fair enough :)
+
+[18:35] *** MayDaniel left
+[18:35] <colomon> flussence: the e<whatever> is the literal signal that we have a Num.
+
+[18:36] <colomon> flussence: without it, your literal is some other kind of number.  (Unless it's a Rat-like thing that cannot be stored in a Rat.)
+
+[18:37] <colomon> pmichaud: I guess the other way of asking is, is "as Num" ignored during the dispatching?
+
+[18:38] * TimToady wonders if putting the 'as Num' on a proto can figure out which multis need the coercion and which don't
+
+[18:40] <TimToady> and when we know the candidate lists at compile time, we can compute the coercions at compile time
+
+[18:41] *** buubot_backup left
+[18:41] <pmichaud> colomon: I don't think "as Num" affects the dispatch selection, no.
+
+[18:42] <sorear> good * #perl6
+
+[18:43] <colomon> pmichaud: to me that makes infix:<+>(Real $x as Num, Real $y as Num) sound like the ultimate solution.  it's every bit as flexible as having infix:<+>(Real $x, Real $y) and infix:<+>(Num $x, Num $y), faster, and requires less code.  Seems like a huge win.
+
+[18:43] <mberends> good * sorear
+
+[18:44] <pmichaud> colomon: cool.  now we just need jnthn++ to implement "as XYZ" in nom.  :-)
+
+[18:45] <dalek> rakudo/nom: 9c4146d | mberends++ | tools/build/ (2 files):
+
+[18:45] <dalek> rakudo/nom: [tools/build] suggest when and how Configure.pl needs to be re-run
+
+[18:45] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/9c4146d1dc
+
+[18:46] <tadzik> oh nice
+
+[18:46] <pmichaud> mberends: +  @$(PERL) tools/build/check-versions.pl install/bin/nqp 367	
+
+[18:46] <pmichaud> probably wants to be
+
+[18:46] <pmichaud> @$(PERL) tools/build/check-versions.pl $(NQP_EXE)
+
+[18:47] <pmichaud> so you're checking the version of NQP being used to build Rakudo, as opposed to assuming it's in install/bin/nqp :)
+
+[18:47] <moritz> it does in nom :-)
+
+[18:47] <mberends> thanks pmichaud, will fix immediately :)
+
+[18:47] <moritz> sorry, answering to stale chat
+
+[18:47] * moritz should backlog the whole stuff
+
+[18:48] <pmichaud> is there a reason for not using -M for the file modification times?
+
+[18:48] <pmichaud> (ooc)
+
+[18:48] <colomon> pmichaud: as far as I can see, there's no conflict in that solution with .Bridge, either -- it just won't be used for normal math operations on the built in types.
+
+[18:49] <mberends> pmichaud: I thought that was a value in days, the stat is in seconds. (But the days may be fractional)
+
+[18:50] <pmichaud> my experience has been that -M has good enough resolution to distinguish seconds... but perhaps my experience is not so complete :)
+
+[18:50] * colomon wonders if a BridgeType type alias could make it easy to remove that penalty for user-defined math operations and user-defined real types...
+
+[18:51] <mberends> pmichaud: I thought about -M and wasn't sure... but I'm happy to switch to that and try it
+
+[18:52] *** aindilis joined
+[18:54] *** REPLeffect left
+[19:01] <dalek> rakudo/nom: dd97747 | mberends++ | tools/build/ (2 files):
+
+[19:01] <dalek> rakudo/nom: [tools/build] use $(NQP_EXE) and for timestamps -M as suggested by pmichaud++
+
+[19:01] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/dd97747e60
+
+[19:02] *** buubot_backup joined
+[19:04] *** mkramer joined
+[19:08] *** mkramer left
+[19:09] *** REPLeffect joined
+[19:14] *** icwiener left
+[19:17] <dalek> rakudo/nom: ac26106 | pmichaud++ | / (4 files):
+
+[19:17] <dalek> rakudo/nom: Initial implementation of Array, List, and Parcel.
+
+[19:17] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/ac26106f48
+
+[19:17] <dalek> rakudo/nom: 3015a76 | pmichaud++ | src/CORE.setting/Array.pm:
+
+[19:17] <dalek> rakudo/nom: Use a vivification closure for Array.at_pos.
+
+[19:17] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/3015a76898
+
+[19:17] <dalek> rakudo/nom: f5bccfc | pmichaud++ | / (5 files):
+
+[19:17] <dalek> rakudo/nom: Merge branch 'nom' of github.com:rakudo/rakudo into nom
+
+[19:17] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/f5bccfc2ce
+
+[19:17] <dalek> rakudo/nom: ba0e74c | pmichaud++ | tools/build/ (2 files):
+
+[19:17] <dalek> rakudo/nom: Merge branch 'nom' of github.com:rakudo/rakudo into nom
+
+[19:17] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/ba0e74ce05
+
+[19:17] <dalek> rakudo/nom: fd1c2a1 | pmichaud++ | / (5 files):
+
+[19:17] <dalek> rakudo/nom: Add EnumMap and Hash.  Refactor Array and List slightly.
+
+[19:17] <dalek> rakudo/nom: 
+
+[19:17] <dalek> rakudo/nom: Note that these implementations of List, Array, etc. are currently
+
+[19:17] <dalek> rakudo/nom: intended to "get basic functionality in place" rather than
+
+[19:17] <dalek> rakudo/nom: "optimized for performance".  Once we have things fleshed out
+
+[19:17] <dalek> rakudo/nom: a bit further in nom, we will revisit the implementations to
+
+[19:17] <dalek> rakudo/nom: figure out where the hotpaths are and how to improve them
+
+[19:17] <dalek> rakudo/nom: (e.g., List.gimme).
+
+[19:17] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/fd1c2a163c
+
+[19:19] *** gbacon_ joined
+[19:19] *** araujo left
+[19:19] *** kanishka left
+[19:32] <tadzik> nombuild fails for me
+
+[19:32] <moritz> fine here
+
+[19:32] <tadzik> with --gen-nqp probably
+
+[19:33] *** kaare_ joined
+[19:33] <tadzik> that's what fixed that for me: http://wklej.org/id/544262/
+
+[19:34] <pmichaud> ah, yes
+
+[19:34] <PerlJam> tadzik: it "fails" if you've got a root-installed parrot, but attempt to install rakudo/nqp as non-root  :)
+
+[19:34] <pmichaud> that's correct.
+
+[19:34] * pmichaud fixes
+
+[19:37] *** bluescreen10 left
+[19:37] <colomon> is --gen-parrot now obsolete?
+
+[19:37] <pmichaud> no
+
+[19:38] <moritz> m
+
+[19:38] *** bluescreen10 joined
+[19:38] <colomon> Is --gen-parrot-option broken, then?  I'm getting the PCRE error even with --gen-parrot-option=--without-pcre in my Configure.pl line.
+
+[19:39] <pmichaud> there is no more --gen-parrot-option, it's now --parrot-option.
+
+[19:39] <pmichaud> it's probably not implemented in nom, I can add it.
+
+[19:39] <colomon> I'd appreciate that.
+
+[19:41] <pmichaud> --parrot-option now pushed.
+
+[19:42] <pmichaud> (not tested... that's your job :)
+
+[19:42] <colomon> roger
+
+[19:43] <dalek> rakudo/nom: 004e57a | pmichaud++ | src/CORE.setting/traits.pm:
+
+[19:43] <dalek> rakudo/nom: Stub in a "is rw" trait for Routines.
+
+[19:43] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/004e57aca5
+
+[19:43] <dalek> rakudo/nom: 6aec0a7 | pmichaud++ | src/CORE.setting/ (2 files):
+
+[19:43] <dalek> rakudo/nom: Be careful about using \$ref that will appear inside of closures.
+
+[19:43] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/6aec0a7b07
+
+[19:43] <dalek> rakudo/nom: b5b3d7a | pmichaud++ | tools/build/check-versions.pl:
+
+[19:43] <dalek> rakudo/nom: Fix path for NQP::Configure in check-versions.pl; patch courtesy tadzik++.
+
+[19:43] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/b5b3d7a460
+
+[19:43] <dalek> rakudo/nom: 7c85e61 | pmichaud++ | src/ (2 files):
+
+[19:43] <dalek> rakudo/nom: Initial version of postcircumfix:<[ ]> and postcircumfix:<{ }>.
+
+[19:43] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/7c85e61685
+
+[19:43] <dalek> rakudo/nom: 6dcae2e | pmichaud++ | Configure.pl:
+
+[19:43] <dalek> rakudo/nom: Add --parrot-option to Configure.pl.
+
+[19:43] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/6dcae2e743
+
+[19:44] <pmichaud> phenny: tell jnthn  Array and Hash now implemented in Nom, if you want to work on "my @a" and "my %h" and the like.  :)
+
+[19:44] <phenny> pmichaud: I'll pass that on when jnthn is around.
+
+[19:44] <TimToady> pretty soon you guys are going to be able to knock out a new Perl 6 implementation in about a week or so...  :)
+
+[19:44] <tadzik> 10 years of practice :)
+
+[19:44] <TimToady> it shows :)
+
+[19:46] <pmichaud> I've only had seven.
+
+[19:46] <PerlJam> pmichaud: has it been that long?
+
+[19:46] <pmichaud> I "started" in summer 2004
+
+[19:47] <pmichaud> (but didn't actually get up to speed until about a year after that)
+
+[19:47] <pmichaud> PerlJam: and yes, it's been "that long"  (sigh)
+
+[19:48] * jnthn back
+
+[19:48] <phenny> jnthn: 19:44Z <pmichaud> tell jnthn  Array and Hash now implemented in Nom, if you want to work on "my @a" and "my %h" and the like.  :)
+
+[19:48] * jnthn has had less than 4 :)
+
+[19:48] * tadzik is approaching 1, if that counts :)
+
+[19:48] <jnthn> I think that puts me at one implementation of roles per year. 
+
+[19:49] <jnthn> :)
+
+[19:49] <pmichaud> I think I've had about one implementation of array/list per year, yes.
+
+[19:50] <tadzik> do they get better?
+
+[19:50] <pmichaud> oh, absolutely
+
+[19:50] <pmichaud> this latest one is going together quite nicely
+
+[19:50] <pmichaud> it's even.... readable (I think)
+
+[19:50] <tadzik> then I see that as progress
+
+[19:50] <jnthn> So are the roles
+
+[19:50] <jnthn> Generally, ever implementation of roles reifies more concepts.
+
+[19:50] <colomon> pmichaud++ # fix seems to have worked
+
+[19:50] <pmichaud> Generally, every instance of lists reifies more values.  :-P
+
+[19:50] <jnthn> The current roles implementation has 4 meta-objects.
+
+[19:51] <jnthn> (as in, current one I'm doing)
+
+[19:51] <jnthn> Up from 2, which was up form 1. :)
+
+[19:51] <pmichaud> colomon: excellent, thanks
+
+[19:52] <benabik> jnthn: Next version will have 8?
+
+[19:52] <jnthn> benabik: I think I may have run out of concepts to split up. :)
+
+[19:52] <pmichaud> jnthn: Don't worry, TimToady++ will add more.
+
+[19:52] <jnthn> O.O
+
+[19:53] <jnthn> pmichaud: Do Array and Hash have $!container_descriptor s?
+
+[19:53] <pmichaud> jnthn: not yet
+
+[19:53] <pmichaud> jnthn: you can add if you want
+
+[19:53] <jnthn> k
+
+[19:53] <jnthn> Probably need that :)
+
+[19:54] <jnthn> uh-oh
+
+[19:54] <TimToady> I think most of the concepts that have been split up so far were implicit in the original design, so you'll just have to find more concepts to split up there :)
+
+[19:54] <jnthn> "We are very close to physical limit of time slots for the talks #ye2011. Please submit now if you want to give a talk!"
+
+[19:54] * jnthn submits
+
+[19:54] <pmichaud> uh-oh
+
+[19:54] *** thou_ joined
+[19:55] <pmichaud> I guess I should submit.
+
+[19:55] <jnthn> pmichaud: Planning to come to YAPC::Europe?
+
+[19:55] <jnthn> OK
+
+[19:55] <pmichaud> jnthn: what are you submitting on?
+
+[19:55] <jnthn> pmichaud: what are you...oh.
+
+[19:55] <jnthn> :)
+
+[19:55] <jnthn> EDEADLOCK :)
+
+[19:55] <pmichaud> jnthn: I figure you've given talks already this year and kinda know what you want to talk about.
+
+[19:55] <pmichaud> I have only done one (very generic) Perl 6 talk this year.
+
+[19:55] *** kaare_ left
+[19:55] <jnthn> pmichaud: You'da thunk so but I'm not sure what to do.
+
+[19:56] <jnthn> Normally I write something special for YAPC::Europe
+
+[19:56] <jnthn> So all the folks I spoke for at workshops have something new to see.
+
+[19:56] <pmichaud> too bad we haven't done anything significant recently that you could write about :)
+
+[19:56] <jnthn> :P
+
+[19:56] <jnthn> pmichaud: I guess question is, what do you want to do?
+
+[19:56] <pmichaud> I'm not at all picky
+
+[19:56] <jnthn> I guess traditionally, you've done the talk in the role of "Rakudo update"
+
+[19:57] *** cognominal_ joined
+[19:57] <pmichaud> I can do a generic "here's where we are with Rakudo talk"  or an NQP talk (but I think with recent changes you're entitled to the nqp talk) or focus on some feature of the nom implementation or ...
+
+[19:57] <pmichaud> I've also thought about doing a "State of the Butterfly" talk to correspond to the "State of the Velociraptor"
+
+[19:57] <jnthn> I think there should be a talk looking at the latest tech and goodies in Rakudo land, and some roadmap
+
+[19:58] <jnthn> Or at least touching on that
+
+[19:58] <jnthn> So folks know where things stand.
+
+[19:58] <jnthn> I could very easily talk about 6model and meta-programming.
+
+[19:58] <PerlJam> I think most people still tend to think the butterfly hasn't left its chrysalis 
+
+[19:58] <pmichaud> I'm also thinking about a talk on "Perl 6 as a disruptive technology"  but it might be a bit too provocative/controversial
+
+[19:59] *** george_z0rwell joined
+[19:59] <pmichaud> I can also talk about Rakudo performance over the past year
+
+[19:59] <jnthn> a bit too...disruptive? :)
+
+[19:59] *** aindilis` joined
+[19:59] *** stephanepayrard_ left
+[19:59] *** Reaganomicon left
+[19:59] <pmichaud> (and hopefully by yapc::eu we'll be able to benchmark nom)
+
+[19:59] *** aindilis left
+[20:00] *** frettled left
+[20:00] <jnthn> I guess most of what I've focused on over the last year is metamodel stuff and preparing for more static analysis.
+
+[20:00] *** frettled joined
+[20:00] <jnthn> And gradual typing and such stuff.
+
+[20:00] *** s1n joined
+[20:03] <pmichaud> Anyway, I'll do some sort of "Rakudo talk"
+
+[20:03] <pmichaud> I don't want it to be just "status", though -- would like something a bit spicy in there.
+
+[20:03] <jnthn> yeah, quite
+
+[20:05] *** mkramer1 joined
+[20:05] *** mkramer1 left
+[20:05] *** cognominal_ left
+[20:06] <pmichaud> afk for a bit
+
+[20:07] <sorear> ...I'm back
+
+[20:07] *** furryfish is now known as furryfishy
+
+[20:08] * jnthn backlogs what happens while we was on his pub research mission :)
+
+[20:11] <pmichaud> oh, before I go:  interesting statistic:   http://gist.github.com/1019662
+
+[20:11] *** masak joined
+[20:11] <masak> allo, #perl6
+
+[20:11] <pmichaud> it takes us less time to compile the setting to .pir (9.74 seconds) than it takes for parrot to compile the .pir to .pbc (16.74 seconds)
+
+[20:12] <pmichaud> which either means our compilation speed has improved greatly, or we're generating too much .pir
+
+[20:12] <tadzik> or both :)
+
+[20:12] *** cognominal_ joined
+[20:12] <tadzik> masak: allo allo
+
+[20:13] <pmichaud> ....and it's not the latter, I don't think
+
+[20:13] <pmichaud> pmichaud@kiwi:~/nom$ wc -l src/gen/CORE.setting.pir 
+
+[20:13] <pmichaud> 28050 src/gen/CORE.setting.pir
+
+[20:16] <sorear> pmichaud: I remember back when compiling the setting to .pir took 36,000 seconds :)  9.74 is _impressive_
+
+[20:17] <jnthn> pmichaud: Wait, the PIR => PBC takes longer than the Perl 6 => PIR?
+
+[20:17] <tadzik> the setting got a bit smaller
+
+[20:18] <jnthn> pmichaud: Oh :/
+
+[20:18] <jnthn> pmichaud: You know all those little loadinits we no longer have? :)
+
+[20:19] <jnthn> pmichaud: And how PIR is currently our "serialization format"? :)
+
+[20:19] * jnthn suspects we're blowing up the register allocator. :)
+
+[20:19] <benabik> The register allocator is a little simple..
+
+[20:21] * jnthn sees some easy improvements
+
+[20:21] <tadzik> I like those
+
+[20:21] <jnthn> (to our code-gen, not to the reg alloc)
+
+[20:21] <tadzik> they're easy, and they're improvements :)
+
+[20:21] <jnthn> It's doing stuff I didn't think it was doing.
+
+[20:22] *** envi_laptop left
+[20:22] <jnthn> tadzik: ooc, is the startup time still fairly decent? I remember you measured it when we had even less in the setting.
+
+[20:23] <tadzik> hmm, I'll have to track down the logs to see how it was :)
+
+[20:23] <moritz> it's gone up a bit
+
+[20:23] <moritz> from ~270ms to 360ms
+
+[20:23] <masak> http://strangelyconsistent.org/blog/june-8-2011-parts-of-strings updated for the new C<substr> API.
+
+[20:23] <tadzik> ./perl6 -e "say 'Hello, world'"  0,32s user 0,06s system 98% cpu 0,388 total
+
+[20:24] <jnthn> tadzik: I forget what you had before :)
+
+[20:24] <jnthn> moritz: OK, thanks.
+
+[20:25] <tadzik> jnthn: let me see that in the logs
+
+[20:25] <tadzik> I suppose "Hello world" does not occur too often. But was I using the comma...
+
+[20:26] <tadzik> 2011-06-01 23:35:03     tadzik  ./perl6 -e 'say "Hello world!"'  0,25s user 0,03s system 99% cpu 0,281 total
+
+[20:27] <tadzik> we need "isnomstillfast.com"
+
+[20:28] <masak> :)
+
+[20:29] <pmichaud> any chance that nom will appear on p6eval (before it becomes 'master')?
+
+[20:29] <pmichaud> jnthn: yes, PIR=>PBC is taking about 60% longer than Perl 6 => PIR :)
+
+[20:30] <tadzik> that's a bit weird
+
+[20:31] <PerlJam> When does it look like nom will become master?
+
+[20:31] *** ymasory_ joined
+[20:31] <pmichaud> and although CORE.setting is currently mostly stubs, 941 lines of CORE.setting(.pm) results in 28050 lines of PIR, which means a factor of about 28:1
+
+[20:31] *** ymasory left
+[20:31] <pmichaud> ...which is not very much.
+
+[20:31] <pmichaud> PerlJam: I don't know.  I doubt we'll be ready for June.  July is entirely in the realm of possibility.
+
+[20:32] <pmichaud> normal release date for 2011.06 would be Jun 23
+
+[20:32] <pmichaud> that's 13 days from today
+
+[20:33] <tadzik> wow, wow
+
+[20:33] <pmichaud> that said, with as quickly as things are coming together, June isn't entirely out of the question.  But then again, NPW is next weekend.
+
+[20:33] <masak> yeah, too bad :)
+
+[20:33] <jnthn> It is? O.O
+
+[20:33] <tadzik> I'm jealous
+
+[20:33] <jnthn> Also I ahve to write a keynote for the event the day before NPW. :)
+
+[20:34] * pmichaud wonders about the modifier there
+
+[20:34] <pmichaud> is it a keynote for the event that occurs the day before NPW, or is the day before NPW when jnthn++ will write his keynote?  ;)
+
+[20:34] <jnthn> oh!
+
+[20:34] <jnthn> I hadn't seen the ambiguity :P
+
+[20:34] <pmichaud> I suppose it could be both. :)
+
+[20:35] <jnthn> pmichaud: There's an (unrelated) event my $dayjob is co-hosting the day before NPW
+
+[20:35] <pmichaud> you could write the keynote for the event that occurs the day before NPW on the day before NPW :)
+
+[20:35] <jnthn> I think I'll try and write the keynote a little further ahead of time than that :P
+
+[20:36] <jnthn> pmichaud: if I'm generating PAST that calls a pirop, and there's an I register, what PAST can I generate to stop it making PIR that instantiates an Integer PMC only to immediately unbox it to use in the op?
+
+[20:36] <jnthn> pmichaud: It turns out the deserialization code is chock full of that.
+
+[20:36] <jnthn> Which is wasteful in terms of registers, when a literal would be just fine.
+
+[20:36] <jnthn> (These are all literals.)
+
+[20:37] <pmichaud> jnthn: can you point me to the code in question?
+
+[20:37] <pmichaud> mainly you need to make sure the signature is correct
+
+[20:38] <masak> pmichaud: I'm afraid I overpromised yesterday with "crunchy chocolate action". :/ that's not until in a week. today's the Moon Lander. :)
+
+[20:38] <pmichaud> masak: no problem :)
+
+[20:38] * masak writes a moon lander
+
+[20:38] <tadzik> :)
+
+[20:38] <tadzik> place your bets gentleman, what would it be?
+
+[20:39] <jnthn> pmichaud: oh
+
+[20:39] <jnthn> pmichaud: It's more involved than that, I think. :(
+
+[20:40] <pmichaud> can you point me to the code in question?  ;)
+
+[20:40] <jnthn> pmichaud: Yeah, it wasn't the bit I thought it was. Finding the relevant thing.
+
+[20:41] <pmichaud> it looks to me (from looking at the pir output)  that the arguments to repr_bind_attr_*  are being forced to be PMCs by the PAST
+
+[20:41] <jnthn> pmichaud: src/PAST/SixModelPASTExtensions.pir
+
+[20:41] <jnthn> pmichaud: That's the code that generates natively typed attribute binds/gets.
+
+[20:42] <jnthn> pmichaud: It kinda sucks.
+
+[20:42] <jnthn> I couldn't figure out how to do better though. I may well have missed something with regard to the whole coercion model.
+
+[20:43] <pmichaud>     # We have three cases here.
+
+[20:43] <pmichaud>     #   0 children = use self
+
+[20:43] <pmichaud>     #   1 child    = object to look up on
+
+[20:43] <pmichaud>     #   2 children = object to look up on + class handle
+
+[20:43] <pmichaud> which case is this one?
+
+[20:44] <sorear> How many registers does the current PAST::Compiler need for "$x + $y; $x + $y; $x + $y;" (NQP)?  6? 9?
+
+[20:44] <jnthn> pmichaud: Rakudo and NQP will always emit 2
+
+[20:44] <pmichaud>     call_on = self.'as_post'(call_on, 'rtype'=>'P')
+
+[20:45] <pmichaud> I suspect that's forcing a PMC
+
+[20:45] <sorear> o/ masak
+
+[20:45] <pmichaud> (it might need to be one)
+
+[20:45] <masak> \o sorear 
+
+[20:46] <benabik> sorear: I count 9.
+
+[20:46] <jnthn> pmichaud: Line 146 onwards are the more interesting ones, I think
+
+[20:46] <pmichaud> oh, wait
+
+[20:47] <pmichaud> when this gets called, bindpost is already a POST tree?
+
+[20:47] <jnthn> pmichaud: I think call_on is the invocant.
+
+[20:47] <jnthn> pmichaud: er
+
+[20:47] <jnthn> pmichaud: the name suggests so
+
+[20:47] <jnthn> pmichaud: I understand this less than you might hope. :)
+
+[20:47] <jnthn> (It was quite a struggle to write something that actually worked.)
+
+[20:47] <jnthn> I suspect I'm missing something.
+
+[20:48] <pmichaud> what generates an attribute_6model pasttype ?
+
+[20:48] <jnthn> pmichaud: Any attribute access in NQP or Rakudo.
+
+[20:48] <jnthn> pmichaud: It's basically a replacement for attribute that understands 6model enough to ask it whether the type is a native or not.
+
+[20:49] <jnthn> And if native, what sorta native.
+
+[20:49] <pmichaud> okay, looking.
+
+[20:49] <jnthn> Thanks.
+
+[20:50] <pmichaud> I'm guessing the problem arises when we have     $!attribute := <value>
+
+[20:51] <pmichaud> <value> is being coerced into a PMC by :pasttype<bind>  before it ever gets to attribute_6model
+
+[20:51] <jnthn> pmichaud: That sounds familiar.
+
+[20:51] <pmichaud> yes, :pasttype<bind> has:
+
+[20:52] <pmichaud>     rpost = self.'as_post'(rpast, 'rtype'=>'P')
+
+[20:52] <pmichaud>     rpost = self.'coerce'(rpost, 'P')
+
+[20:52] <pmichaud>     ops.'push'(rpost)
+
+[20:52] <jnthn> Hmm. Premature commitment?
+
+[20:52] <jnthn> I guess we never had the native case before then.
+
+[20:52] <pmichaud> well, until 6model it wasn't possible to bind to anything by a PMC
+
+[20:52] <pmichaud> *but
+
+[20:53] <jnthn> Ah, true. :)
+
+[20:53] <pmichaud> also, :pasttype<bind> doesn't have any information to know what sort of thing it's binding.
+
+[20:53] *** bluescreen10 left
+[20:53] <sorear> yiiiikes native types it looks like rakudo/nom is trying to beat niecza on speed :)
+
+[20:53] <pmichaud> since it's a node above the attribute node
+
+[20:54] <masak> sorear: well, we have to keep things interesting, don't we? :)
+
+[20:55] <jnthn> pmichaud: I think in PAST2DNST I passed down the PAST for the value to bind by having it in a contextual and letting the actual var node deal with it.
+
+[20:55] <jnthn> Or something like that.
+
+[20:55] <sorear> in niecza, var nodes are variadic, 1 arg = bind, 0 arg = fetc
+
+[20:56] <dalek> rakudo/nom: 185801c | moritz++ | src/CORE.setting/operators.pm:
+
+[20:56] <dalek> rakudo/nom: add coercive Str ops. If any of those need .Stringy instead, it is an easy search+replace for pmichaud++
+
+[20:56] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/185801c494
+
+[20:57] <pmichaud> moritz: I know that infix:<~> is Stringy
+
+[20:58] <pmichaud> jnthn: I'm guessing we need a new "bind" pasttype that lets the lhs decide the coercion
+
+[20:59] <jnthn> pmichaud: That could also work.
+
+[21:00] *** ymasory_ left
+[21:00] <pmichaud> it's probably a pain to try to have NQP figure out when a bind is to an attribute versus something else
+
+[21:01] <pmichaud> easier to do it in the bind pasttype
+
+[21:01] <jnthn> pmichaud: I suspect so, yeah
+
+[21:02] <pmichaud> do we have any other native binds yet?
+
+[21:02] <jnthn> pmichaud: Just looked through your Array/List/EnumMap/Hash. :)
+
+[21:02] <jnthn> pmichaud: no, only to attributes
+
+[21:02] <pmichaud> I'm guessing we'd want the others someday also.
+
+[21:02] <jnthn> pmichaud: Though that may be all we need (more)
+
+[21:02] <pmichaud> I wish I had more latitude to fix this in Parrot.
+
+[21:03] <jnthn> my int $a := 42; # don't think this works, you can only assign natives
+
+[21:03] <sorear> I prefer to think you can only bind natives
+
+[21:03] <pmichaud> presumably the PAST::Var node knows it's native, though, and would select a different fetchop/storeop
+
+[21:03] <sorear> it's clear you can't do both
+
+[21:03] <jnthn> sorear: That was my first intuition too, but apparently not ;)
+
+[21:04] <sorear> jnthn: so why does nqp allow binding to native typed attributes?
+
+[21:04] <jnthn> sorear: Right, and since binding feels more referency I think the last call on this was that it should be assignment.
+
+[21:04] <jnthn> sorear: Because it doesn't have assignment :P
+
+[21:04] <jnthn> sorear: I think I implemented it and then asked the question also ;)
+
+[21:04] <sorear> maybe nqp should allow my int $a := 42 for the same reason. :)
+
+[21:04] <jnthn> hehe
+
+[21:05] <jnthn> Well, the thing is, what does my int $a actually mean
+
+[21:05] <jnthn> Does it mean "we have a Scalar[int]"
+
+[21:05] <masak> dang, I crashes into the moon :(
+
+[21:05] <masak> *crashed
+
+[21:05] <masak> this game is hard! :)
+
+[21:05] <jnthn> Or does it mean, we have an int register?
+
+[21:05] <sorear> it allows you to use $a as a synonym for an I slot in the lexpad
+
+[21:05] *** bluescreen10 joined
+[21:05] <sorear> or does it?
+
+[21:06] <jnthn> :)
+
+[21:06] <jnthn> I dunno, I put off thinking too hard about them :)
+
+[21:06] *** araujo joined
+[21:06] *** araujo left
+[21:06] *** araujo joined
+[21:06] <sorear> yeah
+
+[21:06] <jnthn> Maybe after roles... :)
+
+[21:06] <sorear> I'm reminded of our last discussion
+
+[21:06] <sorear> I remember deciding that it should create Scalar[int]
+
+[21:06] <sorear> And decontainerization should be orthogonal
+
+[21:07] <sorear> However it begs the question - can we ever decontainerize attributes?
+
+[21:07] <jnthn> Anyway, I think the "desired syntax" is assigny, not bindy.
+
+[21:07] <jnthn> Well, that's why I'm a bit reluctant on the Scalar[int] approach
+
+[21:07] <sorear> containers are not free
+
+[21:08] <masak> yay! second landing attempt was successful! :)
+
+[21:08] <sorear> I estimate that 1/3 to 1/2 of the memory use of niecza's Op-trees are actually the containers
+
+[21:08] <jnthn> Because P6opaque just puts the native int straight into the attribute.
+
+[21:08] <sorear> $some-op.lhs is a 6 word Scalar-instance
+
+[21:08] <sorear> which points to $some-other-op
+
+[21:09] <jnthn> pmichaud: (latitude to fix this in Parrot) what do you want to change?
+
+[21:10] <jnthn> pmichaud: also, is this a thinko:
+
+[21:10] <jnthn> -sub infix:<,>(|$) {
+
+[21:10] <jnthn> +my sub infix:<,>(|$) {
+
+[21:10] <jnthn> (my is the default)
+
+[21:11] <pmichaud> it's just the result of a cut-and-paste from another file
+
+[21:12] <pmichaud> (I re-developed Parcel/List/Array in a separate file then cut+paste them into CORE.setting, rather than recompiling CORE.setting for each minor change)
+
+[21:14] <pmichaud> (latitude)  I'd want to change the structure of :pasttype<bind>
+
+[21:14] <pmichaud> but that's probably too radical a change for Parrot
+
+[21:15] <pmichaud> (it also involves fixing the PAST::Var node types)
+
+[21:15] <pmichaud> We'll just fix it when we re-implement PAST in NQP :)
+
+[21:15] <sorear> too late, iiuc
+
+[21:15] <sorear> benabik has already started that
+
+[21:15] <pmichaud> I think he's implementing in nqp-rx
+
+[21:15] <jnthn> yeah, I believe so too
+
+[21:16] <jnthn> Also, I think the big part of what he's doing is POST => PBC
+
+[21:16] <benabik> jnthn: POST -> PBC is done-ish.  I'm trying to get everything needed for PAST -> PBC
+
+[21:17] <benabik> This does involve getting PAST into NQP-rx so it's hackable
+
+[21:17] <jnthn> benabik: POST -> PBC is mostly done? Wow!
+
+[21:18] <benabik> jnthn: bacek worked on it for a while.
+
+[21:18] <benabik> jnthn: But he added new POST types to do it, so I have to teach them to PAST.
+
+[21:18] <jnthn> Magical coding robot is magical.
+
+[21:21] * moritz doesn't feel motivated to do all the coercive numeric operators right now
+
+[21:22] <jnthn> moritz++ # already did the string ones :)
+
+[21:22] *** tomize joined
+[21:22] <dalek> rakudo/nom: ebbf34c | jnthn++ | src/CORE.setting/ (2 files):
+
+[21:22] <dalek> rakudo/nom: Really hard patch to make my @a and my %h work properly.
+
+[21:22] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/ebbf34caaf
+
+[21:24] <jnthn> moritz: Is there any chance of a nom target on p6eval?
+
+[21:25] <jnthn> moritz: Or are you the wrong person to ask about that?
+
+[21:25] *** PhatEddy joined
+[21:26] <moritz> jnthn: there is a chance, yes :-)
+
+[21:26] <sorear> moritz, diakopter, and I have shell access to p6eval
+
+[21:26] <sorear> moritz: what all needs to be done to add a new p6eval target?
+
+[21:27] <moritz> sorear: 1) set up a dir where the target is compiled (typically clone some source repo)
+
+[21:27] <moritz> sorear: 2) a build script in the evalbot repo
+
+[21:27] <moritz> sorear: 3) a crontab entry
+
+[21:27] <moritz> sorear: 4) a patch for evalbot.pl to accept the target
+
+[21:27] <dalek> rakudo/nom: 145e466 | jnthn++ | src/Perl6/Actions.pm:
+
+[21:27] <dalek> rakudo/nom: Fix %h<foo> style hash indexing.
+
+[21:27] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/145e4666d2
+
+[21:28] *** hercynium left
+[21:29] <sorear> I see moritz  is already started
+
+[21:34] <dalek> evalbot: ad9b9cf | moritz++ | build-scripts/rebuild-nom.sh:
+
+[21:34] <dalek> evalbot: initial build script for nom
+
+[21:34] <dalek> evalbot: review: https://github.com/perl6/evalbot/commit/ad9b9cfd7a
+
+[21:34] <dalek> evalbot: b87bf78 | moritz++ | evalbot.pl:
+
+[21:34] <dalek> evalbot: add nom target
+
+[21:34] <dalek> evalbot: review: https://github.com/perl6/evalbot/commit/b87bf784f9
+
+[21:34] <pmichaud> jnthn: I'm going to have to think a bit on the attribute_6model stuff
+
+[21:34] <pmichaud> it's not a trivial fix :(
+
+[21:35] <moritz> (both of the commits to evalbot are not tested in any way. Be impressed if they actually work :-)
+
+[21:36] <dalek> evalbot: 1693c51 | moritz++ | build-scripts/rebuild-nom.sh:
+
+[21:36] <dalek> evalbot: fix permissions
+
+[21:36] <dalek> evalbot: review: https://github.com/perl6/evalbot/commit/1693c514cf
+
+[21:36] <sorear> nom: say "Hello world"
+
+[21:37] *** scottp joined
+[21:37] <moritz> evalbot not yet restarted
+
+[21:37] <sorear> evalbot control restart
+
+[21:37] *** p6eval left
+[21:37] *** p6eval joined
+[21:37] *** ChanServ sets mode: +v p6eval
+
+[21:37] <sorear> nom: say "Hello world"
+
+[21:37] <moritz> oh, and I'm just testing the rebuild script
+
+[21:37] <moritz> during which time the perl6 executable is likely not available :/
+
+[21:37] <sorear> is there a p6eval target for newNQP?
+
+[21:37] <moritz> yes, nqp
+
+[21:38] <moritz> the old one is now nqprx
+
+[21:38] <sorear> nqpnet: say("Test")
+
+[21:38] <sorear> nqpclr: say("Test")
+
+[21:38] <p6eval> nom: OUTPUT«sh: ./perl6: not found␤»
+
+[21:38] <p6eval> nqpnet: OUTPUT«(timeout)»
+
+[21:38] <PhatEddy> rakudo: class A { method m {say 'm from A'}}; class B is A { method m { say 'm from B'}}; my $x = B.new; $x.SUPER::m()
+
+[21:38] <p6eval> rakudo 4a6d21: OUTPUT«Null PMC access in find_method('ACCEPTS')␤  in main program body at line 22:/tmp/p9BkQAh2H5␤»
+
+[21:39] <PhatEddy> I am having some trouble figuring out how to call a superclass method ...
+
+[21:39] <dalek> evalbot: 644f0c6 | moritz++ | build-scripts/rebuild-nom.sh:
+
+[21:39] <dalek> evalbot: fix directory
+
+[21:39] <dalek> evalbot: review: https://github.com/perl6/evalbot/commit/644f0c6eba
+
+[21:39] <moritz> PhatEddy: nextsame, nextwith
+
+[21:40] <masak> blog post! http://strangelyconsistent.org/blog/june-10-2011-a-moon-lander
+
+[21:40] <jnthn> PhatEddy: What moritz said, or explicitly name the superclass. SUPER isn't implemented yet (and in the case of multiple inheritance it's just plain ambiguous)
+
+[21:40] <moritz> I guess it's a fossile
+
+[21:41] <PhatEddy> thx
+
+[21:41] <sorear> SUPER can (assuming we're using P5 semantics for it) only be used within the class
+
+[21:41] <sorear> because it really means something like __PACKAGE__->{ISA}[0]
+
+[21:42] <sorear> (or ::?PACKAGE.superclasses.[0] ?)
+
+[21:42] <moritz> oh wow, nom build fails fails on evalbot server
+
+[21:42] <moritz> /home/p6eval/perl5/perlbrew/perls/perl-5.12.2/bin/perl5.12.2 -MExtUtils::Command -e cp src/pmc/perl6_group.so src/ops/perl6_ops.so dynext
+
+[21:42] <moritz> Too many arguments at -e line 1
+
+[21:42] <moritz> make: *** [dynext/perl6_group.so] Error 2
+
+[21:43] <moritz> any ideas?
+
+[21:43] *** Tedd1^ joined
+[21:43] <PhatEddy> rakudo: class A { method m {say 'm from A'}}; class B is A {method m1 { self.SUPER::m() }; method m { say 'm from B'}}; my $x = B.new; $x.m1()
+
+[21:43] <p6eval> rakudo 4a6d21: OUTPUT«Null PMC access in find_method('ACCEPTS')␤  in 'B::m1' at line 22:/tmp/wH88ygPFyI␤  in main program body at line 22:/tmp/wH88ygPFyI␤»
+
+[21:43] <jnthn> moritz: er...wow. :)
+
+[21:43] <sorear> PhatEddy: 14:40 < jnthn> PhatEddy: What moritz said, or explicitly name the superclass.  SUPER isn't implemented yet (and in the case of multiple  inheritance it's just plain ambiguous)
+
+[21:43] <jnthn> moritz: It's actually failing to use cp from EXTUtils::Command
+
+[21:44] *** spq1 left
+[21:44] *** Patterner left
+[21:45] <moritz> jnthn: yes
+
+[21:45] <masak> PhatEddy: I think SUPER is a spec fossil, like moritz said.
+
+[21:45] <jnthn> moritz: Then...I'm very confused. :)
+
+[21:45] <jnthn> I don't think I've ever seen *that* fail before.
+
+[21:46] <moritz> from S12: Hidden classes may be visited
+
+[21:46] <moritz> as C<SUPER::>, but not via "C<next>".
+
+[21:46] <moritz> wtf?
+
+[21:46] *** Psyche^ joined
+[21:46] *** Psyche^ is now known as Patterner
+
+[21:46] <masak> moritz: we've discussed it before.
+
+[21:46] <jnthn> "is hidden"
+
+[21:47] <masak> moritz: I think it's a fossil *anyway*.
+
+[21:47] <moritz> what about just requiring the explicit class name?
+
+[21:47] <masak> yeah.
+
+[21:47] <masak> it's fragile to classes changing parent, but that's rare.
+
+[21:47] <pmichaud> parent(s)
+
+[21:48] <masak> it's that possible 's' that makes SUPER extra suspicious.
+
+[21:48] <masak> as people have pointed out.
+
+[21:48] <sorear> someday, the spec will be translated into specese and nicely printed
+
+[21:48] <masak> I say get rid of it.
+
+[21:48] <tadzik> landed on the 2nd try :)
+
+[21:48] <masak> not the spec, SUPER. :)
+
+[21:48] * moritz gets rid of it
+
+[21:48] <tadzik> masak++ # fun game
+
+[21:48] <masak> tadzik: yay!
+
+[21:48] <masak> tadzik: it took two tries for me as well :)
+
+[21:48] <sorear> then I would love to see the look on Bjarne Stroustrop's face when he he sees a language spec three times bigger than C++ :)
+
+[21:49] <dalek> specs: fafed74 | moritz++ | S (2 files):
+
+[21:49] <dalek> specs: [S02,S12] remove SUPER from the specs
+
+[21:49] <dalek> specs: 
+
+[21:49] <dalek> specs: If anybody wants it back, please revert this patch, and add an explanation
+
+[21:49] <dalek> specs: what SUPER does in the presence of multi inheritance
+
+[21:49] <dalek> specs: review: https://github.com/perl6/specs/commit/fafed7400a
+
+[21:49] <sorear> moritz: S01!  Perl 5 has SUPER and MI, we copy its rules unless noted otherwise.
+
+[21:50] <PhatEddy> thx all - have enough to get what I'm planning done think ...
+
+[21:50] <moritz> sorear: ... unless the rules are insane :-)
+
+[21:50] <moritz> sorear: but you're welcome to explicitly add that SUPER is gone
+
+[21:52] <dalek> niecza/immediate: 6e8c8fc | sorear++ | src/ (2 files):
+
+[21:52] <dalek> niecza/immediate: Unsorted fiddles to remove Body use from all except subset/regex
+
+[21:52] <dalek> niecza/immediate: review: https://github.com/sorear/niecza/commit/6e8c8fc49d
+
+[21:52] <dalek> niecza/immediate: e7fb127 | sorear++ | src/niecza:
+
+[21:52] <dalek> niecza/immediate: Tweak stubbed packages again to work when lexical
+
+[21:52] <dalek> niecza/immediate: review: https://github.com/sorear/niecza/commit/e7fb12725e
+
+[21:52] <masak> sorear: did you see dlugosz' "Perl 6 Rigorous Technical Specification"? http://www.dlugosz.com/Perl6/
+
+[21:54] <moritz> PhatEddy: IT WON'T WORK WITH SUPER
+
+[21:54] <moritz> PhatEddy: sorry, replied to a stale chat
+
+[21:54] * moritz should really, really go to bed
+
+[21:54] <masak> it bears repeating, though.
+
+[21:54] <masak> :)
+
+[21:55] <moritz> but not in that tone :(
+
+[21:55] <moritz> sleep &
+
+[21:55] <jnthn> night o/
+
+[21:55] <masak> no, rarely in that tone.
+
+[21:55] <masak> night, moritz.
+
+[22:02] *** alester left
+[22:03] <pmichaud> jnthn: possible attribute_6model patch coming
+
+[22:04] <jnthn> woo
+
+[22:04] <sorear> masak: epic fail on planetsix.perl.org
+
+[22:04] *** furryfishy left
+[22:04] *** furryfish joined
+[22:05] <pmichaud> jnthn: http://gist.github.com/1019879
+
+[22:05] <pmichaud> see if that improves things?
+
+[22:05] <pmichaud> don't know if nom will also have to do  bind -> bind_6model
+
+[22:06] <pmichaud> I don't know how to check in nqp itself if the patch makes things better.
+
+[22:06] <pmichaud> oops
+
+[22:07] <pmichaud> definitely a bug in that patch
+
+[22:07] <pmichaud> just  asec
+
+[22:07] *** gbacon_ left
+[22:07] <pmichaud> (I'm not even sure how/why it worked)
+
+[22:08] *** colomon left
+[22:08] <pmichaud> jnthn: http://gist.github.com/1019884   # updated patch
+
+[22:08] <pmichaud> grrrr
+
+[22:08] <pmichaud> still not right
+
+[22:08] <pmichaud> http://gist.github.com/1019888  # this one
+
+[22:10] <jnthn> pmichaud: Really ready now? :P
+
+[22:10] * jnthn tries it :)
+
+[22:10] <pmichaud> I'm trying it with nom
+
+[22:12] <jnthn> me also
+
+[22:12] <pmichaud> nope, doesn't seem to have helped.
+
+[22:13] <jnthn> pmichaud: Is there a difference between $integer in a PAST tree and a PAST::Val.new( :value($integer) )
+
+[22:13] <pmichaud> shouldn't be.
+
+[22:13] <jnthn> e.g. does the first imply :returns('Integer')?
+
+[22:14] <pmichaud> hmmm
+
+[22:14] <pmichaud> no, shouldn't imply :returns('Integer')
+
+[22:14] <pmichaud> my nom build didn't use the new nqp
+
+[22:14] <pmichaud> oh, I know why
+
+[22:14] <pmichaud> pmichaud--
+
+[22:14] <jnthn> pmichaud: oddness, I get:
+
+[22:14] <jnthn> Method 'attribute_6model_type' not found for invocant of class ''
+
+[22:14] <jnthn> When building NQP
+
+[22:14] <jnthn> (with the patch)
+
+[22:15] <pmichaud> that's definitely odd
+
+[22:15] <jnthn> Done a make clean justin case.
+
+[22:16] <jnthn> pmichaud: no, same thing :(
+
+[22:17] <pmichaud> weird
+
+[22:17] <pmichaud> it definitely doesn't work on my system, so let me work on the patch a bit more.
+
+[22:17] <jnthn> k
+
+[22:18] *** whiteknight joined
+[22:18] <pmichaud> it did change the output, so I know that it's doing _something_ at least :)
+
+[22:21] *** cognominal joined
+[22:22] *** MayDaniel joined
+[22:23] *** cognominal_ left
+[22:24] *** furryfish left
+[22:26] <dalek> niecza/immediate: e21bfa2 | sorear++ | / (2 files):
+
+[22:26] <dalek> niecza/immediate: More fixes to gather and package stubbing
+
+[22:26] <dalek> niecza/immediate: review: https://github.com/sorear/niecza/commit/e21bfa2e6f
+
+[22:26] <dalek> niecza/immediate: fdcf61d | sorear++ | src/ (2 files):
+
+[22:26] <dalek> niecza/immediate: Reimplement &?BLOCK et al, INIT et al, statement labels
+
+[22:26] <dalek> niecza/immediate: review: https://github.com/sorear/niecza/commit/fdcf61d247
+
+[22:26] *** PhatEddy left
+[22:27] <masak> sorear: the June 7 post seems to be out of order on Planet Perl 6. it used to have a date in the future, but I fixed that. don't know what else to do about it.
+
+[22:27] *** Mowah left
+[22:27] <jnthn> masak: How far in the future? :)
+
+[22:27] <jnthn> masak: Will it be top of Planet Perl for days, months, or years? ;)
+
+[22:28] *** bluescreen10 left
+[22:28] <masak> jnthn: about a month in the future.
+
+[22:28] *** gfldex joined
+[22:28] <masak> and I don't know.
+
+[22:28] <sorear> 20110706, eh
+
+[22:29] <jnthn> That's one way to dominate an aggregator. :)
+
+[22:29] <sorear> does Juerd (ping) run planetsix?
+
+[22:29] <jnthn> Don't think so.
+
+[22:30] *** bluescreen10 joined
+[22:30] <sorear> who is in charge of the TPF aggregators?
+
+[22:38] *** bluescreen10 left
+[22:38] *** thou_ left
+[22:39] *** sftp left
+[22:39] *** furryfishy joined
+[22:40] *** sftp joined
+[22:40] *** fish|ipad joined
+[22:52] *** bluescreen10 joined
+[22:59] <masak> good night, #perl6.
+
+[22:59] *** masak left
+[22:59] <sorear> good night, masak
+
+[23:00] <sorear> oops.  I just accidentally broke a critical invariant of niecza's package system
+
+[23:01] <sorear> the requirement: subclasses always have higher ID numbers than their superclasses, so are loaded later, so the superclasses are always complete
+
+[23:02] <sorear> the break: class A { ... }; class B { }; class A is B { }; # used to emit B,A, now emits A,B as a result of stronger predeclaration semantics
+
+[23:04] <TimToady> obviously you should be counting down instead of up :)
+
+[23:05] <pmichaud> jnthn: got it!
+
+[23:05] <jnthn> pmichaud: \o/
+
+[23:05] <pmichaud>     repr_bind_attr_int $P3650, $P3651, "$!rw", 0
+
+[23:05] <jnthn> :D
+
+[23:05] <pmichaud>     repr_bind_attr_str $P3652, $P3653, "$!name", "$child"
+
+[23:06] <jnthn> pmichaud: I bet that shaves some off CORE.setting.[pir&pbc] :)
+
+[23:06] <pmichaud> we'll see.  my solution is a bit on the hacky side.
+
+[23:06] <pmichaud> it cleans up a couple of items while doing a couple of hacky things
+
+[23:07] <jnthn> Are we pushing against an overall PAST::Compiler that's not been so used to dealing with natives?
+
+[23:07] <pmichaud> overall coercion in attribute_6model is cleaner; but we have to work around the broken bindpost semantics
+
+[23:07] <jnthn> Ah
+
+[23:07] *** bluescreen10 left
+[23:07] <pmichaud> not so much that, as a PAST compiler that had to deal with Parrot's broken lvalue semantics
+
+[23:07] <jnthn> Ah :/
+
+[23:07] <pmichaud> (and guessed wrong in this particular case.)
+
+[23:07] *** bluescreen10 joined
+[23:08] *** awoodland joined
+[23:09] <pmichaud> shall I just commit + push my patches and let you test that way... or shall I nopaste them?
+
+[23:09] *** am0c left
+[23:09] <jnthn> pmichaud: Is it to just NQP, or to Rakudo also?
+
+[23:09] <pmichaud> both
+
+[23:09] <pmichaud> :pasttype<bind> has to become :pasttype<bind_6model>
+
+[23:09] <pmichaud> (in Rakudo also)
+
+[23:10] <jnthn> pmichaud: Can you push just the NQP ones first, so I can check the build issue is gone?
+
+[23:10] <pmichaud> I can just nopaste you the patch
+
+[23:10] *** gbacon_ joined
+[23:10] <pmichaud> http://gist.github.com/1019984
+
+[23:10] *** MayDaniel left
+[23:12] <jnthn> applied, tryijng build
+
+[23:12] <sorear> jnthn++ pmichaud++ fighting to push forward the state of the art in native typing
+
+[23:13] <sorear> TimToady: Have you thought much about the issues in decontainerizing object attributes?
+
+[23:14] <pmichaud> jnthn: btw, that patch to enable my @a and my %h was TEH AWESOME  :)
+
+[23:16] <jnthn> pmichaud: I thought you'd like it. ;)
+
+[23:16] <pmichaud> http://gist.github.com/1019997  # here's the corresponding patch to nom
+
+[23:16] <sorear> jnthn: why BIND_POS but BIND_Key ?
+
+[23:16] <jnthn> good news, nqp built
+
+[23:17] <jnthn> sorear: Where, exactly?
+
+[23:17] <sorear> nom
+
+[23:17] <pmichaud> Hash.pm
+
+[23:17] <jnthn> sorear: Yes, I guessed that bit... :)
+
+[23:17] <jnthn> Oh
+
+[23:17] <jnthn> you're talking about code pmichaud++ did ;)
+
+[23:17] <pmichaud> might've been me that did that
+
+[23:17] <sorear> actually I'm reading the "TEH AWESOME" patch
+
+[23:17] * jnthn didn't code review carefully enough :P
+
+[23:17] <jnthn> sorear++
+
+[23:17] <pmichaud> it's a typo on my part
+
+[23:18] <pmichaud> I'll fix it once we're stable with the nqp/native stuff
+
+[23:18] <jnthn> sorear: https://github.com/rakudo/rakudo/commit/ebbf34caaf7546811700402f64c2717002d09992 ?
+
+[23:18] <jnthn> oh, it was in the context
+
+[23:18] <sorear> Why do Array and Hash BIND_Key/BIND_POS use '$x is copy'?
+
+[23:19] <pmichaud> because they want to be sure to have their own container
+
+[23:19] <sorear> my @foo; @foo[0] = 5; @foo[1] := @foo[0]; @foo[0]++; say @foo[1]
+
+[23:19] <sorear> is copy breaks that, no?
+
+[23:19] <pmichaud> I'm not worried about that case yet.
+
+[23:20] <pmichaud> see note about that says "This is all preliminary to get stuff working...."
+
+[23:20] <pmichaud> *above
+
+[23:20] <jnthn> We don't know how to code-gen the @foo[1] := ... yet anyway 
+
+[23:20] <pmichaud> also, it's not clear that  := will call BIND_POS anyway
+
+[23:20] <jnthn> Unlikely
+
+[23:20] <sorear> Unlikely?
+
+[23:20] <jnthn> Maybe passes :BIND_VALUE(...) to postcircumfix
+
+[23:21] <sorear> ah
+
+[23:21] <sorear> I like that
+
+[23:21] <jnthn> Which yes, may eventually call down to the method we're discussing now
+
+[23:21] <jnthn> Me too, it's a simple AST twiddle ;)
+
+[23:21] <sorear> mind if I use that for niecza, or do you expect you'll be changing it again?
+
+[23:22] <pmichaud> I think you're always welcome to use whatever you want for niecza.  :)
+
+[23:22] <sorear> heh
+
+[23:22] <pmichaud> I think there's a non-zero probability we'll change it again.  :)
+
+[23:22] <sorear> "mind" maybe not the right word...
+
+[23:23] <sorear> what about ::=?
+
+[23:23] <sorear> in nieczaland, X := Y does the equivalent of X := pir::descalarrref__pp(Y)
+
+[23:23] <sorear> er, X ::= Y :)
+
+[23:24] <jnthn> pmichaud: Just make installing your NQP patch and trying Rakudo one now
+
+[23:24] *** ymasory joined
+[23:24] <jnthn> (sorry, had a small distraction implementing something...)
+
+[23:24] *** awoodland left
+[23:24] <pmichaud> np
+
+[23:24] *** colomon joined
+[23:25] <sorear> o/ colomon
+
+[23:25] <colomon> \o
+
+[23:25] <colomon> just opened my computer again in preparation for running out the door for a show.  :)
+
+[23:25] <colomon> how's hacking?
+
+[23:25] <sorear> good!
+
+[23:26] <colomon> I'm scheming on how to add trig functions, etc to Niecza.  Presuming you didn't already do it while I wasn't looking.  :)
+
+[23:26] *** kid51 joined
+[23:26] <jnthn> pmichaud: oh noes
+
+[23:26] <jnthn> nom patch won't apply cleanly
+
+[23:26] <sorear> colomon: 2 ** 10000 > (5 / 2) ** 10000 # this is actually 2 ** 10000 > Inf
+
+[23:27] <pmichaud> I might not be up-to-date
+
+[23:27] <sorear> colomon: no, not yet.  I look forward to seeing what you come up with!
+
+[23:27] <pmichaud> checking
+
+[23:27] <colomon> sorear: yeah, realized it after I typed it.
+
+[23:27] <dalek> rakudo/nom: c7ba581 | jnthn++ | src/Perl6/Metamodel/ParametricRoleHOW.pm:
+
+[23:27] <dalek> rakudo/nom: Try and make it clearer that line 2 of an error message is actually an explanation for line 1.
+
+[23:27] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/c7ba5816d7
+
+[23:27] <dalek> rakudo/nom: 32b2b73 | jnthn++ | src/Perl6/Actions.pm:
+
+[23:27] <dalek> rakudo/nom: Toss old code for handling |@foo, |%bar, etc. Don't quite know how we'll handle it but...probably not like this.
+
+[23:27] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/32b2b73c74
+
+[23:27] <dalek> rakudo/nom: 045613a | jnthn++ | src/Perl6/Actions.pm:
+
+[23:27] <dalek> rakudo/nom: Refactor and clena up term:sym<name> action a bit; should make type name mentions cheaper at runtime and prepares for handling types as role parameters.
+
+[23:27] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/045613aaff
+
+[23:27] <dalek> rakudo/nom: bbb094d | jnthn++ | src/ (5 files):
+
+[23:27] <dalek> rakudo/nom: First cut of parametric roles. Type variables seem to work out OK in signatures at least...something's busted with attributes, and probably there's hairy fixup issues to go too.
+
+[23:27] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/bbb094d8a8
+
+[23:27] <colomon> (5 / 2).FatRat ** 10000 wouldn't be, though
+
+[23:27] <jnthn> pmichaud: Probably because I did ^
+
+[23:27] <jnthn> :)
+
+[23:27] <pmichaud> yes, that's it.
+
+[23:27] <pmichaud> let me rebuild the patches
+
+[23:28] <jnthn> nqp one is fine
+
+[23:28] <jnthn> I didn't change that
+
+[23:29] <pmichaud> http://gist.github.com/1020017  # possibly clean nom patch
+
+[23:30] <jnthn> pmichaud: applied cleanly, building
+
+[23:34] <sorear> should ~ use Str or Stringy?  Note that it never receives a Junction argument, due to autothreading.
+
+[23:34] <sorear> infix:<~> I mean
+
+[23:34] <pmichaud> last I heard, infix:<~> uses the Stringy versions of its arguments
+
+[23:35] <pmichaud> say  "hello", Any;    # helloAny()
+
+[23:35] <pmichaud> say "hello" ~ Any;   # hello  (+ possibly a warning)
+
+[23:35] <pmichaud> rakudo gets this wrong, of course.
+
+[23:35] <sorear> .Stringy or .Stringy.Str?  Is .Stringy on non-Junctions allowed to return non-Str?
+
+[23:36] <pmichaud> don't know -- hadn't gotten that far.
+
+[23:38] <TimToady> .Stringy is required only to return something Stringy, doesn't have to be Str
+
+[23:38] <TimToady> just as Numeric doesn't have to return Num
+
+[23:38] <pmichaud> nom: say 'hello';  # yet?
+
+[23:38] <p6eval> nom: OUTPUT«sh: ./perl6: not found␤»
+
+[23:38] <pmichaud> not yet.
+
+[23:38] <sorear> TimToady: what do &chars, &infix:<~>, etc do when fed a general value of Stringy?
+
+[23:39] <jnthn> pmichaud: +1 on the patches
+
+[23:39] <pmichaud> jnthn: okay, committing, pushing
+
+[23:40] <jnthn> pmichaud: A nice 42KB off the PBC size.
+
+[23:40] <jnthn> pmichaud: And probably hundred plus less junk PMCs and instructions at startup, if not more.
+
+[23:40] <TimToady> that would depend on what multis are out there with which types; to the extend there are multiple Stringy types, they have to play together much like numeric types do
+
+[23:41] <sorear> I see
+
+[23:41] <TimToady> but grapheme strings should be pretty general
+
+[23:42] <TimToady> much like Nums and/or FatRats
+
+[23:43] <TimToady> just as Nums imply some restrictions as a general type, so might Str
+
+[23:43] <dalek> nqp: b289784 | pmichaud++ | src/PAST/SixModelPASTExtensions.pir:
+
+[23:43] <dalek> nqp: First set of coercion refactors for attribute_6model.
+
+[23:43] <dalek> nqp: review: https://github.com/perl6/nqp/commit/b289784817
+
+[23:43] <dalek> nqp: dd1944b | pmichaud++ | src/ (4 files):
+
+[23:43] <dalek> nqp: Add :pasttype<bind_6model> to PAST::Compiler, to improve handling of native constants.
+
+[23:43] <dalek> nqp: 
+
+[23:43] <dalek> nqp: PAST::Compiler's :pasttype<bind> doesn't know about native types, and
+
+[23:43] <dalek> nqp: forces the RHS argument to be a PMC.  This doesn't play well with
+
+[23:43] <dalek> nqp: 6model's native attributes, though, and caused a lot of unneeded
+
+[23:43] <dalek> nqp: boxing and unboxing of native constants.  Rather than try to fix
+
+[23:43] <dalek> nqp: :pasttype<bind> in PAST::Compiler (which likely runs into all sorts
+
+[23:43] <dalek> nqp: of Parrot deprecation issues), we just add a new :pasttype<bind_6model>
+
+[23:43] <dalek> nqp: that can handle binding to attribute_6model variables (albeit in
+
+[23:43] <dalek> nqp: a slightly hacky way).  When we rewrite PAST into NQP, we should be
+
+[23:43] <dalek> nqp: able to clean up the bind semantics dramatically and can fix things
+
+[23:43] <dalek> nqp: then.
+
+[23:43] <dalek> nqp: review: https://github.com/perl6/nqp/commit/dd1944bc2f
+
+[23:43] *** bitpart joined
+[23:45] <pmichaud> jnthn: yeah, I'm sure it improves our overall time hugely.  It bugs me to see boxing/unboxing that we really don't need.
+
+[23:45] <jnthn> pmichaud: btw, config.default is working out very nicely for me :)
+
+[23:45] <pmichaud> jnthn: excellent, same here.
+
+[23:45] <jnthn> pmichaud: That also
+
+[23:45] <pmichaud> nqp and nom patches pushed.
+
+[23:45] <jnthn> It probably shaves a little off the time Parrot spends in there too
+
+[23:45] <pmichaud> well, I'm always a little worried about gc churn as well.
+
+[23:45] <jnthn> It's worth worrying about.
+
+[23:46] <pmichaud> I'm not sure what to do to reduce our register usage there, though.
+
+[23:46] <pmichaud> a lot of the registers are in fact .const 'Sub' things, so it's not like we can reuse those I don't think.
+
+[23:46] <jnthn> True
+
+[23:46] <jnthn> Well, it's not a long-term thing.
+
+[23:47] <jnthn> Oh
+
+[23:47] <jnthn> We're also still generating the fixup and deserialize code
+
+[23:47] <jnthn> When actually we only really need generate one of them
+
+[23:47] <jnthn> (I wanted both for debugging for a while, but the number of bugs I've needed to fix in that area has been close to zero.)
+
+[23:48] <pmichaud> that sounds good also
+
+[23:48] <dalek> rakudo/nom: 7aa97bd | pmichaud++ | / (3 files):
+
+[23:48] <dalek> rakudo/nom: Update Actions.pm and SymbolTable.pm to use new :pasttype<bind_6model>
+
+[23:48] <dalek> rakudo/nom: from nqp.  Also bump NQP_REVISION.
+
+[23:48] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/7aa97bd083
+
+[23:48] <dalek> rakudo/nom: 82c88f5 | pmichaud++ | src/CORE.setting/Hash.pm:
+
+[23:48] <dalek> rakudo/nom: Fix typo in Hash.BIND_KEY (sorear++ for spotting this one!)
+
+[23:48] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/82c88f5ece
+
+[23:48] <jnthn> I need a way to know if we're compiling to run straight away, or if we're going to output PIR and that's all.
+
+[23:48] <pmichaud> %*COMPILING likely has the flags.
+
+[23:49] <jnthn> ah, yeah
+
+[23:49] <jnthn> Anyway, I can get a nice win from that.
+
+[23:49] <jnthn> Was always the plan, just was more -Odebug so far. :)
+
+[23:49] <pmichaud> sure, no problem.
+
+[23:49] <diakopter> hello from iphone
+
+[23:49] <pmichaud> so far we seem to be *much* more efficient in codegen than master was
+
+[23:50] <jnthn> o/ diakopter 
+
+[23:50] <jnthn> pmichaud: Yes, there was a concious effort to be. :)
+
+[23:50] <jnthn> pmichaud: We emit a LOAD less code surrounding containers.
+
+[23:51] <pmichaud> time for a break here -- bbiaw
+
+[23:51] <jnthn> k
+
+[23:51] <sorear> diakopter: hello
+
+[23:51] <pmichaud> overnight I'm likely to switch  CORE.setting -> core
+
+[23:51] <pmichaud> I keep mis-typing the directory name
+
+[23:52] <jnthn> core blimey
+
+[23:52] <jnthn> :P
+
+[23:52] *** woosley joined
+[23:53] *** lue left
+[23:54] *** jfried left
+[23:57] *** lue joined
+[23:58] *** thou joined
