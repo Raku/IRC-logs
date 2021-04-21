@@ -1,0 +1,588 @@
+[00:00] <geekosaur> isn't Map a readonly Hash? for this, you only need one of them, with gistseen keeping it from recursing inside again
+
+[00:01] <geekosaur> or at least close enough that you only need the oine implementation, plus something to keep caching happy
+
+[00:01] <MasterDuke> yeah, i guess a better way to say my question is, why doesn't Map.gist use gistseen?
+
+[00:03] <MasterDuke> Hash is a Map
+
+[00:03] *** shareable6 joined
+[00:03] <geekosaur> that's why I think caching. with gistseen it knows not to recurse, without it recurses on elements. so Map needs to do that to gist its ocntents, but Hash explicitly recurses once to cache it and then sets the cached flag so the gist machinery doesn;t recurse again
+
+[00:04] <geekosaur> presumably because it;s faster than the default recursion
+
+[00:04] <geekosaur> (for one, it doesn't need to use polymorphic didspatch ebcause it knows already it's a Map)
+
+[00:05] <geekosaur> at least that's my guess. probably need lizmat for more detail
+
+[00:05] <timotimo> except if you mix something in
+
+[00:06] <timotimo> also, it doesn't know it's a map, it only knows that it's Map or a subclass for which there isn't a more specific candidate
+
+[00:07] <MasterDuke> timotimo: fyi, this question is inspired by your comment on https://github.com/rakudo/rakudo/issues/1835
+
+[00:07] <timotimo> ah, it just uses Map's stringification?
+
+[00:08] <timotimo> but i do see gistseen on the call stack
+
+[00:08] <MasterDuke> but changing Map.gist (since PseudoStash is a Map) to use gistseen doesn't help
+
+[00:08] <timotimo> try printing out the keys in the gistseen structure; i expect it just has a new WHICH every time?
+
+[00:08] <MasterDuke> hm, i assumed it uses Map's gist, since it doesn't have its own
+
+[00:09] <timotimo> https://gist.github.com/timo/7491891687cf4aeab7843c16d50c0a84
+
+[00:13] <samcv> hopefully this will be helpful, should be making .lines 30% faster
+
+[00:13] <timotimo> it's probably sensitive to line length?
+
+[00:14] <samcv> well longer lines take more time
+
+[00:14] <MasterDuke> did i miss something? what's making .lines 30% faster?
+
+[00:14] <timotimo> but shorter lines spend more time making strings and such?
+
+[00:14] <samcv> well longer input
+
+[00:15] <samcv> timotimo: yeah i guess so...
+
+[00:15] <timotimo> anyway, 30% sounds absolutely lovely
+
+[00:15] <samcv> what was taking most time was find_cclass in string
+
+[00:16] <samcv> and the code that gets unicode property should be about 10% faster
+
+[00:16] <MasterDuke> timotimo: https://gist.github.com/MasterDuke17/c1381e577c4c3a3b8c74588c806adaef first bunch of output of printing the WHICH in gistseen
+
+[00:16] <samcv> for things in plane 1
+
+[00:16] <samcv> and general category should be slightly faster as well
+
+[00:17] <samcv> and then we'll have more speed with non MVMString based hashes internally in moarvm as well
+
+[00:18] <samcv> unicodable6: { .uniprop eq 'Zl' }
+
+[00:18] <unicodable6> samcv, U+2028 LINE SEPARATOR [Zl] (control character)
+
+[00:18] <samcv> maybe i can make it faster if i convert the property call to just a list of all Zl unicode characters
+
+[00:19] <timotimo> i'm not sure i see the connection to mvmstring based hashes?
+
+[00:19] <samcv> hmm is that the only one?
+
+[00:19] <samcv> timotimo: well i made it check the hash value before doing memcmp
+
+[00:19] <timotimo> oh, i thought we were still talking about find_cclass
+
+[00:19] <samcv> (it made MVMString hashes 15% faster, so i'm guessing may speed up non MVMString hashes by 10%)
+
+[00:19] <samcv> well i am. but i lost track of my mind
+
+[00:22] <MasterDuke> m: my $a; $a = PseudoStash.new for ^5000; say $a
+
+[00:22] <camelia> rakudo-moar 847d3d60b: OUTPUT: «PseudoStash.new(($_ => 4999))␤»
+
+[00:22] <MasterDuke> m: my $a; $a = PseudoStash.new for ^6000; say $a
+
+[00:22] <camelia> rakudo-moar 847d3d60b: OUTPUT: «PseudoStash.new(($_ => 5999))␤»
+
+[00:22] <samcv> unicodable6: { .uniprop eq 'Zp' }
+
+[00:22] <unicodable6> samcv, U+2029 PARAGRAPH SEPARATOR [Zp] (control character)
+
+[00:23] <MasterDuke> huh. adding a `note $WHICH` in gistseen makes the 5000 version print `Pair|680173F0EF009277D9152317924CA6D5FEB9CAE6 Too few positionals passed; expected 3 arguments but got 2   in block <unit> at -e line 1`
+
+[00:23] <MasterDuke> but the 6000 version just start spewing out an untold number of lines of output
+
+[00:26] <samcv> ok i think i got about a 50% speedup of .lines by removing all unicode database calls
+
+[00:27] <samcv> well it's maybe 30% with overhead from doing .slurp and other mvm overhead but i believe it's about 50% faster by itself
+
+[00:27] <jnthn> o.O
+
+[00:27] <jnthn> samcv: .lines on a Str, or on a filehandle?
+
+[00:27] <samcv> on a str
+
+[00:27] <jnthn> ah :)
+
+[00:28] <jnthn> Was gonna say, I worked on the filehandle case quite a bit and couldn't think where it was doing calls into the Unicode DB aside from decoding/normalization
+
+[00:28] <samcv> uh it may be 2x faster actually
+
+[00:28] <samcv> anyway it's a lot
+
+[00:29] <jnthn> samcv++
+
+[00:29] <samcv> yep it is 2x
+
+[00:38] <MasterDuke> and adding MVM_SPESH_DISABLE=1 makes it always die with `Too few positionals passed; expected 3 arguments but got 2`, no matter the iteration count
+
+[00:52] <jnthn> sleep &
+
+[00:52] <evalable6> jnthn, rakudo-moar 847d3d60b: OUTPUT: «Use of uninitialized value of type Callable in numeric context␤  in block <unit> at /tmp/I…»
+
+[00:52] <evalable6> jnthn, Full output: https://gist.github.com/28764fb6d98cc9d1e059e2d7205ac3b5
+
+[00:55] <Geth> ¦ nqp: 9833073130 | (Samantha McVey)++ | tools/build/MOAR_REVISION
+
+[00:55] <Geth> ¦ nqp: Bump MoarVM to get 2x speed improv. for .lines and others
+
+[00:55] <Geth> ¦ nqp: 
+
+[00:55] <Geth> ¦ nqp: Changes: 2018.05..2018.05-12-g042ee7874
+
+[00:55] <Geth> ¦ nqp: 042ee7874 Make .lines 2x faster by speeding up MVM_find_cclass for newlines
+
+[00:55] <Geth> ¦ nqp: f94b02972 Use new branch predictor hints to unicode_db and prop query
+
+[00:55] <Geth> ¦ nqp: a84b607bd Add branch predictor hints macros
+
+[00:55] <Geth> ¦ nqp: 154d2c3f8 Convert HASH_DEL_IN_BKT and HASH_EXPAND_BUCKETS from macros to inlines
+
+[00:55] <Geth> ¦ nqp: <…commit message has 8 more lines…>
+
+[00:55] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/9833073130
+
+[00:55] <Geth> ¦ nqp: version bump brought these changes: https://github.com/MoarVM/MoarVM/compare/2018.05...2018.05-12-g042ee7874
+
+[01:24] <Geth> ¦ nqp: c00142108a | (Samantha McVey)++ | tools/build/MOAR_REVISION
+
+[01:24] <Geth> ¦ nqp: Bump MoarVM to fix MSCV that broke with last bump
+
+[01:24] <Geth> ¦ nqp: 
+
+[01:24] <Geth> ¦ nqp: Changes: 2018.05-12-g042ee7874..2018.05-13-gec9deabcb
+
+[01:24] <Geth> ¦ nqp: ec9deabcb Fix MSVC build by making dummy expect macros
+
+[01:24] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/c00142108a
+
+[01:24] <Geth> ¦ nqp: version bump brought these changes: https://github.com/MoarVM/MoarVM/compare/2018.05-12-g042ee7874...2018.05-13-gec9deabcb
+
+[01:34] <Geth> ¦ rakudo: 6663a6d454 | (Samantha McVey)++ | tools/build/NQP_REVISION
+
+[01:34] <Geth> ¦ rakudo: Bump NQP/MoarVM to get 2x speed improv. for .lines
+
+[01:34] <Geth> ¦ rakudo: 
+
+[01:34] <Geth> ¦ rakudo: Changes: 2018.05..2018.05-12-gc00142108
+
+[01:34] <Geth> ¦ rakudo: c00142108 Bump MoarVM to fix MSCV that broke with last bump
+
+[01:34] <Geth> ¦ rakudo: 983307313 Bump MoarVM to get 2x speed improv. for .lines and others
+
+[01:34] <Geth> ¦ rakudo: ba0367278 Fix stringification of Sub when using --target=ast
+
+[01:34] <Geth> ¦ rakudo: d3280011c s:global/start/beginning/ in JVM slice methods 2
+
+[01:34] <Geth> ¦ rakudo: 562d359b7 s:global/start/beginning/ in JVM slice methods
+
+[01:34] <Geth> ¦ rakudo: fc6441a19 Fix STDIN error for non-interactive REPL mode
+
+[01:34] <Geth> ¦ rakudo: d8ee853cd [js] Add getppid op
+
+[01:34] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/6663a6d454
+
+[01:34] <Geth> ¦ rakudo: version bump brought these changes: https://github.com/perl6/nqp/compare/2018.05...2018.05-12-gc00142108
+
+[01:50] *** Kaiepi left
+[01:52] *** PufferBot left
+[01:52] *** Kaiepi joined
+[01:57] *** ilbot3 joined
+[01:57] *** ChanServ sets mode: +v ilbot3
+
+[02:10] *** llfourn joined
+[02:39] *** Zoffix joined
+[03:29] <samcv> unicodable6: { .uniprop('space') }
+
+[03:30] <unicodable6> samcv, U+000A <control-000A> [Cc] (control character)
+
+[03:30] <unicodable6> samcv, U+0009 <control-0009> [Cc] (control character)
+
+[03:30] <unicodable6> samcv, 25 characters in total: https://gist.github.com/73b04d2e2cda3f146239f6ea0a7622c5
+
+[03:50] <Zoffix> samcv++ # 2x faster stuff
+
+[04:23] <samcv> :)
+
+[04:38] <samcv> well it's night time for me. o/
+
+[05:30] *** Kaiepi left
+[05:30] *** Kaiepi joined
+[06:07] *** BenGoldberg joined
+[06:12] *** BenGoldberg left
+[07:49] *** robertle joined
+[08:12] *** shareable6 left
+[08:20] <[Tux]> Rakudo version 2018.05-20-g6663a6d45 - MoarVM version 2018.05-14-g0d542c459
+
+[08:20] <[Tux]> csv-test-xs-20      0.465 -  0.468
+
+[08:20] <[Tux]> csv-ip5xs           0.877 -  1.029
+
+[08:20] <[Tux]> test-t --race       0.981 -  1.054
+
+[08:20] <[Tux]> test-t              2.339 -  2.401
+
+[08:20] <[Tux]> csv-ip5xs-20        8.540 -  8.883
+
+[08:20] <[Tux]> test                8.771 - 10.043
+
+[08:20] <[Tux]> test-t-20 --race   14.769 - 15.178
+
+[08:20] <[Tux]> csv-parser         25.388 - 25.394
+
+[08:20] <[Tux]> test-t-20          42.112 - 44.475
+
+[08:48] *** jmerelo joined
+[08:48] <jmerelo> hi
+
+[08:51] <jmerelo> [Tux]: quite an improvement, right?
+
+[09:08] *** shareable6 joined
+[09:13] <El_Che> t/04-nativecall/01-argless.t                                  (Wstat: 139 Tests: 0 Failed: 0)
+
+[09:13] <El_Che>   Non-zero wait status: 139
+
+[09:13] <El_Che> seem to be a flapper
+
+[09:13] <El_Che> (passed on the next build)
+
+[09:26] <[Tux]> jmerelo, not really
+
+[10:27] *** shareable6 left
+[10:41] *** AlexDaniel joined
+[11:39] *** jmerelo left
+[11:56] *** Zoffix left
+[12:18] <ilmari> git ff
+
+[12:18] <ilmari> EWIN
+
+[12:28] *** Kaiepi left
+[12:29] *** Kaiepi joined
+[12:49] <Geth> ¦ roast/avoid_redecl_warn: a920e69c88 | usev6++ | 5 files
+
+[12:49] <Geth> ¦ roast/avoid_redecl_warn: Avoid some warnings about redeclarations
+
+[12:49] <Geth> ¦ roast/avoid_redecl_warn: review: https://github.com/perl6/roast/commit/a920e69c88
+
+[13:25] <Geth> ¦ rakudo: 1c1acbc2aa | MasterDuke17++ | src/core/Hash.pm6
+
+[13:25] <Geth> ¦ rakudo: Turn BIND-KEY into multis
+
+[13:25] <Geth> ¦ rakudo: 
+
+[13:25] <Geth> ¦ rakudo: The CORE.setting compilation no longer gets confused.
+
+[13:25] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/1c1acbc2aa
+
+[13:25] <Geth> ¦ rakudo: caf0f568b0 | (Elizabeth Mattijsen)++ (committed using GitHub Web editor) | src/core/Hash.pm6
+
+[13:25] <Geth> ¦ rakudo: Merge pull request #1869 from MasterDuke17/add_BIND-KEY_multi
+
+[13:25] <Geth> ¦ rakudo: 
+
+[13:25] <Geth> ¦ rakudo: Turn BIND-KEY into multis
+
+[13:25] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/caf0f568b0
+
+[13:43] *** MasterDuke left
+[13:58] *** pmurias joined
+[13:58] <Geth> ¦ nqp/async-await-continuations: 943 commits pushed by 31 authors
+
+[13:58] <Geth> ¦ nqp/async-await-continuations: review: https://github.com/perl6/nqp/compare/8e5e3376d246...715790e16caf
+
+[14:02] <samcv> [Tux]: i haven't been able to get your CSV test working property i'm not sure what i'm doing wrong
+
+[14:03] <samcv> perl6 test-t.pl < /tmp/hello.csv doesn't appear to do anything
+
+[14:03] <timotimo> was the "make the input data smaller" thing part of the instructions already?
+
+[14:04] <timotimo> you're potentially running test-t-20 without realizing?
+
+[14:04] <samcv> timotimo: no clue. what's the proper way to run just test-t?
+
+[14:04] <timotimo> i think you just change the for loop that generates /tmp/hello.csv to give only ... don't know, 5k 50k lines
+
+[14:06] <timotimo> 50000 lines, indeed
+
+[14:06] <samcv> ah ok
+
+[14:06] <timotimo> 1_000_000 in the README.speed file, 50_000 what's used for the measurements on channel
+
+[14:06] <samcv> i'm also curious about the speed it'd be if clang were used
+
+[14:07] <samcv> for many things clang seems to be faster for me
+
+[14:07] <samcv> clang 6 vs gcc 7.4
+
+[14:15] <[Tux]> samcv, any questions left unanswered?
+
+[14:18] <Geth> ¦ nqp: f08a582693 | (Paweł Murias)++ | src/vm/js/nqp-runtime/coercions.js
+
+[14:18] <Geth> ¦ nqp: [js] Handle _ and unicode unary minus in string to number coercions
+
+[14:18] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/f08a582693
+
+[14:18] <Geth> ¦ nqp: d5f13c037e | (Paweł Murias)++ | src/vm/js/nqp-runtime/core.js
+
+[14:18] <Geth> ¦ nqp: [js] Fix bug
+
+[14:18] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/d5f13c037e
+
+[14:18] <Geth> ¦ nqp: 41a0d017fe | (Paweł Murias)++ | src/vm/js/nqp-runtime/core.js
+
+[14:18] <Geth> ¦ nqp: [js] Implement nqp::getuniname for private-use and surrogate characters
+
+[14:18] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/41a0d017fe
+
+[14:29] <samcv> on 50,000 items i get 10.26s on gcc 7.4 and 9.65 on clang atm
+
+[14:30] <timotimo> that's an impressive difference
+
+[14:44] *** MasterDuke joined
+[15:17] <samcv> perf reports that text::csv test-t.pl is using 5.96% in MVM_sc_get_sc_object but with some changes i got it down to 1.62%
+
+[15:18] <Geth> ¦ rakudo: jsimonet++ created pull request #1873: Hide parent's submethods from ^methods() result.
+
+[15:18] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/1873
+
+[15:20] <[Tux]> samcv, shall I give you co-maint?
+
+[15:21] <samcv> dunno, i don't need it
+
+[15:21] <samcv> these were changes i'm making to moarvm fyi
+
+[15:21] <[Tux]> ah
+
+[15:23] <samcv> i also recently added branch predictor macro hints so we can tell the compiler that certain cases should be expected. not sure i was able to measure a difference by putting MVM_UNLIKELY() around cases that are very unlikely like when we throw for having nonconcrete objects but i'm guessing every bit helps
+
+[15:23] <samcv> though it did make a difference in improving the speed of uniprop general category internally in moarvm which is used a lot so the big switches wolud optimize for the most common case
+
+[15:24] <samcv> (i did that yesterday) not sure if it affects text::csv though. but other code it can have a bit of impact on
+
+[15:31] <Geth> ¦ rakudo: 704b893c6a | usev6++ | src/vm/jvm/runtime/org/perl6/rakudo/RakudoContainerSpec.java
+
+[15:31] <Geth> ¦ rakudo: [JVM] Implement canStore in RakudoContainerSpec
+
+[15:31] <Geth> ¦ rakudo: 
+
+[15:31] <Geth> ¦ rakudo: This fixes some tests that failed because a wrong multi candidate was
+
+[15:31] <Geth> ¦ rakudo: choosen because nqp::isrwcont gave a wrong result. Fixes RT #126531
+
+[15:31] <Geth> ¦ rakudo: and https://github.com/perl6/nqp/issues/385.
+
+[15:31] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/704b893c6a
+
+[15:31] <synopsebot> RT#126531 [open]: https://rt.perl.org/Ticket/Display.html?id=126531 [JVM] throwing X::AdHoc "Cannot assign to a readonly variable or a value" instead of X::Parameter::RW
+
+[15:38] <Geth> ¦ roast: 77e5e6ea57 | usev6++ | 4 files
+
+[15:38] <Geth> ¦ roast: [JVM] Unfudge now passing tests
+
+[15:38] <Geth> ¦ roast: review: https://github.com/perl6/roast/commit/77e5e6ea57
+
+[16:24] *** skids joined
+[17:19] *** shareable6 joined
+[17:38] *** stmuk joined
+[17:40] *** stmuk_ left
+[17:46] *** shareable6 left
+[17:58] <AlexDaniel> .
+
+[18:01] *** Kaiepi left
+[18:01] *** Kaiepi joined
+[18:22] *** cognominal joined
+[18:51] *** lucasb joined
+[18:59] <samcv> it seems nqp and rakudo only use nqp::findcclass for whitespace and for newlines
+
+[18:59] <samcv> so i'm going to optimize both of those
+
+[18:59] <samcv> already optimized for newline which affects .lines. and .words should get a speedup when i optimize for whitespace
+
+[19:01] <MasterDuke> nice
+
+[19:02] <Geth> ¦ rakudo: tbrowder++ created pull request #1874: Clean up and correct whitespace handling.
+
+[19:02] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/1874
+
+[19:03] *** skids left
+[19:05] <lucasb> Hello. I'm making an argument for changing the behavior of Rational.base($n, *):
+
+[19:05] <Geth> ¦ rakudo: cc28ce378a | (Tom Browder)++ | src/Perl6/Pod.nqp
+
+[19:05] <Geth> ¦ rakudo: Clean up and correct whitespace handling.
+
+[19:05] <Geth> ¦ rakudo: 
+
+[19:05] <Geth> ¦ rakudo: Improve unicode space char documentation.
+
+[19:05] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/cc28ce378a
+
+[19:05] <Geth> ¦ rakudo: 01a3736499 | (Elizabeth Mattijsen)++ (committed using GitHub Web editor) | src/Perl6/Pod.nqp
+
+[19:05] <Geth> ¦ rakudo: Merge pull request #1874 from tbrowder/reduce-spaces-regex
+
+[19:05] <Geth> ¦ rakudo: 
+
+[19:05] <Geth> ¦ rakudo: Clean up and correct whitespace handling.
+
+[19:05] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/01a3736499
+
+[19:06] <lucasb> m: <1/3>.base(10, 2**63)
+
+[19:06] <camelia> rakudo-moar 704b893c6: OUTPUT: «(timeout)»
+
+[19:06] <lucasb> ^^ Ok, fine. it's *my* fault. I, the programmer, requested that huge number.
+
+[19:07] <lucasb> On the other hand, when I say "<1/3>.base(10, *)", the "*" mean DWIM, right? And I don't want the DWIM behavior to mean "please, make my program hang". In this case I would be happier with an arbitrary lower limit for fractional digits *plus* a warning saying that the limit was reached and if I really want, I can pass an actual number to the method, instead of whatever.
+
+[19:08] <samcv> MasterDuke: basically instead of calling for the unicode property of every single character as it's searching for a match, i'm going to have ucd2c.pl make a macro that is just (cp == 20) || (cp == 10) || etc
+
+[19:08] <samcv> and it's much cheaper and doesn't have to go to the unicode database which is costly when you're seeking the document for a specific thing
+
+[19:12] <tbrowder_> samcv: in your unicode work, have you seen anyplace that would improve text file io for ascii encoding? jnthn has done lots of work to improve ascii rw io vs p5, but maybe you’ve found something in your recent optimization work that would help.
+
+[19:13] <samcv> maybe. i haven't tested stuff with ascii decoding. i could test that?
+
+[19:13] <samcv> like .slurp(:enc<ascii>) or whatever?
+
+[19:16] <samcv> looks like our nqp::iscclass for alphabetic was wrong and tested Lo, Ll, Lu, Lt, Lm not the alphabetic property.
+
+[19:16] <samcv> alphabetic is supposed to be  Lowercase + Uppercase + Lt + Lm + Lo + Nl + Other_Alphabetic. aside from generating a ton of different checks and being wasteful that way. hopefully nothing breaks when i change this...
+
+[19:18] <samcv> unless we wanted that functionality? idk
+
+[19:20] <tbrowder_> well, i have a test setup on github (that i need to update) that does read / write of large text files that i think shows a practical comparison of p5 vs p6 in a user’s real environment.
+
+[19:22] <samcv> unicodable6: { .uniprop.starts-with('L') != ( .uniprop('Lowercase') || .uniprop('Uppercase') || .uniprop eq 'Lt' | 'Lm' | 'Lo') }
+
+[19:22] <unicodable6> samcv, «timed out after 30 seconds» «exit signal = SIGHUP (1)»
+
+[19:22] <samcv> :(
+
+[19:22] <tbrowder_> see github.com/tbrowder/perl6-read-write-tests
+
+[19:23] <samcv> unicodable6: { .uniprop('L') != ( .uniprop('Lowercase') || .uniprop('Uppercase') || .uniprop eq 'Lt' | 'Lm' | 'Lo') }
+
+[19:23] <unicodable6> samcv, «timed out after 30 seconds» «exit signal = SIGHUP (1)»
+
+[19:23] <samcv> AlexDaniel: how to make it try harder?
+
+[19:25] <pmurias> samcv: re really wanted that functionality, I'm under the impression that a lot of the unicode property stuff "specced" behavior is a result of random circumstances rather than thought over decisions ;)
+
+[19:43] <samcv> pmurias: which functionality?
+
+[19:49] <samcv> well i mean Alphabetic includes 🅓 for example which is So symbol other. but it is .uniprop('Uppercase') so it's in Alphabetic
+
+[19:50] <geekosaur> pmurias, it's generally more complex than that
+
+[19:50] <geekosaur> unicode has cultural and even political aspects
+
+[19:50] <geekosaur> technical issues aren't even int he back seat, sometimes they end up strapped to the roof
+
+[19:51] <El_Che>  geekosaur: what roof. That early optimaization! :)
+
+[19:51] <El_Che> l
+
+[19:52] <samcv> well regardless i can change it to L since currently it does Lo Ll Lu Lt Lm
+
+[19:53] <geekosaur> El_Che, you think it's a joke. problem is, you are in some sense right: but the "roof" is part of the structure of unicode itself
+
+[19:54] <geekosaur> a structure that is trying to do far too many things at once
+
+[19:54] <samcv> which structure?
+
+[19:54] <geekosaur> (but has no choice but to try to do sso or just give up completely on the idea)
+
+[19:54] <samcv> and what is this roof. forgive me for being confused
+
+[19:55] <geekosaur> sorry, I'm building a metaphor for the complete mess that is unicode and everything around it, including but not limited to: technical, language.writing, cultural, political, etc.
+
+[19:55] <geekosaur> unicode-as-concept is more or less impossible. and yet necessary
+
+[19:56] <samcv> ah
+
+[19:56] <samcv> the mess that is unicode is better than the mess before. and for that we can be happy :P
+
+[19:56] <El_Che> my metaphore was way simplier: don't build a roof if you plan to add a 2nd store
+
+[19:56] <samcv> but i agree to some aspect
+
+[19:56] <samcv> hah
+
+[19:56] <samcv> ok i get that
+
+[19:58] <geekosaur> well, if I;m using a vehicle metaphor, I'm imagining you hang extra trailers on the end
+
+[19:58] <geekosaur> because you're not going to get everyone to raise the underpasses to make roon for your second story
+
+[19:58] <geekosaur> *room
+
+[20:00] <geekosaur> which still fits the metaphor: people will use unicode to the extent that it fits what works for them and no further. which is why it's still not that popular in many places: still showing western cultural roots and fitting a bit poorly in many ways
+
+[20:12] <tbrowder_> m: say “\n” ~~ /\h/
+
+[20:12] <camelia> rakudo-moar 01a373649: OUTPUT: «Nil␤»
+
+[20:18] <tbrowder_> does anyone see the need for allowing any space chars in pod, other than the newline, that are in the regex \v character class?
+
+[20:24] <pmurias> samcv: old unicode roast tests
+
+[20:25] <samcv> tbrowder_: aside from the fact that it is specced you mean?
+
+[20:26] <tbrowder_> i didn’t know that was specced, looking...
+
+[20:26] <samcv> oh well i thought that was the issue?
+
+[20:26] <samcv> with those tests that failed a few days ago
+
+[20:32] <tbrowder_> no, sorry, in working that issue, i worked from the outside in, and now i realize that the fix is too large in that i believe legal pod should be restricted from having any character in the \v char class except the newline. at the moment the space char tests asume any \v char can be in pod text.
+
+[20:33] <tbrowder_> i should have said “inside out” since i broadened the scope of the testing.
+
+[20:34] <AlexDaniel> samcv: re harder: https://github.com/perl6/whateverable/issues/317
+
+[20:34] <AlexDaniel> squashable6: next
+
+[20:34] <squashable6> AlexDaniel, ⚠🍕 Next SQUASHathon in 5 days and ≈13 hours (2018-06-02 UTC-12⌁UTC+14). See https://github.com/rakudo/rakudo/wiki/Monthly-Bug-Squash-Day
+
+[20:34] <AlexDaniel> samcv: next squashathon is for whateverable, maybe you can contribute this :)
+
+[21:11] *** shareable6 joined
+[21:24] *** stmuk_ joined
+[21:26] *** stmuk left
+[21:27] *** cognominal left
+[21:37] *** mst left
+[21:37] *** mst joined
+[21:49] *** cognominal joined
+[22:42] *** BenGoldberg joined
+[23:01] <MasterDuke> timotimo: re the PseudoStash business, i've thoroughly confused myself. you think the fix is in Mu.gistseen?
+
+[23:01] <timotimo> more probably in a WHICH somewhere
+
+[23:05] <MasterDuke> ?
+
+[23:05] <timotimo> well, why isn't it noticing that it's the same PseudoStash object over and over again?
+
+[23:06] <MasterDuke> well, it's not always the same
+
+[23:07] <MasterDuke> i.e., if i print the $WHICH in gistseen and then do a wc -l vs sort -u | wc -l i got 27265 and 15151
+
+[23:07] <timotimo> well, i thought it's the same object but it generates a different WHICH unfortunately
+
+[23:10] <MasterDuke> hm, maybe that's why lower iteration counts don't see this
+
+[23:11] <timotimo> well, i think that's because it doesn't inline at lower iteration counts
+
+[23:11] <MasterDuke> i.e., at higher counts a gc happens and the object moves
+
+[23:11] <timotimo> it'll only move twice at most
+
+[23:12] <MasterDuke> but it seems ~6k is where things change, which seems really high for making an inlining decision
+
+[23:13] <timotimo> hmm.
+
+[23:47] *** stmuk joined
+[23:49] *** stmuk_ left

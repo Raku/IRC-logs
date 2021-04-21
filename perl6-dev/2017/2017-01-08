@@ -1,0 +1,809 @@
+[10:17] <[Tux]> This is Rakudo version 2016.12-248-gf6303d7be built on MoarVM version 2016.12-71-g331a6b43
+
+[10:17] <[Tux]> csv-ip5xs        3.138
+
+[10:17] <[Tux]> test            12.974
+
+[10:17] <[Tux]> test-t           5.327
+
+[10:17] <[Tux]> csv-parser      13.893
+
+[11:19] <bartolin> bisectable6: my $attempts = 0; say (1..5).grep({if $_ == 3 {$attempts++; redo unless $attempts == 10}; $_}).join("|"); say "looked $attempts times for element 3"
+
+[11:19] <bisectable6> bartolin, Bisecting by output (old=2015.12 new=f6303d7) because on both starting points the exit code is 0
+
+[11:19] <bisectable6> bartolin, bisect log: https://gist.github.com/2b11fafe62e22fa42296c3803fba4be2
+
+[11:19] <bisectable6> bartolin, (2017-01-06) https://github.com/rakudo/rakudo/commit/3c52aa096c190c31bd397e1dbe58b6320fa7bc61
+
+[11:21] <bartolin> m: my $attempts = 0; say (1..5).grep({if $_ == 3 {$attempts++; redo unless $attempts  == 10}; $_}).join("|"); say "looked $attempts times for element 3"
+
+[11:21] <camelia> rakudo-moar f6303d: OUTPUT«1|2|4|5␤looked 1 times for element 3␤»
+
+[11:21] <bartolin> star-m: my $attempts = 0; say (1..5).grep({if $_ == 3 {$attempts++; redo unless $attempts  == 10}; $_}).join("|"); say "looked $attempts times for element 3"
+
+[11:21] <camelia> star-m 2016.10: OUTPUT«1|2|3|4|5␤looked 10 times for element 3␤»
+
+[11:22] <bartolin> looks like a regression, doesn't it? I'll rakudobug it
+
+[11:24] <bartolin> j: 'my $attempts = 0; say (1..5).grep({if $_ == 3 {$attempts++; redo unless $attempts == 10}; $_}).join("|"); say "looked $attempts times for element 3"'
+
+[11:24] <camelia> rakudo-jvm fb4f16: OUTPUT«WARNINGS for <tmp>:␤Useless use of constant string "my $attempts = 0; say (1..5).grep({if $_ == 3 {$attempts++; redo unless $attempts == 10}; $_}).join(\"|\"); say \"looked $attempts times for element 3\"" in sink context (line 1)␤»
+
+[11:24] <bartolin> j: my $attempts = 0; say (1..5).grep({if $_ == 3 {$attempts++; redo unless $attempts == 10}; $_}).join("|"); say "looked $attempts times for element 3"
+
+[11:24] <camelia> rakudo-jvm fb4f16: OUTPUT«1|2|3|4|5␤looked 10 times for element 3␤»
+
+[11:24] <bartolin> on latest r-j this dies with 'redo without loop construct'
+
+[12:02] <lizmat> bartolin: please rakudobug it, and add tests for it and then we revert the patch if we can't find out why
+
+[12:02] <lizmat> on first sight, I have no idea why this fails: it's just getting the iterator and working off off that
+
+[12:03] <lizmat> there shouldn't be anything else important code using an iterator should know about, right ?
+
+[12:18] <bartolin> lizmat: I think it happens, because NEXT and REDO are not handled in grep-callable: https://github.com/rakudo/rakudo/blob/f6303d7beb2f4f83b09e5552e8c054bd06824414/src/core/Any-iterable-methods.pm#L930
+
+[12:18] <lizmat> but, but, why didn't we see this before then ?
+
+[12:18] <bartolin> lizmat: .. and this surfaces only now
+
+[12:19] * bartolin didn't fully understand, yet
+
+[12:22] <bartolin> in IterateOneWithPhasers we do more work with regard to LAST, NEXT and REDO: https://github.com/rakudo/rakudo/blob/f6303d7beb2f4f83b09e5552e8c054bd06824414/src/core/Any-iterable-methods.pm#L104
+
+[12:23] <bartolin> anyway, I'm writing a bug report now
+
+[12:23] <lizmat> star-m: my $attempts = 0; say (1..5).grep({if $_ == 3 {$attempts++; redo unless $attempts  == 10}; $_})   # broken longer ago
+
+[12:23] <camelia> star-m 2016.10: OUTPUT«(1 2 4 5)␤»
+
+[12:23] <lizmat> BTW: what does "redo" in a grep mean anyway ?
+
+[12:25] <bartolin> yeah, I wondered about that, too
+
+[12:25] <bartolin> in S32-list/grep.t we have tests for 'last' and 'next' in grep -- with a comment "grep with last, next etc."
+
+[12:28] <bartolin> also, 7021861705 might be related to this. do you remember which hyper/race tests passed back then, perhaps?
+
+[12:28] <lizmat> no
+
+[12:31] <AlexDaniel> well, try the same element again?
+
+[12:31] <AlexDaniel> I wonder why would anybody need this ever…
+
+[12:32] <AlexDaniel> even ｢last｣ in grep is not that common given that it was broken for almost a year and nobody noticed
+
+[12:35] <bartolin> I don't see a use case for 'redo'. Actually I stumbled about this, because a test for 'next' in grep from S32-list/grep.t dies on rakudo-j -- and it seems to happen for the same reason, that 'redo' is failing on MoarVM
+
+[12:35] <bartolin> r: say (1..12).grep({next if $_ % 5 == 0; $_ % 2 == 0}).join('|')
+
+[12:35] <camelia> rakudo-moar f6303d, rakudo-jvm fb4f16: OUTPUT«2|4|6|8|12␤»
+
+[12:36] <bartolin> ^^ that one dies now with 'next without loop construct' on rakudo-j
+
+[12:37] <AlexDaniel> by the way…
+
+[12:37] <AlexDaniel> j: say (1..12).grep({next if $_ % 5 == 0; $_ % 2 == 0}).join('|')
+
+[12:37] <camelia> rakudo-jvm fb4f16: OUTPUT«2|4|6|8|12␤»
+
+[12:37] <AlexDaniel> oh, that's not very old!
+
+[12:38] <bartolin> no, but it is before 3c52aa096c
+
+[12:38] <AlexDaniel> how much space does r-j take when installed, by the way?
+
+[12:38] <AlexDaniel> and how long does it take to build it?
+
+[12:41] <bartolin> hmm, I have no numbers, but can take a look
+
+[12:42] <AlexDaniel> well, would be nice to know before I jump into it head first :)
+
+[12:42] <bartolin> my install dir has a size of 11 M
+
+[12:42] <lizmat> well, the simple thing could be to just die on a redo in a grep
+
+[12:43] <AlexDaniel> wow, 11
+
+[12:43] <bartolin> and it's definitely not fast. stage parse takes about 140 s on my server
+
+[12:43] <AlexDaniel> but generally under 10 minutes I guess?
+
+[12:44] <bartolin> yes, I'd say less than 10 min, but not much less
+
+[12:44] <lizmat> otoh, if the code block has a phaser, it goes through the slow .map path, and then redo *is* supported
+
+[12:44] <lizmat> so I guess we have no choice  :-(
+
+[12:47] * bartolin builds r-j
+
+[12:47] <AlexDaniel> so if I am going to do the same thing bisectable does now for r-moar but for r-j, do I need to know anything? In terms of building it? Running it is a bit different story…
+
+[12:48] <moritz> you need to know that you'll need patience
+
+[12:48] <bartolin> AlexDaniel: Hmm, there where a lot of commits where r-j did not build at all
+
+[12:48] <AlexDaniel> that is, ≈5500 builds or something. I guess most of them will fail, yea
+
+[12:49] <AlexDaniel> moritz: you overestimate the amount of patience required
+
+[12:49] <moritz> AlexDaniel: tell me after you've done it :-)
+
+[12:49] <AlexDaniel> I've already done it for moar
+
+[12:49] <AlexDaniel> it was like 3 or 4 days to do it from scratch
+
+[12:52] <AlexDaniel> a good estimate for moar was 1 minute per build (it takes about 7, but there are 7 in parallel)
+
+[12:52] <AlexDaniel> soo
+
+[12:52] <AlexDaniel> m: say 5500 ÷ 60 ÷ 24
+
+[12:52] <camelia> rakudo-moar f6303d: OUTPUT«3.819444␤»
+
+[12:52] <AlexDaniel> yea
+
+[12:53] <AlexDaniel> .oO( it takes more procrastination than patience )
+
+[12:54] <moritz> the JVM needs more memory, so fewer builds in parallel
+
+[12:54] <moritz> and it's slower
+
+[12:54] <moritz> OTOH, more builds will abort early
+
+[12:55] <AlexDaniel> memory! Good point. I won't be surprised if it goes over 16 GB
+
+[12:56] <bartolin> I'm running my daily builds on a virtual machine with 8 GB and 2 cores
+
+[12:57] <bartolin> and I think 6 GB would be enough
+
+[12:57] <moritz> maybe 4
+
+[12:57] <lizmat> ok, so I have a fix for redo in grep, but it makes it 1.7x slower   :-(
+
+[12:58] <lizmat> bartolin: ^^
+
+[12:58] <bartolin> on that machine a complete build (with nqp-j) just tooka bit about 12 min :-/
+
+[13:00] <bartolin> lizmat: :-( that's a lot, esp. since noone needs 'redo' in grep
+
+[13:00] <lizmat> yeah...  :(
+
+[13:01] <lizmat> in fact, just using map would only make it 1.5x slower, because we then don't need to check for phasers
+
+[13:04] <bartolin> lizmat: how does your fix look like? (could you gist it?)
+
+[13:04] <lizmat> basically add the redo support from sequential-map
+
+[13:05] <bartolin> I see
+
+[13:05] <lizmat> https://gist.github.com/lizmat/819e753b785d3ca7db4b884beac36f89
+
+[13:12] <bartolin> bug report (without this discussion, yet): RT #130529
+
+[13:12] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=130529
+
+[13:17] <lizmat> hmmm... it just occurred to me that returning an empty Slip from a map, starts up a SlippyIterator and then doesn't find anything in it
+
+[13:18] <lizmat> perhaps we need an EmptySlip sentinel just like IterationEnd to indicate nothing got returned
+
+[13:18] <lizmat> an eqaddr for that should be really fast
+
+[13:19] <lizmat> jnthn moritz notviki opinions ?  ^^
+
+[13:19] * moritz can't really comment
+
+[13:21] <jnthn> m: say Empty.^name
+
+[13:21] <camelia> rakudo-moar f6303d: OUTPUT«Slip␤»
+
+[13:21] <jnthn> Already exists, no? :)
+
+[13:21] <jnthn> And yes, we can past-path Empty
+
+[13:22] <jnthn> *fast-path
+
+[13:25] <lizmat> hmmm...
+
+[13:26] <lizmat> ok, will do
+
+[13:30] <bartolin> lizmat: there is anothere inconsistency with the command above: it works as expected when I use .perl instead of .join
+
+[13:31] <bartolin> m:  my $attempts = 0; say (1..5).grep({if $_ == 3 {$attempts++; redo unless $attempts  == 10}; $_}).perl; say "looked $attempts times for element 3"
+
+[13:31] <camelia> rakudo-moar f6303d: OUTPUT«(1, 2, 3, 4, 5).Seq␤looked 10 times for element 3␤»
+
+[13:31] <lizmat> yeah, that inconsistency will go after I push my fix
+
+[13:31] <lizmat> will make grep about 1.4x slower
+
+[13:31] <lizmat> I guess you can't have your cake and eat it as well
+
+[13:32] <bartolin> so, you think the problem really is in grep-callable and only surfaces with the new join for Seq?
+
+[13:32] <lizmat> yeah, pretty sure of that
+
+[13:33] <lizmat> it will also fix the problem on the JVM
+
+[13:33] <lizmat> I guess we were cutting corners a bit too much there  -(
+
+[13:33] <bartolin> ok. what do you think about adding: 'NEXT', $_,
+
+[13:33] <bartolin> lizmat: to the nqp::handle part
+
+[13:34] <lizmat> the expensive part is the REDO part
+
+[13:34] <bartolin> (I think only that will make r-j happy there=
+
+[13:34] <lizmat> you need to build an entire loop construct for that
+
+[13:34] <bartolin> *nod*
+
+[13:35] <lizmat> and since redo is dynamic (afaik), we can't determine at compile time whether a block will execute a redo or not
+
+[13:38] <dalek> rakudo/nom: 362f674 | lizmat++ | src/core/Any-iterable-methods.pm:
+
+[13:38] <dalek> rakudo/nom: Fix for RT #130529
+
+[13:38] <dalek> rakudo/nom:
+
+[13:38] <dalek> rakudo/nom: - remove the special case "fast" grep loop because it didn't support redo
+
+[13:38] <dalek> rakudo/nom: - make general case a bit faster by rewriting as nqp ops
+
+[13:38] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=130529
+
+[13:38] <dalek> rakudo/nom: - also directly go to sequential-map, instead of calling self.map
+
+[13:38] <dalek> rakudo/nom: - this makes the slow path about 10% faster
+
+[13:38] <dalek> rakudo/nom: - this makes the fast path about 1.4x slower  :-(
+
+[13:38] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/362f674450
+
+[13:40] * bartolin feels a bit sorry for bringing this up ...
+
+[13:41] <bartolin> but lizmat++
+
+[13:41] <lizmat> yeah, sometimes you have a kobayashi maru situation
+
+[13:57] <jnthn> I suspect the redo handling will get cheaper once we have a goto
+
+[14:09] <dalek> rakudo/nom: 9052427 | lizmat++ | src/core/Str.pm:
+
+[14:09] <dalek> rakudo/nom: Use Empty for an empty Slip
+
+[14:09] <dalek> rakudo/nom:
+
+[14:09] <dalek> rakudo/nom: So we can test for it better later.
+
+[14:09] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/90524270aa
+
+[16:21] <b2gills> I wonder if ｢|()｣ could return ｢Empty｣ rather than a new Slip every time.
+
+[16:22] <notviki> 0.o it returns a slip?
+
+[16:22] <notviki> Ah ok
+
+[16:22] <b2gills> m: say Empty.perl; say (|()).perl
+
+[16:22] <camelia> rakudo-moar 905242: OUTPUT«slip()␤slip()␤»
+
+[16:23] <notviki> s: &prefix:<|>
+
+[16:23] <SourceBaby> notviki, Sauce is at https://github.com/rakudo/rakudo/blob/9052427/src/core/List.pm#L1464
+
+[16:25] <b2gills> m: my \a = |(); my \b = |(); say Empty =:= a; say a =:= b # currently |() returns a new Slip every time
+
+[16:25] <camelia> rakudo-moar 905242: OUTPUT«False␤False␤»
+
+[16:27] <notviki> m: say Empty =:= Empty
+
+[16:27] <camelia> rakudo-moar 905242: OUTPUT«True␤»
+
+[16:27] <notviki> Prolly just need a new candidate that doesn't take args?
+
+[16:28] <notviki> m: my \a = ().Slip; my \b = ().Slip; say Empty =:= a; say a =:= b
+
+[16:28] <camelia> rakudo-moar 905242: OUTPUT«False␤False␤»
+
+[16:49] <RabidGravy> for discussion https://github.com/perl6/DBIish/issues/84
+
+[20:22] <lizmat> m: dd { 42 if 0 }()   # how about that would actually spell Empty ?
+
+[20:22] <camelia> rakudo-moar 905242: OUTPUT«slip()␤»
+
+[20:23] <notviki> m: dd Empty
+
+[20:23] <camelia> rakudo-moar 905242: OUTPUT«slip()␤»
+
+[20:23] * moritz doesn't care much either way
+
+[20:23] <lizmat> m: dd { 42 if 0 }().perl.EVAL # and this would also say Empty
+
+[20:23] <camelia> rakudo-moar 905242: OUTPUT«slip()␤»
+
+[20:24] <lizmat> it would make debugging a bit easier for me  :-)
+
+[20:24] <lizmat> but it breaks 2 spectests that specifically test for "slip()"
+
+[20:24] <lizmat> as the output of .perl
+
+[20:25] <lizmat> FWIW, it would also be faster  :-) for the Empty case, at the expense of one more nqp::eqaddr when it isn't
+
+[20:25] <masak> I feel these types for listish and other emptiness keep floating around over the years, slowly, like oil on water
+
+[20:25] <masak> I'm sorry, that came out very grumpy :)
+
+[20:26] <lizmat> well, Empty is post-GLR
+
+[20:26] <lizmat> so it's only been around for 1.5 year at the most
+
+[20:26] <masak> but if the above proposal is a simplification in that it makes things more consistent without any obvious drawback, I'm all for it, I guess
+
+[20:26] <moritz> I don't really understand what Nil is used for these days
+
+[20:26] <moritz> except for resetting something to its default value
+
+[20:27] <geekosaur> emptiness is surprisingly hard to pin down :)
+
+[20:27] <lizmat> Nil signifies the absence of a value where there should be one
+
+[20:27] <moritz> but that could be a function too; doesn't need to be a separate type
+
+[20:27] <moritz> lizmat: but don't we have type objects already to do that?
+
+[20:27] <masak> moritz: the magic behavior of assigning to Nil is such an obvious antipattern anyway -- let's get rid of it
+
+[20:27] <lizmat> m: dd (Nil,)
+
+[20:27] <camelia> rakudo-moar 905242: OUTPUT«(Nil,)␤»
+
+[20:27] <lizmat> m: dd (Empty,)
+
+[20:27] <camelia> rakudo-moar 905242: OUTPUT«()␤»
+
+[20:27] <moritz> like, use Str when no instance of Str can be found?
+
+[20:28] <lizmat> masak: assigning to Nil ??
+
+[20:28] <masak> moritz: it's non-obvious *and* it slows down assignment in general
+
+[20:28] <moritz> masak: +1
+
+[20:28] <masak> m: my Int $x = 42; $x = Nil; say $x
+
+[20:28] <camelia> rakudo-moar 905242: OUTPUT«(Int)␤»
+
+[20:28] <masak> lizmat: that.
+
+[20:28] <lizmat> masak: how does it slow down assignment in general ??
+
+[20:29] <masak> lizmat: because you need to check, is it Nil, and then run special code
+
+[20:29] <lizmat> ok, so you rather have something like undefine() ?
+
+[20:29] <masak> frankly, I'd rather just set it to Int in the above case
+
+[20:29] <masak> with arrays, I'd rather just set it to ()
+
+[20:30] <masak> etc
+
+[20:30] <lizmat> masak: and what should .first return when it doesn't find anything ?
+
+[20:30] <masak> I'm not proposing getting rid of Nil, fwiw
+
+[20:30] <masak> just that it lose that magic assignment behavior
+
+[20:30] <masak> I'm all for having some value that means "there wasn't anything here, sorry"
+
+[20:31] <moritz> lizmat: it could also fail
+
+[20:31] <lizmat> well, that's how it worked before, if I recall correctly
+
+[20:31] <moritz> fail('nothing here, move along')
+
+[20:31] <masak> yeah, I'd be fine with it throwing an exception, even
+
+[20:31] <lizmat> just like .pop fails atm instead of returning Nil
+
+[20:31] <moritz> IterationEnd :-)
+
+[20:32] <lizmat> but all of this discussion strayed from my original question, which I consider answered now
+
+[20:34] <masak> +1
+
+[20:40] <jnthn> I did fear Nil would slow down every assignment, but it turns out you need to do a type check anyway on assignment, and you can put the Nil magic on the failure path.
+
+[20:41] <jnthn> The Nil assignment magic is so you can write stuff like `my ExpectedType $foo = @bar.first(&predicate)`
+
+[20:42] <jnthn> Without it, what could `first` return?
+
+[20:42] <moritz> a Failure
+
+[20:43] <masak> I'm not opposed to a type that means "you expected there to be something here but there wasn't anything"
+
+[20:43] <moritz> or you could give first, pop et al an optional argument for the fallback
+
+[20:43] <jnthn> Right, 'cus specifying things twice aids refactorability. :)
+
+[20:43] * masak .oO( poor man's Maybe )
+
+[20:44] <jnthn> m: say Failure ~~ Nil
+
+[20:44] <camelia> rakudo-moar 905242: OUTPUT«True␤»
+
+[20:44] <jnthn> And Failure is a Nil, which just happens to carry an exception because there's something useful to convey beyond "there wasn't a value"
+
+[20:45] <japhb> jnthn: To be clear, you're saying that Nil handling does not slow down assignments that would have worked normally *at all*?
+
+[20:45] <moritz> does that mean Failure also have the semantics of resetting stuff to the default value?
+
+[20:45] <moritz> my Int $x is default(5); sub f() { fail 'fast' }; $x = 42; $x = f(); say $x
+
+[20:46] <moritz> m: my Int $x is default(5); sub f() { fail 'fast' }; $x = 42; $x = f(); say $x
+
+[20:46] <camelia> rakudo-moar 905242: OUTPUT«Earlier failure:␤ fast␤  in sub f at <tmp> line 1␤  in block <unit> at <tmp> line 1␤␤Final error:␤ Type check failed in assignment to $x; expected Int but got Failure (Failure.new(exception...)␤  in block <unit> at <tmp> line 1␤␤»
+
+[20:46] <masak> m: my Int $x = 42; $x = Failure; say $x
+
+[20:46] <camelia> rakudo-moar 905242: OUTPUT«Type check failed in assignment to $x; expected Int but got Failure (Failure)␤  in block <unit> at <tmp> line 1␤␤»
+
+[20:46] <moritz> .oO( Liskov? )
+
+[20:46] <moritz> I don't think I'd like it the other way though
+
+[20:46] <masak> no please no
+
+[20:46] <masak> not more of it
+
+[20:47] <moritz> masak: not more what? Liskov violation? or magic?
+
+[20:47] <masak> magic
+
+[20:48] <jnthn> japhb: I'd have to go code-digging, but I believe it's on the failover path.
+
+[20:48] <japhb> jnthn: But it doesn't prevent optimizations that you'd otherwise be able to do?
+
+[20:48] <jnthn> japhb: Those type checks don't spesh away yet, but once we get *that* done too then the Nil case is essentially free.
+
+[20:49] <japhb> oh cool
+
+[20:49] <jnthn> The far costlier thing going on in assignment is the WHENCE callback stuff, fwiw.
+
+[20:49] <dalek> rakudo/nom: ebe9147 | lizmat++ | src/core/SlippyIterator.pm:
+
+[20:49] <dalek> rakudo/nom: Make Empty work faster with the SlippyIterator
+
+[20:49] <dalek> rakudo/nom:
+
+[20:49] <dalek> rakudo/nom: - check for Empty directly at startup
+
+[20:49] <dalek> rakudo/nom: - check for first value pulled, don't start if IterationEnd:
+
+[20:49] <dalek> rakudo/nom:   this should handle the slip() cases faster
+
+[20:49] <dalek> rakudo/nom: - rewrite method in nqp entirely
+
+[20:49] <dalek> rakudo/nom: - 5% faster in my @a = ^1000; for ^1000 { my @b = @a.grep({ 0 }) }
+
+[20:49] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/ebe9147013
+
+[20:49] <dalek> rakudo/nom: ec0258a | lizmat++ | src/core/Slip.pm:
+
+[20:49] <dalek> rakudo/nom: Give Empty its own .perl output
+
+[20:49] <dalek> rakudo/nom:
+
+[20:49] <dalek> rakudo/nom: - for easier debugging
+
+[20:49] <dalek> rakudo/nom: - for faster .perl output for Empty
+
+[20:50] <jnthn> Which I didn't yet hit on a good strategy for getting rid of.
+
+[20:50] <lizmat> - and yes, it roundtrips ok
+
+[20:50] <lizmat> This breaks two spectests that were specifically checking for .perl
+
+[20:50] <lizmat> returning "slip()".  I consider those tests to be sub-optimal  :-)
+
+[20:50] <japhb> I'm not familiar with that bit, what is the WHENCE callback?
+
+[20:51] <lizmat> review: https://github.com/rakudo/rakudo/commit/ec0258a
+
+[20:51] <jnthn> m: my %h; if %h<a> { }; say %h.keys # we never vivify a hash entry
+
+[20:51] <camelia> rakudo-moar 905242: OUTPUT«()␤»
+
+[20:51] <jnthn> m: my %h; if %h<a> -> \entry { entry = 42 }; say %h.keys # we never vivify a hash entry
+
+[20:51] <camelia> rakudo-moar 905242: OUTPUT«()␤»
+
+[20:51] <lizmat> japhb: it's the bit that makes:
+
+[20:51] <jnthn> duh
+
+[20:51] <lizmat> m: my %h; my $b := %h<a>; dd %h; $b = 42; dd %h
+
+[20:52] <camelia> rakudo-moar 905242: OUTPUT«Hash %h = {}␤Hash %h = {:a(42)}␤»
+
+[20:52] <lizmat> work
+
+[20:52] <jnthn> m: my %h; %h<a> = 42; say %h.keys
+
+[20:52] <camelia> rakudo-moar 905242: OUTPUT«(a)␤»
+
+[20:52] <jnthn> Right, that :)
+
+[20:52] <jnthn> Same on arrays etc.
+
+[20:52] <jnthn> It's a 1-shot callback-on-assign
+
+[20:53] <jnthn> m: my %h; %h<a b c> |= 1..3; say %h
+
+[20:53] <camelia> rakudo-moar 905242: OUTPUT«Cannot assign to an immutable value␤  in block <unit> at <tmp> line 1␤␤»
+
+[20:53] <jnthn> d'oh
+
+[20:53] <japhb> Oh gah, that case that lizmat showed is ... ew, yeah
+
+[20:53] <jnthn> m: my %h; %h<a b c> Z= 1..3; say %h
+
+[20:53] <camelia> rakudo-moar 905242: OUTPUT«{a => 1, b => 2, c => 3}␤»
+
+[20:53] <jnthn> Also since meta-ops like Z= can happen then it can happen somewhat "at a distance"
+
+[20:53] * japhb nods ruefully
+
+[20:53] <jnthn> First-class l-values are both powerful and a performance headache.
+
+[20:54] <japhb> Totally get that.
+
+[20:54] <japhb> And it's not just that they're first-class l-values, it's also that they can vivify
+
+[20:54] <jnthn> Aye
+
+[20:54] <jnthn> Thankfully, we did make assignment something that the VM can understand.
+
+[20:55] <dalek> roast: ce75103 | lizmat++ | S03-metaops/reduce.t:
+
+[20:55] <dalek> roast: Fix two sub-optimal tests that broke with ec0258a
+
+[20:55] <dalek> roast: review: https://github.com/perl6/roast/commit/ce75103dbc
+
+[20:55] <jnthn> Spesh skates on extremely thin ice at the moment in that regard, though.
+
+[20:56] <japhb> I bet.  That whole problem space just feels like running through a locust swarm and trying not to hit any bugs
+
+[20:56] <jnthn> We'll need proper alias analysis before long, but that gets us a good way towards escape analysis too...
+
+[20:56] <jnthn> ...which we'd probably want anyway.
+
+[20:56] <japhb> nodnod
+
+[20:57] * jnthn wonders if we'll manage EA during the year :)
+
+[21:00] <notviki> My dalek replacement is ready. Anyone got keys to rakudo/rakudo, rakudo/star, and moarvm/moarvm and can go into Settings -> Web Hooks and swap out dalek for:   http://geth.perl6.party/?chan=#perl6-dev  (or #moarvm for moarvm), Content-type: application/json and "Send me everything." for which events?
+
+[21:00] <dalek> roast/6.c-errata: deba56e | lizmat++ | S03-metaops/reduce.t:
+
+[21:00] <dalek> roast/6.c-errata: Fix two tests that broke with ec0258a
+
+[21:00] <dalek> roast/6.c-errata: review: https://github.com/perl6/roast/commit/deba56e8e5
+
+[21:00] <notviki> (though currently only "Pull Request", "Create", and "Push" events have handlers)
+
+[21:01] <moritz> notviki: I can do that for rakudo/{rakudo,star}, iirc
+
+[21:01] <notviki> cool
+
+[21:02] <jnthn> Maybe let's do a couple of repos first, see how it is, then do the rest? :)
+
+[21:02] <notviki> Sounds good
+
+[21:02] <notviki> done doc and roast so far.
+
+[21:02] <jnthn> OK
+
+[21:02] <AlexDaniel> done for whateverable
+
+[21:02] <AlexDaniel> :)
+
+[21:02] <jnthn> I'll do MoarVM tomorrow unless a showstopper stops the show :)
+
+[21:02] <jnthn> notviki++
+
+[21:02] <moritz> notviki: doen for rakudo/{rakudo,star}
+
+[21:02] <moritz> *done
+
+[21:04] <AlexDaniel> .tell dalek We like dogfood. Change the webhook to http://geth.perl6.party/?chan=#perl6-dev (or #moarvm for moarvm), Content-type: application/json and "Send me everything."
+
+[21:04] <yoleaux2> AlexDaniel: I'll pass your message to dalek.
+
+[21:06] <Geth> roast/zoffixznet-patch-1: 7bd88e48f1 | (Zoffix Znet)++ | README.md
+
+[21:06] <Geth> roast/zoffixznet-patch-1: s/Environment/Environmental/
+
+[21:06] <Geth> roast/zoffixznet-patch-1:
+
+[21:06] <Geth> roast/zoffixznet-patch-1: also bot test
+
+[21:06] <Geth> roast/zoffixznet-patch-1: review: https://github.com/perl6/roast/commit/7bd88e48f1
+
+[21:06] <Geth> roast: zoffixznet++ created pull request #220: s/Environment/Environmental/
+
+[21:06] <Geth> roast: review: https://github.com/perl6/roast/pull/220
+
+[21:06] <Geth> roast: c7904f7da9 | (Zoffix Znet)++ | README.md
+
+[21:06] <Geth> roast: s/Environment/Environmental/ (#220)
+
+[21:06] <Geth> roast:
+
+[21:06] <Geth> roast: also bot test
+
+[21:06] <Geth> roast: review: https://github.com/perl6/roast/commit/c7904f7da9
+
+[21:06] <notviki> k
+
+[21:07] <notviki> so far so good :P
+
+[21:07] <timotimo> i like its initial capital letter
+
+[21:07] <timotimo> also its color is nice
+
+[21:07] <timotimo> oh, create pull request, eh?
+
+[21:08] <notviki> Yeah, unlike dalek this one will also say when people create pull requests
+
+[21:08] <notviki> (I noticed on doc repo some seem to be unreviewed for days)
+
+[21:09] <timotimo> does it also receive comments and such on pull requests? so we could theoretically check that nothing got done in a pull request?
+
+[21:10] <notviki> Yeah, there's a web hook for comments too. These are all the available events we could do something for: blob:http://imgur.com/42205f88-d5d1-4ad3-8fe4-02c3257c938a
+
+[21:10] <notviki> http://i.imgur.com/xwdjIGJ.png
+
+[21:11] <diakopter> notviki: cool
+
+[21:12] <diakopter> notviki: did you try some very long messages to see if it throttles messages enough to get past freenode's spam detection?
+
+[21:13] <notviki> diakopter: it does something smarter for when the push has multiple commits: https://irclog.perlgeek.de/perl6/2017-01-08#i_13880268
+
+[21:13] <notviki> diakopter: for long commit messages it abridges them (saying $X more lines) and still gives review URL
+
+[21:14] <notviki> Though now I realize it doesn't currently do anything for very long single lines
+
+[21:14] <diakopter> neat
+
+[21:15] <diakopter> well presumably they'd just be truncated by the irc server
+
+[21:18] <timotimo> make sure to abbreviate extremely long branch names ;)
+
+[21:18] <notviki> good idea.
+
+[21:18] <notviki> Geth: source
+
+[21:18] <Geth> notviki, Source at https://github.com/zoffixznet/geth To add repo, add an 'application/json' webhook on GitHub pointing it to http://geth.perl6.party/?chan=#perl6
+
+[21:19] <timotimo> "well volunteered"? ;)
+
+[21:19] <notviki> Well, I just created two Issues on it :)
+
+[21:20] <timotimo> cool :)
+
+[21:59] <Geth> rakudo: fbbe446c64 | (Elizabeth Mattijsen)++ | src/core/Rakudo/Internals.pm
+
+[21:59] <Geth> rakudo: Introducing R:I.ZipIterablesMapIterator
+
+[21:59] <Geth> rakudo:
+
+[21:59] <Geth> rakudo: Zips iterables, each zip passed as an IterationBuffer to the mapper.
+
+[21:59] <Geth> rakudo: The new workhorse for Zop
+
+[21:59] <Geth> rakudo: review: https://github.com/rakudo/rakudo/commit/fbbe446c64
+
+[21:59] <camelia> rakudo-moar ec0258: OUTPUT«===SORRY!=== Error while compiling <tmp>␤Undeclared names:␤    Elizabeth used at line 1␤    Internals used at line 1␤    Mattijsen used at line 1␤Undeclared routines:␤    core used at line 1␤    fbbe446c64 used at line 1␤    src used …»
+
+[21:59] <camelia> rakudo-moar ec0258: OUTPUT«===SORRY!=== Error while compiling <tmp>␤Bogus postfix␤at <tmp>:1␤------> Introducing R:I.ZipIterablesMapIterator⏏␤    expecting any of:␤        infix␤        infix stopper␤        postfix␤        statement end␤        sta…»
+
+[21:59] <camelia> rakudo-moar ec0258: OUTPUT«===SORRY!=== Error while compiling <tmp>␤Two terms in a row␤at <tmp>:1␤------> s, each zip passed as an IterationBuffer⏏ to the mapper.␤    expecting any of:␤        infix␤        infix stopper␤        postfix␤        stateme…»
+
+[21:59] <camelia> rakudo-moar ec0258: OUTPUT«===SORRY!=== Error while compiling <tmp>␤Unsupported use of C++ constructor syntax; in Perl 6 please use method call syntax␤at <tmp>:1␤------> The new workhorse ⏏for Zop␤»
+
+[22:00] <camelia> rakudo-moar ec0258: OUTPUT«===SORRY!=== Error while compiling <tmp>␤Confused␤at <tmp>:1␤------> review: https:⏏//github.com/rakudo/rakudo/commit/fbbe44␤    expecting any of:␤        colon pair␤»
+
+[22:00] <lizmat> que ?
+
+[22:01] <lizmat> notviki: it's trying to run my commit message as code ?
+
+[22:01] <timotimo> oh jesus
+
+[22:01] <timotimo> rakudo: say "hi"
+
+[22:01] <camelia> rakudo-moar ec0258: OUTPUT«hi␤»
+
+[22:01] <notviki> lol
+
+[22:01] <geekosaur> guessing camelia has a special case to not accept commands from dalek when the repo name matches a program
+
+[22:01] <timotimo> yeah, it must have had that so far %)
+
+[22:01] <notviki> Well, that's easy to rectify
+
+[22:01] <timotimo> that's amazing
+
+[22:01] <notviki> No, it didn't dalek reported it as "rakudo/nom"
+
+[22:01] <timotimo> yeah, just put a ü instead of u or something
+
+[22:01] <notviki> But I taught geth to treat nom as master
+
+[22:01] <geekosaur> er s/when/, for when/
+
+[22:01] <timotimo> or an extra space
+
+[22:02] <geekosaur> ah
+
+[22:02] <timotimo> quite frankly, that is hilarious :)
+
+[22:03] <diakopter> uh huh, botwars
+
+[22:03] <notviki> There. Fixed forever :}
+
+[22:03] <geekosaur> batty bots
+
+[22:23] <lizmat> m: use nqp; BEGIN my $h := nqp::hash("a",42); dd $h   # huh?  Am I missing something ?
+
+[22:23] <camelia> rakudo-moar fbbe44: OUTPUT«Mu␤»
+
+[22:23] <lizmat> m: use nqp; my $h; BEGIN $h := nqp::hash("a",42); dd $h  # even weirder ?
+
+[22:23] <camelia> rakudo-moar fbbe44: OUTPUT«Any $h = Any␤»
+
+[22:24] <lizmat> m: use nqp; my $h; BEGIN { $h := nqp::hash("a",42) }; dd $h  # are we not allowed to run nqp code in a BEGIN block ?
+
+[22:24] <camelia> rakudo-moar fbbe44: OUTPUT«Any $h = Any␤»
+
+[22:24] <b2gills> m: use nqp; INIT my $h := nqp::hash("a",42); dd $h
+
+[22:24] <camelia> rakudo-moar fbbe44: OUTPUT«{:a(42)}␤»
+
+[22:25] <b2gills> m: use nqp; my $h := BEGIN nqp::hash("a",42); dd $h
+
+[22:25] <camelia> rakudo-moar fbbe44: OUTPUT«{:a(42)}␤»
+
+[22:25] <lizmat> b2gills: wow,
+
+[22:25] <lizmat> wonder what's going on there
+
+[22:27] <diakopter> m: use nqp; BEGIN my $h = nqp::hash("a",42); dd $h
+
+[22:27] <camelia> rakudo-moar fbbe44: OUTPUT«Cannot find method 'dispatch:<.?>': no method cache and no .^find_method␤  in block <unit> at <tmp> line 1␤␤»
+
+[22:28] <diakopter> wheh
+
+[22:28] <b2gills> m: use nqp; BEGIN my $h = nqp::hash("a",42); put $h.^name
+
+[22:28] <camelia> rakudo-moar fbbe44: OUTPUT«BOOTHash␤»
+
+[22:34] <diakopter> m: use nqp; BEGIN our $h := nqp::hash("a",42); dd $h # lizmat <-
+
+[22:34] <camelia> rakudo-moar fbbe44: OUTPUT«Any $h = Any␤»
+
+[22:35] <lizmat> diakopter: I'd rather not pollute namespaces
+
+[22:36] <diakopter> ok, I wasn't suggesting doing that; just showing more evidence of what might be going on
+
+[22:42] <timotimo> m: use nqp; BEGIN my Mu $h := nqp::hash("a",42); dd $h
+
+[22:42] <camelia> rakudo-moar fbbe44: OUTPUT«Mu␤»
+
+[22:54] <Geth> roast: 876785a94f | MasterDuke17++ | S05-mass/rx.t
+
+[22:54] <Geth> roast: Add a test for Nd digits in regex quantifiers
+
+[22:54] <Geth> roast: review: https://github.com/perl6/roast/commit/876785a94f

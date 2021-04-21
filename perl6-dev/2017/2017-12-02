@@ -1,0 +1,517 @@
+[00:01] <lizmat> m: my @a = ^5; @a[2] = <a b c>.Slip; dd @a, [@a]  # I'd expect the latter to be [0,1,"a","b","c",3,4]   am I wrong ?
+
+[00:01] <camelia> rakudo-moar 5929887c7: OUTPUT: «Array @a = [0, 1, slip("a", "b", "c"), 3, 4]␤[0, 1, slip("a", "b", "c"), 3, 4]␤»
+
+[00:02] <lizmat> aka, circumfix [] should honour slips ?
+
+[00:02] <lizmat> if so, we need to also fix Array.clone
+
+[00:05] <lizmat> GH #1283 really is a can of worms
+
+[00:10] <jnthn> lizmat: No, because an array is a bunch of Scalar containers, and that slip is thus itemlized
+
+[00:10] <yoleaux> 1 Dec 2017 21:30Z <bartolin> jnthn: if you could spare a few minutes to take a look at PR 1253 (rakudo) -- i'd be really happy to get your opinion on that one. (it's not urgent in any way)
+
+[00:10] <jnthn> *itemized
+
+[00:11] <jnthn> The dd output may be wrong, however
+
+[00:11] <jnthn> m: dd [0, 1, slip("a", "b", "c"), 3, 4]
+
+[00:11] <camelia> rakudo-moar 5929887c7: OUTPUT: «[0, 1, "a", "b", "c", 3, 4]␤»
+
+[00:11] <jnthn> Yes, it is
+
+[00:12] <jnthn> It should dump to [0, 1, $(slip("a", "b", "c")), 3, 4] to be accurate
+
+[00:12] <lizmat> guess Slip.perl is in error then
+
+[00:13] <jnthn> Rakudo
+
+[00:13] <jnthn> oops
+
+[00:13] <jnthn> Rakudo #1283
+
+[00:14] <jnthn> aww, I wanted a link :P
+
+[00:15] <lizmat> https://github.com/rakudo/rakudo/pull/1283
+
+[00:15] <lizmat> oops, pull request rather than issue
+
+[00:16] <jnthn> Yes, but the matching issue being https://github.com/rakudo/rakudo/issues/1238 is either lucky or a total visual pattern match screw :P
+
+[00:16] <lizmat> https://github.com/rakudo/rakudo/issues/1238   # confusingly an anagram
+
+[00:17] <jnthn> But yes, that does raise a genuinely interesting issue: what should one expect to happen with .clone when mixing in and adding an attribute
+
+[00:17] <lizmat> yup
+
+[00:18] <lizmat> m: my $a = 42; use nqp; my $b := nqp::clone($a); $b = 666; dd $a, $b  # especially since nqp::clone appears to be deconting Scalar containers
+
+[00:18] <camelia> rakudo-moar 5929887c7: OUTPUT: «Cannot assign to an immutable value␤  in block <unit> at <tmp> line 1␤␤»
+
+[00:19] <jnthn> Note that in
+
+[00:19] <jnthn> https://github.com/rakudo/rakudo/commit/6b2b34a79150f6e9a275fd39eb5dd96519d6179f
+
+[00:19] <jnthn> Changing:
+
+[00:19] <jnthn> my \clone = self.WHAT.CREATE;
+
+[00:19] <jnthn> Into
+
+[00:19] <jnthn> my \cone = nqp::clone(self);
+
+[00:19] <jnthn> And then leaving the clone of storage in place would probably fix the issue
+
+[00:20] <jnthn> \clone of course
+
+[00:20] * lizmat tries that
+
+[00:20] <jnthn> Though it would leave excessive entanglement of Scalar attributes
+
+[00:20] <jnthn> BUT
+
+[00:20] <jnthn> I'm very dubious about this in that
+
+[00:21] <jnthn> m: my %h = a => 1; my %hc := %h.clone; %hc<a>++; dd %h
+
+[00:21] <camelia> rakudo-moar 5929887c7: OUTPUT: «Hash %h = {:a(2)}␤»
+
+[00:21] <lizmat> well, it all boils down to the intended semantics of .clone
+
+[00:21] <jnthn> Is wrong before before and after
+
+[00:22] <jnthn> Cases like this make we wonder if Beta got inheritance right :P
+
+[00:23] <lizmat> your suggestion seems to fix GH #1238
+
+[00:23] <jnthn> Yes, but there still be worms :)
+
+[00:23] <lizmat> *and* not break the disentanglement test
+
+[00:23] <lizmat> but yeah
+
+[00:23] <lizmat> worms indeed
+
+[00:23] <jnthn> Right, but I'd argue that my example above is a test we're missing
+
+[00:23] <jnthn> That's in easy fix too. What is not an easy fix is the mixin thing.
+
+[00:24] <lizmat> m: class A { has $.a is rw = 42 }; my $a = A.new; my $b := $a.clone; $b.a = 666; dd $a, $b
+
+[00:24] <camelia> rakudo-moar 5929887c7: OUTPUT: «A $a = A.new(a => 42)␤A.new(a => 666)␤»
+
+[00:25] <lizmat> m: class A { has @.a = 42 }; my $a = A.new; my $b := $a.clone; $b.a = 666; dd $a, $b   # what a difference a sigil makes
+
+[00:25] <camelia> rakudo-moar 5929887c7: OUTPUT: «A $a = A.new(a => [666])␤A.new(a => [666])␤»
+
+[00:25] <jnthn> I think the general principle of clone is "it's shallow but we clone Scalar containers at the thing a normal user would consider a top level"
+
+[00:25] <jnthn> Which for an array and a hash means the elements of it
+
+[00:26] <lizmat> yeah, but that forces a deep grasp of containers which means a WAT in many cases :-(
+
+[00:26] <jnthn> I'm arguing that we should be cloning the Scalar containers held inside of Array and Hash, to be clear
+
+[00:26] <jnthn> I think that would be less WAT
+
+[00:27] <lizmat> jnthn: also, if that were true, shouldn't we remove *all* special .clone cases from core?
+
+[00:27] <jnthn> I don't think users expect a cloned array and hash to be entangled.
+
+[00:27] <lizmat> m: class A { has @.a = 42 }; my $a = A.new; my $b := $a.clone; $b.a = 666; dd $a, $b   # and this?  isn't that a WAT then ?
+
+[00:27] <camelia> rakudo-moar 5929887c7: OUTPUT: «A $a = A.new(a => [666])␤A.new(a => [666])␤»
+
+[00:27] <jnthn> I suspect the really good solution for this kind of problem, alas, would look something like having a submethod called CLONE that does the cloning for a particular level of the inheritance chain
+
+[00:28] <jnthn> That one is debatable.
+
+[00:28] <jnthn> m: my @a = 1,2,3; my @b := @a.clone; @a[1]++; say @b
+
+[00:28] <camelia> rakudo-moar 5929887c7: OUTPUT: «[1 2 3]␤»
+
+[00:28] <jnthn> That is doing the right thing, I think
+
+[00:29] <jnthn> Unlike the Hash example I showed above
+
+[00:30] <lizmat> m: my Int @a = ^5; my @b := @a.clone; @b[0] = "foo"; dd @a, @b   # Array.clone still needs fixing, though
+
+[00:30] <camelia> rakudo-moar 5929887c7: OUTPUT: «Array[Int] @a = Array[Int].new(0, 1, 2, 3, 4)␤["foo", 1, 2, 3, 4]␤»
+
+[00:31] <jnthn> That loosk right? @a and @b aren't entangled?
+
+[00:31] * lizmat is visions of pre/post GLR discussions all over again
+
+[00:31] <jnthn> Oh! It lost the type
+
+[00:31] <lizmat> yup
+
+[00:31] <jnthn> That one is at least just sloppy rather than deep
+
+[00:32] <lizmat> still fixing the @a case, but not the has @.a case, feels inconsistent to me
+
+[00:34] <TimToady> .oO(how deep is "shallow"?)
+
+[00:34] <jnthn> I can argue that one both ways
+
+[00:34] <lizmat> I'm pretty sure we all can  :-)
+
+[00:34] <jnthn> Though arguably has $.a = [...] is an escape-hatch for shallower clone there
+
+[00:35] <lizmat> I think the fact that we need specialized cases of .clone instead of Mu.clone always doing the right thing, is a code smell
+
+[00:36] <jnthn> I think the only way .clone can always do the right thing is if we allow a submethod CLONE that leads each level of the inheritance chain decide what shallow clone means to it.
+
+[00:36] <jnthn> *that lets
+
+[00:36] <TimToady> down through the containers seems like an easily explainable default, but I like the CLONE submethod idea, if we can decide how to default the levels that have to default either above or below
+
+[00:36] <lizmat> which would let Mu.clone always do the right thing  :-)
+
+[00:37] <jnthn> That'd fix the mixin issue
+
+[00:38] <TimToady> but probably you can default to pretending submethod CLONE would have just done the containers either above or below, so having an interposed CLONE is probably not a problem for derived classes, that I can see
+
+[00:39] * TimToady is glad we invented the submethod concept as a general thing
+
+[00:39] <jnthn> Probably not
+
+[00:39] <jnthn> Aye
+
+[00:40] <TimToady> of course, if you generalize all the things, you get laughed at on hackernews :P
+
+[00:41] <lizmat> fwiw, I was pleasantly surprised by the relative low number of trolls on HN
+
+[00:41] <lizmat> relatively speaking, of course
+
+[00:41] <jnthn> Laughing is easy, making something people can laugh at is the hard part? :P
+
+[00:42] <teatime> there aren't trolls, but seems to me there are a *lot* of earnest people saying silly things
+
+[00:42] <lizmat> .oO( the wolves are howling, but the butterfly caravan flies on )
+
+[00:44] <lizmat> so if I get this right, we create a Mu.CLONE that has the current Mu.clone semantics
+
+[00:44] <lizmat> and let Mu.clone call .CLONE on all of the values it encounters ?
+
+[00:44] <jnthn> No
+
+[00:45] <jnthn> We walk the MRO top to bottom. At each level, we check if it can CLONE and call that
+
+[00:45] <Zoffix> "2017 Perl 6 Advent Day 2 – Perl 6: Sigils, Variables, and Containers": https://perl6advent.wordpress.com/2017/12/02/perl-6-sigils-variables-and-containers/
+
+[00:46] <jnthn> If it doesn't have one, we do the default thing: clone the attributes, and if any of them are a Scalar, clone that too
+
+[00:47] <lizmat> jnthn: isn't the default thing a Mu.CLONE ?
+
+[00:47] <lizmat> I mean, why not have MMD handle that ?
+
+[00:48] <TimToady> that's what we do for BUILD and such, isn't it?
+
+[00:49] <jnthn> Yeah, it's what we do for BUILD, modulo some optimization :)
+
+[00:49] * TimToady admits to not tracking the recent buildplanish work too closely...
+
+[00:49] <jnthn> That work was "just" compiling something per class that calls the required BUILD submethods and so forth
+
+[00:50] <jnthn> Which is a lot easier on optimizers to deal with
+
+[00:50] * TimToady is scared by your quotes :)
+
+[00:51] <jnthn> Just an aversion to describing something that took a bunch of time to get right with "just" :)
+
+[00:52] <jnthn> (lizmat++ is to thank for the work; I think I'm to blame for the idea... :))
+
+[00:52] <lizmat> jnthn: so you're saying you want something similar for cloning, aka a CLONEPLAN ?
+
+[00:53] <jnthn> I think let's just do it by a loop over the mro first to get the semantics figured out
+
+[00:53] <jnthn> well, reverse mro
+
+[00:55] <lizmat> ok, I will sleep a bit on that
+
+[00:56] <lizmat> probably no time for it tomorrow,. but maybe on Sunday on the boat back to mainland Europe
+
+[00:56] <jnthn> :)
+
+[00:56] <jnthn> Been to Blighty?
+
+[00:56] <lizmat> if the weather cooperates  (it didn't the last time, so I was more focused on other things rather than programming)
+
+[00:57] <lizmat> in Edinburgh atm
+
+[00:57] <jnthn> I've apparently been there, but too young to remember it :)
+
+[00:57] <jnthn> *but was
+
+[00:58] <lizmat> so not sure if that's Blighty or not, in view of political developments of the past years
+
+[00:59] <jnthn> :)
+
+[01:00] <jnthn> .oO( Red lines...drawn in pencil )
+
+[01:07] <lizmat> sleep&
+
+[01:12] <timotimo> don't forget that with mixins we don't actually get separate submethods, or at least i think we don't? this has been an issue with BUILD in the past if i'm not mistaken
+
+[01:12] <jnthn> timotimo: We do, it's a new level of inheritance
+
+[01:13] <timotimo> oh
+
+[01:23] <jnthn> sleep time o/
+
+[09:46] <lizmat> Files=1229, Tests=75910, 304 wallclock secs (14.12 usr  5.17 sys + 2087.15 cusr 207.70 csys = 2314.14 CPU)
+
+[09:46] <lizmat> definitely about 10 seconds faster than the last time I did this!
+
+[09:47] <lizmat> having said that, startup time seems to be at an all time high for me now: around 143 msecs  :-(
+
+[10:16] <[Tux]> Rakudo version 2017.11-49-g5929887c7 - MoarVM version 2017.11-28-gba1fb9542
+
+[10:16] <[Tux]> csv-test-xs-20      0.446 -  0.462
+
+[10:16] <[Tux]> csv-ip5xs           1.062 -  1.082
+
+[10:16] <[Tux]> test-t --race       1.186 -  1.214
+
+[10:16] <[Tux]> test-t              2.905 -  2.936
+
+[10:16] <[Tux]> csv-parser         12.010 - 12.550
+
+[10:16] <[Tux]> test               11.985 - 12.091
+
+[10:16] <[Tux]> csv-ip5xs-20       12.814 - 13.002
+
+[10:16] <[Tux]> test-t-20 --race   18.414 - 18.781
+
+[10:16] <[Tux]> test-t-20          52.677 - 53.019
+
+[11:42] <Geth> ¦ rakudo: f768623d90 | (Elizabeth Mattijsen)++ | src/Perl6/Metamodel/ClassHOW.nqp
+
+[11:42] <Geth> ¦ rakudo: Don't create BUILDALL if we don't need it
+
+[11:42] <Geth> ¦ rakudo:
+
+[11:42] <Geth> ¦ rakudo: - assumption being that if a class has its own .new, it will know how to build
+
+[11:42] <Geth> ¦ rakudo: - reduces core setting size by 32K (less than I hoped for)
+
+[11:42] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/f768623d90
+
+[11:56] <lizmat> afk&
+
+[12:26] <Geth> ¦ roast: 03686da5d7 | (Alex Chen)++ | S04-declarations/my.t
+
+[12:26] <Geth> ¦ roast: Add test for RT#126125
+
+[12:26] <Geth> ¦ roast: review: https://github.com/perl6/roast/commit/03686da5d7
+
+[12:26] <synopsebot> RT#126125 [open]: https://rt.perl.org/Ticket/Display.html?id=126125 [TESTNEEDED] malformed "my" spuriously claims lack of type declaration
+
+[12:46] <timotimo> huh, "our own new"? why would that be a signal for not needing a generated buildall?
+
+[12:46] <jnthn> lizmat: I think f768623d90 doesn't hold up outside of the setting. Consider `class Point { has $.x; has $.y; method new($x, $y) { self.bless(:$x, :$y) } }`.
+
+[12:47] <timotimo> i have lots of classes with a custom new method and they all directly ... what jnthn said
+
+[12:47] <timotimo> maybe look for SET-SELF instead?
+
+[13:09] <Geth> ¦ nqp: de279ccf61 | pmurias++ | src/vm/js/nqp-runtime/cclass.js
+
+[13:09] <Geth> ¦ nqp: [js] Refactor nqp::iscclass to always use regexes
+
+[13:09] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/de279ccf61
+
+[13:09] <Geth> ¦ nqp: 98613a1b17 | pmurias++ | src/vm/js/nqp-runtime/runtime.js
+
+[13:09] <Geth> ¦ nqp: [js] Expose nqp.createIntArray for use by rakudo.js
+
+[13:09] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/98613a1b17
+
+[13:09] <Geth> ¦ nqp: 07548c9d3e | pmurias++ | src/vm/js/nqp-runtime/cclass.js
+
+[13:09] <Geth> ¦ nqp: [js] Make cclass stuff handle unicode better
+
+[13:09] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/07548c9d3e
+
+[14:02] <nine> jnthn: I'm curious. Do you consider ^add_method on generated wrapper classes in Inline::Perl5 usage of the right tool?
+
+[14:17] <jnthn> nine: In the absence of macros, it's the best tool available today
+
+[14:18] <jnthn> (The quasi quotes and AST side of things quite possibly providing a neater way)
+
+[14:22] <jnthn> My point really was that it's not a particularly friendly tool. We've both worked on precomp stuff, so know the rules around when you need BEGIN, when you're already at BEGIN time and don't, when .^compose is needed, when adding "no precompilation" is needed, etc.
+
+[14:23] <jnthn> I have a hard time calling something that needs knowledge of those kinds of things as high level. :-)
+
+[15:31] <nine> No, it just isn't :)
+
+[16:24] <Zoffix> nine: FWIW, there's Issue R#1289 if you had any ideas
+
+[16:24] <synopsebot> R#1289 [open]: https://github.com/rakudo/rakudo/issues/1289 [6.d BLOCKER] Implement a Way to Know Caller's Language
+
+[16:24] <Zoffix> whoa! test-t is below 3s!!
+
+[16:25] <Zoffix> buggable: speed 60 :4 test-t
+
+[16:25] <buggable> Zoffix,  █     ▃   ▂         ↑   ▂              ↑ ↑█                 dates: 2017-11-07–2017-12-02
+
+[16:25] <buggable> Zoffix, ▄█  ▃▃▂█▃ ▄█▂▄▄▅ ▂ ▂▇█▃ ▆█▃▂▂▆▃▁  ▇▂▅▄▆▂████  ▄▃▇ ▂          range: 2.809s–3.795s
+
+[16:25] <buggable> Zoffix, ███▇█████▇██████▇█▆██████████████▇██████████▆▆███▆██         speed: 12% faster (widths: 9/3)
+
+[16:25] <buggable> Zoffix, ████████████████████████████████████████████████████▆▇▆▇↓↓▂▁
+
+[17:29] <pmurias> jnthn: maybe we need an extra op that would gives us more (or a variable) number of significant digits when converting a number
+
+[17:30] <pmurias> jnthn: there are cases where we need 17 (as thats the amount we need to be able to convert to a decimal string and back while preserving the original number)
+
+[17:30] <jnthn> pmurias: Yes, my original question of why the op we have isn't already giving all of them still stands.
+
+[17:31] <jnthn> Unless there's a good reason for it to lop off some of the precision, we could just correct it to not do so?
+
+[17:32] <pmurias> 3.14 would end up '3.1400000000000001'
+
+[17:36] <jnthn> Ah.
+
+[17:37] <jnthn> Well, or would it, 'cus 3.14 in Perl 6 is Rat, not Num :)
+
+[17:38] <pmurias> a NQP 3.14 ;)
+
+[17:41] <pmurias> usings 15 digits allows us to convert a decimal string (up to this number of sigificant digits) and get the same decimal string back
+
+[17:58] <pmurias> jnthn: do you think I should add an extra op?
+
+[18:03] <jnthn> pmurias: We could do...maybe it'll be useful in sprintf impl too
+
+[19:05] <pmurias> jnthn: it seems Perl 5 has a similiar problem (there is even a paper by Guy Steele "How to Print Floating-Point Numbers Accurately" how to solve it)
+
+[19:05] <pmurias> jnthn: the best solutions seems to print the smallest amount of digits that recreates the number
+
+[19:06] <pmurias> both 3.14e0 and 3.1400000000000001e0 create the same number so 3.14 is better
+
+[19:38] <ilmari> does perl6 have hex floats?
+
+[19:38] <ilmari> m: say 0x1.91eb851eb851fp+1
+
+[19:38] <camelia> rakudo-moar f768623d9: OUTPUT: «5===SORRY!5=== Error while compiling <tmp>␤Malformed postfix call␤at <tmp>:1␤------> 3say 0x1.7⏏0591eb851eb851fp+1␤»
+
+[19:40] <ilmari> m: printf '%a', 3.14
+
+[19:40] <camelia> rakudo-moar f768623d9: OUTPUT: «Directive a is not valid in sprintf format sequence %a␤␤»
+
+[19:54] <geekosaur> I don't think there's a hex source format for Nums, no
+
+[19:59] <pmurias> ilmari: are hex floats used much?
+
+[20:00] <ilmari> pmurias: they're in C99 and SUSv3
+
+[20:00] <ilmari> (the %a format for printf, that is)
+
+[20:08] <geekosaur> there's a bit of a tension here because both %a and hex format are kinda low level and the mapping to higher level languages like perl 6 (or haskell or ...) is a bit tricky at best
+
+[20:09] <geekosaur> it looks simple until you hit the edge cases where people are using them expecting more or less to be working closer to the hardware level than can be exposed (especially with perl 6, unless your hardware level is the VM instead of the actual underlying hardware)
+
+[20:11] <pmurias> geekosaur: aren't the num native variables exposing the floating numbers pretty directly?
+
+[20:12] <geekosaur> well. yes and no. the values are exposed, the operations aren't --- and one reason to muck with hex reps is to "tweak" behavior related to x86-family higher resolution modes and how they affect and a're affected by floating ops
+
+[21:09] <geekosaur> hm, think I meant precision instead of resolution. look what you get when I haven;t had coffee yet >.>
+
+[21:24] <nine> geekosaur: that's a serious condition! I wish you a speedy recovery
+
+[21:25] <geekosaur> I have my coffee now, that's why the correction :p
+
+[22:49] <lizmat> .
+
+[22:50] <lizmat> jnthn: re "new", it still works because it will fall back to Mu.BUILDALL, but you're right: checking for SET-SELF is probably better
+
+[22:55] <jnthn> Yeah; I think a lot of user code will lose out by doing it based on new
+
+[22:55] <jnthn> I know I've code that would
+
+[22:55] <jnthn> SET-SELF is probably decent enough
+
+[22:57] <japhb> ilmari, pmurias, geekosaur: You can indeed specify floats in hex (and in fact, in any known base, though the latter is not implemented in Rakudo)
+
+[22:58] <japhb> m: say :16<f00d.cafe>
+
+[22:58] <camelia> rakudo-moar f768623d9: OUTPUT: «61453.792938␤»
+
+[22:58] <japhb> Actually, it's been a while, I wonder ....
+
+[22:58] <japhb> m: say :36<food.cafe>
+
+[22:58] <camelia> rakudo-moar f768623d9: OUTPUT: «731821.3413792␤»
+
+[22:58] <japhb> \o/
+
+[22:59] <japhb> But I bet there isn't isolated '.' ...
+
+[22:59] <japhb> m: say :36[12,34,'.',5,6]
+
+[22:59] <camelia> rakudo-moar f768623d9: OUTPUT: «466.143519␤»
+
+[23:00] <jnthn> m: say :36<food.cafe>
+
+[23:00] <japhb> In this case, I love being wrong.  :-)
+
+[23:00] <camelia> rakudo-moar f768623d9: OUTPUT: «731821.3413792␤»
+
+[23:00] <jnthn> m: say :36<food.cafe>.WHAT
+
+[23:00] <camelia> rakudo-moar f768623d9: OUTPUT: «(Rat)␤»
+
+[23:00] <japhb> Ah, your point being it's not giving you a float.  Lemme try something
+
+[23:00] <jnthn> :)
+
+[23:01] <japhb> m: say <:36[12,34,'.',5,6]*1e0>
+
+[23:01] <camelia> rakudo-moar f768623d9: OUTPUT: «:36[12,34,'.',5,6]*1e0␤»
+
+[23:01] <japhb> m: say <:36[12,34,'.',5,6]*1**0>
+
+[23:01] <camelia> rakudo-moar f768623d9: OUTPUT: «:36[12,34,'.',5,6]*1**0␤»
+
+[23:01] <japhb> m: say :36[12,34,'.',5,6]*1**0
+
+[23:01] <camelia> rakudo-moar f768623d9: OUTPUT: «466.143519␤»
+
+[23:02] <japhb> m: say (:36[12,34,'.',5,6]*1**0).WHAT
+
+[23:02] <camelia> rakudo-moar f768623d9: OUTPUT: «(Rat)␤»
+
+[23:03] <japhb> m: say (:36[12,34,'.',5,6]+0i).WHAT
+
+[23:03] <camelia> rakudo-moar f768623d9: OUTPUT: «(Complex)␤»
+
+[23:04] <japhb> m: say (:36[12,34,'.',5,6]+0i).re.WHAT
+
+[23:04] <camelia> rakudo-moar f768623d9: OUTPUT: «(Num)␤»
+
+[23:04] <japhb> I wonder how accurate that conversion to Num is?
+
+[23:08] <japhb> OK, so going back to S02, it looks like only the 'e' notation forces num underneath, but constant folding and complex literals can give you one implicitly.
+
+[23:09] <jnthn> Yeah, though I'd ask the same question on conversion accuracy
+
+[23:09] <jnthn> (I don't know the answer)
+
+[23:36] <AlexDaniel> lizmat: oh wow… just received your RT comment but it does not appear on the website
+
+[23:37] <AlexDaniel> I've seen that a lot actually
+
+[23:37] <lizmat> :-(
+
+[23:37] <AlexDaniel> don't know if they appear some hours later or something
+
+[23:37] <AlexDaniel> lizmat: anyway: https://rt.perl.org/Ticket/Display.html?id=119521#txn-1512561
+
+[23:37] <lizmat> AlexDaniel++
+
+[23:38] <AlexDaniel> by the way, wander++ (who resolved a few tickets during this squashathon) also had a bunch of problems interfacing with RT
+
+[23:38] <AlexDaniel> I'm really happy that we're doing tiny steps away from it…

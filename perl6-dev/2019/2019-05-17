@@ -1,0 +1,263 @@
+[00:14] <Geth> ¦ rakudo: vrurg++ created pull request #2902: Fix for 'Missing or wrong version of dependency' 
+
+[00:14] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/2902
+
+[00:34] *** sivoais left
+[00:34] *** sivoais joined
+[00:34] *** Kaiepi joined
+[00:34] <Kaiepi> aaaaalmost there with parallelizing feed operators
+
+[00:35] <Kaiepi> i've got stuff like 1...* ==> map { $_ ** 2 } working
+
+[00:35] <Kaiepi> however 1...* ==> map { $_ ** 2 } ==> my @foo doesn't yet
+
+[00:42] <ugexe> how do you decide how much parallelizing to do without arguments like race/hyper have?
+
+[00:43] <timotimo> ugexe: feeds have CSP semantics, which means every stage will have its own "worker" and they pass indvidual bits via channels
+
+[00:43] <timotimo> i don't know if it's meant to have chunking
+
+[00:43] <ugexe> oh its not already doing that?
+
+[00:43] <timotimo> nope, they are currently not parallelized whatsoever
+
+[00:44] <timotimo> if they use "await" internally to fetch data from the Channel, then stages of the work pipeline can be suspended back to the thread pool when they're bored
+
+[00:44] <timotimo> though of course that could lead to a whole lot of suspending/resuming
+
+[00:44] <ugexe> is it going to use `start { }`, or literally a worker thread
+
+[00:44] <ugexe> dedicated worker thread
+
+[00:45] <timotimo> i personally would implement it with `start { }`
+
+[00:50] <ugexe> hopefully that speeds them up a bit
+
+[00:54] <timotimo> it'll still depend a lot on the work per element each stage has, i'd expect
+
+[00:55] <timotimo> if you use it for things like "map { $_ ** 2 }" and the numbers are in the 64bit range ... yeah, no, that won't be faster :)
+
+[00:55] <timotimo> sleep time!
+
+[00:55] <timotimo> o/
+
+[00:55] <ugexe> why is it so slow vs .map though
+
+[00:57] <timotimo> actually, what if you could get hyper semantics with feed syntax by putting "hyper" in front?
+
+[00:58] <timotimo> well, 1..* ==> map { $_ ** 2 } ==> my @foo; will - if there is no batching, which maybe there should be - send every item from one thread, receive them in another, do the squaring, send it to the third one, which will receive and stash into @foo
+
+[00:58] <ugexe> ==hyper>
+
+[00:58] <timotimo> haha
+
+[00:58] <timotimo> »==>»
+
+[00:58] <timotimo> >>WHOOSH>>
+
+[00:59] <timotimo> ==GNDN==
+
+[01:06] <MasterDuke> hm, if you do both --profile=foo.sql and --profile-filename=bar.json, which should win?
+
+[01:43] <MasterDuke> jnthn, timotimo: updated https://github.com/perl6/nqp/pull/532. i'll merge tomorrow or this weekend if it looks fine
+
+[02:26] *** squashable6 left
+[02:30] *** squashable6 joined
+[02:30] *** ChanServ sets mode: +v squashable6
+
+[03:09] *** epony left
+[03:25] <Kaiepi> using a Channel for the pipeline for EVALUATE-FEED is too slow
+
+[03:26] <Kaiepi> using Supply.from-list(@stages).schedule-on($*SCHEDULER).serialize is MUCH faster
+
+[03:43] *** epony joined
+[04:06] *** grayrider joined
+[05:22] *** ufobat__ left
+[05:38] <Geth> ¦ rakudo/master: 5 commits pushed by (Vadim Belman)++
+
+[05:38] <Geth> ¦ rakudo/master: 0e95399b3a | Submodule update
+
+[05:38] <Geth> ¦ rakudo/master: 87647236e8 | Fix for 'Missing or wrong version of dependency'
+
+[05:38] <Geth> ¦ rakudo/master: ccac77a764 | Merge branch 'master' of https://github.com/rakudo/rakudo into build-revamp
+
+[05:38] <Geth> ¦ rakudo/master: 0daee84fd7 | Trying to get Windows nmake happy
+
+[05:38] <Geth> ¦ rakudo/master: 7a7a23df6a | Merge pull request #2902 from vrurg/build-revamp
+
+[05:38] <Geth> ¦ rakudo/master: review: https://github.com/rakudo/rakudo/compare/9ba51a8b4a4b...7a7a23df6a6e
+
+[05:59] *** squashable6 left
+[06:02] *** squashable6 joined
+[06:02] *** ChanServ sets mode: +v squashable6
+
+[07:08] *** robertle joined
+[07:10] *** lizmat joined
+[07:20] *** lizmat left
+[08:27] <jnthn> Kaiepi: But that makes a Supply that emits the blocks, not that funnels data between the blocks executing in parallel...
+
+[08:28] <Kaiepi> oh
+
+[08:28] <jnthn> But yeah, if you're going to have a set of parallel workers, well, you better have enough work to do to make the communication cost worth it
+
+[08:40] <Kaiepi> with my @ <== map { $_ ** 2 } <== (1..100), the parallelized feed code is just as slow as the old code, but it gradually gets faster as you add more stages
+
+[08:41] <Kaiepi> like my @ <== sort { $^a cmp $^b } <== grep { $_ %% 2 } <== map { $_ ** 2 } <== (1..100) is almost as fast as just using the regular method calls
+
+[08:42] <Kaiepi> there's one last thing i'm stuck on though
+
+[08:42] <Kaiepi> bastille% ./perl6 --ll-exception -e 'my @foo; my @ <== grep { $_ %% 2 } <== @foo <== map { $_ ** 2 } <== 1...*; say @foo[0..10]' 
+
+[08:42] <Kaiepi> When invoking 10 '', provided outer frame 0xc17bc449ed8 (7 '<unit>') does not match expected static frame 0xc17bc44a360 (9 '')
+
+[08:46] <jnthn> That means there's a closure-handling screw-up in the code-gen somewhere
+
+[08:47] <jnthn> Will be a mistake in the QAST that gets produced
+
+[08:47] <jnthn> Presumably for the case of an intermediate variable
+
+[08:55] <masak> Kaiepi: submit a bug report?
+
+[08:55] <Kaiepi> yeah jnthn it's for the intermediate call to RI.EVALUATE-FEED that gets made for @foo
+
+[08:59] <Kaiepi> masak this is a bug in a pullreq i'm working on, not on HEAD
+
+[09:42] <masak> ok, nice
+
+[10:04] <Kaiepi> done parallelizing feed operators!
+
+[10:26] *** klapperl left
+[10:31] <Geth> ¦ rakudo: Kaiepi++ created pull request #2903: Parallelize feed operators and support lazy lists
+
+[10:31] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/2903
+
+[10:33] *** klapperl joined
+[10:38] *** brrt joined
+[11:08] *** brrt left
+[11:20] <Geth> ¦ roast: Kaiepi++ created pull request #538: Update S03-feeds/basic.t with regards to parallelism and lazy lists
+
+[11:20] <Geth> ¦ roast: review: https://github.com/perl6/roast/pull/538
+
+[12:22] *** Guest5089 joined
+[12:52] *** brrt joined
+[13:05] *** MasterDuke left
+[13:34] *** skids joined
+[13:45] <Geth> ¦ rakudo: vrurg self-assigned Rakudo no longer builds properly on OpenBSD https://github.com/rakudo/rakudo/issues/2904
+
+[14:36] *** mornfall left
+[14:37] *** mornfall joined
+[14:37] *** lizmat joined
+[14:40] *** lizmat_ joined
+[14:43] *** lizmat left
+[14:47] *** lizmat_ left
+[14:49] *** robertle left
+[14:58] *** brrt left
+[16:27] *** lizmat joined
+[16:29] *** lizmat left
+[16:30] *** lizmat joined
+[16:55] *** robertle joined
+[16:57] <Geth> ¦ nqp: vrurg++ created pull request #539: Support for the latest changes in nqp-configure
+
+[16:57] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/pull/539
+
+[16:58] <Geth> ¦ rakudo: vrurg++ created pull request #2906: Support for latest changes in nqp-configure
+
+[16:58] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/2906
+
+[17:17] *** a3f left
+[17:25] *** a3f joined
+[17:41] <Geth> ¦ nqp: 03ded1c4f8 | (Vadim Belman)++ | 3 files
+
+[17:41] <Geth> ¦ nqp: Support for the latest changes in nqp-configure
+
+[17:41] <Geth> ¦ nqp: 
+
+[17:41] <Geth> ¦ nqp: OpenBSD build and command line options handling improvements.
+
+[17:41] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/03ded1c4f8
+
+[17:41] <Geth> ¦ nqp: 446765f35f | (Vadim Belman)++ (committed using GitHub Web editor) | 3 files
+
+[17:41] <Geth> ¦ nqp: Merge pull request #539 from vrurg/build-revamp
+
+[17:41] <Geth> ¦ nqp: 
+
+[17:41] <Geth> ¦ nqp: OpenBSD build improvements
+
+[17:41] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/446765f35f
+
+[17:57] <vrurg> Can I somehow restart travis/appveyour on github for a PR without a new commit?
+
+[17:59] <ugexe> yes
+
+[18:00] <ugexe> when viewing the test on e.g. travis-ci it should be an option towards the upper right (probably inside More Options)
+
+[18:01] <ugexe> actually its right *under* the More Options 
+
+[18:01] <ugexe> it says "Restart Job"
+
+[18:02] <vrurg> Not for me. Perhaps because I've no account there.
+
+[18:02] <ugexe> you can login with github
+
+[18:03] <ugexe> the green button in the upper right should say something like that
+
+[18:04] <vrurg> We might be meaning differernt systems. I'm on appveyor now. 
+
+[18:05] <vrurg> It only allows me to download the log.
+
+[18:06] <ugexe> appveyor allows logging in with github as well
+
+[18:07] <vrurg> That's what I've done. But can't see a restart option.
+
+[18:07] <vrurg> Ok, will find out later, have other things to do now. Thanks!
+
+[18:07] <ugexe> want me to retstart it?
+
+[18:07] <ugexe> im able to see the restart button... unsure why you cannot though
+
+[18:12] *** vrurg left
+[18:13] *** vrurg joined
+[18:14] <vrurg> ugexe: Yes, restart please! R#2906
+
+[18:14] <synopsebot> R#2906 [open]: https://github.com/rakudo/rakudo/pull/2906 Support for latest changes in nqp-configure
+
+[18:19] <ugexe> restarted
+
+[19:31] *** lizmat left
+[19:41] *** scovit left
+[19:44] <Kaiepi> i feel like the way i wrote the qast half of feed operator parallelization is kinda hacky
+
+[19:44] <Kaiepi> rather than creating a rakudo array and pushing the callbacks onto that, how would i go about creating the qast nodes representing the callbacks to pass instead?
+
+[19:48] *** scovit joined
+[19:49] <Kaiepi> for instance i want to take a node like this https://hastebin.com/acegihasuy.rb , push an extra argument onto it, and wrap it with a node representing the callback that takes that extra argument as its sole argument
+
+[19:50] <Kaiepi> is that possible?
+
+[20:00] <jnthn> That's the make_thunk thing I was talking about yesterday, I think
+
+[20:00] <jnthn> make_thunk_ref, it seems
+
+[20:00] <jnthn> Gives you a Code you can pass that wraps the lot
+
+[20:00] <jnthn> But wouldn't you want a signature?
+
+[20:01] <jnthn> That takes the array?
+
+[20:01] <jnthn> Um, source is perhaps a better word
+
+[20:33] <Kaiepi> it's not necessarily an array
+
+[21:03] *** skids left
+[22:20] *** MasterDuke joined
+[22:20] *** MasterDuke left
+[22:20] *** MasterDuke joined
+[22:33] <MasterDuke> jnthn: if you've got a free min or two does https://github.com/perl6/nqp/pull/532 look like it'll work for comma?
+
+[22:55] <jnthn> MasterDuke: I might say "in a future Rakudo release" rather than "the next one" to give us a little room
+
+[22:56] <jnthn> MasterDuke: I*think it'll work
+
+[22:57] <jnthn> *I think
+

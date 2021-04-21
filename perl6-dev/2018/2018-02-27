@@ -1,0 +1,721 @@
+[00:15] <AlexDaniel> fwiw looking at it again today I'm also puzzled by the current behavior of &say. I know that junctions are not always intuitive, but I'm expecting printing a .gist of something to do just that
+
+[00:16] <AlexDaniel> I also don't understand the reasoning for this optimization: https://github.com/rakudo/rakudo/commit/6e0ac15e574cbeef22c06da2bd74816d71a46d41
+
+[00:17] <AlexDaniel> adding a candidate so that calling .say a lot of times on a Str is faster? I'd say throw a sleep in there to make sure people don't use say for that purpose
+
+[00:19] <AlexDaniel> that's a joke of course, but optimizing for misuse is perhaps not something we should be doing
+
+[00:20] <AlexDaniel> .tell lizmat in case you need some extra uninformed opinions: https://irclog.perlgeek.de/perl6-dev/2018-02-27#i_15861908
+
+[00:20] <yoleaux> AlexDaniel: I'll pass your message to lizmat.
+
+[00:34] <timotimo> AlexDaniel: but you're calling say with the junction, and calling stuff with junctions usually autothreads
+
+[00:45] <MasterDuke> my int @d = ^10; my int $m = 4; my int $p = 2; my int $BASE = 1000000000; @d[$m] = ((@d[$m] + $p * @d[$m-$p]) % $BASE); dd @d
+
+[00:45] <evalable6> MasterDuke, rakudo-moar 838782b7d: OUTPUT: «array[int].new(0, 1, 2, 3, 8, 5, 6, 7, 8, 9)␤»
+
+[00:46] <MasterDuke> my int @d = ^10; my int $m = 4; my int $p = 2; my int $BASE = 1000000000; my int $a = @d[$m] + $p * @d[$m-$p]; @d[$m] = $a % $BASE; dd @d
+
+[00:46] <evalable6> MasterDuke, rakudo-moar 838782b7d: OUTPUT: «array[int].new(0, 1, 2, 3, 8, 5, 6, 7, 8, 9)␤»
+
+[00:46] <MasterDuke> timotimo: for me (with the added print in the int,int candidate for infix:<%>, the second prints, but the first doesn't
+
+[00:49] <MasterDuke> `say @d[$m] % $BASE` prints, but `say (@d[$m] + $m) % $BASE` does not
+
+[00:49] <MasterDuke> `say ($m + $m) % $BASE` does
+
+[00:52] <MasterDuke> so it's the native array
+
+[00:53] <Zoffix> AlexDaniel`: +1 on removing special-casing for say Str. It always bothered me that "say prints a gist" has to be followed by "except on Str"
+
+[00:53] <Zoffix> m: say <42> but role { method git { say "not-42" } }
+
+[00:53] <camelia> rakudo-moar 838782b7d: OUTPUT: «42␤»
+
+[00:53] <Zoffix> Affects subclasses too
+
+[00:53] <Zoffix> oh
+
+[00:53] <Zoffix> m: say <42> but role { method gist { say "not-42" } }
+
+[00:53] <camelia> rakudo-moar 838782b7d: OUTPUT: «42␤»
+
+[00:53] <Zoffix> yeah
+
+[00:54] <Zoffix> m: say 42 but role { method gist { "not-42" } } # yes the same feature works for other types
+
+[00:54] <camelia> rakudo-moar 838782b7d: OUTPUT: «not-42␤»
+
+[00:54] <Zoffix> s/yes/yet/;
+
+[00:57] <Zoffix> timotimo: if we go by what's supposed to usually happen with Junction, then `say` should not thread, as it can take a Mu. So that fact that it still threads would be special-casing in that view.
+
+[00:59] <Zoffix> We can have a very easy definition of say "equivalent to put of .gist"
+
+[00:59] <Zoffix> And toss the special casing we have for Str and toss the special-casing we have for Junctions and it'll magically Do The Right Thing.
+
+[01:00] <Zoffix> ZofBot: death to specialcases
+
+[01:00] <ZofBot> Zoffix, .oO( Glomming Submethods for Fun and Profit )
+
+[01:01] * Zoffix wonders what Perl 6 without any special-casing would look like
+
+[01:09] <MasterDuke> 'perl 6'
+
+[01:10] <MasterDuke> thank you, i'll be here all night
+
+[01:55] <MasterDuke> huh, the native $idx version of AT-POS in native_array.pm is being called...
+
+[02:38] <MasterDuke> m: use nqp; my int $a = 1; say nqp::objprimspec($a); my Int $b = 2; say nqp::objprimspec($b)
+
+[02:38] <camelia> rakudo-moar 838782b7d: OUTPUT: «0␤0␤»
+
+[02:39] <MasterDuke> m: use nqp; my str $a = "a"; say nqp::objprimspec($a); myStr $b = "b"; say nqp::objprimspec($b)
+
+[02:39] <camelia> rakudo-moar 838782b7d: OUTPUT: «5===SORRY!5=== Error while compiling <tmp>␤Variable '$b' is not declared␤at <tmp>:1␤------> 3 = "a"; say nqp::objprimspec($a); myStr 7⏏5$b = "b"; say nqp::objprimspec($b)␤»
+
+[02:39] <MasterDuke> m: use nqp; my str $a = "a"; say nqp::objprimspec($a); my Str $b = "b"; say nqp::objprimspec($b)
+
+[02:39] <camelia> rakudo-moar 838782b7d: OUTPUT: «0␤0␤»
+
+[02:39] <MasterDuke> shouldn't some of those give a value other than 0?
+
+[02:43] <MasterDuke> nqp: my str $a := "a"; say(nqp::objprimspec($a)); my str $b; say nqp::objprimspec($b); my $c; say nqp::objprimspec($c)
+
+[02:56] <camelia> nqp-moarvm: OUTPUT: «Confused at line 2, near "say nqp::o"␤   at gen/moar/stage2/NQPHLL.nqp:707  (/home/camelia/rakudo-m-inst-2/share/nqp/lib/NQPHLL.moarvm:panic)␤ from gen/moar/stage2/NQP.nqp:920  (/home/camelia/rakudo-m-inst-2/share/nqp/lib/nqp.moarvm:comp_unit)␤ from gen/mo…»
+
+[02:56] <MasterDuke> nqp: my str $a := "a"; say(nqp::objprimspec($a)); my str $b; say(nqp::objprimspec($b)); my $c; say(nqp::objprimspec($c))
+
+[02:56] <camelia> nqp-moarvm: OUTPUT: «3␤3␤0␤»
+
+[02:56] <MasterDuke> works in nqp
+
+[04:09] <MasterDuke> timotimo: if i just pull the array accesses out into their own native int variables, `e.g., my int $a = @d[$m]` and put those in the math expressions it goes from 1000s to 270s with the correct result
+
+[06:57] <AlexDaniel`> timotimo: fair enough...
+
+[08:29] <lizmat> .
+
+[08:29] <yoleaux> 00:20Z <AlexDaniel> lizmat: in case you need some extra uninformed opinions: https://irclog.perlgeek.de/perl6-dev/2018-02-27#i_15861908
+
+[08:30] <lizmat> AlexDaniel`: I'm not sure I understand the reason why you would be against special casing of Str:D in say
+
+[08:30] <lizmat> m: say "the result is $score"
+
+[08:30] <camelia> rakudo-moar 838782b7d: OUTPUT: «5===SORRY!5=== Error while compiling <tmp>␤Variable '$score' is not declared␤at <tmp>:1␤------> 3say "the result is 7⏏5$score"␤»
+
+[08:31] <lizmat> say "the result is $score"   # feels like a pretty common "good" thing to do ?
+
+[08:31] <AlexDaniel`> lizmat: not that I'm fully against, but it's a weird optimization to have in my opinion
+
+[08:31] <lizmat> and since Str.gist returns self
+
+[08:32] <AlexDaniel`> if "the result is $score" is called just once, what's the point of optimizing it?
+
+[08:33] <lizmat> I bet there are a lot of programs out there that do a lot of "say"
+
+[08:33] <lizmat> *and* every little bit helps
+
+[08:33] <AlexDaniel`> and if it's called hundreds or thousands of times, then very likely it's a misuse of &say
+
+[08:34] <lizmat> why?
+
+[08:34] <AlexDaniel`> but no problem we can leave it there
+
+[08:34] <AlexDaniel`> because a human is not going to read thousands of lines, this is very likely something produced for machines
+
+[08:34] <lizmat> I don't see the misuse?
+
+[08:34] <AlexDaniel`> and in that case &put should be used
+
+[08:35] <lizmat> so we should take out the Str:D candidate for put ?
+
+[08:35] <lizmat> the same reasoning holds there, I think
+
+[08:36] <AlexDaniel`> huh?
+
+[08:37] <AlexDaniel`> so &say is for humans, &put is for machines
+
+[08:37] <lizmat> ?
+
+[08:37] <AlexDaniel`> you don't agree with that?
+
+[08:37] <AlexDaniel`> hmmm… let's see if we have it doc-ed somewhere
+
+[08:37] * lizmat is confused now
+
+[08:37] <AlexDaniel`> https://docs.perl6.org/language/faq#How_and_why_do_say,_put_and_print_differ?
+
+[08:38] <AlexDaniel`> > But there's another difference: print and put converts its arguments to a string by calling the Str method on each item passed to, say uses the gist method instead. The former is meant for computers, the latter for human interpretation.
+
+[08:39] <lizmat> well, it's nice that someone wrote this up like this, but I'm more in the liberal school here
+
+[08:39] <lizmat> I don't assign a value to say / put or print
+
+[08:40] <lizmat> they're all ways of outputting things
+
+[08:40] <lizmat> in different ways
+
+[08:40] <lizmat> you, as a user / developer, determine what is most appropriate for you
+
+[08:41] <lizmat> "put" was a *very* late addition, that TimToady put in just before 6.c came out
+
+[08:41] <lizmat> I would also say that "dd" is optimized for debugging, not "say"
+
+[08:41] <lizmat> 1. because it does a .perl
+
+[08:42] <lizmat> 2. it writes to STDERR, so it won't interfere with normal output
+
+[08:42] <lizmat> 3. it does some extra to prevent hanging on some constructs that are infinite
+
+[08:43] <[Tux]> Rakudo version 2018.02.1-47-g838782b7d - MoarVM version 2018.02-6-g1849ae6d6
+
+[08:43] <[Tux]> csv-test-xs-20      0.439 -  0.453
+
+[08:43] <[Tux]> csv-ip5xs           0.836 -  0.862
+
+[08:43] <[Tux]> test-t --race       1.103 -  1.106
+
+[08:44] <[Tux]> test-t              2.677 -  2.708
+
+[08:44] <[Tux]> csv-ip5xs-20        7.823 -  7.893
+
+[08:44] <[Tux]> test                9.613 -  9.677
+
+[08:44] <[Tux]> csv-parser         12.742 - 12.759
+
+[08:44] <[Tux]> test-t-20 --race   16.858 - 18.104
+
+[08:44] <[Tux]> test-t-20          48.559 - 48.735
+
+[08:44] <AlexDaniel> ok, we don't have to change it, it's not a big deal :) FWIW Some related discussion here: https://github.com/perl6/doc/pull/1437
+
+[08:44] <yoleaux> 00:34Z <thundergnat> AlexDaniel: Issue submitted https://github.com/rakudo/rakudo/issues/1573 A little verbose but I figured too much was better than not enough. Thanks for your help!
+
+[08:52] <AlexDaniel> bisect: old=2014.01 put 42
+
+[08:52] <bisectable6> AlexDaniel, Bisecting by exit code (old=2014.01 new=838782b). Old exit code: 1
+
+[08:53] <bisectable6> AlexDaniel, bisect log: https://gist.github.com/70eea9e4454c05d0aeeaa3f0e75ae246
+
+[08:53] <bisectable6> AlexDaniel, (2015-11-12) https://github.com/rakudo/rakudo/commit/bcebf8e96ff7cd68cdc9f4ef9815c724544082e6
+
+[08:53] <AlexDaniel> right so the optimization was there before &put existed
+
+[09:00] <lizmat> yes, way before, as far as I remember
+
+[09:03] <AlexDaniel> 2014-06-16
+
+[09:08] * lizmat hopes AlexDaniel can live with https://github.com/perl6/doc/commit/a08d92b076
+
+[09:09] <AlexDaniel> “humen“
+
+[09:10] <Geth> ¦ rakudo: abfbd1ab1f | (Elizabeth Mattijsen)++ | src/core/Num.pm
+
+[09:10] <Geth> ¦ rakudo: Make sub rand/srand a multi
+
+[09:10] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/abfbd1ab1f
+
+[09:11] <lizmat> AlexDaniel: would it make sense to add a "blocker" section to https://gist.github.com/Whateverable/2138ef220cb045b15f638d61cde51016
+
+[09:12] <lizmat> to have an easy overview of remaining blocker tickets ?
+
+[09:15] <AlexDaniel> lizmat: https://github.com/perl6/doc/issues/1802
+
+[09:15] <AlexDaniel> lizmat: https://github.com/perl6/whateverable/issues/292
+
+[09:16] <lizmat> :-)
+
+[09:16] <AlexDaniel> lizmat: as for the doc commit, it's totally fine but probably needs a little blurb mentioning that dd is rakudo-specific, otherwise no problem
+
+[09:27] <lizmat> m: say gethostname
+
+[09:27] <camelia> rakudo-moar 838782b7d: OUTPUT: «camelia␤»
+
+[09:27] <AlexDaniel> say gethostname
+
+[09:27] <AlexDaniel> e: say gethostname
+
+[09:27] <evalable6> AlexDaniel, rakudo-moar abfbd1ab1: OUTPUT: «superserver␤»
+
+[09:27] <AlexDaniel> xD
+
+[09:28] <lizmat> looks like this is not specced, not tested and not documented
+
+[09:29] <lizmat> and it looks like it has existed at least since 2013
+
+[09:29] <AlexDaniel> c: 2014.01 say gethostname
+
+[09:29] <committable6> AlexDaniel, ¦2014.01: «superserver␤»
+
+[09:29] <AlexDaniel> greppable6: gethostname
+
+[09:30] <greppable6> AlexDaniel, 13 lines, 4 modules: https://gist.github.com/efd256be2c9c28e8f5103044d0dd5830
+
+[09:30] <AlexDaniel> there's one person using it
+
+[09:31] <lizmat> looks like my Sys::Hostname module can be simplified  :-)
+
+[09:55] <gfldex> m: sub infix:«<<»(Array \a, Any \v){ a.push: v }; my @a; @a << 42;
+
+[09:55] <camelia> rakudo-moar abfbd1ab1: OUTPUT: «5===SORRY!5=== Error while compiling <tmp>␤Unsupported use of << to do left shift; in Perl 6 please use +< or ~<␤at <tmp>:1␤------> 3y \a, Any \v){ a.push: v }; my @a; @a <<7⏏5 42;␤»
+
+[09:55] <gfldex> is that ^^^ intentional?
+
+[09:55] <gfldex> (if so, it's an ENODOC)
+
+[09:56] <lizmat> that feels like a false positive to me
+
+[09:56] <AlexDaniel> no really but it's a known problem
+
+[09:56] <AlexDaniel> there are many cases when it assumes that you're parsing regular perl 6 without custom ops and complains about unrelated stuff
+
+[09:56] <lizmat> afk for a few hours&
+
+[09:56] <AlexDaniel> not*
+
+[09:57] <gfldex> rakudo is to clever for it's own good :)
+
+[10:32] <|Tux|> test-t              2.600 -  2.601
+
+[11:10] <Zoffix> "<lizmat> and since Str.gist returns self" that isn't guaranteed. The "little bit that helps" is at the cost of special-cased behavior that breaks custom Str and its subclasses
+
+[11:10] <Zoffix> m: class Foo is Str { method gist { "just a foo" } }; say Foo
+
+[11:10] <camelia> rakudo-moar abfbd1ab1: OUTPUT: «just a foo␤»
+
+[11:10] <Zoffix> :(
+
+[11:10] <Zoffix> m: class Foo is Str { method gist { "just a foo" } }; say Foo.new
+
+[11:11] <camelia> rakudo-moar abfbd1ab1: OUTPUT: «␤»
+
+[11:11] <Zoffix> There's no reasonable explanation for why Foo:D.gist stops using Foo.gist other than we stuck a special case to for minor performance gain
+
+[11:13] <Zoffix> And the FAQ even says "The gist method, which you can also create for your own classes"
+
+[11:16] <Zoffix> Nor does it explain why you can `say Mu` and get Mu.gist, but if you do `say Junction:D` you get… potentially no output at all. Why doesn't it just use Junction.gist and display that? Again, a special case for no other reason that it's mis-designed. (the special-casing for print/put can be argued that there's no non-threaded Junction.Str meaning [it returns a Junction] and the options are to thread or to
+
+[11:16] <Zoffix> throw)
+
+[11:17] <Zoffix> This shit's broken.
+
+[11:22] <lizmat> well, then it has been broken for a *long* time
+
+[11:26] <lizmat> at least since https://github.com/rakudo/rakudo/commit/6e0ac15e574cbeef22c
+
+[11:26] <lizmat> almost 4 years ago
+
+[11:39] <Geth> ¦ rakudo: 6d6a69fd01 | (Elizabeth Mattijsen)++ | src/core/OS.pm
+
+[11:39] <Geth> ¦ rakudo: Make sub gethostname a multi
+
+[11:39] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/6d6a69fd01
+
+[11:39] <Geth> ¦ rakudo: 3a0d53ced5 | (Elizabeth Mattijsen)++ | src/core/io_operators.pm
+
+[11:39] <Geth> ¦ rakudo: Revert 6e0ac15e574cbeef22c
+
+[11:39] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/3a0d53ced5
+
+[11:40] <Geth> ¦ rakudo: c1d2a5bc4f | (Elizabeth Mattijsen)++ | src/core/Pair.pm
+
+[11:40] <Geth> ¦ rakudo: Make sub pair a multi
+
+[11:40] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/c1d2a5bc4f
+
+[11:49] <AlexDaniel> is anybody writing tests for the revert?
+
+[11:49] <AlexDaniel> I'm busy right now but I can file a ticket if nobody is on it
+
+[11:52] <lizmat> I'll write some tests
+
+[11:52] <AlexDaniel> OK
+
+[11:54] <Geth> ¦ rakudo: 4da2418ac9 | (Elizabeth Mattijsen)++ | src/core/Proc.pm
+
+[11:54] <Geth> ¦ rakudo: Make sub run/shell multi's
+
+[11:54] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/4da2418ac9
+
+[11:59] <dogbert2> when will MoarVM be bumped, does anybody know?
+
+[12:00] <lizmat> dogbert2: no idea, should it?
+
+[12:01] <AlexDaniel> isn't it bumped already?
+
+[12:02] <lizmat> last bump was for 2018.02 it appears
+
+[12:02] <lizmat> (of tools/build/NQP_REVISION)
+
+[12:02] <AlexDaniel> aaaah, moarvm is bumped in nqp
+
+[12:02] <AlexDaniel> but nqp is not bumped in rakudo
+
+[12:04] <Geth> ¦ rakudo: 62fc311851 | (Elizabeth Mattijsen)++ | src/core/Match.pm
+
+[12:04] <Geth> ¦ rakudo: Make sub make a multi
+
+[12:04] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/62fc311851
+
+[12:04] <lizmat> ok, lemme test if it works  :-)
+
+[12:04] <dogbert2> I was looking for the libuv upgrade
+
+[12:04] <AlexDaniel> oh right that's a big good one
+
+[12:05] <dogbert2> then I can run some tests :-)
+
+[12:05] <lizmat> building/testing now, gimme 5 mins or so
+
+[12:05] <dogbert2> lizmat++
+
+[12:07] <AlexDaniel> dogbert2++ for the reminder
+
+[12:08] <AlexDaniel> undersightable-- for not existing (should've reminded automatically)
+
+[12:08] <dogbert2> hmm, how many bots do we have now :-)
+
+[12:09] <AlexDaniel> 16 whateverables I think
+
+[12:09] <dogbert2> cool
+
+[12:09] <AlexDaniel> huggable: bots
+
+[12:09] <huggable> AlexDaniel, The #perl6 irc channel normally hosts several helpful bots. I am a bot, and everyone else voiced on this channel is a bot. See the full list here: https://github.com/perl6/doc/issues/711#issuecomment-235414744
+
+[12:09] <dogbert2> bisect: uptime
+
+[12:09] <bisectable6> dogbert2, 2 days, 1 hour, 34 minutes, and 41 seconds, 241.5625MiB maxrss. This is Rakudo version 2018.01-209-gf74890550 built on MoarVM version 2018.01-97-g22d2db5e0 implementing Perl 6.c.
+
+[12:09] <dogbert2> are they still suffering from SEGV's?
+
+[12:10] <dogbert2> at least memory usage looks good
+
+[12:10] <AlexDaniel> yes, still segv-ing
+
+[12:10] <AlexDaniel> and yes memory usage is almost perfect
+
+[12:10] <dogbert2> argh
+
+[12:12] <AlexDaniel> I can't push anyone to fix this because, well, you can't test these bots locally yet
+
+[12:13] <AlexDaniel> but you can run them!
+
+[12:13] <AlexDaniel> it's just a matter of setting up some lightweight irc server for the test suite
+
+[12:13] <AlexDaniel> or changing it so that it is not needed
+
+[12:14] <AlexDaniel> once there's an easy way to run the test suite we'll be able to have some useful bug reports
+
+[12:14] <AlexDaniel> several of them actually
+
+[12:16] <lizmat> hmmm, I got a hang on t/spec/S29-os/system.t
+
+[12:16] <lizmat> but it ran fine by itself  :-(
+
+[12:16] <lizmat> going to push anyway
+
+[12:16] <Geth> ¦ rakudo: fed92e3b82 | (Elizabeth Mattijsen)++ | tools/build/NQP_REVISION
+
+[12:16] <Geth> ¦ rakudo: Bump NQP to get all the latest NQP and MoarVM goodies
+
+[12:16] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/fed92e3b82
+
+[12:16] <Geth> ¦ rakudo: version bump brought these changes: https://github.com/perl6/nqp/compare/2018.02...2018.02-58-g24f9097
+
+[12:16] <lizmat> .oO( release early, release often )
+
+[12:18] <AlexDaniel> xD the sound of point releases
+
+[12:20] * dogbert2 rebuilds ...
+
+[12:23] <travis-ci> Rakudo build failed. Elizabeth Mattijsen 'Revert 6e0ac15e574cbeef22c'
+
+[12:23] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/346734055 https://github.com/rakudo/rakudo/compare/abfbd1ab1f7c...3a0d53ced5d8
+
+[12:26] <lizmat> t/04-nativecall/09-nativecast.t seems to have failed one of its tests   ^^^
+
+[12:26] <lizmat> cannot reproduce  :-(
+
+[12:27] <Geth> ¦ rakudo: d3f50dbac8 | (Elizabeth Mattijsen)++ | src/core/Rakudo/Internals.pm
+
+[12:27] <Geth> ¦ rakudo: Make sub exit a multi
+
+[12:27] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/d3f50dbac8
+
+[12:32] <|Tux|> $ perl6 --doc lib/Text/CSV.pod6
+
+[12:32] <|Tux|> ===SORRY!=== Error while compiling /pro/3gl/CPAN/Text-CSV6/lib/Text/CSV.pod6
+
+[12:32] <|Tux|> Two terms in a row
+
+[12:32] <|Tux|> as posted in https://github.com/Tux/CSV/issues/10
+
+[12:33] <lizmat> https://www.meetup.com/Amsterdam-Core-Infrastructure/events/247649657/   # not a word of Perl in there
+
+[12:33] <|Tux|> where should I find "the problem" or is that syntax just wrong
+
+[12:33] <lizmat> "we’re moving from monolith architecture to SOA"
+
+[12:33] <AlexDaniel> oh, so that's a .pod6 failure?
+
+[12:37] <|Tux|> AlexDaniel, your guess is better than mine :)
+
+[12:38] <AlexDaniel> |Tux|: can you golf it?
+
+[12:40] <|Tux|> AlexDaniel, https://gist.github.com/Tux/0d0237b59882b69f66d5281642b1a145
+
+[12:40] <|Tux|> will that do?
+
+[12:42] <AlexDaniel> c: HEAD run <wget -O sandbox/test.pod6 https://gist.githubusercontent.com/AlexDaniel/d594e0bf13d010ed3dc7e55f60bac86d/raw/f3595e4caa0a54e55d70409d9a23838f47ac7377/gistfile1.txt>
+
+[12:42] <committable6> AlexDaniel, https://gist.github.com/6563bd723b08d2046722214f0eccf1d9
+
+[12:42] <AlexDaniel> c: HEAD run <perl6 --doc sandbox/test.pod6>
+
+[12:43] <committable6> AlexDaniel, https://gist.github.com/ba83b670b3f32236cbc32fb6b3391eb9
+
+[12:43] <lizmat> FWIW, since the NQP bump, I'm seeing a lot more flappers in spectest  :-(
+
+[12:43] <AlexDaniel> |Tux|: ↑ why is that different?
+
+[12:43] <lizmat> in weird places such as: S11-modules/perl6lib.t and t/spec/S16-io/put.t
+
+[12:44] <lizmat> all of them "You planned N tests but ran 0"
+
+[12:44] <AlexDaniel> ah shit, missing =
+
+[12:44] <lizmat> which feels like a segfault somewhere along the way
+
+[12:44] <AlexDaniel> c: HEAD run <wget -O sandbox/test.pod6 https://gist.githubusercontent.com/AlexDaniel/d594e0bf13d010ed3dc7e55f60bac86d/raw/7609b4312bf500e54309513da103919cb2065835/gistfile1.txt>
+
+[12:44] <Geth> ¦ rakudo: b9f40fea53 | (Elizabeth Mattijsen)++ | src/core/signals.pm
+
+[12:44] <Geth> ¦ rakudo: Make sub signal a multi
+
+[12:44] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/b9f40fea53
+
+[12:44] <committable6> AlexDaniel, https://gist.github.com/ff5f87e3b5fb7ea808bc2941edeb6694
+
+[12:44] <AlexDaniel> c: HEAD run <perl6 --doc sandbox/test.pod6>
+
+[12:44] <committable6> AlexDaniel, https://gist.github.com/3f96bbb53e0ca3158f897865821d5183
+
+[12:44] <AlexDaniel> ok so here it is reproduced
+
+[12:44] <AlexDaniel> c: 2017.12 run <perl6 --doc sandbox/test.pod6>
+
+[12:44] <committable6> AlexDaniel, https://gist.github.com/39d3c2dfe527d9a13bc544fda8bedcaa
+
+[12:45] <AlexDaniel> but identical problem on 2017.12
+
+[12:45] <AlexDaniel> 6c: run <perl6 --doc sandbox/test.pod6>
+
+[12:45] <committable6> AlexDaniel, https://gist.github.com/4d1a5f8d20d983cf8f2a99b3a5c44745
+
+[12:45] <AlexDaniel> |Tux|: not a regression as far as I can see :)
+
+[12:46] <|Tux|> I didn't say so :)
+
+[12:46] <AlexDaniel> 6c: run <perl6 --version>
+
+[12:46] <committable6> AlexDaniel, https://gist.github.com/f0877a0c45d07097a67e10a1e271219d
+
+[12:46] <|Tux|> This is Rakudo version 2018.02.1-47-g838782b7d built on MoarVM version 2018.02-6-g1849ae6d6
+
+[12:46] <|Tux|> implementing Perl 6.c.
+
+[12:50] <AlexDaniel> |Tux|: I think it just needs =begin pod and =end pod …
+
+[12:50] <AlexDaniel> |Tux|: “Every Pod document has to begin with =begin pod and end with =end pod. Everything between these two delimiters will be processed and used to generate documentation.”
+
+[12:52] <|Tux|> AlexDaniel, I think that .pod and .pod6 files could be exempt to that rule?
+
+[12:53] <|Tux|> FWIW /me has no problem whatsoever in adding those two lines, but it feels kinda silly
+
+[12:59] <Geth> ¦ rakudo: dfef828357 | (Elizabeth Mattijsen)++ | src/core/Str.pm
+
+[12:59] <Geth> ¦ rakudo: Make subs trim/trim-leading/trim-trailing multi's
+
+[12:59] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/dfef828357
+
+[13:02] <lizmat> [Tux]: FWIW, in perl 5, .pod does not have a special meaning either, does it ?
+
+[13:03] <|Tux|> no, but it does not require =begin pod and =end pod, as a strirting valid = (like =head1) *implies* that this is pod up to and including =cut
+
+[13:04] <|Tux|> (or end-of-file)
+
+[13:05] <lizmat> ah, on such a bicycle  :-)
+
+[13:05] <|Tux|> :]
+
+[13:05] <lizmat> I guess Perl 6 is more picky than that
+
+[13:05] <|Tux|> that is why I posed the proposition
+
+[13:06] <|Tux|> feel free to ignore. I added the =begin/end pod to that document
+
+[13:10] <AlexDaniel> huggable: rakudobug
+
+[13:10] <huggable> AlexDaniel, Report bugs on https://github.com/rakudo/rakudo/issues/new    If you don't have access to GitHub, you can email your report to [email@hidden.address] . See also: https://github.com/rakudo/rakudo/wiki/rt-introduction
+
+[13:10] <AlexDaniel> ↑ here's the place for all worthy propositions :)
+
+[13:12] <[Coke]> I just got a weird error from 'make xtest' in the doc suite, error reported in nqp running the Perl 6 Grammar moarvm bytecode: https://gist.github.com/coke/7aabc5c3a416eec0710373feb717a0fa
+
+[13:13] <[Coke]> (running it a second time there's no warnings)
+
+[13:14] <AlexDaniel> .oO( Fixed! )
+
+[13:14] <dogbert2_> initial spectest with MVM_SPESH_NODELAY=1 and MVM_SPESH_BLOCKING=1 looks no worse than usual
+
+[13:16] <Geth> ¦ rakudo: 9a0a7bdd83 | (Elizabeth Mattijsen)++ | src/core/Str.pm
+
+[13:16] <Geth> ¦ rakudo: Make sub chrs a multi
+
+[13:16] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/9a0a7bdd83
+
+[13:16] <lizmat> dogbert2_: maybe it's been like that for a while already
+
+[13:17] <lizmat> haven't run so many spectests on a day in a long time
+
+[13:21] * lizmat just did GH #1574
+
+[13:21] <lizmat> https://github.com/rakudo/rakudo/issues/1574
+
+[13:30] <dogbert2_> lizmat++
+
+[13:31] <dogbert2_> there are a couple of nasty bugs left, threading and GC related, they rear their ugly heads from time to time
+
+[13:33] <Geth> ¦ rakudo: 32b08035b4 | (Elizabeth Mattijsen)++ | src/core/Str.pm
+
+[13:33] <Geth> ¦ rakudo: Make sub uniparse a multi
+
+[13:33] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/32b08035b4
+
+[13:34] <lizmat> which concludes my first run on ^sub in the core
+
+[13:34] <[Coke]> lizmat++
+
+[13:41] <Geth> ¦ roast: 2ca70b92d1 | (Elizabeth Mattijsen)++ | 2 files
+
+[13:41] <Geth> ¦ roast: Add tests to check say/note(Str:D) call .gist
+
+[13:41] <Geth> ¦ roast: review: https://github.com/perl6/roast/commit/2ca70b92d1
+
+[14:17] <travis-ci> Rakudo build passed. Elizabeth Mattijsen 'Make subs trim/trim-leading/trim-trailing multi's'
+
+[14:17] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/346761094 https://github.com/rakudo/rakudo/compare/b9f40fea53d7...dfef828357dd
+
+[14:57] <travis-ci> Rakudo build passed. Elizabeth Mattijsen 'Make sub uniparse a multi'
+
+[14:57] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/346775454 https://github.com/rakudo/rakudo/compare/9a0a7bdd836d...32b08035b42d
+
+[14:57] <dogbert2_> stresstest was clean on my 32 bit vm
+
+[15:52] <lizmat> m: sub a(\a) { a = 42 }; my int $a; a $a; say $a   # will this ever work ?
+
+[15:52] <camelia> rakudo-moar 32b08035b: OUTPUT: «Cannot modify an immutable Int (0)␤  in sub a at <tmp> line 1␤  in block <unit> at <tmp> line 1␤␤»
+
+[15:55] <moritz> lizmat: I don't think so, because int is pass-by-value, not pass-by-reference
+
+[15:56] <lizmat> m: sub a($a is rw) { $a = 42 }; my int $a; a $a; say $a   # but this works ?
+
+[15:56] <camelia> rakudo-moar 32b08035b: OUTPUT: «42␤»
+
+[16:16] <[Coke]> I'm assuming that's getting boxed.
+
+[16:16] <[Coke]> m: sub a($a is rw) { say $a.WHAT; $a=42}; my int $a; say $a.WHAT; a $a; say $a; say $a.WHAT
+
+[16:16] <camelia> rakudo-moar 32b08035b: OUTPUT: «(Int)␤(Int)␤42␤(Int)␤»
+
+[16:16] <[Coke]> ... oh right, WHAT has to box it.
+
+[16:17] <[Coke]> m: sub a($a is rw) { dd $a; $a=42}; my int $a; dd $a; a $a; dd $a;
+
+[16:17] <camelia> rakudo-moar 32b08035b: OUTPUT: «0␤0␤42␤»
+
+[16:17] <[Coke]> ... I don't know how to test my theory. :)
+
+[16:22] * japhb wonders if DUMP still works
+
+[16:22] <japhb> m: sub a($a is rw) { dd $a; $a=42}; my int $a; put $a.DUMP; a $a; put $a.DUMP;
+
+[16:22] <camelia> rakudo-moar 32b08035b: OUTPUT: «0␤0␤42␤»
+
+[16:22] <japhb> m: sub a($a is rw) { dd $a; $a=42}; my int $a; put $a.VAR.DUMP; a $a; put $a.DUMP;
+
+[16:22] <camelia> rakudo-moar 32b08035b: OUTPUT: «▶0␤0␤42␤»
+
+[16:22] <japhb> m: sub a($a is rw) { dd $a; $a=42}; my int $a; put $a.VAR.DUMP; a $a; put $a.VAR.DUMP;
+
+[16:22] <camelia> rakudo-moar 32b08035b: OUTPUT: «▶0␤0␤▶42␤»
+
+[16:23] <japhb> Hmmm
+
+[17:59] * TimToady waves his scepter and sez that "say" must NOT autothread junctions, because the main purpose of "say" is to serve illogical humans, and not to be as consistent as our math operators pretend to be
+
+[18:54] <timotimo> pray say
+
+[19:43] <Geth> ¦ rakudo: b62e0eb7a7 | (Elizabeth Mattijsen)++ | src/core/io_operators.pm
+
+[19:43] <Geth> ¦ rakudo: &say should not auto-thread
+
+[19:43] <Geth> ¦ rakudo:
+
+[19:43] <Geth> ¦ rakudo: As per https://irclog.perlgeek.de/perl6-dev/2018-02-27#i_15864766
+
+[19:43] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/b62e0eb7a7
+
+[19:45] <lizmat> afk again&
+
+[21:11] <Geth> ¦ rakudo: 52176c3c79 | TimToady++ | src/Perl6/Grammar.nqp
+
+[21:11] <Geth> ¦ rakudo: improve message 1<3 heuristic to recognize 1<=3
+
+[21:11] <Geth> ¦ rakudo:
+
+[21:11] <Geth> ¦ rakudo: Also happens to recognize 1<==3, fwiw...
+
+[21:11] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/52176c3c79
+
+[21:35] <Geth> ¦ roast: 8c27f8eb83 | usev6++ | S16-io/eof.t
+
+[21:35] <Geth> ¦ roast: [JVM] Unfudge now passing (sub-)tests
+
+[21:35] <Geth> ¦ roast: review: https://github.com/perl6/roast/commit/8c27f8eb83
+
+[22:19] <MasterDuke> jnthn, timotimo: `my int @d = ^10; say @d[2] % @d[4];`, that should use the int,int candidate for infix:<%>, correct?
+
+[22:20] <jnthn> Ideally, but I'm not sure we're quite there yet
+
+[22:20] <MasterDuke> ah
+
+[22:21] <MasterDuke> that would explain what i was seeing with rindolf's code
+
+[22:21] <MasterDuke> "if i just pull the array accesses out into their own native int variables, `e.g., my int $a = @d[$m]` and put those in the math expressions it goes from 1000s to 270s with the correct result"
+
+[22:57] <MasterDuke> jnthn: what needs to be done?
+
+[23:19] <jnthn> MasterDuke: I'm not 100% sure, but I think at the very least we'd need to track known native arrays in the optimizer and understand accesses to them will give back native int/num/str
+
+[23:22] <MasterDuke> static optimizer?
+
+[23:28] <jnthn> Yes
+
+[23:34] <jnthn> Hmmm...what should I do on vacation? I know...implement a lock-free data structure. https://github.com/jnthn/p6-concurrent-stack :)
+
+[23:34] <jnthn> 'night, #perl6-dev
+
+[23:39] * lizmat wonders why that doesn't use a repr('ConcBlockingQueue') undeneath?
+
+[23:46] <Geth> ¦ rakudo: af35389485 | (Elizabeth Mattijsen)++ | 5 files
+
+[23:46] <Geth> ¦ rakudo: Make sure all set ops have an "is pure" on their proto only
+
+[23:46] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/af35389485
+
+[23:46] <lizmat> sleep&

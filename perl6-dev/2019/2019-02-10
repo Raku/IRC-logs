@@ -1,0 +1,322 @@
+[00:02] <timotimo> jnthn: got an idea how we should handle an attribute being used before it's declared in the class when it'll be declared to be native, but the methods using it already code-genned a regular old object access?
+
+[00:16] *** samcv left
+[00:18] *** samcv joined
+[00:26] <jnthn> timotimo: Would have to keep track of the attribute access QAST::Var nodes and then set the .returns on them after composition time
+
+[00:27] <timotimo> oh, it's that easy? cool.
+
+[00:27] <jnthn> I think so :)
+
+[00:27] <timotimo> i think this is the fourth time i've stumbled upon seeing the null op emitted by takedispatcher being spesh'd in inline not being used to give the isnull after it a constant value
+
+[00:27] <timotimo> i seem to recall we wanted to postpone that until we can just run the regular optimizer post-inline or something?
+
+[00:28] <timotimo> i think that point is coming ever closer?
+
+[00:28] <jnthn> Yes, and in theory I've done that work
+
+[00:28] <timotimo> just have to sort out some explosions from the real world? :)
+
+[00:28] <jnthn> I did switch on more DIE, which went well. Then tried to enable some further opts and got some explosions.
+
+[00:29] <jnthn> But that was before the deopt information fix I did this last week
+
+[00:29] <jnthn> Which might well have caused such troubles
+
+[00:29] <timotimo> ah, yes
+
+[00:32] <jnthn> But yeah, in theory we'll be able to make the normal optimize_bb run over the blocks that we inlined
+
+[00:32] <jnthn> Which should take out the very thing you'd like to see gone :)
+
+[00:33] <timotimo> i don't see an optimize_null anywhere :P
+
+[00:33] <jnthn> Well, modulo that :P
+
+[00:33] <timotimo> :)
+
+[00:34] <jnthn> But that's the easy bit
+
+[00:38] <timotimo> hm, currently we're building a low-level list object every time we want to execute a native call, to hold all the arguments
+
+[00:38] <timotimo> that also forces boxing to happen, of course
+
+[00:38] <timotimo> i wonder how we could handle that better
+
+[00:39] <timotimo> have a tc-registered MVMRegister* that can be used to hold stuff? though that doesn't account for rw natives and such
+
+[00:42] <jnthn> That's a bit of a tricky one; I've wondered if we might manage to do something vaguely clever with a spesh plugin there
+
+[00:42] <jnthn> Though never figured it out all the way (didn't spend that much time thinking about it yet)
+
+[00:44] <timotimo> mhm
+
+[00:59] <timotimo> well, at least the jit devirtualizes every push as well as the setelemspos
+
+[00:59] <timotimo> though i could imagine a series of create, set size, reset size to 0, push a bunch, could actually be special-cased in the jit
+
+[01:00] <timotimo> since it's how we emit an nqp::list(1, 2, 3, 4)
+
+[01:00] *** lizmat joined
+[01:01] <timotimo> though of course i'd first want to have a measurement of how often that actually happens in "boring" code
+
+[01:03] <timotimo> create_BUILDPLAN has it; not exactly hot in regular user code, of course
+
+[01:29] *** ExtraCrispy left
+[01:32] *** Tux__ left
+[01:33] *** |Tux| joined
+[01:34] *** lizmat left
+[01:42] *** ExtraCrispy joined
+[02:04] <vrurg> Wonder if the list of concretizations would always match the list of roles?
+
+[02:07] <timotimo> hm, only for roles with arguments i guess?
+
+[02:08] <vrurg> No as any role gets specialized at composition time.
+
+[02:13] <timotimo> OK
+
+[02:15] <vrurg> Too bad I missed jnthn 
+
+[02:28] <Geth> ¦ rakudo: ramillies++ created pull request #2689: Fixed the bug #2688 (wrong values for asinh of negative argument)
+
+[02:28] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/2689
+
+[02:28] <synopsebot> RAKUDO#2688 [open]: https://github.com/rakudo/rakudo/issues/2688 asinh() is not an odd function
+
+[03:00] <releasable6> Next release in ≈6 days and ≈15 hours. 10 blockers. Please log your changes in the ChangeLog: https://github.com/rakudo/rakudo/wiki/ChangeLog-Draft
+
+[06:09] *** Kaiepi joined
+[08:02] *** ufobat___ joined
+[09:05] <nine> timotimo: we only do the list object thing for native calls that cannot be JIT compiled. If you want to get rid of lists, just teach MoarVM to JIT compile more argument types
+
+[09:24] <timotimo> oh, interesting
+
+[09:26] <nine> See NativeCall's !create-jit-compiled-function-body
+
+[09:32] <timotimo> i see it, but i don't see anything like checks for what we support
+
+[09:34] <timotimo> or is that inside of moar?
+
+[09:35] <nine> https://github.com/MoarVM/MoarVM/blob/master/src/core/nativecall.c#L435
+
+[09:35] <nine> Look for goto fail;
+
+[09:35] <timotimo> haha, that's a name i remember fondly
+
+[09:51] <timotimo> the type that's bailing out my native calls is CSTRUCT, and i dunno how this part of the code has to look in order to happen
+
+[09:58] *** lizmat joined
+[09:58] <nine> timotimo: would that be passed as an actual struct or as struct*?
+
+[09:59] <timotimo> i'd expect struct*
+
+[10:01] <timotimo> last night i was trying to build sp_p6oget_i32 and sp_p6obind_i32, but i was getting super strange segfaults .. today i take a look being a little more awake and see i had the exact same signature for both ops, even though bind obviously doesn't have a write register as its first arg
+
+[10:02] <timotimo> well, that mystery is solved
+
+[10:03] <timotimo> nine: i think your new compiler code was the first to require those ops for optimization :)
+
+[10:04] <nine> nice :)
+
+[10:06] <timotimo> i wouldn't expect it to make much off a difference, but of course every little bit helps :)
+
+[10:06] <nine> Would it be possible to move the void *cstruct; to the top of MVMCStructBody? Then supporting CStruct in NativeCall JIT would be as simple as adding it to this case: https://github.com/MoarVM/MoarVM/blob/master/src/core/nativecall.c#L522
+
+[10:07] <timotimo> i could imagine moving that to be absolutely problem-free
+
+[10:11] <timotimo> MoarVM::Handler and MAST::Frame have accessors for 32bit attributes that now get an sp_p6o[bind|get]_i32 for them
+
+[10:11] <timotimo> how often are they called?
+
+[10:12] <nine> I don't think it's terribly often
+
+[10:13] <timotimo> darn
+
+[10:13] <timotimo> i was so excited! :P
+
+[10:14] <nine> Sorry about that... You could try that CStruct thing. As you brought it up, getting that to JIT compile could speed up your code a lot
+
+[10:16] <timotimo> working on it
+
+[10:19] <timotimo> now i have one more bail for the double arg type
+
+[10:19] <timotimo> that's of course more fun because of float registers, right?
+
+[10:27] <nine> probably, yes
+
+[10:28] <timotimo> that's the function i'm most excited about, argh :)
+
+[10:28] <timotimo> it's SDL_RenderCopyEx; it has an "angle" argument that lets me rotate stuff
+
+[10:33] <timotimo> hold on, we just use the jit's c call nodes
+
+[10:33] <timotimo> they know about float arguments already
+
+[10:33] <timotimo> shouldn't this be trivial?
+
+[10:35] *** lizmat left
+[10:37] <timotimo> oh
+
+[10:39] <timotimo> it might be doable with not too much work
+
+[10:59] <timotimo> looks like it's now always passing 0 after compilation has happened
+
+[11:02] *** lizmat joined
+[11:06] <timotimo> m: my buf8 $foo .= new; buf8.write-double(0, 3.7530748180290279e-316); say $foo
+
+[11:06] <camelia> rakudo-moar d904b7048: OUTPUT: «No such method 'write-double' for invocant of type 'Buf[uint8]'␤  in block <unit> at <tmp> line 1␤␤»
+
+[11:06] <timotimo> m: my buf8 $foo .= new; buf8.write-num64(0, 3.7530748180290279e-316); say $foo
+
+[11:06] <camelia> rakudo-moar d904b7048: OUTPUT: «Invocant of method 'write-num64' must be an object instance of type 'Buf', not a type object of type 'Buf[uint8]'.  Did you forget a '.new'?␤  in block <unit> at <tmp> line 1␤␤»
+
+[11:06] <timotimo> m: my buf8 $foo .= new; $foo.write-num64(0, 3.7530748180290279e-316); say $foo
+
+[11:06] <camelia> rakudo-moar d904b7048: OUTPUT: «Buf[uint8]:0x<C8 1A 87 04 00 00 00 00>␤»
+
+[11:07] <timotimo> m: my buf8 $foo .= new; $foo.write-num64(0, 3.7530748180290279e-316); say $foo.read-uint64(0).base(16)
+
+[11:07] <camelia> rakudo-moar d904b7048: OUTPUT: «4871AC8␤»
+
+[11:08] <timotimo> m: my buf8 $foo .= new; $foo.write-num64(0, 3.7530748180290279e-316); say $foo.read-uint64(0).base(2)
+
+[11:08] <camelia> rakudo-moar d904b7048: OUTPUT: «100100001110001101011001000␤»
+
+[11:17] <[Tux]> Rakudo version 2018.12-293-gd904b7048 - MoarVM version 2018.12-95-gf55ecdecd
+
+[11:17] <[Tux]> csv-test-xs-20      0.437 -  0.443
+
+[11:17] <[Tux]> csv-ip5xs           0.748 -  0.765
+
+[11:17] <[Tux]> test-t --race       0.851 -  0.856
+
+[11:17] <[Tux]> test-t              1.861 -  1.889
+
+[11:17] <[Tux]> csv-ip5xs-20        6.311 -  6.511
+
+[11:17] <[Tux]> test                7.480 -  7.514
+
+[11:17] <[Tux]> test-t-20 --race   10.522 - 10.649
+
+[11:17] <[Tux]> csv-parser         22.241 - 22.484
+
+[11:17] <[Tux]> test-t-20          31.541 - 31.882
+
+[12:57] *** lucasb joined
+[12:57] *** dogbert2_ left
+[13:45] *** dct joined
+[13:52] *** dct left
+[13:52] *** dct joined
+[14:10] *** dct left
+[14:36] *** dct joined
+[15:11] *** dct left
+[15:16] *** lucasb left
+[15:46] *** Ven`` joined
+[16:00] *** lizmat left
+[16:30] *** tobs joined
+[16:40] *** ufobat_ joined
+[16:44] *** ufobat___ left
+[16:52] *** patrickb joined
+[17:00] *** cygx joined
+[17:00] <cygx> m: sub foo($a) { my class Foo { method a {$a} } }
+
+[17:00] <yoleaux> 3 Feb 2019 19:10Z <timotimo> cygx: i want to put something in the ecosystem to bridge Image::RGBA::Text and SDL2::Raw, how does that sound to you?
+
+[17:00] <camelia> rakudo-moar d904b7048: ( no output )
+
+[17:00] <yoleaux> 5 Feb 2019 18:44Z <timotimo> cygx: i look forward to you having a look at my pull requests and issues for Image::RGBA::Text :) :)
+
+[17:01] <timotimo> oh hey!
+
+[17:01] <cygx> o/
+
+[17:01] <cygx> m: sub foo($a) { my class Foo { method a {$a} } }; my $f1 = foo(1); my $f2 = foo(2); my $f3 = foo(3); say $f1.a, $f2.a, $f3.a
+
+[17:01] <camelia> rakudo-moar d904b7048: OUTPUT: «333␤»
+
+[17:01] <cygx> if classes do not form closures, should such code be disallowed?
+
+[17:01] <timotimo> cygx: i'm pretty glad your module sparked my imagination like that
+
+[17:02] <cygx> glad to hear it
+
+[17:02] <cygx> I've done more work on https://github.com/cygx/p6-image-rgba , but I think I'm done for now
+
+[17:02] <timotimo> i'm wondering if it'd be interesting to make operators from that Color module available in there
+
+[17:03] <timotimo> like, you could have a palette of a, a-but-10%-brighter, a-but-20%-brighter etc
+
+[17:05] <cygx> bit blit would also be an obvious candidate
+
+[17:06] <cygx> pull requests welcome ;)
+
+[17:07] <timotimo> you mean like "this rectangular part actually belongs at these coordinates in the image"?
+
+[17:08] <timotimo> i've thought of that too, but i thought that might be stretching it
+
+[17:08] <timotimo> do you think it should be fine to put in more pixel data than you've declared the image size to be?
+
+[17:09] <timotimo> btw wanna see my crappy art? :D
+
+[17:14] <timotimo> http://hack.p6c.org/~timo/spaceship_and_coins.mp4
+
+[17:14] *** lizmat joined
+[17:15] <timotimo> cygx: ^
+
+[17:16] <timotimo> got an idea what the module should be named that uploads an Image::RGBA into an SDL2 Texture?
+
+[17:17] <cygx> that's not crappy, that's retro
+
+[17:17] <cygx> the point of factoring out an Image::RGBA class was that you have something to hang off such transformations
+
+[17:18] <cygx> re naming, Image::RGBA::SDL2 or SDL2::RGBA come to mind...
+
+[17:20] <timotimo> SDL2::Raw + SDL2::RgbAW
+
+[17:29] *** ufobat_ left
+[17:31] <timotimo> fwiw, retro can look a lot better than what i made there :D
+
+[17:32] *** dct joined
+[17:37] *** ufobat_ joined
+[17:37] *** tyil left
+[17:45] *** Ven`` left
+[17:51] *** tyil joined
+[18:01] *** dct left
+[18:37] *** dct joined
+[18:48] *** dct left
+[20:24] <AlexDaniel> there are a bunch of blockers, so please take a look
+
+[20:25] <AlexDaniel> also, I'll be away this weekend (Friday…Sunday)
+
+[20:55] <leont> Is there a rakudo ticket for the App::Prove6 issue?
+
+[21:02] <Geth> ¦ rakudo: Kaiepi++ created pull request #2691: Fix segfault in Blob.new
+
+[21:02] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/2691
+
+[21:19] <AlexDaniel> leont: sorry, are we talking about this? https://github.com/perl6/ecosystem-unbitrot/issues/554
+
+[21:19] <AlexDaniel> leont: I don't think there's a ticket for that
+
+[21:20] <leont> Yeah
+
+[21:31] *** cygx left
+[21:47] *** patrickb left
+[21:51] <leont> I haven't been able to reproduce it though
+
+[21:56] <AlexDaniel> leont: `Flapper`, so you likely need to run it in a loop… and perhaps you need to give your cpu some extra work to make it happen
+
+[22:00] *** dct joined
+[22:49] <japhb> timotimo: Run it through hq3x or hq4x (https://en.wikipedia.org/wiki/Hqx) or one of the other pixel art scaling algorithms? (https://en.wikipedia.org/wiki/Pixel-art_scaling_algorithms)  I bet one of them would make your art look pretty nice.
+
+[22:50] <japhb> Come to think of it, with my limited patience for placing individual pixels, that's probably how I'd do an 8-bit look at a scale that actual can be seen on a modern display.
+
+[22:58] <timotimo> japhb: i wanted to, but i didn't have the patience to implement one in perl6 :)
+
+[22:59] <timotimo> i used piskel to draw the thing and actually used vim to transfer the image over because the lazyness
+
+[23:00] <releasable6> Next release in ≈5 days and ≈19 hours. 11 blockers. Please log your changes in the ChangeLog: https://github.com/rakudo/rakudo/wiki/ChangeLog-Draft
+
+[23:30] *** dct left
+[23:51] *** AlexDaniel left

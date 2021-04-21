@@ -1,0 +1,711 @@
+[09:09] <nine> I fear I have to rewrite the whole dependency loading code to fix the occasional failures on file systems with coarse time stamps, i.e. RT #128156
+
+[09:10] <nine> Right now we try to load a precomp file, during loading of the dependencies notice that one of them changed, precompile the source again and load the result.
+
+[09:12] <nine> Sometimes compilation is so fast that it finishes in the same Instant (with just 2 second resolution on crappy file systems) as the dependency's. Then we declare it outdated though we just precompiled it and try to load from source.
+
+[09:15] <nine> Problem is that we really don't know which of them is older when the time stamps match, so we cannot rely on the target module being fresher even though we just compiled it ourselves. Someone else could have recompiled the dependency in the meantime.
+
+[09:16] <nine> All of this was much easier when we locked the whole precomp store during module loading. But a global lock is a luxury we just cannot afford :)
+
+[09:18] <nine> The solution will probably be to first check all dependencies, then open all dependencies' files, then check again and only if they still check out actually pass them to the CompUnit::Loader
+
+[09:19] <nine> If they don't check out again, rinse and repeat.
+
+[09:24] <nine> This will actually make module load times unbounded, but that's just the price for going lockless.
+
+[09:25] <psch> two second resolution on a file system really seems pretty crappy, at a glance :S
+
+[09:27] <dalek> rakudo/nom: 05691d4 | lizmat++ | src/core/Rakudo/Internals.pm:
+
+[09:27] <dalek> rakudo/nom: Make EmptyIterator still faster for push-all
+
+[09:27] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/05691d424a
+
+[09:27] <dalek> rakudo/nom: beb3c98 | lizmat++ | src/core/List.pm:
+
+[09:27] <dalek> rakudo/nom: Make iteration of Lists about 10% faster
+
+[09:27] <dalek> rakudo/nom:
+
+[09:27] <dalek> rakudo/nom: - by differentiating between reified/non-reified lists
+
+[09:27] <dalek> rakudo/nom: - by making sure an iterator doesn't take slow, non-reified path again
+
+[09:27] <dalek> rakudo/nom: - by making smaller, inlineable methods
+
+[09:27] <dalek> rakudo/nom: - by not allocating if not necessary
+
+[09:27] <dalek> rakudo/nom: - by using the new EmptyIterator if a list is completely empty
+
+[09:27] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/beb3c98689
+
+[09:29] <nine> On to be fair, the race condition has been there all along. The timestamp issue just exposed it even in a non-parallelized test.
+
+[09:33] <lizmat> psch: that's FAT for you, or are there other ones ?
+
+[09:33] <lizmat> if I remember correctly, there were only 5 bits left for the second value
+
+[09:33] <lizmat> on MS-DOS FAT systems
+
+[09:34] <nine> lizmat: seems like on OS X we also only get 1 second resolution of time stamps. Though that could just be a missing patch for MoarVM
+
+[09:34] * psch doesn't know a lot about file systems
+
+[09:35] <lizmat> nine: on OS X, you could use IO.watch
+
+[09:37] <lizmat> but I have doubts on the timeliness of it, judging from how long it sometimes takes before a Finder window updates
+
+[09:38] <nine> lizmat: sounds like a possible optimization once I've fixed the algorithm. Because it might turn out that we will recompile unnecessarily in certain cases just to be sure.
+
+[09:58] <pmurias> nine: would just md5ing things be a possible solution on systems with crappy timestamps?
+
+[10:04] <nine> pmurias: indeed an intriguing proposition. That would change the question from "is it up to date" to "is it the same".
+
+[10:11] <pmurias> nine: s/md5/sha1/ ;)
+
+[10:17] <nine> pmurias: yes, yes, yes, I can generate the sha when assembling the precomp file and store it on top
+
+[10:25] <psch> hrm, this is weird
+
+[10:25] <psch> i've added code to check for valid args for the setcodeobj calls we write
+
+[10:25] <psch> and there's no problem there
+
+[10:25] <psch> which is somewhat inconsistent with the error that pops up :P
+
+[10:27] <travis-ci> Rakudo build failed. Elizabeth Mattijsen 'Make iteration of Lists about 10% faster
+
+[10:27] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/133703776 https://github.com/rakudo/rakudo/compare/7500ea2a100b...beb3c9868963
+
+[10:33] <psch> i suppose that means i'll have to check where exactly that setcodeobj call comes from
+
+[10:33] <nine> psch: look for generated code, not the runtime
+
+[10:34] <psch> nine: i'm checking (and dying if there's a problem) during code gen
+
+[10:34] <psch> the bit commented with "Add code object fixups" in jvm/QAST/Compiler.nqp, to be precise
+
+[10:35] <psch> and if it's not going through there, i really don't know where it could go through
+
+[10:35] <psch> that's the only place we use setcodeobj in Compiler.nqp
+
+[10:35] <psch> well, except it's a setcodeobj call that gets written to QAST somewhere in e.g. World
+
+[10:36] <psch> ...huh, that fits doesn't it
+
+[10:36] <psch> as in, the problem that we have is that is *doesn't* get a fixup
+
+[10:38] <nine> https://github.com/perl6/nqp/blob/master/src/vm/jvm/QAST/Compiler.nqp#L3382
+
+[10:38] <nine> that's definitely it
+
+[10:38] <psch> yeah, that's where my debug code sits
+
+[10:39] <nine> the code obj is there during compilation but no longer when loaded from the bytecode file
+
+[10:39] <nine> the equivalent code on moar doesn't run
+
+[10:40] <nine> but adding a check for is_nested will give you a NPE
+
+[10:40] <nine> because it's expecting more code objects than it finds
+
+[10:40] <nine> lunch now
+
+[11:04] <dalek> nqp: a855dd0 | (Pawel Murias)++ | src/vm/moar/QAST/QASTOperationsMAST.nqp:
+
+[11:04] <dalek> nqp: Decontainerize the argument to setwho for consistency with the JVM backend.
+
+[11:04] <dalek> nqp: review: https://github.com/perl6/nqp/commit/a855dd0e9f
+
+[11:04] <dalek> nqp: eb74bba | (Pawel Murias)++ | src/vm/js/nqp-runtime/ (2 files):
+
+[11:04] <dalek> nqp: [js] Serialize/deserialize the HLL role.
+
+[11:04] <dalek> nqp: review: https://github.com/perl6/nqp/commit/eb74bba230
+
+[11:04] <dalek> nqp: 29186d6 | (Pawel Murias)++ | src/vm/js/ (2 files):
+
+[11:04] <dalek> nqp: [js] Decontainerize the arguments to a whole bunch of ops.
+
+[11:04] <dalek> nqp: review: https://github.com/perl6/nqp/commit/29186d61de
+
+[11:04] <dalek> nqp: 235f116 | (Pawel Murias)++ | src/vm/jvm/runtime/org/perl6/nqp/runtime/Ops.java:
+
+[11:04] <dalek> nqp: [jvm] Remove dead code.
+
+[11:04] <dalek> nqp: review: https://github.com/perl6/nqp/commit/235f116fb5
+
+[11:04] <dalek> nqp: 6f33259 | (Pawel Murias)++ | src/vm/jvm/ (2 files):
+
+[11:04] <dalek> nqp: [jvm] Make nqp::reprname decontainerize it's argument.
+
+[11:18] <[Tux]> This is Rakudo version 2016.05-28-gbeb3c98 built on MoarVM version 2016.05
+
+[11:18] <[Tux]> test            20.347
+
+[11:18] <[Tux]> test-t          13.025
+
+[11:18] <[Tux]> csv-parser      34.376
+
+[14:51] <nine> Oh the irony! nqp::sha1 can only hash strings, not buffers though SHA1 is clearly defined on a byte level rather than character data.
+
+[15:23] <timotimo> m(
+
+[15:23] <timotimo> yeah
+
+[15:24] <nine> I guess decoding the buffer from latin-1 should keep it unharmed
+
+[15:39] <timotimo> it'd still be nice if we would just let the sha1 op take bufs, too
+
+[15:39] <timotimo> also less overhead i suppose
+
+[15:39] <timotimo> you wouldn't want to build a hash cracker when you can only work with strings and they'd have to be decoded every single time
+
+[16:52] <nine> Meh...with a decode("latin-1") it's not \0 safe
+
+[16:58] <lizmat> I guess it's because nqp::sha predates Buf/Blob implementation
+
+[17:40] <timotimo> yeah, could very well be
+
+[18:39] <Woodi> nine: looks turning off atimes and dirtimes is common optimalization on SSD drives :)  isn't atomic move enought ? also repo lock on maintenance work is not uncommon...
+
+[18:44] <geekosaur> that's not so much optimization as it is extending write lifetime
+
+[18:47] <Zoffix> Does anything bad happen if I delete my fork of rakudo?
+
+[18:47] <Zoffix> I can't be arsed to figure out how to make it up to date with rakudo/rakudo...
+
+[18:48] <geekosaur> you lose any non-upstreamed changes you might have
+
+[18:48] <Zoffix> Ah, k. There aren't any.
+
+[18:49] <geekosaur> other than that, it seems to do the right thing (I had a trashed fork of another project, nuked it and re-forked, things became sane and nothing appears to have come unhinged/dangling)
+
+[18:49] <psch> alternatively you can add upstream as remote and do something like  "git pull upstream && git reset --hard upstream/nom" i think
+
+[18:50] <psch> and then force push to your fork
+
+[18:50] <psch> actually, i think the pull isn't needed, and a fetch might be enough
+
+[18:50] <psch> 'cause pull might want to merge, which makes everything annoying :)
+
+[18:51] <Zoffix> Normally git pull --rebase http://github.com/rakudo/rakudo; works, but there are conflicts this time.
+
+[18:52] <Zoffix> How long is our deprecation cycle?
+
+[18:52] <psch> pre-christmas it was a half a year i think?  then a clean break with christmas, and "it didn't come up yet" now afaik :)
+
+[18:53] <Zoffix> m: say from-json '[]'
+
+[18:53] <camelia> rakudo-moar beb3c9: OUTPUT«[]␤»
+
+[18:53] <Zoffix> Oh, I thought that was deprecated and giving warnings... never mind
+
+[18:53] <psch> m: sub f is DEPRECATED { }; f()
+
+[18:53] <camelia> rakudo-moar beb3c9: ( no output )
+
+[18:54] <Zoffix> (it probably is, but isn't giving warnings)
+
+[18:54] <Zoffix> Hm, it is: https://github.com/rakudo/rakudo/blob/3f9f60e279de35c356204886337ba848e2d8fcb2/src/core/JSON/Pretty.pm#L7
+
+[18:55] <psch> m: say %*ENV.keys.grep(/:i dep/)
+
+[18:55] <camelia> rakudo-moar beb3c9: OUTPUT«(RAKUDO_NO_DEPRECATIONS)␤»
+
+[18:55] <psch> m: say %*ENV.grep(.key ~~ /:i dep/)
+
+[18:55] <camelia> rakudo-moar beb3c9: OUTPUT«Method 'key' not found for invocant of class 'Any'␤  in block <unit> at /tmp/EUyiVLcsPO line 1␤␤»
+
+[18:55] <psch> m: say %*ENV.pairs.grep(.key ~~ /:i dep/)
+
+[18:55] <camelia> rakudo-moar beb3c9: OUTPUT«Method 'key' not found for invocant of class 'Any'␤  in block <unit> at /tmp/qVtov65sRF line 1␤␤»
+
+[18:55] <Zoffix> Ah
+
+[18:55] <psch> m: say %*ENV.pairs.grep(*.key ~~ /:i dep/)
+
+[18:55] <camelia> rakudo-moar beb3c9: OUTPUT«WhateverCode object coerced to string (please use .gist or .perl to do that)  in block <unit> at /tmp/fiG4AtUwgW line 1␤()␤»
+
+[18:55] <psch> grm
+
+[18:55] <psch> m: say %*ENV.grep({ $_ .key ~~ /:i dep/ })
+
+[18:55] <camelia> rakudo-moar beb3c9: OUTPUT«(RAKUDO_NO_DEPRECATIONS => 1)␤»
+
+[18:55] <psch> there :P
+
+[18:56] <Zoffix> m: BEGIN %*ENV<RAKUDO_NO_DEPRECATIONS> = 0; say from-json '[]'
+
+[18:56] <camelia> rakudo-moar beb3c9: OUTPUT«[]␤Saw 1 occurrence of deprecated code.␤================================================================================␤Sub from-json (from GLOBAL) seen at:␤  /tmp/e_bkH_UeV4, line 1␤Please use JSON::Fast, JSON::Tiny or JSON::Pretty from https:/…»
+
+[18:57] <Zoffix> Is there some way to find out what stuff is specifically deprecated and when it's supposed to be removed?
+
+[18:57] <Zoffix> I mean other than grepping for 'deprecated' and looking up commit dates ;/
+
+[19:01] <psch> it used to say when stuff was gonna be removed i think
+
+[19:01] <psch> not sure how that worked, though
+
+[19:02] <Zoffix> :/
+
+[19:13] <geekosaur> that was only done for stuff deprecated before 6.c, and they were all deprecated by release
+
+[19:13] <geekosaur> I think deprecations that are part of spec are here until 6.d at least
+
+[19:16] <Zoffix> k
+
+[19:17] <Zoffix> FWIW: I'm getting test failures with current rakudo checkout: https://gist.github.com/zoffixznet/7623d88036b7e7fa083aced9c4b0ebb9
+
+[19:17] <geekosaur> (actually I'd assume spec deprecations are valid now, marked deprecated in 6.d, removed in 6.e)
+
+[19:17] <psch> i think S17 is still suspectable to flapping
+
+[19:18] <psch> Zoffix: do they reliably fail at the same spot, even when run standalone with make or with perl6-m?
+
+[19:18] <geekosaur> S17-supply is certainly still flapping. the S17-lowlevel one I don't recall seeing on linux or os x
+
+[19:19] <geekosaur> oh, I see, from-json. not spec, and no idea how it's being handled
+
+[19:19] <Zoffix> S17 segfaulted on the third try: https://gist.github.com/zoffixznet/ccf2b5dd8ed2f389fecbf0c9818da084
+
+[19:20] <psch> yeah, i'd think that's the same, known, inconsistent behavior
+
+[19:20] <psch> unfortunately not enough people who understand moar async around vOv
+
+[19:20] <Zoffix> S17-supply/syntax.t just says Aborted on each run: https://gist.github.com/zoffixznet/3898ea116ee419e80f45c34bbe2c9463
+
+[19:21] <Zoffix> Oh... do I need to do some sort of special magic on them, to make them rakudo-specific?
+
+[19:22] <psch> if you ran them with 'make $file' or 'make spectest' there should be a $file.rakudo in the same folder
+
+[19:22] <psch> i think even .rakudo-moar
+
+[19:22] <psch> that one you can run with perl6-m
+
+[19:22] <Zoffix> And t/spec/S32-num/power.rakudo.moar seems to reliably fail the same: https://gist.github.com/zoffixznet/6e5b6aa7a69041dd5409b55ab7fb6bc9
+
+[19:23] <Zoffix> I don't have .moar files for the other two tests, so I guess they don't have special stuff
+
+[19:23] <psch> Zoffix: well, considering that "fail" is passing a few TODOs and a few not that's ok :)
+
+[19:24] <psch> TODO tests are expected to not pass, and come up in the summary if they do pass
+
+[19:24] <Zoffix> Oh, ok.
+
+[19:26] <bartolin> those passing TODOs should probably fudged specifically for OS X (they pass for me on FreeBSD as well)
+
+[19:26] <bartolin> *be fudged
+
+[19:28] <Zoffix> So... any idea on how to fix any of this stuff? Or will it go into release anyway?
+
+[19:29] <psch> considering the S17 flappers have been around for probably a year or so... :/
+
+[19:29] <Zoffix> :/
+
+[19:29] <psch> passing TODOs usually only pass platform-specific
+
+[19:29] <psch> well, it *is* moar-dependent async, feel free to dig in :)
+
+[19:29] <Zoffix> I'm not ready for that yet :P
+
+[19:36] <bartolin> speaking of fudged tests which actually pass: there is skiped block in integration/advent2014-day05.t which works on my machine. could someone else try and run that test file without the "skip"?
+
+[19:36] <bartolin> I'm a bit reluctant to change that in roast because it seemed to be a flapper, too
+
+[19:41] <psch> seems to hang here..?
+
+[19:41] * psch waits another minute or so
+
+[19:43] <psch> yeah, still nothing happening
+
+[19:46] <psch> bartolin: 5 minutes now, still hanging.  i'd leave that skipped :)
+
+[19:47] <Zoffix> PR to fix RT#128284 https://github.com/rakudo/rakudo/pull/777
+
+[19:47] <Zoffix> https://rt.perl.org/Ticket/Display.html?id=128284
+
+[19:48] <Zoffix> Oh, w00t! PR #777 :) If only I gave any credence to the existence of lucky numbers 😜
+
+[19:50] <psch> m: my $a = { say "foo"; say "bar" }; say $a.?name
+
+[19:50] <camelia> rakudo-moar beb3c9: OUTPUT«␤»
+
+[19:50] <psch> m: say Callable.^can('name')
+
+[19:50] <camelia> rakudo-moar beb3c9: OUTPUT«Too many positionals passed; expected 2 arguments but got 3␤  in block <unit> at /tmp/N0KzTkHJ0t line 1␤␤»
+
+[19:50] <psch> m: say Callable.can('name')
+
+[19:50] <camelia> rakudo-moar beb3c9: OUTPUT«()␤»
+
+[19:50] <psch> Zoffix: i think .? doesn't do what you think it does
+
+[19:52] <Zoffix> psch, it calls a method if it exists or returns a Nil .... doesn't it?
+
+[19:52] <bartolin> psch: thanks!
+
+[19:53] <psch> Zoffix: it does, sorry
+
+[19:53] <Zoffix> m: say "{$_.?name() || $_.^name()}" for sub{}, sub bar {}, *, -> {}, {;}, &[<], &sum
+
+[19:53] <camelia> rakudo-moar beb3c9: OUTPUT«Sub␤bar␤Whatever␤Block␤Block␤infix:«<»␤sum␤»
+
+[19:53] <psch> actually, i misinterpreted my result for the Block test above :)
+
+[19:53] <Zoffix> Ah
+
+[19:54] <psch> m: say Nil
+
+[19:54] <camelia> rakudo-moar beb3c9: OUTPUT«Nil␤»
+
+[19:54] <Zoffix> psch, it returns an empty string
+
+[19:54] <psch> m: say { Nil }()
+
+[19:54] <camelia> rakudo-moar beb3c9: OUTPUT«Nil␤»
+
+[19:54] <psch> Block.name does?
+
+[19:54] <Zoffix> m: my $a = { say "foo"; say "bar" }; say $a.name eqv ''
+
+[19:54] <camelia> rakudo-moar beb3c9: OUTPUT«True␤»
+
+[19:55] <psch> that is really confusing
+
+[19:56] <psch> m: say "" // "foo"
+
+[19:56] <camelia> rakudo-moar beb3c9: OUTPUT«␤»
+
+[19:56] <psch> well, never mind where that name method comes from vOv
+
+[19:57] <psch> otherwise it looks fine to me, even though i somewhat dislike || for "is this a non-empty Str"
+
+[19:57] <psch> or "is this 0", for that matter
+
+[19:57] <psch> but that's probably just me :)
+
+[19:58] * psch isn't really programming-minded anymore, apparently
+
+[19:58] <psch> well, for today only hopefully :P
+
+[19:59] <dalek> rakudo/nom: 9ff1af5 | (Zoffix Znet)++ | lib/Test.pm6:
+
+[19:59] <dalek> rakudo/nom: Fix RT#128284: warnings on failing Test::cmp-ok
+
+[19:59] <dalek> rakudo/nom:
+
+[19:59] <dalek> rakudo/nom: Instead of attempting to stringify the matcher, we try to call .name (that will give us name for named subs) or call ^.name, which will give us the name of the thing, such as Block, Whatever, etc.
+
+[19:59] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/9ff1af5a92
+
+[19:59] <dalek> rakudo/nom: 4a7eaa0 | peschwa++ | lib/Test.pm6:
+
+[19:59] <dalek> rakudo/nom: Merge pull request #777 from zoffixznet/fix-RT128284
+
+[19:59] <dalek> rakudo/nom:
+
+[19:59] <dalek> rakudo/nom: Fix RT#128284: warnings on failing Test::cmp-ok
+
+[19:59] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/4a7eaa06b5
+
+[20:00] <Zoffix> \o/
+
+[20:01] <psch> now, considering that passing $op to &cmp-ok as Str is per design, feel free to solve that too ;)
+
+[20:02] <geekosaur> glwt
+
+[20:04] <Zoffix> Wouldn't doing so nullify my RFC to ditch that feature? :P
+
+[20:04] <psch> ...i suppose it would
+
+[20:04] <Zoffix> Plus, I don't know how to fix the security issue ¯\_(ツ)_/¯
+
+[20:04] <psch> well, it *is* EVAL...
+
+[20:05] <psch> on the other hand it is a test function
+
+[20:05] <Zoffix> m: EVAL "run 'ls'"
+
+[20:05] <camelia> rakudo-moar beb3c9: OUTPUT«run is disallowed in restricted setting␤  in sub restricted at src/RESTRICTED.setting line 1␤  in sub run at src/RESTRICTED.setting line 14␤  in block <unit> at EVAL_0 line 1␤  in block <unit> at /tmp/bf7rOdD5sz line 1␤␤»
+
+[20:05] <Zoffix> It's protected here...
+
+[20:05] <psch> m: "run 'ls'".EVAL.say
+
+[20:05] <camelia> rakudo-moar beb3c9: OUTPUT«run is disallowed in restricted setting␤  in sub restricted at src/RESTRICTED.setting line 1␤  in sub run at src/RESTRICTED.setting line 14␤  in block <unit> at EVAL_0 line 1␤  in block <unit> at /tmp/p5No4LGFRS line 1␤␤»
+
+[20:05] <Zoffix> m: use Test; cmp-ok '', '~~>;warn run "ls"; <z', '', '';
+
+[20:05] <camelia> rakudo-moar beb3c9: OUTPUT«Perlito␤dalek-queue␤evalbot␤evalbot.log␤foo␤lib␤log␤mbox␤nqp-js␤p1␤p2␤p6eval-token␤perl5␤rakudo-j-1␤rakudo-j-2␤rakudo-j-inst␤rakudo-j-inst-1␤rakudo-j-inst-2␤rakudo-m-1␤rakudo-m-2␤rakudo-m-inst␤rakudo-m-inst-1␤rak…»
+
+[20:06] <psch> oh hm
+
+[20:06] <psch> actually that's quite easy to fix in that specific case i think
+
+[20:06] <Zoffix> Well volunteered! :P
+
+[20:07] <psch> m: my $x = '<'; say ::("&infix:<$x>")
+
+[20:07] <camelia> rakudo-moar beb3c9: OUTPUT«No such symbol '&infix:<<>'␤  in block <unit> at /tmp/f7U8AXJNyy line 1␤␤Actually thrown at:␤  in block <unit> at /tmp/f7U8AXJNyy line 1␤␤»
+
+[20:07] <psch> m: my $x = '<'; say ::("&infix:[$x]")
+
+[20:07] <camelia> rakudo-moar beb3c9: OUTPUT«Use of uninitialized value <element> of type Any in string context␤Any of .^name, .perl, .gist, or .say can stringify undefined things, if needed.  in any canonicalize_pair at src/Perl6/World.nqp line 4331␤Use of uninitialized value <element> of type A…»
+
+[20:07] <psch> m: my $x = '<'; say ::("&infix:<<$x>>")
+
+[20:07] <camelia> rakudo-moar beb3c9: OUTPUT«Use of uninitialized value $x of type Any in string context␤Any of .^name, .perl, .gist, or .say can stringify undefined things, if needed.  in code  at /tmp/v0XBTsvRYJ line 1␤No such symbol '&infix:<<<>>'␤  in block <unit> at /tmp/v0XBTsvRYJ line 1…»
+
+[20:07] <psch> well, maybe not :P
+
+[20:07] <psch> also kinda silly that the actual symbol isn't found, but it doesn't parse error
+
+[20:07] <psch> m: my $x = '=='; say ::("&infix:<$x>")
+
+[20:07] <camelia> rakudo-moar beb3c9: OUTPUT«sub infix:<==> (Mu $?, Mu $?) { #`(Sub+{<anon|52917568>}+{Precedence}|51437744) ... }␤»
+
+[20:08] <Zoffix> m: my $x = '<'; say ::("&infix:«$x»")
+
+[20:08] <camelia> rakudo-moar beb3c9: OUTPUT«Use of uninitialized value $x of type Any in string context␤Any of .^name, .perl, .gist, or .say can stringify undefined things, if needed.  in code  at /tmp/cBZsGiWNCQ line 1␤sub infix:«<» (Mu $?, Mu $?) { #`(Sub+{<anon|52917568>}|67963888) ... }␤»
+
+[20:08] <Zoffix> m: BEGIN my $x = '<'; say ::("&infix:«$x»")
+
+[20:08] <camelia> rakudo-moar beb3c9: OUTPUT«sub infix:«<» (Mu $?, Mu $?) { #`(Sub+{<anon|52917568>}|52845664) ... }␤»
+
+[20:08] <psch> oh, right, that again
+
+[20:08] <Zoffix> How come the == worked?
+
+[20:08] <psch> well, the ::() lookup itself is runtime
+
+[20:09] <psch> so i suspect that we really don't install &infix:<<>, because we couldn't even parse it anyway
+
+[20:09] <Zoffix> m: my $x = '<'; say ::("&infix:«$x»")
+
+[20:09] <camelia> rakudo-moar beb3c9: OUTPUT«Use of uninitialized value $x of type Any in string context␤Any of .^name, .perl, .gist, or .say can stringify undefined things, if needed.  in code  at /tmp/AD4OLKgg4Z line 1␤sub infix:«<» (Mu $?, Mu $?) { #`(Sub+{<anon|52917568>}|73985008) ... }␤»
+
+[20:09] <Zoffix> m: my $x = '=='; say ::("&infix:«$x»")
+
+[20:09] <camelia> rakudo-moar beb3c9: OUTPUT«Use of uninitialized value $x of type Any in string context␤Any of .^name, .perl, .gist, or .say can stringify undefined things, if needed.  in code  at /tmp/QbpwRhao_k line 1␤No such symbol '&infix:«==»'␤  in block <unit> at /tmp/QbpwRhao_k line 1…»
+
+[20:09] <psch> see, it warns, but finds it
+
+[20:09] <Zoffix> oh
+
+[20:09] <Zoffix> wtf
+
+[20:09] <Zoffix> m: my $x = '=='; say ::("&infix:<$x>")
+
+[20:09] <camelia> rakudo-moar beb3c9: OUTPUT«sub infix:<==> (Mu $?, Mu $?) { #`(Sub+{<anon|52917568>}+{Precedence}|53330048) ... }␤»
+
+[20:09] <psch> yeah, double interpolation
+
+[20:09] <psch> m: my $x = '=='; say ::("&infix:<<$x>>")
+
+[20:09] <camelia> rakudo-moar beb3c9: OUTPUT«Use of uninitialized value $x of type Any in string context␤Any of .^name, .perl, .gist, or .say can stringify undefined things, if needed.  in code  at /tmp/MhnVYdLjll line 1␤No such symbol '&infix:<<==>>'␤  in block <unit> at /tmp/MhnVYdLjll line 1…»
+
+[20:10] <psch> ...probably, something like that
+
+[20:10] <psch> m: my $op = '&infix:<<>'; say ::($op)
+
+[20:10] <camelia> rakudo-moar beb3c9: OUTPUT«No such symbol '&infix:<<>'␤  in block <unit> at /tmp/kqEHnTJzve line 1␤␤Actually thrown at:␤  in block <unit> at /tmp/kqEHnTJzve line 1␤␤»
+
+[20:10] <psch> m: my $op = '&infix:[<]'; say ::($op)
+
+[20:10] <camelia> rakudo-moar beb3c9: OUTPUT«No such symbol '&infix:[<]'␤  in block <unit> at /tmp/25Vr57bheU line 1␤␤Actually thrown at:␤  in block <unit> at /tmp/25Vr57bheU line 1␤␤»
+
+[20:10] <psch> m: my $op = q{&infix:['<']}; say ::($op)
+
+[20:10] <camelia> rakudo-moar beb3c9: OUTPUT«No such symbol '&infix:['<']'␤  in block <unit> at /tmp/8jkZPafY7u line 1␤␤Actually thrown at:␤  in block <unit> at /tmp/8jkZPafY7u line 1␤␤»
+
+[20:11] * psch gives up vOv
+
+[20:11] <Zoffix> I don't get what you mean by double interpolation.... What difference is there between m: my $x = '=='; say ::("&infix:«$x»") and m: my $x = '=='; say ::("&infix:<$x>")
+
+[20:12] <psch> m: my $x = "foo"; say <$x>; say <<$x>>
+
+[20:12] <camelia> rakudo-moar 4a7eaa: OUTPUT«$x␤(foo)␤»
+
+[20:12] <nine> Woodi: we don't use atime, but we surely need mtime. Also I was not talking about locking the repo on maintenance but on read
+
+[20:12] <psch> i'm really just getting more confused right now, honestly
+
+[20:13] <psch> the "" interpolate the $x already :/
+
+[20:13] <bartolin> psch, Zoffix: is this related: RT #127284
+
+[20:13] <bartolin> https://rt.perl.org/Ticket/Display.html?id=127284
+
+[20:14] <psch> bartolin: probably somehow, yeah
+
+[20:14] <Zoffix> m: sub &infix:«$op» { say $^a + $^b }; 2 $op 4
+
+[20:14] <camelia> rakudo-moar 4a7eaa: OUTPUT«===SORRY!=== Error while compiling /tmp/Ab3Fo4SH5q␤Missing block␤at /tmp/Ab3Fo4SH5q:1␤------> sub⏏ &infix:«$op» { say $^a + $^b }; 2 $op 4␤    expecting any of:␤        new name to be defined␤»
+
+[20:15] <Zoffix> m: sub infix:«$op» { say $^a + $^b }; 2 $op 4
+
+[20:15] <camelia> rakudo-moar 4a7eaa: OUTPUT«===SORRY!=== Error while compiling /tmp/lNbcZ1arYQ␤Colon pair value '$op' too complex to use in name␤at /tmp/lNbcZ1arYQ:1␤------> sub infix:«$op»⏏ { say $^a + $^b }; 2 $op 4␤    expecting any of:␤        postfix␤»
+
+[20:15] <Zoffix> m: sub infix:<$op> { say $^a + $^b }; 2 $op 4
+
+[20:15] <camelia> rakudo-moar 4a7eaa: OUTPUT«6␤»
+
+[20:15] <Zoffix> OK. For some reason I thought «» in this case was just a different way to write <>
+
+[20:16] <Zoffix> m: sub infix:q{$op}| { say $^a + $^b }; 2 $op 4
+
+[20:16] <camelia> rakudo-moar 4a7eaa: OUTPUT«===SORRY!===␤Internal error: find_var_decl could not find $_␤»
+
+[20:16] <psch> *that* is neat
+
+[20:17] <psch> but yeah, the colonpair after routine_decl doesn't allow different quoting constructs
+
+[20:17] <psch> as in, it's really a colonpair, not a colon followed by a Str
+
+[20:18] <Zoffix> m: sub infix:<\<\<\<> { say $^a + $^b }; 2 <<< 4
+
+[20:18] <camelia> rakudo-moar 4a7eaa: OUTPUT«6␤»
+
+[20:19] <b2gills> m: my $op = '+'; say CORE::{"&infix:<$op>"}(3,4)
+
+[20:19] <camelia> rakudo-moar 4a7eaa: OUTPUT«7␤»
+
+[20:21] <bartolin> heh, RT #126646 is also fixed, Zoffix++
+
+[20:21] <Zoffix> m: use MONKEY-SEE-NO-EVAL; my $op = '<'; $op.subst-mutate: '<', '\<'; my $matcher = EVAL "&infix:<$op>"; $matcher(3,4).say; $matcher(4,3).say
+
+[20:21] <camelia> rakudo-moar 4a7eaa: OUTPUT«True␤False␤»
+
+[20:21] <Zoffix> So that's the fix for the Str form of cmp-ok
+
+[20:22] * Zoffix won't submit it, because of wanting Str form to be gone :P
+
+[20:23] <Zoffix> Well, part of the fix. > is needed too
+
+[20:23] <psch> i wouldn't really consider it fixed while it still has EVAL, actually
+
+[20:24] <Zoffix> Is there even a way to avoid the EVAL, while keeping Str?
+
+[20:24] <psch> m: my $x = '<'; say quietly ::("&infix:«$x»")
+
+[20:24] <camelia> rakudo-moar 4a7eaa: OUTPUT«Use of uninitialized value $x of type Any in string context␤Any of .^name, .perl, .gist, or .say can stringify undefined things, if needed.  in code  at /tmp/rxyY2JVyLD line 1␤sub infix:«<» (Mu $?, Mu $?) { #`(Sub+{<anon|61760624>}|66583376) ... }␤»
+
+[20:24] <psch> hrm, that's not how that warnings goes away :/
+
+[20:24] <psch> but yeah, without that uninit warning that form would be right
+
+[20:24] <psch> 'cause that's a runtime lookup, not an EVAL
+
+[20:25] <psch> m: my $x = '<'; say quietly ::('&infix:«$x»')
+
+[20:25] <camelia> rakudo-moar 4a7eaa: OUTPUT«No such symbol '&infix:«$x»'␤  in block <unit> at /tmp/SX20Q2JPSf line 1␤␤Actually thrown at:␤  in block <unit> at /tmp/SX20Q2JPSf line 1␤␤»
+
+[20:25] <psch> ...really weird
+
+[20:25] <psch> m: my $x = '<'; say quietly ::('&infix:«\qq[{$x}]»')
+
+[20:25] <camelia> rakudo-moar 4a7eaa: OUTPUT«sub infix:«<» (Mu $?, Mu $?) { #`(Sub+{<anon|61760624>}|64543632) ... }␤»
+
+[20:25] <geekosaur> ?
+
+[20:25] <psch> ah, there you go
+
+[20:25] <psch> m: my $x = '<'; say ::('&infix:«\qq[{$x}]»')
+
+[20:25] <camelia> rakudo-moar 4a7eaa: OUTPUT«sub infix:«<» (Mu $?, Mu $?) { #`(Sub+{<anon|61760624>}|70859600) ... }␤»
+
+[20:26] <psch> so, that form, with < > if the op contains « or »
+
+[20:26] <Zoffix> Ah, k
+
+[20:26] <psch> m: my $x = '<'; say ::('&infix:«\qq[$x]»')
+
+[20:26] <camelia> rakudo-moar 4a7eaa: OUTPUT«sub infix:«<» (Mu $?, Mu $?) { #`(Sub+{<anon|61760624>}|73292640) ... }␤»
+
+[20:26] <psch> well, *that* form :)
+
+[20:27] <psch> don't need {} inside qq for a scalar
+
+[20:27] <Zoffix> What if it contains both > and »?
+
+[20:27] <psch> m: my $x = '<'; say ::('&infix:[\'\qq[$x]\']')
+
+[20:27] <camelia> rakudo-moar 4a7eaa: OUTPUT«No such symbol '&infix:['<']'␤  in block <unit> at /tmp/MmAxrmkdTf line 1␤␤Actually thrown at:␤  in block <unit> at /tmp/MmAxrmkdTf line 1␤␤»
+
+[20:27] <psch> :/
+
+[20:27] <psch> then everything is broken /o\
+
+[20:27] <psch> m: say &infix:['<']
+
+[20:27] <camelia> rakudo-moar 4a7eaa: OUTPUT«sub infix:«<» (Mu $?, Mu $?) { #`(Sub+{<anon|61760624>}|68303488) ... }␤»
+
+[20:28] <psch> ah
+
+[20:28] <Zoffix> ?
+
+[20:28] <psch> m: say &infix:«==»
+
+[20:28] <camelia> rakudo-moar 4a7eaa: OUTPUT«sub infix:<==> (Mu $?, Mu $?) { #`(Sub+{<anon|61760624>}+{Precedence}|34816160) ... }␤»
+
+[20:28] <psch> m: say ::('&infix:«==»')
+
+[20:28] <camelia> rakudo-moar 4a7eaa: OUTPUT«No such symbol '&infix:«==»'␤  in block <unit> at /tmp/nwWRSu5Krx line 1␤␤Actually thrown at:␤  in block <unit> at /tmp/nwWRSu5Krx line 1␤␤»
+
+[20:28] <psch> Zoffix: well, we only *install* one form of the &infix ops for runtime lookup, but the grammar cheats when it parses it at compile time
+
+[20:29] <psch> Zoffix: note that «==» also doesn't nominally exist
+
+[20:29] <psch> m: say CORE::{&infix:«==»}
+
+[20:29] <camelia> rakudo-moar 4a7eaa: OUTPUT«Sub+{<anon|61760624>}+{Precedence} object coerced to string (please use .gist or .perl to do that)  in block <unit> at /tmp/fpmM9ei7yf line 1␤Nil␤»
+
+[20:29] <psch> m: say &(CORE::{&infix:«==»})
+
+[20:29] <camelia> rakudo-moar 4a7eaa: OUTPUT«Sub+{<anon|61760624>}+{Precedence} object coerced to string (please use .gist or .perl to do that)  in block <unit> at /tmp/qN0gdtVvPM line 1␤Nil␤»
+
+[20:29] <psch> anyway, yeah
+
+[20:30] <b2gills> say ::{'&infix:«<»'}; say ::{'&infix:<+>'}
+
+[20:30] <b2gills> m: say ::{'&infix:«<»'}; say ::{'&infix:<+>'}
+
+[20:30] <camelia> rakudo-moar 4a7eaa: OUTPUT«sub infix:«<» (Mu $?, Mu $?) { #`(Sub+{<anon|61760624>}|60447488) ... }␤sub infix:<+> (Mu $?, Mu $?) { #`(Sub+{<anon|61760624>}+{Precedence}|52712400) ... }␤»
+
+[20:30] <psch> m: say ::('&infix:«==»')
+
+[20:30] <camelia> rakudo-moar 4a7eaa: OUTPUT«No such symbol '&infix:«==»'␤  in block <unit> at /tmp/SX6n176EIX line 1␤␤Actually thrown at:␤  in block <unit> at /tmp/SX6n176EIX line 1␤␤»
+
+[20:30] <psch> ...i already did that
+
+[20:31] * psch better heads bedwards o/
+
+[20:31] <b2gills> For some reason if there is a < it has to be «» otherwise it has to be <>
+
+[20:31] <psch> b2gills: 'cause that's the literal lexical names
+
+[20:31] <b2gills> m: say ::('&infix:<==>')
+
+[20:31] <camelia> rakudo-moar 4a7eaa: OUTPUT«sub infix:<==> (Mu $?, Mu $?) { #`(Sub+{<anon|53470544>}+{Precedence}|42791312) ... }␤»
+
+[20:31] <psch> b2gills: the compile look-up cheats, but the runtime on doesn't
+
+[20:32] <psch> b2gills: hence why &infix:«==» prints &infix:<==>
+
+[20:32] <psch> ..."hence why" reads like i should really go to bed :P
+
+[20:32] <psch> o/
+
+[20:34] <b2gills> m: say -> $op { ::{'&infix:<' ~ $op ~ '>'} // ::{'&infix:«' ~ $op ~ '»'}   } for « + < »
+
+[20:34] <camelia> rakudo-moar 4a7eaa: OUTPUT«-> $op { #`(Block|55970128) ... }␤-> $op { #`(Block|55970200) ... }␤»
+
+[20:35] <b2gills> m: say -> $op { ::{'&infix:<' ~ $op ~ '>'} // ::{'&infix:«' ~ $op ~ '»'}   }($_) for « + < »
+
+[20:35] <camelia> rakudo-moar 4a7eaa: OUTPUT«sub infix:<+> (Mu $?, Mu $?) { #`(Sub+{<anon|53470544>}+{Precedence}|47724080) ... }␤sub infix:«<» (Mu $?, Mu $?) { #`(Sub+{<anon|53470544>}|55459632) ... }␤»
+
+[21:20] <travis-ci> Rakudo build failed. peschwa 'Merge pull request #777 from zoffixznet/fix-RT128284
+
+[21:20] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/133778427 https://github.com/rakudo/rakudo/compare/beb3c9868963...4a7eaa06b5e3

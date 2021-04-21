@@ -1,0 +1,503 @@
+[01:12] <samcv> so guys i'm thinking about adding an op to let you get the columns and rows of the termina
+
+[01:57] <Geth> ¦ rakudo: MasterDuke17++ created pull request #1171: In slurp, don't call nqp::join if not needed
+
+[01:57] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/1171
+
+[01:58] <MasterDuke> noticed ^^^ while working on MVM_string_join
+
+[02:02] <japhb> MasterDuke: Does that reduce the max memory usage of your tests?
+
+[02:03] <japhb> From your numbers before, it looked like you were getting at least x8 memory blowup for loading a large file containing at least one >127 codepoint.
+
+[02:03] <japhb> s/loading/slurping/
+
+[02:03] <MasterDuke> not the maxresident that /usr/bin/time reports
+
+[02:03] <MasterDuke> but less is allocated and then garbage collected
+
+[02:04] <japhb> MasterDuke: So fewer GC runs?  Or just smaller ones?
+
+[02:04] <japhb> I guess by smaller I mean nursery-only
+
+[02:05] <MasterDuke> heh, didn't measure those. i was using heaptrack for the memory measurements
+
+[02:10] <MasterDuke> just ran some profiles. slurp took 200ms before, 3ms after. no GCs
+
+[02:10] <japhb> WOAH
+
+[02:13] <MasterDuke> but there wouldn't be any difference if the file had "\r\n" as the line separator
+
+[02:15] <japhb> I'm OK with having that be slower.  Just wish we didn't have to scan for it in the first place.
+
+[02:16] <AlexDaniel> MasterDuke: why does it need to split at all?
+
+[02:17] <japhb> AlexDaniel: Logical newline.  It's looking to see if it needs to do \r\n => \n conversion
+
+[02:18] <japhb> And if you have to scan at all, might as well track the locations in a split (since I believe the difference need not be large in MoarVM, due to immutable strings)
+
+[02:19] <AlexDaniel> so why not nqp::replace ?
+
+[02:19] <AlexDaniel> oops, not replace
+
+[02:20] <AlexDaniel> ah-ha, ok…
+
+[02:22] <AlexDaniel> well, that's exactly how we transpose: https://github.com/rakudo/rakudo/blob/6646e36475855e42a43c96f680ac7314ce82557e/src/core/Rakudo/Internals.pm#L295-L297
+
+[02:23] <AlexDaniel> thing is, “\r\n” is already one grapheme
+
+[02:24] <AlexDaniel> it could've been so great if we just replaced it in-place somehow
+
+[02:31] <AlexDaniel> /o\ why do we even have this code there
+
+[02:33] <AlexDaniel> japhb: by the way, have you seen this?
+
+[02:33] <AlexDaniel> https://docs.perl6.org/language/traps#Splitting_the_Input_Data_Into_Lines
+
+[02:34] <japhb> AlexDaniel: No, thanks for the pointer
+
+[02:34] <AlexDaniel> maybe I don't understand something, but how come that code is even there
+
+[02:35] <japhb> What code?  The code in the traps doc?
+
+[02:35] <AlexDaniel> no, “\r\n” substitution
+
+[02:36] <AlexDaniel> it's so meaningless that it drives me insane :-/
+
+[02:36] <AlexDaniel> spurt ‘deleteme’, “foo\rbar”
+
+[02:36] <AlexDaniel> dd slurp ‘deleteme’ # "foo\nbar"
+
+[02:36] <AlexDaniel> oops
+
+[02:36] <AlexDaniel> dd slurp ‘deleteme’ # "foo\rbar" # here's the right output
+
+[02:37] <AlexDaniel> well, “right”, it's kinda wrong
+
+[02:39] <AlexDaniel> ah, so it's a double-trap
+
+[02:40] <AlexDaniel> not only .lines splits by whatever it wants to, but if you do .split(“\n”) you will get garbage anyway.
+
+[02:40] <AlexDaniel> pff
+
+[02:40] <MasterDuke> doesn't the comment explain why the "\r\n" substitution happens? it's read in binary mode cause that's faster than reading in streaming mode, but that then require "\r\n" to be converted to "\n" explicitly
+
+[02:41] <AlexDaniel> MasterDuke: what about \r
+
+[02:42] <AlexDaniel> I can maybe understand .lines splitting by whatever is considered a newline, sure
+
+[02:42] <AlexDaniel> but .slurp mangling your data silently… that's just garbage
+
+[02:43] <MasterDuke> so .slurp with :bin, then it won't
+
+[02:48] <AlexDaniel> MasterDuke: ok, maybe. How do I .split a buf?
+
+[02:50] <AlexDaniel> oh, I know. you slurp it with :bin, then you decode it
+
+[02:50] <AlexDaniel> and then split it properly
+
+[02:51] <AlexDaniel> to avoid this built-in data mangling
+
+[02:51] <AlexDaniel> that's not right
+
+[02:52] <MasterDuke> i'm kind of ok with that if you're using \r as a line separator
+
+[02:53] <AlexDaniel> you have to do it if you use \n as a separator
+
+[02:53] <AlexDaniel> because otherwise \r\n will be converted into \n, and then you're splitting where you don't want to
+
+[02:53] <AlexDaniel> which is fine for Str.lines, it's a human thing to do
+
+[02:54] <AlexDaniel> but slurp(:!bin, …).split(“\n”) should do exactly what it says, without half-assed data mangling
+
+[03:07] <AlexDaniel> ok, RT #132154
+
+[03:07] <synopsebot6> Link:  https://rt.perl.org/rt3/Public/Bug/Display.html?id=132154
+
+[03:31] <AlexDaniel> MasterDuke: fwiw, have you tried doing index($l, "\r\n") first, and then calling .split.join? In worst case it will make one unnecessary pass through the data, but I wonder if most of the time the speedup will be worth it.
+
+[03:32] <AlexDaniel> this assuming that .split itself is slow, maybe that's not the case
+
+[03:32] <MasterDuke> hm, haven't tried that. but now that we have a fast index, could be worth trying
+
+[03:37] <MasterDuke> might not be worth it though. after my change, the .slurp of the 50mb, 1million line file only took 5ms. decode took 850ms, append took 715ms, and read-internal took 25ms
+
+[03:39] <AlexDaniel> append?
+
+[03:40] <MasterDuke> src/core/Buf.pm:565
+
+[03:43] <AlexDaniel> MasterDuke: ok. Am I understanding it correctly that join-ing one element takes so much time?
+
+[03:43] <AlexDaniel> I mean before your change vs after your change
+
+[03:44] <MasterDuke> joining one large element is slow. after my change, it just doesn't do a join if there's only one element
+
+[03:46] <AlexDaniel> what about making nqp::join return the same string if there's only one element? :)
+
+[03:47] <MasterDuke> join returns a new string
+
+[03:48] <MasterDuke> (i did that, and the savings was the same, but that's not what's supposed to happen)
+
+[03:49] <MasterDuke> m: my $a = "a" x 2**29; my $t = now; my $b = join(",", $a); say now - $t; say $a eq $b; say $a.WHERE == $b.WHERE
+
+[03:49] <camelia> rakudo-moar 0b15f6: OUTPUT: «MoarVM panic: Memory allocation failed; could not allocate 2147483648 bytes␤»
+
+[03:49] <MasterDuke> m: my $a = "a" x 2**28; my $t = now; my $b = join(",", $a); say now - $t; say $a eq $b; say $a.WHERE == $b.WHERE
+
+[03:49] <camelia> rakudo-moar 0b15f6: OUTPUT: «0.8793568␤True␤False␤»
+
+[03:50] <MasterDuke> on my machine that's 5s for 2**29 and 20s for 2**30
+
+[03:51] <AlexDaniel> MasterDuke: why is it not supposed to happen?
+
+[03:52] <AlexDaniel> I may not know something, but isn't it the whole point of having immutable strings?
+
+[03:52] <MasterDuke> https://github.com/perl6/nqp/blob/master/docs/ops.markdown#join
+
+[03:53] <AlexDaniel> doesn't really explain why it can't return the same string if it makes sense
+
+[03:53] <AlexDaniel> maybe it can't, I dunno
+
+[03:55] <MasterDuke> .ask jnthn instead of https://github.com/rakudo/rakudo/pull/1171, could nqp::join return the input string if there was only one?
+
+[03:55] <yoleaux> MasterDuke: I'll pass your message to jnthn.
+
+[03:55] <MasterDuke> .ask timotimo instead of https://github.com/rakudo/rakudo/pull/1171, could nqp::join return the input string if there was only one?
+
+[03:55] <yoleaux> MasterDuke: I'll pass your message to timotimo.
+
+[03:56] <MasterDuke> AlexDaniel: btw, what's some combining graphemes?
+
+[03:56] <MasterDuke> *what're
+
+[03:57] <AlexDaniel> u: COMBINING
+
+[03:57] <unicodable6> AlexDaniel, U+0301 COMBINING ACUTE ACCENT [Mn] ( ́)
+
+[03:57] <unicodable6> AlexDaniel, U+0300 COMBINING GRAVE ACCENT [Mn] ( ̀)
+
+[03:57] <unicodable6> AlexDaniel, 445 characters in total: https://gist.github.com/fe71497199952fc975b27f7a2718092d
+
+[03:57] <AlexDaniel> u: { .uniprop-bool(‘Prepend’) }
+
+[03:57] <unicodable6> AlexDaniel, U+0001 <control-0001> [Cc] (control character)
+
+[03:57] <unicodable6> AlexDaniel, U+0000 <control-0000> [Cc] (control character)
+
+[03:57] <unicodable6> AlexDaniel, Cowardly refusing to gist more than 5000 lines
+
+[03:58] <AlexDaniel> hmmm what…
+
+[03:58] <AlexDaniel> u: { .uniprop(‘GCB’) eq ‘Prepend’ }
+
+[03:59] <unicodable6> AlexDaniel, U+0600 ARABIC NUMBER SIGN [Cf] (؀ )
+
+[03:59] <unicodable6> AlexDaniel, U+0601 ARABIC SIGN SANAH [Cf] (؁ )
+
+[03:59] <unicodable6> AlexDaniel, 19 characters in total: https://gist.github.com/131f7975630ddcad9659ff1211ae4b4a
+
+[03:59] <AlexDaniel> u: { .uniprop(‘GCB’) eq ‘Extend’ }
+
+[03:59] <unicodable6> AlexDaniel, U+0301 COMBINING ACUTE ACCENT [Mn] ( ́)
+
+[03:59] <unicodable6> AlexDaniel, U+0300 COMBINING GRAVE ACCENT [Mn] ( ̀)
+
+[03:59] <unicodable6> AlexDaniel, 1901 characters in total: https://gist.github.com/39c0a9c995ea99700de7194edd84fb76
+
+[04:00] <AlexDaniel> MasterDuke: so Prepend+some character, some character+Extend, and everything here: http://unicode.org/emoji/charts/emoji-zwj-sequences.html
+
+[04:00] <AlexDaniel> MasterDuke: does that answer your question? :)
+
+[04:00] <MasterDuke> i think so, thanks
+
+[09:01] <[Tux]> This is Rakudo version 2017.09-80-gcf95ce81c built on MoarVM version 2017.09.1-36-gfbd89898
+
+[09:01] <[Tux]> csv-ip5xs        1.357 -  1.363
+
+[09:01] <[Tux]> test             9.821 -  9.944
+
+[09:01] <[Tux]> test-t           3.402 -  3.427
+
+[09:01] <[Tux]> csv-parser      12.188 - 12.446
+
+[09:01] <[Tux]> This is Rakudo version 2017.09-82-g0b15f6728 built on MoarVM version 2017.09.1-36-gfbd89898
+
+[09:01] <[Tux]> csv-ip5xs        1.363 -  1.369
+
+[09:02] <[Tux]> test             9.854 - 10.008
+
+[09:02] <[Tux]> test-t           3.422 -  3.445
+
+[09:02] <[Tux]> csv-parser      12.128 - 12.365
+
+[09:51] <lizmat> Files=1229, Tests=75177, 306 wallclock secs (14.94 usr  5.40 sys + 2098.97 cusr 212.79 csys = 2332.10 CPU)
+
+[11:11] <Geth> ¦ rakudo/nom: 1d63dfd2a8 | skids++ | src/Perl6/Grammar.nqp
+
+[11:11] <Geth> ¦ rakudo/nom: Restrict dynamic lookup metasyntax in rx EVAL (security RT#131079)
+
+[11:11] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/1d63dfd2a8
+
+[11:11] <Geth> ¦ rakudo/nom: b02da4d1ac | lizmat++ (committed using GitHub Web editor) | src/Perl6/Grammar.nqp
+
+[11:11] <Geth> ¦ rakudo/nom: Merge pull request #1168 from skids/rt131079
+
+[11:11] <Geth> ¦ rakudo/nom:
+
+[11:11] <synopsebot6> Link:  https://rt.perl.org/rt3/Public/Bug/Display.html?id=131079
+
+[11:11] <Geth> ¦ rakudo/nom: Restrict dynamic lookup metasyntax in rx EVAL (security RT#131079)
+
+[11:11] <synopsebot6> Link:  https://rt.perl.org/rt3/Public/Bug/Display.html?id=131079
+
+[11:11] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/b02da4d1ac
+
+[11:33] <Geth> ¦ rakudo/nom: ebd6440c27 | (Elizabeth Mattijsen)++ | 2 files
+
+[11:33] <Geth> ¦ rakudo/nom: Make task[2] always contain the full attribute name
+
+[11:33] <Geth> ¦ rakudo/nom:
+
+[11:33] <Geth> ¦ rakudo/nom: To make the first 3 values of the task in the BUILDALLPLAN always
+
+[11:33] <Geth> ¦ rakudo/nom: the same: 0 = type of action, 1 = object type, 2 = full attribute name.
+
+[11:33] <Geth> ¦ rakudo/nom:
+
+[11:33] <Geth> ¦ rakudo/nom: This makes refactoring the BUILDPLAN logic easier.
+
+[11:33] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/ebd6440c27
+
+[11:40] <timotimo> MasterDuke: since nqp::join uses str instead of Str and that can't be mixed into or anything (i believe) it should be fine to return the same object in that case
+
+[12:20] <MasterDuke> timotimo: huh. think i should add that to my MoarVM PR instead?
+
+[12:37] <timotimo> that's the PR that also makes join use strands sometimes?
+
+[12:50] <MasterDuke> yeah
+
+[13:02] <timotimo> i think we could have that, yeah
+
+[13:03] <MasterDuke> i'll add another commit that does that
+
+[13:09] <MasterDuke> timotimo: i pretty much am just copying https://github.com/MoarVM/MoarVM/blob/master/src/strings/ops.c#L1658-L1668 up to https://github.com/MoarVM/MoarVM/blob/master/src/strings/ops.c#L1632 and changing the continues to returns
+
+[13:10] <MasterDuke> oops. changing the `piece =` to return. but do i need to worry about those `if (...) continue`?
+
+[13:14] <timotimo> hm, there can potentially be null strings
+
+[13:19] <MasterDuke> it just passed a spectest, but how can i explicitly test those cases? joining a Nil? type object?
+
+[13:20] <timotimo> m: use nqp; nqp::join(nqp::null_s())
+
+[13:20] <camelia> rakudo-moar ebd644: OUTPUT: «===SORRY!===␤Arg count 1 doesn't equal required operand count 3 for op 'join'␤»
+
+[13:20] <timotimo> er, obviously
+
+[13:20] <timotimo> m: use nqp; nqp::join([nqp::null_s()], "")
+
+[13:20] <camelia> rakudo-moar ebd644: OUTPUT: «This type cannot unbox to a native string: P6opaque, Array␤  in block <unit> at <tmp> line 1␤␤»
+
+[13:20] <timotimo> m: use nqp; nqp::join(nqp::list_s(nqp::null_s()), "")
+
+[13:20] <camelia> rakudo-moar ebd644: OUTPUT: «This representation (VMArray) cannot unbox to a native string (for type BOOTStrArray)␤  in block <unit> at <tmp> line 1␤␤»
+
+[13:20] <timotimo> m: use nqp; nqp::join("", nqp::list_s(nqp::null_s()))
+
+[13:20] <camelia> rakudo-moar ebd644: ( no output )
+
+[13:20] <timotimo> you can check if this covers that branch
+
+[13:21] <timotimo> m: use nqp; nqp::join("", nqp::list_s(nqp::null()))
+
+[13:21] <camelia> rakudo-moar ebd644: OUTPUT: «Cannot unbox a type object (VMNull) to a str.␤  in block <unit> at <tmp> line 1␤␤»
+
+[13:21] <timotimo> but perhaps we don't have a way to put null pointers in string lists any more
+
+[13:21] <timotimo> so perhaps has to be a non-string list
+
+[13:21] <timotimo> m: use nqp; nqp::join("", nqp::list(nqp::null()))
+
+[13:21] <camelia> rakudo-moar ebd644: ( no output )
+
+[13:21] <timotimo> so maybe this would trigger that code
+
+[13:22] <MasterDuke> ah. `use nqp; nqp::join("", nqp::list(nqp::null()))` now gives `Cannot unbox a type object (VMNull) to a str.` with my change
+
+[13:22] <MasterDuke> instead of no output
+
+[13:23] <timotimo> hm, but that if only checks if the pointer value is true, not MVM_is_null(tc, thepointer)
+
+[13:24] <timotimo> that would be necessary to weed out VMNull objects
+
+[13:30] <MasterDuke> think i should put in the same exact checks? or change the existing ones and then use those?
+
+[13:38] <timotimo> i'm not sure :(
+
+[13:38] <timotimo> that code is 3 years old, but i think we already had VMNull at that point
+
+[13:40] <MasterDuke> i'll use the same for now, changing both could be another commit later
+
+[15:14] <stmuk> has the idea of shipping 6.d next month been abandoned?
+
+[15:14] <Zoffix> Yup
+
+[15:14] <Zoffix> Months ago
+
+[15:14] * Zoffix points to the FAQ entry
+
+[15:15] <stmuk> no weeks ago and I just changed that entry
+
+[15:15] * Zoffix points to the log where Zoffix said not committing to a date will make people just wait it all out
+
+[15:16] <stmuk> I've no idea what that means
+
+[15:17] <Zoffix> People oposed my wanting to release on Diwalli and wanted the date to be fluid instead. And I said if we do that, we'll just do nothing until later time. And that happened.
+
+[15:17] <Zoffix> Well, at least I did nothing :) Don't know about anyone else :)
+
+[15:17] <Zoffix> Without the date, there's no pressure.
+
+[15:18] <stmuk> Yeah I know time based releases seem unpopular after Dec 2015 :)
+
+[15:19] <Zoffix> Yeah
+
+[15:20] <Zoffix> Biggest thing is reviewing roast. Once that's done, the rest is cake.
+
+[15:21] <Zoffix> Gonna switch to 6.d-release mode: when some free time turns up, do release-affecting stuff only... instead of stuff like $*USAGE
+
+[15:23] <Zoffix> Second biggest thing: making roast pass on Windows: https://github.com/perl6/6.d-prep/tree/master/TODO#passing-tests
+
+[15:25] <Zoffix> The plan to make docs site mark 6.d vs. 6.c feels like something to be done pre 6.d-release, but thinking more of it, it might suffice to just do manual markers (same as we've done so far for Rakudo release versions) and implement it properly when the docs site is swapped to Bootstrap and (possibly) Pod::To::SQL and dynamic backend. Simply 'cause doing it right now and then re-doing it for BS seems like
+
+[15:25] <Zoffix> more work and I think a dynamic backend would make it easier to implement properly too
+
+[15:25] <Zoffix> properly => being able to easily see (or even show/hide)_features that are for a specific language version only
+
+[15:26] <Zoffix> & easy for devs to add new features (even as stubs, for documentation later)
+
+[15:26] <Zoffix> s/features/docs for new features/;
+
+[15:26] * Zoffix &
+
+[15:31] * dogbert11 wonders if jnthn is still sampling food truck dishes
+
+[17:06] <gfldex> i'm optimising JSON::Fast right now and wish we had a fast .trans implementation
+
+[17:07] <gfldex> quoting string to output them as json takes most of the time
+
+[17:10] <timotimo> does .trans do anything different from .split with :v?
+
+[17:11] * MasterDuke knows that Unicode is The Right Thing To Do™, but is still somewhat nostalgic for the days when 8-bits was good enough for everybody
+
+[17:14] * MasterDuke really wishes that Unicode had been universal a long time ago, so everybody already had time to optimize it
+
+[17:20] <timotimo> optimize it or optimize for it?
+
+[17:20] <MasterDuke> optimize all the things
+
+[17:24] <MasterDuke> timotimo: find out anything more about that possibly missing $?CLASS lookup optimization?
+
+[17:25] <timotimo> i find the optimization (in general, not sure about $?CLASS in particular) still fires a bunch
+
+[17:25] <MasterDuke> huh. so no certain leads into the MVM_string_equal business?
+
+[17:26] <timotimo> nothing certain so far
+
+[17:27] <timotimo> i don't have good tools to cross-reference the calls to getlexperinvspec with what speshed code was in effect at what time
+
+[17:29] <timotimo> bbiab
+
+[18:04] <MasterDuke> timotimo: btw, updated https://github.com/MoarVM/MoarVM/pull/705 with those checks
+
+[18:09] <timotimo> so, what should it do if it falls through these returns?
+
+[18:09] <timotimo> i.e. (piece) or (item && IS_CONCRETE(item)) not being true?
+
+[18:10] <timotimo> do we perhaps want to return The Empty String™ instead?
+
+[18:53] <MasterDuke> well, it just does whatever happened before
+
+[19:05] <timotimo> fair enough
+
+[19:16] <MasterDuke> i'm not saying what it does now is the best possible option, so we could consider changing that also
+
+[20:00] <gfldex> timotimo: I got to-json in JSON::Fast 6.1x faster
+
+[20:05] <timotimo> *nice*
+
+[20:05] <AlexDaniel> :ooo
+
+[20:05] <timotimo> though the from-json was much nearer and dearer to my heart. since i didn't write a line of to-json ;)
+
+[20:06] <gfldex> there slight changes in output bit jq is parsing it propery it and it roundtrips fine
+
+[20:06] <gfldex> i got a 11MiB json file I have to read, update and write
+
+[20:07] <gfldex> the biggest win comes from checking if there is anything to escape and if not just to return the unmodified Str
+
+[20:10] <timotimo> ah!
+
+[20:10] <timotimo> i do something similar in parsing
+
+[20:15] <gfldex> travis is happy, PR incomming
+
+[20:19] <lizmat> ok, so I'm working on a prototype to flatten BUILDALL into a method per class (rather than on in Mu going over the BUILDALLPLAN)
+
+[20:19] <gfldex> timotimo: I didn't bump version
+
+[20:20] <MasterDuke> afk for a while, but clickbaiting https://github.com/rakudo/rakudo/pull/1171 and https://github.com/MoarVM/MoarVM/pull/705 in case anybody has opinions and hasn't seen them yet
+
+[20:20] <lizmat> preliminary results: 30% improvement for a class with a single not-required public attribute without default
+
+[20:20] <lizmat> to 50% improvement for 4 required public attributes
+
+[20:21] <lizmat> the prototype uses EVAL to create the BUILDALL method for the class
+
+[20:21] <lizmat> now I need to move that to a version that builds AST's and uses the MOP directly
+
+[20:22] <lizmat> and I'm sorta stuck, so would appreciate pointers to get me started on that part
+
+[20:29] <timotimo> have you looked at parts of the code that generate code for our accessor methods?
+
+[20:30] <lizmat> yeah looking at generate_accessor now
+
+[20:31] <timotimo> i'd imagine it'd be much like that
+
+[20:31] <lizmat> timotimo: so you're saying I should create a "generate_buildall" method inside CompilerServices?
+
+[20:32] <timotimo> aye
+
+[20:32] <timotimo> hold on a bit
+
+[20:32] <lizmat> I would pass the BUILDALLPLAN to it
+
+[20:32] <timotimo> check out the generate_buildallplan_3 branch
+
+[20:32] <timotimo> it's old, but it has a tiny start
+
+[20:32] <timotimo> maybe you can steal the bits around the compilation and just rewrite what exactly it compiles
+
+[20:34] <lizmat> aye, yeah, that's a good start  :-)
+
+[20:38] <lizmat> .ask nine wrt to calling BUILDALL with positionals: could we create another name for that, like BUILDALL_WITH_POSITIONALS() ?
+
+[20:38] <yoleaux> lizmat: I'll pass your message to nine.
+
+[20:39] <lizmat> .tell nine BUILDALL could then be an only method, instead of a multi
+
+[20:39] <yoleaux> lizmat: I'll pass your message to nine.
+
+[21:53] <lizmat> timotimo: in your branch, why are there two Qast::Var.new( ) for :name<init>  ?
+
+[21:53] <lizmat> *QASR
+
+[21:53] <lizmat> *QAST   grrr
+
+[22:16] <Geth> ¦ roast: mryan++ created pull request #332: Add tests for type byte
+
+[22:16] <Geth> ¦ roast: review: https://github.com/perl6/roast/pull/332
+
+[23:52] <timo> lizmat: please feel free to consider any and all parts of my old code for this to be potentially broken. the code never worked as i had it, it caused mysterious breakage during core setting compilation at the earliest, or loading the core setting at the latest; fuzzy on the details
+
+[23:52] <yoleaux> 17 Sep 2017 09:43Z <lizmat> timo: good catch with 1ca81432af51b842ca0f0    That was really a typo

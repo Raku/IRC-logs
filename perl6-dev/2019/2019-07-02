@@ -1,0 +1,252 @@
+[00:40] <timotimo> lizmat: it looks like using a big if/elsif/else is a noticeable bit faster than the when/when/default one in jsonify
+
+[00:48] <timotimo> Called 13212853 frames. / 5823134 frames were inlined (44.07%). / 11998426 frames were jitted (90.81%). / 15712 On Stack Replacements were done.
+
+[00:48] <timotimo> vs
+
+[00:50] <timotimo> Called 9938461 frames. / 3373703 frames were inlined (33.95%). / 8756809 frames were jitted (88.11%). / 15711 On Stack Replacements were done.
+
+[00:50] <timotimo> m: say 13212853 * 100 / 9938461
+
+[00:50] <camelia> rakudo-moar d4ceb97e0: OUTPUT: «132.94667052␤»
+
+[01:00] <timotimo> mhhh, none of the typecheck ACCEPTS method calls seem to be inlined
+
+[01:00] <timotimo> sounds like perhaps a good spot to use more nqp ops
+
+[01:03] <timotimo> Called 5012985 frames. / 2725967 frames were inlined (54.38%). / 3846050 frames were jitted (76.72%). / 15712 On Stack Replacements were done.
+
+[01:03] <timotimo> that's a lot less
+
+[01:03] <timotimo> Ran for 2934055 microseconds (of which 49687 in spesh). - newest code
+
+[01:03] <timotimo> Ran for 4492072 microseconds (of which 43691 in spesh). - in the middle
+
+[01:03] <timotimo> Ran for 6359703 microseconds (of which 69481 in spesh). - before i started
+
+[01:04] <timotimo> like, heck yeah?!
+
+[01:06] <timotimo> couldn't have done it without you, lizmat \o/
+
+[01:09] <timotimo> lizmat: btw, normally spesh runs completely in parallel to the program run time, so the "of which $n in spesh" sounds kind of like "more time spent in spesh means the program took less of the total time"
+
+[01:27] <timotimo> that was like 49 seconds back in version 0.9.12
+
+[01:28] <timotimo> the other in-between versions i don't have on hand right now
+
+[02:23] *** [Coke] joined
+[02:23] <[Coke]> hio
+
+[05:24] <lizmat> timotimo: it was my understanding that jnthn would very soon remove that performance difference, so I didn't bother
+
+[07:03] *** patrickb joined
+[07:20] <[Tux]> Rakudo version 2019.03.1-667-gd4ceb97e0 - MoarVM version 2019.05-96-gd6f9e02ba
+
+[07:20] <[Tux]> csv-test-xs-20      0.432 -  0.435
+
+[07:20] <[Tux]> csv-ip5xs           0.705 -  0.716
+
+[07:20] <[Tux]> test-t --race       0.816 -  0.835
+
+[07:20] <[Tux]> test-t              1.831 -  1.848
+
+[07:21] <[Tux]> csv-ip5xs-20        5.267 -  5.742
+
+[07:21] <[Tux]> test                6.882 -  7.305
+
+[07:21] <[Tux]> test-t-20 --race    8.984 -  9.260
+
+[07:21] <[Tux]> csv-parser         23.861 - 26.589
+
+[07:21] <[Tux]> test-t-20          29.331 - 29.875
+
+[07:21] <[Tux]> (working at home, so the system load is a bit higher than usual)
+
+[09:18] <jnthn> timotimo: Hm, odd about ACCEPTS inlining....I'd have thought that was a perfect candidate to inline...
+
+[09:19] <timotimo> same :)
+
+[09:19] <timotimo> but maybe not a frame that has fifty ACCEPTS in it :) :)
+
+[09:20] <timotimo> where not all of them are used often before spesh hits
+
+[11:53] *** AlexDaniel left
+[12:05] *** AlexDaniel joined
+[13:04] <Geth> ¦ problem-solving: AlexDaniel self-assigned X::MyModule::Foo or MyModule::X::Foo ? https://github.com/perl6/problem-solving/issues/57
+
+[13:37] *** dogbert17 joined
+[14:02] *** MasterDuke left
+[15:39] *** patrickb left
+[16:28] *** MasterDuke joined
+[16:47] <TimToady> switches were designed for AOT optimization, not JIT
+
+[16:52] <TimToady> even inlining is not going to get you the performance of a jump table
+
+[16:53] <TimToady> and, in fact, that optimization was my main motivation for making smartmatch asymmetric
+
+[17:08] <timotimo> what's a good approach to a jumptable based on types? because the given/when (or with/when in this case) was only about type checks
+
+[17:09] <TimToady> probably a good spot for a perfect hash
+
+[17:09] <TimToady> or just a "good enough" hash
+
+[17:09] <timotimo> calculated once when the code is loaded? since the addresses of types are 1) a run-time thing and b) potentially subject to moavement from the GC
+
+[17:09] <TimToady> on string dispatches, Perl 4 just sent to the first statement that could match the initial character
+
+[17:10] <TimToady> well, it's mostly for small integers, or something that can easily be turned into a small integer
+
+[17:11] <timotimo> ah, so if you have a series of switches starting with "abacus", then a million different versions of "xylophone" and at the very end an "apotheosis", you'd get really bad performance?
+
+[17:11] <TimToady> doesn't have to be perfect, since you still have the actual tests
+
+[17:11] <timotimo> if apotheosis is the one you're looking for, that is
+
+[17:11] <TimToady> though on an integer switch without holes, it's pretty easy to get rid of the tests too
+
+[17:11] <timotimo> aye, we even already have a "jumptable" op that the qastcompiler at the very least can use
+
+[17:12] <TimToady> yes, for strings the P4 behavior was only a heuristic that often helped, but not guarantees
+
+[17:12] <timotimo> not entirely sure if you can write it as a QAST tree, but it could be made possible
+
+[17:12] <TimToady> it was pretty much guaranteed not to make it much worse, though
+
+[17:12] <timotimo> true
+
+[17:12] <TimToady> basically, just a way to prove you can skip the next N statements
+
+[17:13] <timotimo> does perl5 have something more refined than that? like finding which position in the string has the most "balanced" skip-ability
+
+[17:13] <TimToady> afaik p5 never implemented anything like that
+
+[17:13] <TimToady> it does have trie matching though
+
+[17:13] <timotimo> that also sounds worthwhile
+
+[17:13] <TimToady> but I think that's only down in the regex engine
+
+[17:14] <TimToady> could be wrong about that...
+
+[17:14] <timotimo> at some point we may want to hook up the nfa engine with given/when in some cases
+
+[17:15] <TimToady> a lot of the speed of p5 comes of pulling stuff out of the regex engine so as to never call it
+
+[17:15] <timotimo> the nfa evaluator isn't terribly slow, i don't think
+
+[17:15] <TimToady> well, it's in C
+
+[17:16] <TimToady> and uses a real switch
+
+[17:16] <timotimo> i'm not aware of a way to jit that
+
+[17:16] <timotimo> i mean i guess some forms of NFA translate very easily to a piece of assembly code
+
+[17:16] <timotimo> looking more into vectorizing that thing could be a task for the future, maybe the far future
+
+[17:16] *** [TuxCM] joined
+[17:16] <TimToady> well, we can avoid calling it 4x as many times as we should by propagating fates, which is something jnthn & I have been contemplating
+
+[17:17] <timotimo> aye
+
+[17:17] <timotimo> i recall some difficulty about unique naming of fates so that combining stuff while loading modules isn't troublesome
+
+[17:17] <TimToady> it would be really helpful if someone added an NFA instruction that could access the current Match object
+
+[17:18] <TimToady> well, there's two theories on that
+
+[17:18] <timotimo> are you talking about read access or write access?
+
+[17:18] <TimToady> you can uniquefy when you come in, or you can just make sure the context is part of the identity
+
+[17:19] <timotimo> do the thing with "just" in the sentence, that's surely easier
+
+[17:19] <timotimo> (for this reason i like spelling it "just™")
+
+[17:19] <TimToady> the STD fates engine just assumed that it could provide a list of small integers, and it would automatically get sent to the correct method
+
+[17:19] <TimToady> but that's probably a bit fragile for real life
+
+[17:20] <timotimo> if we just need nqp::nfarun to take an nqp::list_i parameter at the end that it spits some data into, that could be easy enough. just pass whatever is bound into the match object
+
+[17:21] <TimToady> I think if we can add the fates to the current Match and propagate them down the call tree, it's pretty easy to just slip an identifier in the list (or make it an array of arrays) that checks that we haven't gotten out of sync with the original NFA's intentions
+
+[17:22] <TimToady> so that any given proto can say "were these next fates intended for me?" and if not, ignore them
+
+[17:24] <TimToady> with that kind of a setup, it's not necessary to have unique fate numbers
+
+[17:25] <TimToady> so these days I think that's the better approach
+
+[17:25] <timotimo> that doesn't sound bad
+
+[17:25] <timotimo> i don't know what the rest implies, but i can totally add that NFA internals stuff
+
+[17:25] <TimToady> no need for global knowledge
+
+[17:26] <timotimo> like, how the qregex compiler will set up the nfa ops that we're talking about, or how exactly the check at the proto's start ought to look
+
+[17:26] <timotimo> but the plumbing i can make
+
+[17:29] <TimToady> within the NFA, we do need to know which fate goes to which call level, so they have to be unique-ish within the NFA
+
+[17:30] <TimToady> which is why an array-of-arrays might be the right data structure
+
+[17:31] <timotimo> right, since we still have a sort of priority list at the top level
+
+[17:31] <TimToady> also, we have to teach the NFA compiler not to override subfates
+
+[17:32] <TimToady> for at least some NFAs, the subfate can imply the superfate
+
+[17:32] <timotimo> so IIRC fates are kind of like a "gate" and whenever the NFA walks through one gate with one of its superstates it'll just put that on the stack?
+
+[17:32] <timotimo> or do the fates only come at the very end?
+
+[17:32] <timotimo> i haven't looked at this in a while i don't think
+
+[17:33] <TimToady> it's cleaner if they all come at the end, but one would like to handle dipping into subrules and then recombining to the extent it makes sense
+
+[17:35] <timotimo> there was at some point a thought of "if we know a rule is without action method, we can skip calling it altogether", that's not in yet i believe
+
+[17:38] <TimToady> it's possible we may yet need to uniquify all the fates in order to allow incorporation of sub-NFAs without modification
+
+[17:39] <TimToady> if so, I already know how to do that with the internal ones, and I think I know how to do it on deserialization too
+
+[17:40] <TimToady> not copying NFAs would speed up adding new operators a lot, I suspect
+
+[17:42] * TimToady notes also that the fate dispatcher in a proto is an integer switch, which brings us back to the original topic :)
+
+[17:43] <TimToady> well, for alternations, anyway, but maybe in a proto it's just a table lookup
+
+[17:45] <timotimo> i do think we generate a jumplist op for reacting to the fates that we get from nfa_run
+
+[17:46] <TimToady> another farther-in-the-future optimization is to notice when a given set of fates always produces the same tree with a different leaf, and just call the leaf action directly, and fake up the tree around it
+
+[17:47] <TimToady> not sure type specialization is quite up to that task
+
+[17:48] <timotimo> with a spesh plugin it could perhaps be
+
+[17:51] <TimToady> though I'm not sure how much that saves us unless we can find a way not to reallocate the intermediate levels of tree
+
+[17:51] <timotimo> AFK
+
+[18:03] <timotimo> not entirely sure how much can be done in how many steps :)
+
+[18:27] *** robertle joined
+[19:19] *** Kaiepi left
+[19:56] *** [TuxCM] left
+[20:21] *** Kaiepi joined
+[20:39] *** robertle left
+[21:00] *** [TuxCM] joined
+[21:09] *** Kaiepi left
+[21:11] *** Kaiepi joined
+[21:13] *** patrickb joined
+[22:08] *** MasterDuke left
+[22:18] *** patrickb left
+[22:32] *** Kaiepi left
+[22:32] *** Kaiepi joined
+[23:56] <AlexDaniel> there's now a release branch for nqp and rakudo, so feel free to commit stuff
+
+[23:56] <AlexDaniel> (because I've seen the output from Blin and I'm satisfied with it)
+
+[23:56] <AlexDaniel> not into moarvm yet, I guess
+

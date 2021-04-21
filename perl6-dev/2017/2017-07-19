@@ -1,0 +1,895 @@
+[00:04] <MasterDuke> timotimo: do you have any thoughts on https://github.com/rakudo/rakudo/pull/1117 ?
+
+[00:05] <MasterDuke> or anybody else for that matter. why is .contains so slow?
+
+[00:07] <timotimo> we might want to make the substring searcher capable of understanding strands
+
+[00:09] <MasterDuke> how is the regex faster than nqp::index?
+
+[00:10] <timotimo> no clue
+
+[00:10] <MasterDuke> m: use nqp; say nqp::index(("abcde" x 100_000_000) ~ "foo", "foo", 0) > -1; say now - INIT now
+
+[00:10] <camelia> rakudo-moar 8e9605: OUTPUT: «True␤7.1480060␤»
+
+[00:10] <timotimo> how exactly is contains implemented? with nqp::index?
+
+[00:10] <MasterDuke> m: use nqp; say nqp::index(nqp::indexingoptimized(("abcde" x 100_000_000) ~ "foo"), "foo", 0) > -1; say now - INIT now
+
+[00:10] <camelia> rakudo-moar 8e9605: OUTPUT: «MoarVM panic: Memory allocation failed; could not allocate 500000003 bytes␤»
+
+[00:11] <MasterDuke> the numbers are 11s and 1.8s on my machine
+
+[00:12] <MasterDuke> so what is the first one doing? it must understand strands somehow, right?
+
+[00:13] <timotimo> i guess?
+
+[00:13] <timotimo> you can try a profile with perf or something to see what lines of code are involved
+
+[00:14] <timotimo> that should give us a clue
+
+[00:16] <timotimo> for very artificial cases like this the contains operator could see that abcde contains none of the characters in the needle, so it could skip it immediately
+
+[00:16] <timotimo> there are interesting edge cases involving the needle being longer than the individual strands (before repeating)
+
+[00:17] <timotimo> so that you can find "aaaaaaaaaaaaaa" in "a" x 100
+
+[00:18] <MasterDuke> yeah, you couldn't just check that the needle wasn't in a strand, because it could match across repetition boundaries
+
+[00:19] <timotimo> yup
+
+[00:19] <timotimo> and across strand boundaries as well of course
+
+[00:19] <timotimo> and across two different repeated strands
+
+[00:19] <timotimo> "a" x 2 ~ "b" x 2 contains "ab" and "aabb" "interestingly"
+
+[00:20] <MasterDuke> https://gist.github.com/MasterDuke17/9f79e35a27eedfe7870e09e5b9223229
+
+[00:21] <timotimo> is this the fast one?
+
+[00:21] <MasterDuke> slow
+
+[00:21] <MasterDuke> this is the fast one https://gist.github.com/MasterDuke17/5da8e26ef847f7ed549cde31ddb18af2
+
+[00:22] <MasterDuke> the code is in the gist description
+
+[00:26] <MasterDuke> samcv: any thoughts about the above? ways to make .contains faster without using 36x the memory it does now?
+
+[00:27] <samcv> how far should i read in the backlog
+
+[00:28] <samcv> well you are using a repeated string
+
+[00:28] <samcv> as i recommended before try comparing it with a nonrepeated string...
+
+[00:29] <samcv> so write some string to a file then read it and concat it together (nonrepeat)
+
+[00:29] <samcv> so read it to $var. then do $var ~ $var
+
+[00:29] <samcv> then try doing contains on it
+
+[00:29] <samcv> then compare
+
+[00:32] <MasterDuke> pretty much the same time
+
+[00:34] <MasterDuke> '(("abcde" x 100_000_000) ~ "foo").contains("foo"); say now - INIT now' took 9s
+
+[00:34] <timotimo> wow, the time to index the string doesn't even show up at all
+
+[00:34] <MasterDuke> 'my $a = "string.txt".IO.slurp; my $n = now; say ($a ~ $a ~ "foo").contains("foo"); say now - $n' took 7.8s
+
+[00:34] <timotimo> wait, is memchr a string search?
+
+[00:35] <MasterDuke> where string.txt contains "abcde" x 50_000_000
+
+[00:36] <timotimo> can you try what happens when you have abcdeof as the string?
+
+[00:37] <timotimo> because then it's not as trivial to find the o it's looking for by "gallopping"
+
+[00:38] <timotimo> though the slower case should also be gallopping
+
+[00:38] <MasterDuke> no repetitions? or no "foo" in the haystack?
+
+[00:38] <MasterDuke> oh, i see what you mean
+
+[00:40] <MasterDuke> adding "of" took it from 9s to 14.6s. adding "gg" took it from 9s to 12.6s
+
+[00:41] <MasterDuke> adding "fo" took it from 9s to 19s
+
+[00:41] <samcv> memchr is a search
+
+[00:41] <timotimo> that's clearly that optimized algorithm that jumps as far forwards as it can from every mismatch
+
+[00:44] <MasterDuke> so in the non-indexingoptimized version, is it just joining a strand at a time as it's indexing through and then discarding them? is that how the memory used doesn't increase?
+
+[00:46] <timotimo> i don't think it does it like that
+
+[00:46] <samcv> i mean it'd be cool if when indexing a repeated string we could not flatten it and just return that it's not in the repeated string :P
+
+[00:47] <samcv> and destroy your example
+
+[00:47] <samcv> but we call the indexed flattening argument so it'd flatten before indexing i guess
+
+[00:48] <timotimo> ?
+
+[00:48] <samcv> well if we know it's "abcde" repeated we can just say no "foo" isn't in there
+
+[00:49] <samcv> by checking the string x 2
+
+[00:49] <timotimo> not only the string x 2
+
+[00:49] <timotimo> also the preceding and following string
+
+[00:49] <timotimo> and the string x many_more_times if the needle is long
+
+[00:49] <samcv> oh. i didn't see that my bad
+
+[00:49] <samcv> yes of course
+
+[00:49] <samcv> i'm just throwing out ideas
+
+[00:50] <timotimo> i know what's up
+
+[00:50] <timotimo> the regex engine most probably also turns the "foo" that we're searching for into a 32bit storage thingie
+
+[00:50] <timotimo> so it matches with the other string
+
+[00:51] <samcv> why would it do that
+
+[00:51] <samcv> i have seen no evidence it does
+
+[00:51] <timotimo> i see it in callgrind
+
+[00:51] <samcv> oh
+
+[00:52] <samcv> why does it do that. the string we're searching is not 32bit
+
+[00:52] <timotimo> from MVM_string_index it calls into MVM_memmem 385 times in the regex one
+
+[00:54] <timotimo> samcv: i seem to recall you put in code to change the storage of the needle if it benefits the search?
+
+[00:56] <timotimo> hey wait wtf
+
+[00:56] <timotimo> maybe i was looking at it wrong
+
+[00:57] <timotimo> huh.
+
+[00:57] <samcv> timotimo, i was going to
+
+[00:57] <samcv> well i did in a branch of mine
+
+[00:57] <timotimo> ah
+
+[00:57] <samcv> but there were some issues. i will revisit it though
+
+[00:57] <timotimo> the 32bit/32bit one might have been a red herring
+
+[00:58] <timotimo> there's also many 8bit/8bit occurences
+
+[00:58] <timotimo> and between the regex match and the contains call there's no difference in the 32bit/32bit ones by count
+
+[00:59] <samcv> yeah i'd think it'd be 8bit and 8bit
+
+[00:59] <samcv> but i could always be wrong. that's what i'd expect though
+
+[00:59] <timotimo> i would have expected that, too
+
+[01:00] <MasterDuke> i thought it was hard to get strings to be 8bit?
+
+[01:00] <timotimo> just can't have newlines in 'em
+
+[01:00] <MasterDuke> ah
+
+[01:01] <timotimo> actually
+
+[01:01] <timotimo> do we have signed char storage?
+
+[01:01] <samcv> timotimo, it can have newlines though
+
+[01:02] <MasterDuke> replacing one of the chars in the haystack or the needle doesn't change the time
+
+[01:02] <MasterDuke> *with a "\n"
+
+[01:02] <samcv> yeah you can have newlines
+
+[01:02] <timotimo> OK
+
+[01:02] <timotimo> newlines are synthetics, that's why i was thinking that
+
+[01:02] <samcv> \r\n are. and you can have those too :P
+
+[01:03] <samcv> you can have negative integers
+
+[01:03] <MasterDuke> nor does replacing a char with ”
+
+[01:03] <samcv> it's 8bit signed
+
+[01:03] <timotimo> that was what i was worried about :) not having signed storage there
+
+[01:03] <samcv> MasterDuke, well you're concatenating it
+
+[01:03] <samcv> it's not going to do anything to the repeated stuff until you normalize it
+
+[01:03] <samcv> err flatten it
+
+[01:03] <samcv> with the optimized indexing op
+
+[01:04] <MasterDuke> so how does nqp:index work without doing the flattening?
+
+[01:04] <samcv> yes
+
+[01:04] <MasterDuke> that's what i want to make faster
+
+[01:04] <samcv> if both are 8bit or both 32bit and has no strands (i.e. it's a single string without strands like would be created from concatenation)
+
+[01:04] <timotimo> callgrind is taking its sweet time
+
+[01:04] <samcv> then it uses memmem
+
+[01:04] <samcv> otherwise it iterates graphemes one by one
+
+[01:06] <samcv> when you call MVM_string_indexing_optimized it will flatten the strands into only one string, and if all codepoints are not higher than can fit in 8bit signed then it converts it to 8bit as well
+
+[01:06] <samcv> so it converts it to 32 bit, then if all were lower than the max for 8bit signed then it then converts to 8bit after making the 32bit flattened string
+
+[01:06] <MasterDuke> making the need "cdefoo" takes it from 9s to 20s
+
+[01:07] <MasterDuke> *needle
+
+[01:07] <samcv> would it be better to convert to 8bit, and then if we see any too big codepoints we ditch the 8bit flattened thing and put it into 32bit
+
+[01:07] <samcv> instead of having to convert to 8bit afterward
+
+[01:07] <MasterDuke> ah, so any faster way possible than iterating grapheme by grapheme?
+
+[01:08] <samcv> if we assume 50% 32bit and 50% 8bit resulting strings then it'd be faster
+
+[01:08] <samcv> what do ya'll think about that?
+
+[01:10] <timotimo> all the work is happening inside MVM_string_index_from_end
+
+[01:10] <samcv> for which example
+
+[01:10] <timotimo> that's what calls get_grapheme_at_nocheck 500 million times or whatever
+
+[01:10] <samcv> which work?
+
+[01:10] <samcv> when we do nqp::contains? or the regex one
+
+[01:10] <timotimo> indexingoptimized + contains
+
+[01:11] <timotimo> the number of 32/32 memmems is the same but the one for 8/8 differs
+
+[01:11] <timotimo> the slow one goes for 8/8 memmem 642 times
+
+[01:11] <timotimo> the fast one does 1012 times
+
+[01:12] <samcv> timotimo, what do you think of creating an 8bit string and then if we find a too high/low codepoint ditching it and creating a 32bit string
+
+[01:12] <samcv> instead of starting out creating a 32bit string
+
+[01:12] <samcv> it would save time if we're only creating an 8bit string
+
+[01:12] <timotimo> i've wanted to write code like that
+
+[01:12] <samcv> should i do that right now?
+
+[01:13] <timotimo> dunno
+
+[01:13] <timotimo> can you tell me why one has index_from_end and the other doesn't?
+
+[01:13] <samcv> which one what's the difference in code?
+
+[01:14] <timotimo> one is ~~ /foo/ the other is inedxingoptimized + .contains
+
+[01:15] <samcv> ah. well idk the regex perl6/nqp code it must be calling it
+
+[01:16] <samcv> also i can de-duplicate code here
+
+[01:16] <samcv> remove the code in MVM_string_indexing_optimized and just call collapse_strands
+
+[01:17] <samcv> and i'd already made collapse_strands slightly faster at least one point in time. not that much but was a tiny bit
+
+[01:17] <timotimo> something is emitting nqp::rindexfrom
+
+[01:18] <timotimo> does collapse_strands also create a new object?
+
+[01:22] <timotimo> in what place were you hoping to build 8bit strings until we find a high codepoint?
+
+[01:29] <timotimo> like decoding strings or something?
+
+[01:37] <samcv> well that's what MVM_string_indexing_optimized does though
+
+[01:37] <samcv> well except it builds 32 bit. and then once the 32 bit is made turns that to 8 bit.
+
+[01:38] <timotimo> oh ok
+
+[01:39] <samcv> to start with i'm deleting all the code in MVM_string_indexing_optimized and having it call collapse_strands since the code is mostly the same
+
+[01:39] <timotimo> i'll try to get some sleep. it's really hot again today :|
+
+[01:40] <samcv> except without my previous minor optimization i made to collapse strands
+
+[01:40] <timotimo> good luck!
+
+[01:55] <BenGoldberg> Why not attempt to make a 16 bit string?
+
+[02:03] <samcv> you mean if it fits in 16 bits but doesn't fit in 8?
+
+[02:04] <samcv> well we don't do that. but i don't see any reason we couldn't though it would slow down operations between 16bit and 8bit or 16 bit and 32bit strings
+
+[02:04] <samcv> so would reduce even more the chances of strings having matching types
+
+[02:05] <samcv> timotimo, pushed the deduplication code to master now. will work on making it faster to create an 8bit string now
+
+[02:13] <samcv> ok so 'use nqp; say nqp::index(("abcde" x 100_000_000) ~ "foo", "foo", 0) > -1;' i got 7.7->7.4 seconds and that's not even using the indexing optimized function
+
+[02:13] <samcv> that seems faster
+
+[02:14] <samcv> MasterDuke, the optimized version is down to 0.8s with my changes
+
+[02:15] <samcv> down from 1.13780546
+
+[02:15] <samcv> probably uses a ton less memory too
+
+[02:15] <samcv> you still around MasterDuke?
+
+[02:37] <samcv> yay now i'm getting corruption under certain conditions. yay. gotta love that
+
+[02:37] <samcv> with the code i'm still working on that is. not the one i pushed
+
+[03:00] <MasterDuke> samcv: i'm not seeing much difference in speed, but it's now using 2491396maxresident instead of 2508864maxresident (a saving of 17468)
+
+[03:02] <MasterDuke> hm, but that number varies across runs
+
+[03:11] <MasterDuke> that was the lowest value i've seen, most are around the same as before
+
+[03:30] <samcv> what i pushed should only have like a 5% speed improvement or maybe a little less. but only on creating 32 bit strings. i am working on a version that will be faster
+
+[03:30] <samcv> but i'm getting corruption in some cases
+
+[03:30] <samcv> this for example: perl6 -e 'EVAL"« one #`[[[comment]]] two »"'
+
+[03:30] <samcv> not sure why
+
+[03:30] <samcv> oh. actually from less
+
+[03:31] <samcv> seems to trigger much more. heh
+
+[03:31] <samcv> m: '»'.ord.say
+
+[03:31] <camelia> rakudo-moar 8e9605: OUTPUT: «187␤»
+
+[03:32] <samcv> yeah it seems to mess up the data somehow. if i even just type in any high codepoint characters into the REPL it'll die
+
+[03:34] <samcv> ooooooooo i figured out what i did wrong
+
+[03:35] <samcv> heh. i did MVMGrapheme8 g = MVM_string_gi_get_grapheme(tc, &gi); so it always was under 8 bit since i put it into an 8 bit integer
+
+[03:35] <samcv> no wonder things went horribly wrong. so the can_fit_into_8bit check never triggered
+
+[03:36] <samcv> seems to work fine now
+
+[03:36] <samcv> MasterDuke, let me share with you my patch onto MoarVM master
+
+[03:37] <samcv> MasterDuke, apply this patch on master and let me know if it seems better to you https://gist.github.com/b49dd434d5eba07663eb7a7b386f30b5
+
+[03:40] <samcv> should use a lot less memory too i'd think
+
+[03:41] <samcv> well or it'll be about the same in case you did like a string of all ascii and then added a unicode character to the very end of it. in all other cases should be faster
+
+[03:43] <samcv> seems to go from 1.1488307 seconds to 1.0257282 for this test: 'use nqp; say nqp::index(nqp::indexingoptimized(("abcde" x 100_000_000) ~ "foo"), "foo", 0) > -1; say now - INIT now'
+
+[03:58] <samcv> well it gives me the same number of seconds running spectest so it can't negatively impact performance too much
+
+[04:00] <BenGoldberg> If perl6 starts to become popular in asia, I strongly suspect we'll want 16 bit versions of strings, in addition to 8 and 32 bit.
+
+[04:00] <samcv> can those be fit in 16bits?
+
+[04:00] <BenGoldberg> Most of them.
+
+[04:17] <samcv> well i guess we can always just change the type of the needle when trying to index them or whatever
+
+[04:23] <samcv> though doing the same thing but it's perl6 -e 'use nqp; say nqp::index(nqp::indexingoptimized(("abcde" x 100_000_000) ~ "fo»"), "foo", 0) > -1; say now - INIT now'
+
+[04:23] <samcv> goes from 4.5s to 5.7
+
+[04:24] <samcv> though 100 million is a lot of codepoints
+
+[04:31] <samcv> ok was able to reduce it down to 5s from 5.7
+
+[04:48] <samcv> ok cool. making a PR for this change so jnthn can take a look at it
+
+[04:49] <samcv> PR: https://github.com/MoarVM/MoarVM/pull/616
+
+[06:37] <[Tux]> This is Rakudo version 2017.07-12-g8e960522e built on MoarVM version 2017.07
+
+[06:37] <[Tux]> csv-ip5xs        2.631
+
+[06:37] <[Tux]> test            12.421
+
+[06:37] <[Tux]> test-t           4.110 - 4.176
+
+[06:37] <[Tux]> csv-parser      12.057
+
+[07:53] <lizmat> Files=1215, Tests=65561, 221 wallclock secs (13.37 usr  4.99 sys + 1339.81 cusr 140.12 csys = 1498.29 CPU)
+
+[07:53] <yoleaux> 07:19Z <ab6tract> lizmat: i see :)
+
+[08:55] <samcv> anyone here want to add any comments to this post: https://github.com/perl6/6.d-prep/commit/0405d453ba1fe066569d5416d69a9536dcef173c#diff-634da1ebe69a2dec5f4db5215d6ecadeR15
+
+[08:55] <samcv> https://github.com/perl6/6.d-prep/commit/0405d453ba1fe066569d5416d69a9536dcef173c#commitcomment-23167227 err this is the link
+
+[08:55] <samcv> suggestions on what 6.d's codename should be
+
+[09:40] <stmuk_> String::Koremutake of the git SHA !
+
+[10:25] <samcv> hmm?
+
+[10:25] <samcv> i don't understand
+
+[10:28] <stmuk_> its an algo which generates pseudo-Englishish words from random chars
+
+[10:29] <samcv> is it determinalistic?
+
+[10:49] <stmuk_> yes
+
+[13:56] <mr_ron> rakudo: for (50_000, 100_000) -> $limit {my $x; my $y = "x" x 100; $x ~= $y for (1..$limit); say "$limit: ", now - ENTER now}
+
+[13:56] <camelia> rakudo-moar 8e9605: OUTPUT: «50000: 6.187919␤MoarVM panic: Memory allocation failed; could not allocate 6470200 bytes␤»
+
+[13:57] <mr_ron> rakudo: for (50_000,) -> $limit {my $x; my $y = "x" x 100; $x ~= $y for (1..$limit); say "$limit: ", now - ENTER now}
+
+[13:57] <camelia> rakudo-moar 8e9605: OUTPUT: «50000: 6.19400217␤»
+
+[13:57] <mr_ron> rakudo: for (50_000, 100_000) -> $limit {my $x; my $y = "x" x 100; $x ~= $y for (1..$limit); say "$limit: ", now - ENTER now}
+
+[13:57] <camelia> rakudo-moar 8e9605: OUTPUT: «50000: 6.2410434␤MoarVM panic: Memory allocation failed; could not allocate 6470200 bytes␤»
+
+[13:57] <mr_ron> rakudo: for (50_000, 75_000) -> $limit {my $x; my $y = "x" x 100; $x ~= $y for (1..$limit); say "$limit: ", now - ENTER now}
+
+[13:58] <camelia> rakudo-moar 8e9605: OUTPUT: «50000: 6.22447996␤MoarVM panic: Memory allocation failed; could not allocate 6476500 bytes␤»
+
+[13:58] <mr_ron> rakudo: for (25_000, 50_000) -> $limit {my $x; my $y = "x" x 100; $x ~= $y for (1..$limit); say "$limit: ", now - ENTER now}
+
+[13:58] <camelia> rakudo-moar 8e9605: OUTPUT: «25000: 1.6497031␤50000: 5.4814596␤»
+
+[14:01] <mr_ron> rakudo: for (75_000) -> $limit {my $x; my $y = "x" x 100; $x ~= $y for (1..$limit); say "$limit: ", now - ENTER now}
+
+[14:01] <camelia> rakudo-moar 8e9605: OUTPUT: «MoarVM panic: Memory allocation failed; could not allocate 5840200 bytes␤»
+
+[14:02] <mr_ron> rakudo: my $x = "x" x (100 * 75_000); say $x.chars
+
+[14:02] <camelia> rakudo-moar 8e9605: OUTPUT: «7500000␤»
+
+[14:06] <mr_ron> rakudo: my $x = "x" x (100 * 750_000); say $x.chars
+
+[14:06] <camelia> rakudo-moar 8e9605: OUTPUT: «75000000␤»
+
+[14:13] <mr_ron> rakudo: for (50_000) -> $limit {my $x; my $y = "x" x 100; $x ~= $y for (1..$limit); say $x.chars; say "$limit: ", now - ENTER now}
+
+[14:13] <camelia> rakudo-moar 8e9605: OUTPUT: «5000000␤50000: 6.2035536␤»
+
+[14:17] <mr_ron> On my system 100_000 can run 10 * as slow as 50_000 and 150_000 gets killed by OS.  Unless objection new RT ticket will likely have subject similar to 'likely memory management failure with string concat'
+
+[14:34] <Geth> ¦ nqp/master: 6 commits pushed by pmurias++
+
+[14:34] <Geth> ¦ nqp/master: c59a44a6a8 | Add some tests for running continuations with nqp::continuationreset.
+
+[14:34] <Geth> ¦ nqp/master: f9633a4a57 | Fix tags with continuations
+
+[14:34] <Geth> ¦ nqp/master: 497127d506 | [js] Run the block based to nqp::continuationcontrol  outside of the reset
+
+[14:34] <Geth> ¦ nqp/master: 22c2e09fdd | [js] Stub nqp::permit on the js backend
+
+[14:34] <Geth> ¦ nqp/master: 2f01a237c2 | [js] Fixup --beautify in the cross compiler
+
+[14:34] <Geth> ¦ nqp/master: 43902be330 | Add test for nqp::spawnprocasync
+
+[14:34] <Geth> ¦ nqp/master: review: https://github.com/perl6/nqp/compare/b2b8c93b78...43902be330
+
+[14:50] <travis-ci> NQP build failed. pmurias 'Add test for nqp::spawnprocasync'
+
+[14:50] <travis-ci> https://travis-ci.org/perl6/nqp/builds/255287059 https://github.com/perl6/nqp/compare/b2b8c93b7882...43902be330fd
+
+[15:35] <Geth> ¦ nqp/async-await-continuations: 9a378ee133 | pmurias++ | src/vm/js/Compiler.nqp
+
+[15:35] <Geth> ¦ nqp/async-await-continuations: [js] Refactor out a bit of shared code into a sub
+
+[15:35] <Geth> ¦ nqp/async-await-continuations: review: https://github.com/perl6/nqp/commit/9a378ee133
+
+[15:35] <Geth> ¦ nqp/async-await-continuations: 682c859263 | pmurias++ | 4 files
+
+[15:35] <Geth> ¦ nqp/async-await-continuations: Merge branch 'master' into async-await-continuations
+
+[15:35] <Geth> ¦ nqp/async-await-continuations: review: https://github.com/perl6/nqp/commit/682c859263
+
+[15:35] <Geth> ¦ nqp/async-await-continuations: 282e72fd3f | pmurias++ | 6 files
+
+[15:35] <Geth> ¦ nqp/async-await-continuations: [js] Start sprinkling await/async everywhere
+
+[15:35] <Geth> ¦ nqp/async-await-continuations:
+
+[15:35] <Geth> ¦ nqp/async-await-continuations: Passes some tests with cross-compiling nqp.
+
+[15:35] <Geth> ¦ nqp/async-await-continuations: review: https://github.com/perl6/nqp/commit/282e72fd3f
+
+[15:35] * pmurias looks into travis fail...
+
+[15:42] <ugexe> we never unfudged the jvm stuff for proc::async
+
+[15:43] <Geth> ¦ nqp: 2535304767 | pmurias++ | src/vm/jvm/runtime/org/perl6/nqp/runtime/Ops.java
+
+[15:43] <Geth> ¦ nqp: [jvm] Make stub a noop rather than have it do a wrong cast
+
+[15:43] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/2535304767
+
+[15:43] <pmurias> ugexe: you mean in the roast tests?
+
+[15:44] <ugexe> pmurias: yeah... so i dont know that it actually works for jvm. just that it exists for it (as of 2017.060
+
+[15:46] <jnthn> It's implicitly covered in that precompilation uses it, and I made sure it worked that far on JVM
+
+[15:58] <travis-ci> NQP build passed. pmurias '[jvm] Make stub a noop rather than have it do a wrong cast'
+
+[15:58] <travis-ci> https://travis-ci.org/perl6/nqp/builds/255315011 https://github.com/perl6/nqp/compare/43902be330fd...2535304767c5
+
+[16:55] <Geth> ¦ nqp/async-await-continuations: 2f7276110d | pmurias++ | 3 files
+
+[16:55] <Geth> ¦ nqp/async-await-continuations: [js] Fixup some convertions to primitive types in async/await mode
+
+[16:55] <Geth> ¦ nqp/async-await-continuations:
+
+[16:55] <Geth> ¦ nqp/async-await-continuations: Some grammars now work
+
+[16:55] <Geth> ¦ nqp/async-await-continuations: review: https://github.com/perl6/nqp/commit/2f7276110d
+
+[18:52] <Geth> ¦ rakudo/nom: 710fa80004 | (Elizabeth Mattijsen)++ | src/core/Rakudo/QuantHash.pm
+
+[18:52] <Geth> ¦ rakudo/nom: Create iterator early, let it serve as check for emptiness
+
+[18:52] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/710fa80004
+
+[18:52] <Geth> ¦ rakudo/nom: 2dd5963cb3 | (Elizabeth Mattijsen)++ | src/core/Setty.pm
+
+[18:52] <Geth> ¦ rakudo/nom: Make sure Setty at least have a R:I:IterationSet type object
+
+[18:52] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/2dd5963cb3
+
+[19:02] <Zoffix> hack seems ded? My bot's not responding and I can't ssh to give 'em, the boot
+
+[19:02] <Zoffix> Undercover: help
+
+[19:02] <Undercover> Zoffix, Use cover: trigger with args to give to sourcery sub. e.g. cover: Int, 'base'. See http://modules.perl6.org/dist/CoreHackers::Sourcery
+
+[19:03] <Zoffix> huh. Well, this one is, but sourcebaby's ded
+
+[19:05] <Zoffix> can ping but not ssh
+
+[19:07] <lizmat> perhaps moritz can check ?
+
+[19:12] <Geth> ¦ rakudo/nom: ab08bd04a4 | (Elizabeth Mattijsen)++ | src/core/Rakudo/Iterator.pm
+
+[19:12] <Geth> ¦ rakudo/nom: Make R:I:Mappy roles also take IterationSets
+
+[19:12] <Geth> ¦ rakudo/nom:
+
+[19:12] <Geth> ¦ rakudo/nom: As a preparation until all Hashes take IterationSets, or some other
+
+[19:12] <Geth> ¦ rakudo/nom: HLL construct on a low level data structure, so that we can pass them
+
+[19:12] <Geth> ¦ rakudo/nom: along as parameters without being automagically upgraded to HLL Hashes.
+
+[19:12] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/ab08bd04a4
+
+[19:12] <Geth> ¦ rakudo/nom: 250ae1026c | (Elizabeth Mattijsen)++ | src/core/Setty.pm
+
+[19:12] <Geth> ¦ rakudo/nom: Make Setty.values use R:I.Mappy-values directly
+
+[19:13] <Geth> ¦ rakudo/nom:
+
+[19:13] <Geth> ¦ rakudo/nom: Because the R:I:Mappy role now takes IterationSets
+
+[19:13] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/250ae1026c
+
+[19:18] <timotimo> can't run virt-manager o_O
+
+[19:23] <timotimo> huh, so "console" is not the command that'd let me see what's up
+
+[19:31] <nine> timotimo: dmesg is usually worth a look
+
+[19:31] <nine> if the host is affected, too
+
+[19:31] <timotimo> on the master?
+
+[19:31] <timotimo> ah
+
+[19:31] <timotimo> it's usually the virtual disk going poof
+
+[19:32] <nine> well you didn't say what's actually keeping from running virt-manager ;)
+
+[19:32] <timotimo> oh just python-requests being a piece of total shit on fedora
+
+[19:33] <nine> what about virsh?
+
+[19:33] <timotimo> i used that on the remote host
+
+[19:33] <dogbert17> lizmat: I added some SetHash stuff to https://github.com/perl6/roast/pull/285
+
+[19:33] <timotimo> then i did "console 11" (for hack) and got a dead terminal
+
+[19:34] <Geth> ¦ roast/master: 4 commits pushed by (Jan-Olof Hendig)++, lizmat++
+
+[19:34] <Geth> ¦ roast/master: bf26816bc0 | Add tests for RT #130366
+
+[19:34] <Geth> ¦ roast/master: 85a08ad8c3 | Add tests for RT #130366
+
+[19:34] <Geth> ¦ roast/master: c384906f65 | Add tests for RT #130366
+
+[19:34] <Geth> ¦ roast/master: 75ee890be2 | Merge pull request #285 from dogbert17/test-rt-130366
+
+[19:34] <Geth> ¦ roast/master: review: https://github.com/perl6/roast/compare/9b51341b6c...75ee890be2
+
+[19:35] <timotimo> anyway, done.
+
+[19:35] <dogbert17> lizmat: should I close the original issue in RT ?
+
+[19:36] <lizmat> which one was that again?
+
+[19:36] <dogbert17> RT #130366
+
+[19:37] <lizmat> dogbert17: yes please
+
+[19:38] <dogbert17> done
+
+[19:41] <dogbert17> lizmat: are you done with your Set/Bag/Mix work now?
+
+[19:41] <lizmat> I hope to be by the end of the week
+
+[19:41] <lizmat> most of the performance bits have been dealt with, though
+
+[19:42] <dogbert17> lizmat++
+
+[19:42] <lizmat> maintenability bits still to do
+
+[19:43] <Zoffix> Thanks.
+
+[19:44] <dogbert17> I'm wondering if the merged tests cover RT #131241 as well or do we need more?
+
+[19:46] <lizmat> I don't think RT #131241 is covered yet  :-(
+
+[19:46] <dogbert17> where has synopsebot6 gone ...
+
+[19:47] <dogbert17> guess I'll add them as well then :)
+
+[19:47] <dogbert17> timotimo, you around?
+
+[19:47] <lizmat> dogbert17++
+
+[19:48] <Zoffix> there
+
+[19:48] <Zoffix> RT #131241
+
+[19:48] <synopsebot6> Link:  https://rt.perl.org/rt3/Public/Bug/Display.html?id=131241
+
+[19:49] <dogbert17> Zoffix++
+
+[19:54] <timotimo> dogbert17: o/
+
+[20:00] <Geth> ¦ rakudo/nom: b7953d0dd1 | (Elizabeth Mattijsen)++ | 4 files
+
+[20:00] <Geth> ¦ rakudo/nom: Make R:I:Mappy* roles use a more abstract name for lowlevel hash
+
+[20:00] <Geth> ¦ rakudo/nom:
+
+[20:00] <Geth> ¦ rakudo/nom: To prevent cognitive dissonance between Map's $!storage and the
+
+[20:00] <Geth> ¦ rakudo/nom: iterator's more generic copy of that, which is now also used by
+
+[20:00] <Geth> ¦ rakudo/nom: QuantHashes.
+
+[20:00] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/b7953d0dd1
+
+[20:06] <ugexe> m: say Version.new("0.1") ~~ Version.new("0.1.1+"); say Version.new("0.1.0") ~~ Version.new("0.1.1+"); # Is this expected? I'm adding .0 parts to even the length to get the result I want, but wondered if this should already work like that
+
+[20:06] <camelia> rakudo-moar 250ae1: OUTPUT: «True␤False␤»
+
+[20:07] <dogbert17> m: my $b = <a b b c c c>.MixHash; $_ = -1 for $b.values; dd $b # lizmat
+
+[20:07] <camelia> rakudo-moar 250ae1: OUTPUT: «MixHash $b = ("b"=>-1,"a"=>-1,"c"=>-1).MixHash␤»
+
+[20:07] <lizmat> dogbert17: what about it ?
+
+[20:08] <lizmat> looks ok to me ?
+
+[20:08] <lizmat> m: my $b = <a b b c c c>.BagHash; $_ = -1 for $b.values; dd $b
+
+[20:08] <dogbert17> so negative weights for mixes are ok?
+
+[20:08] <camelia> rakudo-moar 250ae1: OUTPUT: «BagHash $b = ().BagHash␤»
+
+[20:08] <lizmat> yup, any non-zero Real value
+
+[20:08] <dogbert17> but not for bags?
+
+[20:09] <lizmat> nope, bags only take natural numbers (as in Ints > 0 )
+
+[20:09] <dogbert17> what about SetHashes?
+
+[20:09] <lizmat> SetHashes take only Bools
+
+[20:09] <lizmat> m: say "foo" if -1
+
+[20:09] <camelia> rakudo-moar 250ae1: OUTPUT: «foo␤»
+
+[20:10] <lizmat> any non-zero values is considered true
+
+[20:10] <dogbert17> ok, I'll continue then, was scared for a sec :)
+
+[20:10] <lizmat> hehe,... good that you check  :-)
+
+[20:11] <Geth> ¦ rakudo/nom: d9055e80fe | (Elizabeth Mattijsen)++ | 4 files
+
+[20:11] <Geth> ¦ rakudo/nom: Retire R:Q:Quanty in favour of R:I:Mappy
+
+[20:11] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/d9055e80fe
+
+[20:17] <timotimo> now actually around
+
+[20:22] <dogbert17> timotimo: Zoffix beat you to it, synopsebot6 was down
+
+[20:28] <timotimo> oh, it doesn't start up on boot?
+
+[20:33] <Geth> ¦ roast: dogbert17++ created pull request #286: Add tests for RT #131241
+
+[20:33] <Geth> ¦ roast: review: https://github.com/perl6/roast/pull/286
+
+[20:33] <synopsebot6> Link:  https://rt.perl.org/rt3/Public/Bug/Display.html?id=131241
+
+[20:45] <Geth> ¦ roast: f7a57d4bd5 | (Jan-Olof Hendig)++ | 3 files
+
+[20:45] <Geth> ¦ roast: Add tests for RT #131241
+
+[20:45] <Geth> ¦ roast: review: https://github.com/perl6/roast/commit/f7a57d4bd5
+
+[20:45] <Geth> ¦ roast: c2718dc4ec | lizmat++ (committed using GitHub Web editor) | 3 files
+
+[20:45] <Geth> ¦ roast: Merge pull request #286 from dogbert17/test-rt-131241
+
+[20:45] <synopsebot6> Link:  https://rt.perl.org/rt3/Public/Bug/Display.html?id=131241
+
+[20:45] <Geth> ¦ roast:
+
+[20:45] <Geth> ¦ roast: Add tests for RT #131241
+
+[20:45] <synopsebot6> Link:  https://rt.perl.org/rt3/Public/Bug/Display.html?id=131241
+
+[20:45] <Geth> ¦ roast: review: https://github.com/perl6/roast/commit/c2718dc4ec
+
+[20:50] <travis-ci> Rakudo build failed. Elizabeth Mattijsen 'Make sure Setty at least have a R:I:IterationSet type object'
+
+[20:50] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/255381965 https://github.com/rakudo/rakudo/compare/8e960522e5ec...2dd5963cb324
+
+[20:50] <buggable> [travis build above] ✓ All failures are due to timeout (0), missing build log (0), GitHub connectivity (1), or failed make test (0).
+
+[20:57] <Geth> ¦ rakudo/nom: 923c32e688 | (Elizabeth Mattijsen)++ | src/core/Rakudo/QuantHash.pm
+
+[20:57] <Geth> ¦ rakudo/nom: Introducing R:Q.RAW-VALUES-MAP
+
+[20:57] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/923c32e688
+
+[20:57] <Geth> ¦ rakudo/nom: 5b6cd4062c | (Elizabeth Mattijsen)++ | src/core/Setty.pm
+
+[20:57] <Geth> ¦ rakudo/nom: Various Setty stringification improvements
+
+[20:57] <Geth> ¦ rakudo/nom:
+
+[20:57] <Geth> ¦ rakudo/nom: - based on a ^100 .Set
+
+[20:57] <Geth> ¦ rakudo/nom: - .Str about 2x faster
+
+[20:57] <Geth> ¦ rakudo/nom: - .perl about 2x faster
+
+[20:57] <Geth> ¦ rakudo/nom: - .gist about 1.4x faster *and* sorted: a long wish of TimToady
+
+[20:57] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/5b6cd4062c
+
+[21:14] <lizmat> grrr  --ll-exception is borked ?
+
+[21:14] <ugexe> yeah
+
+[21:15] <ugexe> https://github.com/rakudo/rakudo/commit/1a4d94930c581e915a2351049e8ee12246c4c26c
+
+[21:19] <AlexDaniel> all *ables are down and nobody told me :)
+
+[21:20] * AlexDaniel totally forgot to start them again after stuff…
+
+[21:47] <Zoffix> I thought another nqp commit fixed it? :/
+
+[22:10] <Geth> ¦ nqp/dump_nqpmatch_seen_hash: 1d72de1b7a | (Timo Paulssen)++ | src/QRegex/Cursor.nqp
+
+[22:10] <Geth> ¦ nqp/dump_nqpmatch_seen_hash: annotate values with an id and omit full value next time
+
+[22:10] <Geth> ¦ nqp/dump_nqpmatch_seen_hash: review: https://github.com/perl6/nqp/commit/1d72de1b7a
+
+[22:15] * Zoffix wonders if `perl Configure.pl --gen-moar --gen-nqp --backends=moar; make; make test; make install` is the quickest way to rebuild for nqp changes
+
+[22:18] <Zoffix> Actually that don't even rebuild it :/
+
+[22:20] <timotimo> it only rebuilds if the nqp you have isn't new enough
+
+[22:20] <timotimo> i.e. you'd have to manually bump the tools/build/*REVISION
+
+[22:21] <Zoffix> I'm just trying to do some debugging. What's the fastest process to see what my changes have done?
+
+[22:21] <timotimo> cd nqp; make install; cd ..; make clean; make install
+
+[22:21] <Zoffix> Thanks
+
+[22:25] <Zoffix> m: use nqp; dd nqp::isnull(nqp::null_s)
+
+[22:25] <camelia> rakudo-moar 5b6cd4: OUTPUT: «0␤»
+
+[22:25] <Zoffix> I see. Zoffix-- for breaking --ll-exception in the release
+
+[22:27] <timotimo> ah
+
+[22:39] <Zoffix> hm. seems that's not the only problem :/
+
+[22:41] <Zoffix> this build time is a killer :/
+
+[22:43] <timotimo> it's pretty bad, yeah
+
+[22:43] <timotimo> used to be much worse
+
+[22:43] <timotimo> if we had the build speed of three years ago with the size of core setting of today, you'd be looking at like 10 minutes :P
+
+[22:44] <Zoffix> :o
+
+[22:46] <timotimo> just a guess, though
+
+[22:50] <Zoffix> *phew* I'm vindicated :) The problem is still there even with my modifications removed :)
+
+[22:50] * Zoffix digs deeper
+
+[23:22] <Zoffix> Right. A puzzle for another day.
+
+[23:22] <Zoffix> .tell MasterDuke This commit isn't working because $error is BOOTException, not a Perl 6 exception and it don't got .message. We need some sort of a different solution. https://github.com/perl6/nqp/commit/859b4441dd3f6fd8816759b3b1f12b2d45a0bfd2
+
+[23:22] <yoleaux> Zoffix: I'll pass your message to MasterDuke.
+
+[23:34] <Geth> ¦ rakudo/improved-version-accepts: 865b2aef43 | (Nick Logan)++ (committed using GitHub Web editor) | src/core/Version.pm
+
+[23:34] <Geth> ¦ rakudo/improved-version-accepts: Improve Version smart match with different lengths
+
+[23:34] <Geth> ¦ rakudo/improved-version-accepts:
+
+[23:34] <Geth> ¦ rakudo/improved-version-accepts: Passes spectest, but changes the behavior of the following to pass:
+
+[23:34] <Geth> ¦ rakudo/improved-version-accepts: ```
+
+[23:34] <Geth> ¦ rakudo/improved-version-accepts: use Test;
+
+[23:34] <Geth> ¦ rakudo/improved-version-accepts: nok v6 ~~ v6c;
+
+[23:34] <Geth> ¦ rakudo/improved-version-accepts: nok v6 ~~ v6.d;
+
+[23:34] <Geth> ¦ rakudo/improved-version-accepts: nok v6 ~~ v6.c+;
+
+[23:34] <Geth> ¦ rakudo/improved-version-accepts: nok v6 ~~ v6.d+';
+
+[23:34] <Geth> ¦ rakudo/improved-version-accepts: done-testing;
+
+[23:34] <Geth> ¦ rakudo/improved-version-accepts: ```
+
+[23:34] <Geth> ¦ rakudo/improved-version-accepts: review: https://github.com/rakudo/rakudo/commit/865b2aef43
+
+[23:34] <Geth> ¦ rakudo: ugexe++ created pull request #1118: Improve Version smart match with different lengths
+
+[23:34] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/1118
+
+[23:41] * Zoffix calls dibs on RT#131767
+
+[23:43] <Zoffix> Why do we have a billion tickets reporting which tests are todoed?
+
+[23:43] <Zoffix> "196 matches". Well, that makes it trying to find a ticket for Test.pm6's todo() rather hopeless :/

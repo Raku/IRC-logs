@@ -1,0 +1,643 @@
+[00:14] <samcv> ok actually not. i fixed a bunch of issues tho trying to solve that one hah
+
+[00:15] <Skarsnik> lol
+
+[00:15] <samcv> but i did get some info on that. it is /leaking some memory from the utf8 encoder. tho idk if that's because it bailed or not. though i'd want it to clean up.
+
+[00:18] <samcv> ok i found a missing free :)
+
+[00:19] <samcv> not causing the decode error though. it's just not freeing the buffer on that particular cause of utf8 failure
+
+[00:19] <samcv> yay! fix everything except this problem!
+
+[06:08] <lizmat> Files=1223, Tests=67674, 269 wallclock secs (13.28 usr  4.97 sys + 1812.53 cusr 189.13 csys = 2019.91 CPU)
+
+[06:11] <timotimo> morning lizmat
+
+[06:11] <timotimo> i'm just about ready to head to breakfast
+
+[06:13] <timotimo> see you in a bit
+
+[06:23] <samcv> morning
+
+[06:27] <timotimo> moinmoin
+
+[06:56] <samcv> at least *now* that utf8 is failing always at the same spot
+
+[07:01] <samcv> i'm going to split up the file until i have a smaller section of it to find the invalid part
+
+[07:08] <samcv> uh i can't reproduce if i head -n the first half or i tail -n the second half
+
+[07:08] <samcv> or even head the first 2/3 or tail the last 2/3
+
+[07:08] <samcv> weird...
+
+[07:12] <timotimo> have you considered using rr to have reverse debugging?
+
+[07:12] <samcv> am able to get it failing by doing head -n -100 so i will continue doing that until it stops erroring
+
+[07:12] <samcv> no
+
+[07:20] <timotimo> i demonstrated two pieces of perl6 + sdl2 at the SPW in a lightning talk; i probably ought to clean them up, put them in the official repo, and make people aware they can actually get the examples
+
+[07:30] <samcv> i split it into 1000 pieces and now i scripted it to try each one and delete it if there was no decoding error
+
+[07:31] <samcv> nice
+
+[07:34] <samcv> some of the split sections are causing moar to just kind of hang
+
+[07:35] <samcv> well seemigly it's doing nothing, they should all be exactly the same size
+
+[07:36] <samcv> i just naïvely split them so some of them are gonna be invalid. but moar shouldn't freeze
+
+[07:40] <timotimo> hm, attach gdb, grab a backtrace?
+
+[07:40] <samcv> yeah
+
+[07:44] <samcv> not getting much, gonna try using perf so i can see what's using the cpu. when i stopped and got a backtrace it was just like not anything seemingly interesting
+
+[07:45] <samcv> not even seeing anything decoding related
+
+[07:45] <samcv> weird...
+
+[07:46] <timotimo> anything interesting at all in strace?
+
+[07:46] <timotimo> unlikely, but you (at least i) never know
+
+[07:46] <samcv> if i slurp the string i get utf-8 invalid. but this is using the same method of the other bug
+
+[07:47] <samcv> so there's some defect in how we handle certain utf8 decoding
+
+[07:48] <samcv> uh just read, fstat, lseek, brk on repeat
+
+[07:48] <samcv> those and just repeated forever
+
+[07:48] <samcv> in that order
+
+[07:48] <samcv> like looping
+
+[07:49] <samcv> i mean the files are only 15K each
+
+[07:49] <samcv> so it should'nt have THAT much to read
+
+[07:51] <timotimo> do the numbers for lseek change?
+
+[07:51] <timotimo> the one in the middle in particular
+
+[07:53] <samcv> yes they repeat
+
+[07:53] <samcv> wc -l #> 456789 and after sort | uniq #> 3153
+
+[07:54] <timotimo> interesting. and how many bytes does read grab from the file?
+
+[07:55] <samcv> curl 'https://gist.githubusercontent.com/samcv/af004626d8aa46c36e828d4a950d24e3/raw/bc4cd9d630075484c8b54428d6eac0b2d20c112a/xagr_base64' | base64 -d > xagr
+
+[07:55] <samcv> if you want the file
+
+[07:56] <samcv> timotimo, here's the last 100 lines of the strace https://gist.github.com/d45aa46c0b17e8bd70677985a1555a46
+
+[07:56] <timotimo> that's a weird file
+
+[07:56] <samcv> which one. the strace or `xagr`
+
+[07:56] <timotimo> xagr
+
+[07:56] <samcv> yeah. it's 1/1000 of that file that was causing the original utf8 bug
+
+[07:57] <timotimo> huh, it keeps reading 0 bytes
+
+[07:57] <samcv> awesome
+
+[07:57] <timotimo> and the seek adjusts the position by 0 bytes
+
+[07:57] <samcv> how can you read that? for my reference
+
+[07:57] <samcv> yeah i noticed that
+
+[07:57] <samcv> read(13 is that reading 13 bytes?
+
+[07:57] <timotimo> nope, file handle number 13
+
+[07:57] <timotimo> strace helpfully shows the result of the read as a string in the middle
+
+[07:58] <timotimo> and the number of bytes read is returned by read
+
+[07:58] <samcv> ahhh
+
+[07:58] <timotimo> the big number is the limit i'd expect
+
+[07:58] <samcv> is there a utility to deduplicate across many lines
+
+[07:58] <timotimo> like sort | uniq but without the sort?
+
+[07:58] <samcv> i guess maybe i can regex and replace the repeating section with one of itself
+
+[08:00] <timotimo> i'm afraid i don't know how to get uniq without sort without any extra tools
+
+[08:00] <timotimo> surely awk has something, otherwise perl
+
+[08:01] <samcv> it's doing a ton of reading nothing
+
+[08:01] <samcv> even near the top
+
+[08:01] <samcv> h/o
+
+[08:02] <timotimo> h/o?
+
+[08:02] <samcv> https://gist.github.com/7bbfbabb8ae4f87424235ba388eecec4 first 1000 lines
+
+[08:02] <samcv> (hold/on)
+
+[08:02] <timotimo> ah
+
+[08:02] <samcv> by line 850 or so it's reading from FD 13 0 bytes
+
+[08:03] <samcv> around 800
+
+[08:05] <timotimo> i don't get it. it should totally know that it's at the EOF
+
+[08:05] <samcv> well. it's invalid utf8
+
+[08:05] <timotimo> does the decoder "want one more byte please" but the file handle keeps givin back 0 bytes?
+
+[08:05] <timotimo> so they pingpong endlessly?
+
+[08:05] <samcv> xagr: line 243, char 126, byte 14678: After a first byte between E1 and EC, expecting two following bytes.
+
+[08:06] <samcv> that could be what's happening
+
+[08:06] <samcv> give me more bytes!
+
+[08:07] <timotimo> here you go, 0 bytes
+
+[08:07] <samcv> give me more bytes!
+
+[08:07] <samcv> :R
+
+[08:07] <timotimo> let's see here, yeah we have 0 bytes for you
+
+[08:14] <samcv> let me try doing a --profile
+
+[08:16] <samcv> timotimo, is there a signal i can send to moarvm that will cause it to exit cleanly and output a profile? ctl + c ain't doing it
+
+[08:16] <timotimo> no, you'd have to tap a signal and that gives you an extra thread that can make the profiler unhappy
+
+[08:17] <timotimo> i think i'll head down to the lobby, liz and wendy probably arrive soon
+
+[08:17] <timotimo> for some hackathon time \o/
+
+[08:20] <samcv> fun!
+
+[08:21] <samcv> tell them i say hi!
+
+[08:30] <[Tux]> This is Rakudo version 2017.07-149-g93a5eff7c built on MoarVM version 2017.07-382-g348b4262
+
+[08:30] <[Tux]> csv-ip5xs        1.414 - 1.612
+
+[08:30] <[Tux]> test            12.763
+
+[08:30] <[Tux]> test-t           4.535 - 4.592
+
+[08:30] <[Tux]> csv-parser      13.772
+
+[08:38] <timotimo> we all have set up our laptops in a corner
+
+[08:38] <timotimo> we stole electrical socket from a tv in the corner :D
+
+[08:47] <lizmat> [Tux]: it feels to me like your machine has gotten slower compared to mine:
+
+[08:47] <[Tux]> about to reboot and to re-test. stay tuned
+
+[08:47] <lizmat> [Tux]: a few weeks ago, my test-t was consistently at 3.5 secs, now it is at 2.8
+
+[08:47] <lizmat> [Tux]: cool!
+
+[08:48] <[Tux]> a lot has accumulated over two weeks, so I just applied the security patches and some other stuff that e.g. broke DBD::Pg, which kinda is essential
+
+[09:20] <[Tux]> This is Rakudo version 2017.07-149-g93a5eff7c built on MoarVM version 2017.07-382-g348b4262
+
+[09:20] <[Tux]> csv-ip5xs        1.374 - 1.424
+
+[09:20] <[Tux]> test            12.619
+
+[09:20] <[Tux]> test-t           4.456 -
+
+[09:20] <[Tux]> csv-parser      14.026
+
+[09:20] <[Tux]> 4.514
+
+[09:24] <lizmat> hmmm... weird
+
+[09:25] <lizmat> he?  that's a weird rakudo/MoarVM version?
+
+[09:25] <lizmat> we're at 2017.08.... now
+
+[09:25] <lizmat> This is Rakudo version 2017.08-5-g593fa5f built on MoarVM version 2017.08.1-19-g151a256   # my machine
+
+[09:25] <lizmat> [Tux]: ^^^
+
+[09:26] <[Tux]> I'll check the git refresh stuff
+
+[09:49] <[Tux]> This is Rakudo version 2017.08-14-gf097e551b built on MoarVM version 2017.08.1-32-gcd41322e
+
+[09:49] <[Tux]> csv-ip5xs        1.348
+
+[09:49] <[Tux]> test            10.761
+
+[09:49] <[Tux]> test-t           3.714
+
+[09:49] <[Tux]> csv-parser      11.486
+
+[09:49] <[Tux]> better?
+
+[09:50] <[Tux]> thanks for watching over my shoulder
+
+[10:36] <lizmat> whee!
+
+[11:51] <piojo> I tricked the perl6 into giving me bad error output when using grammars--it should have told me I had a missing method, but instead told me:
+
+[11:51] <piojo> P6opaque: no such attribute '$!pos' in type Matcher when trying to get a value
+
+[11:51] <piojo> I assume this issue should be filed with Rakudo?
+
+[11:52] <piojo> (not moarvm)
+
+[11:56] <piojo> No worries, I reported it for rakudo
+
+[12:10] <nine> TimToady: isn't the caller's caller the caller's problem? In pseudo code: {use v6.c; Foo { method parse-some() { return $some-grammar.parse(...) } } }; { use v6.d; Foo.parse-some(); } The 6.c code calls parse, so it gets a Nil on parse failure. It adopted parse's API by just returning the Nil. Now a 6.d caller comes along and will get the Nil. But I think that's quite OK.
+
+[12:11] <nine> TimToady: The 6.c method has always returned Nil on parse failure and will continue to do so. That it's implemented by using a grammar and juts passing on parse's return value is an implementation detail that it's caller must not care about. So it's wrong for the caller to expect anything but a Nil.
+
+[12:12] <nine> TimToady: the way for the caller to get something else would be to have a new version of Foo that's written in 6.d. Or to change it's implementation in another way.
+
+[12:20] <timotimo> oh it's nine \o/
+
+[12:20] <timotimo> piojo probably got a method that's already taken by Match or Grammar, that probably caused that problem?
+
+[12:21] <nine> TimToady: that'd be my guess
+
+[12:21] <nine> err.... timotimo ^^^
+
+[12:21] <nine> Apparently irssi doesn't consider case when completing nicks and I've never noticed that before
+
+[12:22] <timotimo> mhm
+
+[12:52] <AlexDaniel> .tell pyrimidine https://irclog.perlgeek.de/perl6-dev/2017-08-27#i_15075855
+
+[12:52] <yoleaux> AlexDaniel: I'll pass your message to pyrimidine.
+
+[12:53] <AlexDaniel> .tell pyrimidine mystery resolved. It's still not as low, but that's possibly noise
+
+[12:53] <yoleaux> AlexDaniel: I'll pass your message to pyrimidine.
+
+[13:53] <dogbert11> hmm, this Malformed UTF8 bug sure is strange
+
+[13:56] <dogbert11> I put a breakpoint at the place where the error msg is printed out and took a look at what different vars were set to
+
+[13:56] <dogbert11> so we have: Breakpoint 1, MVM_string_utf8_decodestream (tc=0x804c588, ds=0x9e943b0, stopper_chars=0x0, seps=0x9e94498) at src/strings/utf8.c:496
+
+[13:57] <dogbert11> looking at the decodestream (ds) one thing stands out:
+
+[13:57] <dogbert11> and that is 'abs_byte_pos'
+
+[13:57] <dogbert11> $1 = {bytes_head = 0x85479d8, bytes_tail = 0x85479d8, chars_head = 0x9f1fdf8, chars_tail = 0x9f1fdf8, chars_reuse = 0x0, abs_byte_pos = 14680064, bytes_head_pos = 0, chars_head_pos = 0, encoding = 1,
+
+[13:57] <dogbert11> result_size_guess = 144, norm = {form = MVM_NORMALIZE_NFG, buffer = 0x8286f98, buffer_size = 64, buffer_start = 10, buffer_end = 11, buffer_norm_end = 10, first_significant = 768, quick_check_property = 29,
+
+[13:57] <dogbert11> translate_newlines = 1, prepend_buffer = 0, regional_indicator = 0}, decoder_state = 0x0}
+
+[13:58] <dogbert11> m: say 14680064 % 1048576 # the IO subsystem tries to read one Meg byte blocks according to strace
+
+[13:58] <camelia> rakudo-moar f097e5: OUTPUT: «0?»
+
+[14:00] <dogbert11> it seems to me that the problem appears right at a buffer boundary
+
+[14:01] * dogbert11 enough rambling
+
+[14:01] <AlexDaniel> dammit. What's the difference between “lines” and “slurp.lines”?
+
+[14:02] * AlexDaniel (?°?°??? ???
+
+[14:04] <dogbert11> I added a few characters to the file a bit above the failing line, 257... something and the problem went away
+
+[14:05] <dogbert11> so the byte(s) which causes the problem is no longer at a buffer boundary
+
+[14:05] * dogbert11 points out that this is amateur nonsense :)
+
+[14:05] <AlexDaniel> dogbert11: yeah, that sound about right
+
+[14:05] <AlexDaniel> s
+
+[14:06] <dogbert11> where are all the cool core devs, recovering from SPW perhaps :)
+
+[14:09] <lizmat> or on the way home
+
+[14:09] <timotimo> or sitting in a hotel lobby hacking
+
+[14:15] <BenGoldberg> m: dd lines
+
+[14:15] <camelia> rakudo-moar f097e5: OUTPUT: «("»Wann treffen wir drei wieder zusamm?«", "   »Um die siebente Stund‘, am Brückendamm.«", "     »Am Mittelpfeiler.«", "         »Ich lösche die Flamm.«", " »Ich mit«", "", "         »Ich komme vom Norden her.«", "        »Und ich vom S…»
+
+[14:15] <BenGoldberg> m: dd slurp
+
+[14:15] <camelia> rakudo-moar f097e5: OUTPUT: «"»Wann treffen wir drei wieder zusamm?«\n   »Um die siebente Stund‘, am Brückendamm.«\n     »Am Mittelpfeiler.«\n         »Ich lösche die Flamm.«\n »Ich mit«\n\n         »Ich komme vom Norden her.«\n        »Und ich vom Süden.«\n      …»
+
+[14:16] <AlexDaniel> BenGoldberg: not “slurp” but “slurp.lines”
+
+[14:16] <BenGoldberg> m: my @a := lines; say @a.WHAT;
+
+[14:16] <camelia> rakudo-moar f097e5: OUTPUT: «Type check failed in binding; expected Positional but got Seq ($(("»Wann treffen wir...)?  in block <unit> at <tmp> line 1??»
+
+[14:17] <BenGoldberg> lines should lazily read $*IN a line at a time.
+
+[14:17] <AlexDaniel> what's “a line”?
+
+[14:18] <AlexDaniel> any comments on https://github.com/perl6/doc/issues/1472 welcome
+
+[14:18] <BenGoldberg> slurp.lines will first read all of $*IN, and then, after that, split it into individual Strs.
+
+[14:19] <AlexDaniel> .tell moritz sometimes .split(“\n”) is actually the right way to do it https://github.com/perl6/doc/issues/1472
+
+[14:19] <yoleaux> AlexDaniel: I'll pass your message to moritz.
+
+[14:24] <AlexDaniel> bwahahahahah
+
+[14:25] <Zoffix> BenGoldberg: lines() alone will read them lazily (not line by line, as there's a buffer involved, but not the whole file at once)
+
+[14:25] <Zoffix> BenGoldberg: it returns a Seq, which is not a Positional mandated by the @ sigil. You need to bind it to $ var
+
+[14:26] <BenGoldberg> Zoffix, Got it, thanks :)
+
+[14:28] <Zoffix> AlexDaniel: I can answer what's "a line" for IO::Handle.lines: lines are delimited with the $.in-in separator
+
+[14:29] <Zoffix> And looking at the sauce for Str.lines, there a line is separated by nqp::const::CCLASS_NEWLINE chars...
+
+[14:29] <AlexDaniel> right, so the fact that Proc::Async does something else is actually a bug I think
+
+[14:30] <AlexDaniel> sorry I'm jumping from one topic to another…
+
+[14:30] <Zoffix> :)
+
+[14:30] <AlexDaniel> anyway: https://github.com/perl6/doc/issues/1472#issuecomment-325201876
+
+[14:35] <AlexDaniel> .tell jnthn FWIW, remember I asked how to process null-separate output? Turns out there's an identical problem when trying to process \n-separated output. See https://github.com/perl6/doc/issues/1472 and https://rt.perl.org/Ticket/Display.html?id=131923
+
+[14:35] <yoleaux> AlexDaniel: I'll pass your message to jnthn.
+
+[14:53] <samcv> AlexDaniel, slurp.lines slurps everything and then turns it into lines. .lines reads it on demand (with a buffer of course)
+
+[14:58] <yoleaux> Zoffix: check on Win10: https://rt.perl.org/rt3/Public/Bug/Display.html?id=131375
+
+[15:02] <AlexDaniel> samcv: it's not just that, which is the whole deal with https://github.com/perl6/doc/issues/1472
+
+[15:03] <samcv> wait what why does it do that
+
+[15:04] <samcv> it splits on \r by itself?
+
+[15:12] <Geth> ¦ rakudo/js: 104059c2a6 | pmurias++ | 3 files
+
+[15:12] <Geth> ¦ rakudo/js: Revert "Workarounds to allow running anything with --setting=NULL."
+
+[15:12] <Geth> ¦ rakudo/js:
+
+[15:12] <Geth> ¦ rakudo/js: This reverts commit 1a79284ab2eee69a67521a338ae18850a62c662c.
+
+[15:12] <Geth> ¦ rakudo/js: review: https://github.com/rakudo/rakudo/commit/104059c2a6
+
+[15:12] <Geth> ¦ rakudo/js: cfb70b3035 | pmurias++ | src/core/Perl.pm
+
+[15:12] <Geth> ¦ rakudo/js: [js] Register js as a known VM in Perl.VMnames
+
+[15:12] <Geth> ¦ rakudo/js: review: https://github.com/rakudo/rakudo/commit/cfb70b3035
+
+[15:12] <Geth> ¦ rakudo/js: b0135ef4c6 | pmurias++ | 2 files
+
+[15:12] <Geth> ¦ rakudo/js: [js] Implement nqp::p6staticouter
+
+[15:12] <Geth> ¦ rakudo/js: review: https://github.com/rakudo/rakudo/commit/b0135ef4c6
+
+[15:12] <AlexDaniel> samcv: well, it attempts to be smart about \r\n \n \r, but it should be using \n strictly when we deal with external processes… I guess
+
+[15:13] <samcv> what do you mean it attempt to be smart
+
+[15:13] <samcv> is it an accident or someone just coded it that way
+
+[15:13] <samcv> and it shouldn't be like thatt
+
+[15:14] <AlexDaniel> “If :translate-nl is set to True (default value), OS-specific newline terminators (e.g. \r\n on Windows) will be automatically translated to \n.”
+
+[15:14] <AlexDaniel> so maybe all I need is just :!translate-nl ?
+
+[15:15] <pmurias> AlexDaniel: re nqp::can returning 1 if the object has a FALLBACK method that's not true?
+
+[15:15] <pmurias> s/?/./
+
+[15:16] <pmurias> AlexDaniel: it might be that way with objects that have a Perl6y metaclass but it's not the case for all
+
+[15:17] <AlexDaniel> m: class Magic { method FALLBACK (|c) { say ‘fallback’ } }; use nqp; say nqp::can(Magic.new, ‘blah’)
+
+[15:17] <camelia> rakudo-moar f097e5: OUTPUT: «1?»
+
+[15:17] <AlexDaniel> m: class Magic { method noFALLBACK (|c) { say ‘fallback’ } }; use nqp; say nqp::can(Magic.new, ‘blah’)
+
+[15:17] <camelia> rakudo-moar f097e5: OUTPUT: «0?»
+
+[15:17] <pmurias> nqp-m: class Foo {method FALLBACK() {}}; say nqp::can(Foo.new, 'missing');
+
+[15:17] <camelia> nqp-moarvm: OUTPUT: «Confused at line 2, near "say nqp::c"?   at gen/moar/stage2/NQPHLL.nqp:787  (/home/camelia/rakudo-m-inst-1/share/nqp/lib/NQPHLL.moarvm:panic)? from gen/moar/stage2/NQP.nqp:919  (/home/camelia/rakudo-m-inst-1/share/nqp/lib/nqp.moarvm:comp_unit)? from gen/mo…»
+
+[15:17] <pmurias> nqp-m: class Foo {method FALLBACK() {}}; say(nqp::can(Foo.new, 'missing'));
+
+[15:17] <camelia> nqp-moarvm: OUTPUT: «0?»
+
+[15:17] <pmurias> AlexDaniel: ^^
+
+[15:18] <AlexDaniel> pmurias: I guess you're right
+
+[15:18] <AlexDaniel> pmurias: would be nice if you clarified it here: https://github.com/perl6/nqp/blob/master/docs/ops.markdown#can
+
+[15:18] <moritz> \o
+
+[15:18] <yoleaux> 14:19Z <AlexDaniel> moritz: sometimes .split(“\n”) is actually the right way to do it https://github.com/perl6/doc/issues/1472
+
+[15:19] <AlexDaniel> pmurias: when I wrote that, it was in context of Grammar.parse
+
+[15:26] <AlexDaniel> samcv: I think it was done deliberately (so that it works with mixed newline styles or something?)
+
+[15:29] * AlexDaniel reboot
+
+[16:16] <Geth> ¦ rakudo/nom: 7cd153f43f | (Elizabeth Mattijsen)++ | 2 files
+
+[16:16] <Geth> ¦ rakudo/nom: Make forms of concatenations with Junctions work
+
+[16:16] <Geth> ¦ rakudo/nom:
+
+[16:16] <Geth> ¦ rakudo/nom: - interpolating a single Junction in a string now works
+
+[16:16] <Geth> ¦ rakudo/nom: - joining a list with a single Junction now works
+
+[16:16] <Geth> ¦ rakudo/nom: - Junction.Str and Str ~ Junction and Junction ~ Str now work
+
+[16:16] <Geth> ¦ rakudo/nom:
+
+[16:16] <Geth> ¦ rakudo/nom: Still missing is an infix:<~>(Junction,Junction) candidate to support
+
+[16:16] <Geth> ¦ rakudo/nom: cases of more than one Junction.
+
+[16:16] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/7cd153f43f
+
+[16:36] <samcv> AlexDaniel, peolple use just a \r as a newline?
+
+[16:38] <lizmat> on the old MacOS (pre X) they did
+
+[16:39] <AlexDaniel> “Many older Mac applications use "Mac-style” line endings. This means that each line in a text file ends with a carriage return character (character 13/0xD, often abbreviated CR).”
+
+[16:40] <Geth> ¦ rakudo/nom: 95a70ca38e | (Elizabeth Mattijsen)++ | src/core/Junction.pm
+
+[16:40] <Geth> ¦ rakudo/nom: Stub Junction ~ Junction
+
+[16:40] <Geth> ¦ rakudo/nom:
+
+[16:40] <Geth> ¦ rakudo/nom: Without it, trying to interpolate more than one Junction into a
+
+[16:40] <Geth> ¦ rakudo/nom: string (or more than one Junction in a List.join) infiniloops.
+
+[16:40] <Geth> ¦ rakudo/nom: Now at least it dies with an NYI error.
+
+[16:40] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/95a70ca38e
+
+[16:42] <lizmat> lobby getting too crowded and loud&
+
+[17:07] <lizmat> m: dd (1|2|3) + (4|5|6)
+
+[17:07] <camelia> rakudo-moar 95a70c: OUTPUT: «any(any(5, 6, 7), any(6, 7, 8), any(7, 8, 9))?»
+
+[17:07] <lizmat> m: dd any(5,6,7,8,9)  # sorta expected this as the result
+
+[17:07] <camelia> rakudo-moar 95a70c: OUTPUT: «any(5, 6, 7, 8, 9)?»
+
+[17:08] <lizmat> is there a reason not to do that ?
+
+[17:09] <Skarsnik> std: dd (1|2|3) + (4|5|6)
+
+[17:10] <lizmat> I guess we lost std: a while ago already
+
+[17:11] <Zoffix> m: dd (1|2|3) + (4^5^6)
+
+[17:11] <camelia> rakudo-moar 95a70c: OUTPUT: «any(one(5, 6, 7), one(6, 7, 8), one(7, 8, 9))?»
+
+[17:11] <lizmat> .ask TimToady is there a reason why (1|2|3) + (4|5|6) should give any(any(5, 6, 7), any(6, 7, 8), any(7, 8, 9)) instead of any(5, 6, 7, 8, 9) ?
+
+[17:11] <yoleaux> lizmat: I'll pass your message to TimToady.
+
+[17:11] <Zoffix> Kinda makes sense for `any` to follow the same thing as other junctions
+
+[17:12] <lizmat> Zoffix: I'm specifically asking for the case where the Junctions are of the same type
+
+[17:12] <Zoffix> Ah
+
+[17:45] <Geth> ¦ rakudo: smls++ created pull request #1139: Move and refactor the multi-dim candidates of postcircumfix { }
+
+[17:45] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/1139
+
+[18:31] <Geth> ¦ rakudo/nom: 0b19baf06a | (Elizabeth Mattijsen)++ | src/core/Junction.pm
+
+[18:31] <Geth> ¦ rakudo/nom: Make Junction ~ Junction work for same type Junctions
+
+[18:31] <Geth> ¦ rakudo/nom:
+
+[18:31] <Geth> ¦ rakudo/nom: - this now also allows interpolation of multiple same type junctions
+
+[18:31] <Geth> ¦ rakudo/nom: - different type junctions will still throw an NYI
+
+[18:31] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/0b19baf06a
+
+[18:32] <lizmat> for example:
+
+[18:32] <lizmat> $ 6 'my $a = any(<a b c>); my $b = any(<txt doc pl>); dd "$a.$b"'
+
+[18:32] <lizmat> any("a.txt", "a.doc", "a.pl", "b.txt", "b.doc", "b.pl", "c.txt", "c.doc", "c.pl")
+
+[18:36] <Zoffix> Neat
+
+[19:16] <AlexDaniel> hm
+
+[19:19] <Geth> ¦ rakudo/nom: 4af1d95cf9 | (Samantha McVey)++ | t/harness5
+
+[19:19] <Geth> ¦ rakudo/nom: Add --no-merge option to t/harness5 to pass through STDERR
+
+[19:19] <Geth> ¦ rakudo/nom:
+
+[19:19] <Geth> ¦ rakudo/nom: By using --no-merge you can have the harness pass through STDERR of the
+
+[19:19] <Geth> ¦ rakudo/nom: perl6 process (gets passed through to STDERR).
+
+[19:19] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/4af1d95cf9
+
+[19:19] <samcv> Zoffix, added --no-merge option to the harness
+
+[19:19] <samcv> works for getting the STDERR i needed, thanks for the pointer :)
+
+[19:20] <Zoffix> cool
+
+[19:20] <Zoffix> samcv++
+
+[19:44] <Geth> ¦ rakudo/nom: 84b40cf514 | (Samantha McVey)++ | t/harness5
+
+[19:44] <Geth> ¦ rakudo/nom: harness5: add help entry for --no-merge and possible verbosity levels
+
+[19:44] <Geth> ¦ rakudo/nom:
+
+[19:44] <Geth> ¦ rakudo/nom: Verbosity levels taken from:
+
+[19:44] <Geth> ¦ rakudo/nom: https://metacpan.org/pod/TAP::Harness#Class-Methods
+
+[19:44] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/84b40cf514
+
+[20:20] <Geth> ¦ rakudo/nom: 815faa35e0 | (Elizabeth Mattijsen)++ | src/core/Str.pm
+
+[20:20] <Geth> ¦ rakudo/nom: Make Any ~ Str / Str ~ Any about 25% faster
+
+[20:20] <Geth> ¦ rakudo/nom:
+
+[20:20] <Geth> ¦ rakudo/nom: - would be 50% faster if we could use Str instead of Stringy
+
+[20:20] <Geth> ¦ rakudo/nom: - but that breaks a spectest
+
+[20:20] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/815faa35e0
+
+[20:22] <Zoffix> \o
+
+[20:22] <aeruder> heya
+
+[20:22] <timotimo> o/
+
+[20:23] <Geth> ¦ rakudo: aeruder++ created pull request #1140: Supply.batch: handle no args and $elems == 1
+
+[20:23] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/1140
+
+[20:39] <travis-ci> Rakudo build failed. Samantha McVey 'Add --no-merge option to t/harness5 to pass through STDERR
+
+[20:39] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/268971925 https://github.com/rakudo/rakudo/compare/0b19baf06a8e...4af1d95cf90d
+
+[20:39] <buggable> [travis build above] ? All failures are due to timeout (0), missing build log (0), GitHub connectivity (0), or failed make test (1). Across all jobs, only t/04-nativecall/01-argless.t test file failed.
+
+[20:39] <Geth> ¦ nqp: smls++ created pull request #368: Make backtracking modifiers on alternations more S05-compliant
+
+[20:39] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/pull/368
+
+[21:21] <Skarsnik> hm fail on NC?
+
+[21:56] <travis-ci> Rakudo build failed. Elizabeth Mattijsen 'Make Any ~ Str / Str ~ Any about 25% faster
+
+[21:56] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/268984038 https://github.com/rakudo/rakudo/compare/84b40cf514b3...815faa35e092
+
+[21:56] <buggable> [travis build above] ? All failures are due to timeout (0), missing build log (0), GitHub connectivity (0), or failed make test (1). Across all jobs, only t/04-nativecall/16-rt125408.t test file failed.
+
+[22:10] <Skarsnik> can we make prove be verbose when one test fail? like to not having to run the tests file individually (and could be very useful for travis repport)
+
+[22:45] <Geth> ¦ roast: da4409e887 | (Samantha McVey)++ | S32-io/spurt.t
+
+[22:45] <Geth> ¦ roast: Don't redefine $fh variable in spurt.t
+
+[22:45] <Geth> ¦ roast: review: https://github.com/perl6/roast/commit/da4409e887

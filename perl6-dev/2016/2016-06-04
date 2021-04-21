@@ -1,0 +1,121 @@
+[09:00] <[Tux]> This is Rakudo version 2016.05-54-g48fe6ae built on MoarVM version 2016.05-18-g1339332
+
+[09:00] <[Tux]> test            19.601
+
+[09:00] <[Tux]> test-t          12.155
+
+[09:00] <[Tux]> csv-parser      33.951
+
+[09:03] <AlexDaniel> [Tux]: is there any graph to see how it was changing over time?
+
+[09:04] <[Tux]> yes: http://tux.nl/Talks/CSV6/speed4.html
+
+[12:05] <nine> cu.codeRefs[10] = "org.perl6.nqp.runtime.CodeRef@71870f2c"
+
+[12:05] <nine> this should be in cu.qbidToCodeRef[2] but is missing
+
+[12:05] <nine> It's the last slot in cu.codeRefs
+
+[12:09] <nine> From my limited understanding of nqp-j this could occur if a code ref is in code_ref_blocks, but not a method of the CompilationUnit's generated class.
+
+[12:10] <nine> If someone can confirm or deny this, that would be a great help already
+
+[12:11] <timotimo> is that similar to when the optimizer optimizes out a block by in-lining, but the block still has to be there otherwise the compler asplodes?
+
+[12:11] <nine> I do see similarities. No idea if they're relevant though.
+
+[12:11] <timotimo> OK
+
+[17:05] <nine> There are indications that he missing method may be a <unit-outer>
+
+[17:05] <nine> Which gives me a bit of a deja-vu. I remember digging around this when I first worked on EVAL
+
+[17:08] <nine> Or...maybe it's not the <unit-outer> but the code generated for calling <unit-outer>
+
+[17:14] <nine> The equivalent code for MoarVM works with %!mast_frames, which did need a part of the fix that we still lack on the JVM because things are very different there
+
+[17:19] <nine> Ok, I think, I made some progress. Seems like $*JCLASS is the closest equivalent to %!mast_frames for my purposes. So let's see if I can share it between the QAST::Compilers same as I do with %!mast_frames.
+
+[17:31] <nine> psch_: ^^^
+
+[18:04] <psch> nine: the bit about the missing entry in qbidToCodeRef sounds vaguely familiar, i think i stumbled across that too
+
+[18:05] <psch> nine: still, MAST_Frames conceptually don't mean anything to me.  i had thought $*JMETH would be the equivalent, because it appears in a similar spot in the QAST->{J,M}AST compilers, but that's obviously just a guess
+
+[18:06] <psch> nine: not having a $*JMETH (which should be equivalent to "the CodeRef doesn't belong to the class", afaiu) seems like it could be the cause, yes
+
+[18:07] <psch> mind, this all just half-knowledge vOv
+
+[18:07] <psch> the way i understand it, we generate a java class for a CompUnit
+
+[18:08] <psch> and the methods of that java class (more or less) correspond to lexical scopes inside the CompUnit
+
+[18:09] <psch> but this might all very well be only kinda-sorta true, or even almost completely false - compilers are kinda hard :)
+
+[18:10] <nine> Yes. And the root of our problem is that during compilation of the EVAL's comp unit a $*JCLASS is created and methods added for those lexical scopes but the result is not used anywhere. Instead we get a new $*JCLASS for the outer comp unit (the module we precompile) which lacks those methods.
+
+[18:11] <nine> So we have the coderef thingies and everything, but not the methods on the $*JCLASS
+
+[18:11] <nine> Same happened on MoarVM. There those executable code blocks are stored in a %!mast_frames hash instead of a class with methods
+
+[18:15] <psch> right.  and simply carrying the right JClass instance around is probably quite a bit harder than it would seem from here i suppose
+
+[18:15] <psch> ...although that's kind of what the moar fix does, isn't it
+
+[18:16] <nine> Yes, I just pass the nqp::hash through %adverbs to the MASTCompiler's constructor instead of having the ctor create it
+
+[18:16] <psch> but the jvm Compiler isn't instantiated
+
+[18:17] <psch> it's just class methods, which is why we rely on dynvars so much
+
+[18:17] <psch> (which, i think, btw, might play a noteable role in performance)
+
+[18:17] <nine> Well method jast creates the JAST::Class and takes the *%adverbs parameter. That's where we could hook into
+
+[18:18] <psch> yeah, that's where i stuffed my attempt with $*JMETH
+
+[18:19] <nine> So you were very close already :)
+
+[18:19] <nine> Ok, I'm AFK now
+
+[18:19] <psch> no idea if i really was close...
+
+[18:20] <psch> everything that compiled failed at least a few nqp tests, and mostly didn't compile rakudo...
+
+[18:20] * psch also out again
+
+[19:49] <dalek> roast: 500d994 | usev6++ | S32-array/delete.t:
+
+[19:49] <dalek> roast: Fudge test for rakudo-j, RT #128320
+
+[19:49] <dalek> roast: review: https://github.com/perl6/roast/commit/500d9947aa
+
+[20:06] <bartolin> I wonder if this line sneaked into roast accidentially: https://github.com/perl6/roast/blob/master/S09-subscript/multidim-assignment.t#L8 (commit c49966e4)
+
+[20:08] <bartolin> on the other hand the line caused the test file to explode on rakudo-j after Rakudo commit 069b789af5 -- so it's probably worth to make it a separate test
+
+[20:10] <bartolin> m: my @a; @a[0 ; 1] = "foo"; say @a # RuntimeException on r-j (No such attribute '$!default' for this object)
+
+[20:10] <camelia> rakudo-moar 48fe6a: OUTPUT«[[(Any) foo]]␤»
+
+[21:43] <MasterDuke_> jnthn: in MoarVM/src/6model/reprs/P6opaque.h, is there a reason MVM_p6opaque_real_data has 'MVMThreadContext *tc' as the first parameter, but never uses it?
+
+[21:44] <jnthn> MasterDuke_: We pretty much always pass tc along to things.
+
+[21:45] <jnthn> Nearly every function takes it. Quite often things that start out not needing it can come to do so in the future, and the predictability is rather nice when implementing stuff.
+
+[21:45] <MasterDuke_> ahh, so no real benefit to removing it?
+
+[21:45] <jnthn> Not really.
+
+[21:46] <jnthn> I mean, it's small, so it's probably going to get inlined by the compiler anyway, at which point the unused arg is free.
+
+[21:46] <jnthn> And in the JIT we emit the machine code equivalent inlined straight into the JITted output.
+
+[21:48] <MasterDuke_> cool. that's kind of what i assumed, but wanted to confirm
+
+[21:54] <dalek> rakudo/nom: 986891f | lizmat++ | src/core/Int.pm:
+
+[21:54] <dalek> rakudo/nom: Quick fix for RT #128318
+
+[21:54] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/986891f7ea

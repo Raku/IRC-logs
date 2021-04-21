@@ -1,0 +1,709 @@
+[00:01] *** anatofuz joined
+[00:08] *** anatofuz left
+[00:08] *** anatofuz joined
+[00:09] *** anatofuz left
+[00:10] *** anatofuz joined
+[00:12] <vrurg> jnthn: BTW, I'm almost done fixing $a = 1; $a ,= 2 where current implementation causes the LHS scalar to be assigned with the newly created list causing a recursive data structure. Like:
+
+[00:12] <vrurg> m: my $a = 1; $a ,= 2; say $a.perl
+
+[00:12] <evalable6> vrurg, rakudo-moar ef2ee7912: OUTPUT: «(my \List_93926578496192 = $(List_93926578496192, 2))␤»
+
+[00:13] <AlexDaniel`> japhb: there's already a matrix client in perl6
+
+[00:13] *** leont left
+[00:13] <vrurg> There're two solutions: either decont $a or clone the container when it's passed into an infix op. Can't choose which way is better.
+
+[00:15] <vrurg> Container cloning is a bit slower way but it wouldn't break operators whose behavior might depend on whether they receive a value or a container.
+
+[00:16] <AlexDaniel`> japhb: also there are 20+ people in Perl 6 / Raku community on matrix.org
+
+[00:17] <AlexDaniel`> japhb: and I'm using matrix right now to talk to you via their freenode bridge… :)
+
+[00:18] <timotimo> how many of them are on matrix but not on the bridge?
+
+[00:18] <vrurg> AlexDaniel: regarding the release blockers: two of them depend on #3174.
+
+[00:19] <AlexDaniel`> timotimo: I was only sending invites to those lurking on #perl6 channel
+
+[00:19] <AlexDaniel`> via the bridge
+
+[00:19] <timotimo> OK
+
+[00:19] <AlexDaniel`> and if your server is federating with matrix.org (I guess most servers do), then you can join #perl6 via the bridge
+
+[00:20] <timotimo> i had a matrix client but i only used it once and forgot its name so now i can't go on matrix any more
+
+[00:21] <AlexDaniel`> here: https://riot.im/app/#/room/#freenode_#perl6-dev:matrix.org
+
+[00:21] <AlexDaniel`> though it probably won't let you in unless you log in? I'm not sure
+
+[00:21] <AlexDaniel`> yeah, seems so
+
+[00:22] <timotimo> riot refused to work for me last time i tried
+
+[00:23] <AlexDaniel`> surprisingly this is publicly visible: https://riot.im/develop/#/group/+perl6:matrix.org
+
+[00:23] <vrurg> timotimo: maybe you'd have an opinion on my question above? I'm balancing 50/50 toward two different solutions and can't make the final choice.
+
+[00:25] <timotimo> oof
+
+[00:31] <vrurg> ok
+
+[00:34] <timotimo> i find it difficult to decide
+
+[00:34] <timotimo> either you end up with unexpectedly no container, or you end up with unexpectedly a container
+
+[00:34] <timotimo> in different situations
+
+[00:34] <timotimo> ... i think
+
+[00:42] <vrurg> timotimo: there will be no unexpected container. It would clone Scalar only if finds a Scalar. The only possible problem is that it'll be not the container passed into the op. But that'd be easier to explain then loss of container.
+
+[00:43] <vrurg> Basically, I tend to use cloning as more clean and predictable path. The thing which worries me is that it adds a bit of CPU cycles to metaop_assign.
+
+[00:44] <vrurg> I can't nqp::clone(a.VAR) because it fails on nativerefs. So, I need to nqp::if(nqp::istype(a.VAR, Scalar), clone(a.VAR), a)
+
+[00:45] <timotimo> at least istype is something spesh knows how to deal with, generally
+
+[00:48] <vrurg> spectesting... Will submit with cloning if it works.
+
+[00:50] <jnthn> Hm, this is one of the cases where the most obvious behavior is the one you're trying to eliminate. :)
+
+[00:51] <jnthn> (I agree the current behavior probably isn't terribly useful.)
+
+[00:52] <jnthn> m: my @a = 1..5; @a ,= 6; dd @a;
+
+[00:52] <evalable6> jnthn, rakudo-moar ef2ee7912: OUTPUT: «Array @a = ((my @Array_93885994670744) = [@Array_93885994670744, 6])␤»
+
+[00:52] <vrurg> jnthn: R#1205 Junction falls into deep recursion 
+
+[00:52] <synopsebot> R#1205 [open]: https://github.com/rakudo/rakudo/issues/1205 [junctions] Compound junction-assignement operators cause a hang
+
+[00:54] <jnthn> I suspect the most sensible behavior would be to turn `a foo= b` into `my \tmp = a; a = a<> foo b;`
+
+[00:54] <vrurg> jnthn: This behavior isn't changing with my fix: ((my @Array_140471863286768) = [@Array_140471863286768, 4])
+
+[00:54] <jnthn> Though that only deals with the scalar case
+
+[00:55] <jnthn> vrurg: Yeah, I don't know what we can really do with the non-Scalar case. I mean, consistency argues for not changing anything, so anything we do here is going to introduce an inconsistency in the name of trying to be more useful.
+
+[00:56] <vrurg> jnthn: I'd rather avoid deconting. If someone decides to make an op behaving differently depending on containerization of its first arg then it won't do what's expected  
+
+[00:56] <jnthn> vrurg: Well, that's the thing: the definition of `,` is to retain the container of what it gets
+
+[00:56] <vrurg> jnthn: that's why I limited change to Scalars only.
+
+[00:57] *** benchable6 left
+[00:57] *** benchable6 joined
+[00:58] <jnthn> Thing is
+
+[00:58] <jnthn> m: my $a = 1; $a = $a, 2; dd $a
+
+[00:58] <evalable6> jnthn, rakudo-moar ef2ee7912: OUTPUT: «WARNINGS for /tmp/l2PgVdcHCK:␤Useless use of constant integer 2 in sink context (lines 1, 1)␤Int $a = 1␤»
+
+[00:58] <jnthn> gah :)
+
+[00:58] <jnthn> m: my $a = 1; $a = ($a, 2); dd $a
+
+[00:58] <evalable6> jnthn, rakudo-moar ef2ee7912: OUTPUT: «List $a = (my \List_94748131518656 = $(List_94748131518656, 2))␤»
+
+[00:59] <vrurg> jnthn: But this is explicit and controllable by a user. Whereas ,= is implicit and causes confusion.
+
+[00:59] <jnthn> We'd be breaking the "you can replace `a = a foo b` with `a foo= b`
+
+[01:00] <jnthn> Uh, I'm pretty sure the language user can control when they use the assign meta-op :P
+
+[01:00] <timotimo> there's kind of already the thing that it calls the zero-arg meaning if the variable is undefined at that point
+
+[01:00] <jnthn> I'm yet to be convinced the cure is worse than the disease.
+
+[01:01] <jnthn> timotimo: True.
+
+[01:01] <jnthn> m: my $a; $a ,= 2; dd $a
+
+[01:01] <evalable6> jnthn, rakudo-moar ef2ee7912: OUTPUT: «List $a = $((), 2)␤»
+
+[01:01] <jnthn> hah :)
+
+[01:01] <timotimo> now *that*'s funny
+
+[01:02] <vrurg> Almost makes sense. Undef makes it an empty list.
+
+[01:02] <jnthn> Yes, no argument that it makes sense, though the current behavior also makes sense in the same kind of way.
+
+[01:03] <vrurg> What is confusing is that it behaves totally differently to when its defined.
+
+[01:03] <jnthn> I guess part of this is that just because you *can* use the assign meta-op on most things doesn't mean it will always have a useful meaning.
+
+[01:04] <jnthn> m: my $a; $a Z= 42
+
+[01:04] <evalable6> jnthn, rakudo-moar ef2ee7912: OUTPUT: «»
+
+[01:04] <jnthn> m: my $a; $a [==]= 42
+
+[01:04] <evalable6> jnthn, rakudo-moar ef2ee7912: OUTPUT: «(exit code 1) 04===SORRY!04=== Error while compiling /tmp/RxgHUz3FXI␤Cannot …»
+
+[01:04] <evalable6> jnthn, Full output: https://gist.github.com/ec781078d9aa20da4c6c7fc26cb1e0af
+
+[01:04] <jnthn> There are some constraints, e.g. "Cannot make assignment out of == because chaining operators are too diffy"
+
+[01:05] <jnthn> I wonder if a better solution would be to not offer `,=`, `&=`, and friends.
+
+[01:05] <timotimo> "too footgunny"
+
+[01:05] <timotimo> "too funny. funny is short for footgunny"
+
+[01:06] <jnthn> I'm surprised , and the junction formers aren't considered diffy, tbh.
+
+[01:06] <jnthn> They certainly return a different type
+
+[01:06] <jnthn> I think I'd prefer to explore in this direction than to try and "fix" the behavior, given I don't actaully see the results of those changes being useful
+
+[01:08] <vrurg> What actually makes sense is: my $j = 1 & 2; $j &= 3;
+
+[01:08] *** benchable6 left
+[01:08] <jnthn> Hmm, maybe but it's still a bit surprising in so far as I suspect it will be expected to give all(1,2,3) but it'll really give all(all(1,2),3)
+
+[01:08] *** benchable6 joined
+[01:09] <jnthn> I guess that's not actually so bad
+
+[01:09] <jnthn> In so far as it doesn't impact the eventual boolification
+
+[01:11] <vrurg> Ok, my task is probably even harder now than before I asked. ;) But it makes more sense now. 
+
+[01:11] <vrurg> Thanks to all!
+
+[01:11] <jnthn> Well, whatever we do, I agree the current user experience is bad :)
+
+[01:11] <jnthn> I can just argue the thing a bunch of different ways :)
+
+[01:12] <jnthn> From a performance design perspective, I really don't like the "extra container" approach though
+
+[01:12] *** anatofuz left
+[01:12] <vrurg> jnthn: I'd better ask to argue to R#3174 when there is a bit of time. Or say "it's ok". ;)
+
+[01:12] <synopsebot> R#3174 [open]: https://github.com/rakudo/rakudo/pull/3174 [data types] Provide means of preserving the decontainerization of values on Hash -> Map coercion
+
+[01:13] *** anatofuz joined
+[01:13] <jnthn> Just because I'm beating my head up implementing EA doesn't mean I want `$a += $b` to produce an extra temporary container for me eliminate. :)
+
+[01:13] *** anatofuz left
+[01:13] *** anatofuz joined
+[01:13] <vrurg> jnthn: The performance matter was my primary reason too. Good I asked because the whole direction I took was wrong.
+
+[01:14] <jnthn> I guess decont makes the junction case work
+
+[01:14] <jnthn> Anyway, I should probably have gone to bed an hour ago... :)
+
+[01:15] <vrurg> Wow... I always forget about your location.
+
+[01:15] * vrurg wonders when some people sleep at all?
+
+[01:16] <jnthn> I slept most of this morning, so... :)
+
+[01:16] <jnthn> Anyways, 'night o/
+
+[01:22] <vrurg> jnthn: o/
+
+[02:19] *** anatofuz left
+[02:20] *** anatofuz joined
+[03:00] <releasable6> Next release in ≈6 days and ≈15 hours. R6 is down. At least 9 blockers. Please log your changes in the ChangeLog: https://github.com/rakudo/rakudo/wiki/ChangeLog-Draft
+
+[03:09] *** anatofuz left
+[03:10] *** anatofuz joined
+[03:11] <vrurg> .tell jnthn junction operators cannot be diffy because it breaks reduction where they're totally ok. Perhaps deconting junction values is the only good solution which might also have good impact on performance.
+
+[03:11] <tellable6> vrurg, I'll pass your message to jnthn
+
+[03:14] *** anatofuz left
+[03:15] *** anatofuz joined
+[04:06] *** anatofuz left
+[04:08] *** anatofuz joined
+[04:25] *** anatofuz left
+[04:27] *** anatofuz joined
+[04:42] *** anatofuz left
+[04:48] *** tbrowder left
+[04:53] *** anatofuz joined
+[04:54] *** tbrowder joined
+[05:17] *** anatofuz left
+[05:18] *** anatofuz joined
+[05:23] *** anatofuz left
+[05:30] *** anatofuz joined
+[06:43] *** anatofuz left
+[06:43] *** anatofuz joined
+[06:46] *** anatofuz left
+[06:46] *** anatofuz joined
+[07:08] *** anatofuz left
+[07:09] *** anatofuz joined
+[07:12] *** anatofuz left
+[07:13] *** anatofuz joined
+[07:51] *** anatofuz left
+[07:52] *** anatofuz joined
+[07:57] *** anatofuz left
+[08:06] *** anatofuz joined
+[08:35] *** leont joined
+[08:45] *** anatofuz left
+[08:46] *** anatofuz joined
+[08:47] <[Tux]> Rakudo version 2019.07.1-260-g9dd67cb37 - MoarVM version 2019.07.1-201-ge4a756c6a
+
+[08:47] <[Tux]> csv-test-xs-20      0.422 -  0.424
+
+[08:47] <[Tux]> csv-ip5xs           0.692 -  0.698
+
+[08:47] <[Tux]> test-t --race       0.819 -  0.896
+
+[08:47] <[Tux]> test-t              1.785 -  1.796
+
+[08:47] <[Tux]> csv-ip5xs-20        5.021 -  5.151
+
+[08:47] <[Tux]> test                7.268 -  7.462
+
+[08:47] <[Tux]> test-t-20 --race    9.312 - 10.143
+
+[08:47] <[Tux]> csv-parser         22.341 - 24.223
+
+[08:47] <[Tux]> test-t-20          29.961 - 30.373
+
+[08:50] *** anatofuz left
+[08:58] *** anatofuz joined
+[10:16] *** anatofuz left
+[10:16] *** anatofuz joined
+[10:21] *** anatofuz left
+[10:54] *** anatofuz joined
+[11:14] *** anatofuz left
+[11:14] *** anatofuz joined
+[12:05] *** FROGGS joined
+[12:47] *** epony left
+[12:52] *** anatofuz left
+[12:53] *** anatofuz joined
+[12:57] *** anatofuz left
+[12:59] *** lucasb joined
+[13:25] *** anatofuz joined
+[13:54] *** leont left
+[13:58] *** anatofuz left
+[14:36] *** FROGGS left
+[14:54] *** dogbert17 left
+[15:06] *** epony joined
+[15:32] *** dogbert17 joined
+[15:55] *** anatofuz joined
+[16:16] *** gdonald left
+[16:18] <Geth> ¦ problem-solving: JJ assigned to AlexDaniel Issue Ecosystem stability issues https://github.com/perl6/problem-solving/issues/105
+
+[16:29] *** anatofuz left
+[16:44] *** Ven`` joined
+[17:01] *** anatofuz joined
+[17:34] *** Ven`` left
+[17:35] *** Ven`` joined
+[17:35] *** anatofuz left
+[17:35] *** Ven`` left
+[17:38] <Geth> ¦ rakudo: vrurg++ created pull request #3186: De-containerize Junction values.
+
+[17:38] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/3186
+
+[18:23] <Geth> ¦ rakudo/newer-sprintf: 40c4cc5225 | (Elizabeth Mattijsen)++ | src/core.e/Rakudo/Internals/Sprintf.pm6
+
+[18:23] <Geth> ¦ rakudo/newer-sprintf: Add complete support for *.* for %b/%x
+
+[18:23] <Geth> ¦ rakudo/newer-sprintf: review: https://github.com/rakudo/rakudo/commit/40c4cc5225
+
+[18:23] <Geth> ¦ roast/new-sprintf: 79e0b68058 | (Elizabeth Mattijsen)++ | S32-str/sprintf-b.t
+
+[18:23] <Geth> ¦ roast/new-sprintf: Add additional "*" and "*.*" tests to %b
+
+[18:23] <Geth> ¦ roast/new-sprintf: review: https://github.com/perl6/roast/commit/79e0b68058
+
+[18:24] <Geth> ¦ rakudo/master: 4 commits pushed by (Vadim Belman)++, (Elizabeth Mattijsen)++
+
+[18:24] <Geth> ¦ rakudo/master: d708535430 | Make Junction ops diffy
+
+[18:24] <Geth> ¦ rakudo/master: a7864b8568 | Revert making junction ops diffy
+
+[18:24] <Geth> ¦ rakudo/master: f3234baa48 | De-containerize junction values
+
+[18:24] <Geth> ¦ rakudo/master: 827aa6eebc | Merge pull request #3186 from vrurg/rakudo_1205
+
+[18:24] <Geth> ¦ rakudo/master: review: https://github.com/rakudo/rakudo/compare/ef2ee7912669...827aa6eebcec
+
+[18:26] <vrurg> lizmat: it was a little bit preliminary. ;) I'm now working on the actual freeze of gist/perl methods
+
+[18:26] <lizmat> sorry... was glad you caught it... :)
+
+[18:28] <vrurg> lizmat: it wasn't me. ;) But the possible freeze is still there because one can $a = 1; $a = ($a, 1); say ~$a – though it's now only about List.
+
+[18:31] <vrurg> lizmat: I'd like to ask your opinion on R#3174.
+
+[18:31] <synopsebot> R#3174 [open]: https://github.com/rakudo/rakudo/pull/3174 [data types] Provide means of preserving the decontainerization of values on Hash -> Map coercion
+
+[18:38] <lizmat> vrurg: /me commented
+
+[18:38] <vrurg> lizmat: thanks!
+
+[18:45] <AlexDaniel> jnthn: so, are you ok with #89 not providing any specific extensions?
+
+[18:45] <AlexDaniel> I was busy with some stuff so I wasn't able to follow what happened there
+
+[18:46] <AlexDaniel> but basically, some people said that the PR shouldn't have extensions specified (including samcv), yet I vaguely remember jnthn saying that extensions should be decided as part of this PR
+
+[18:46] <AlexDaniel> so which one is it?
+
+[18:47] <vrurg> lizmat: but taking into account that we need to get a fix before the coming release, what would you say about the approach I took? It was generally agreed that deconting hash values on Map coercion is the way to go.
+
+[18:48] <AlexDaniel> releasable6: status
+
+[18:48] <releasable6> AlexDaniel, Next release in ≈6 days and ≈0 hours. R6 is down. At least 9 blockers. Unknown changelog format
+
+[18:48] <releasable6> AlexDaniel, Details: https://gist.github.com/ab53b7adb3746cf3c78e655b77bfa365
+
+[18:48] <AlexDaniel> I'm not sure if this is realistic…
+
+[18:49] <lizmat> feels icky, as that would imply that a Map can have containers sometimes, and other times not
+
+[18:49] <lizmat> code as "my %m is Map = a => (my $ = 42)" would have containers
+
+[18:50] <lizmat> whereas "my %m = { a => (my $ = 42) }.Map" would not
+
+[18:50] <lizmat> eh... make that :=  :-)
+
+[18:53] <vrurg> lizmat: Unfortunately, it has to be this way because we have code relying on |%h.Map for argument passing. :(
+
+[18:54] <lizmat> code in the core, or in the ecosystem ?
+
+[18:54] <vrurg> And same time Map is currently unfified with List in their behaviors. So, considering that Map -> Hash conterizes values, having Hash -> Map doing vice versa is an acceptable compromize.
+
+[18:54] <vrurg> lizmat: in the ecosystem. 
+
+[18:55] <tobs> I had code like that (in the ecosystem) but vrurg++ PRd a fix after an earlier Blin run, IIRC
+
+[18:56] <vrurg> Right, I submitted to PRs on this to two modules.
+
+[18:58] <vrurg> So, probably ecosystem is currently clean of this problem. But people tend to use that construct, especially for passing on arrays because plain |%h passes a conteinarized array which gets assigned as a single element. R#3168 is about this problem.
+
+[18:58] <synopsebot> R#3168 [open]: https://github.com/rakudo/rakudo/issues/3168 [BLOCKER][regression] Unpacking a |%h.Map has a different behaviour from 2019.07.1
+
+[18:58] <lizmat> vrurg: added my review and requested changes  :-)
+
+[19:03] <vrurg> lizmat++ thanks! Makes sense.
+
+[19:04] *** Kaiepi left
+[19:04] *** Kaypie joined
+[19:08] <Geth> ¦ roast/new-sprintf: 2932a5648a | (Elizabeth Mattijsen)++ | S32-str/sprintf-x.t
+
+[19:08] <Geth> ¦ roast/new-sprintf: Add additional "*" and "*.*" tests to %x
+
+[19:08] <Geth> ¦ roast/new-sprintf: review: https://github.com/perl6/roast/commit/2932a5648a
+
+[19:14] <MasterDuke> anyone else getting errors in t/spec/S32-temporal/DateTime.t ? `Second out of range. Is: 60, should be in 0..^60; a leap second can occur only at 23:59  in block  at t/spec/S32-temporal/DateTime.t line 804  in block <unit> at t/spec/S32-temporal/DateTime.t line 706`
+
+[19:15] <MasterDuke> hm, works fine if i disable jit
+
+[19:16] <MasterDuke> even if i just disable the expr jit
+
+[19:17] <MasterDuke> .tell brrt some expr jit problem https://colabti.org/irclogger/irclogger_log/perl6-dev?date=2019-09-15#l238
+
+[19:17] <tellable6> MasterDuke, I'll pass your message to brrt
+
+[19:18] <vrurg> MasterDuke: anything special needed to see the problem? Because I'm currently running spectests tens of times each day, no problem about datetime
+
+[19:18] <MasterDuke> vrurg: nope. but are you at HEAD on moarvm?
+
+[19:18] *** Ven`` joined
+[19:19] <vrurg> MasterDuke: last updated to 3f97d73d4c7 couple of days ago.
+
+[19:20] <AlexDaniel> .tell jnthn please let me know https://colabti.org/irclogger/irclogger_log/perl6-dev?date=2019-09-15#l210
+
+[19:20] <MasterDuke> then i suspect it's the recent merge brrt did of https://github.com/MoarVM/MoarVM/pull/1176
+
+[19:20] <tellable6> AlexDaniel, I'll pass your message to jnthn
+
+[19:28] <Geth> ¦ rakudo: vrurg++ created pull request #3187: Protect List from freezing on self-recursion
+
+[19:28] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/3187
+
+[19:30] <Geth> ¦ rakudo: edbcd7596a | (Vadim Belman)++ | src/core.c/List.pm6
+
+[19:30] <Geth> ¦ rakudo: Protect List from freezing on self-recursion
+
+[19:30] <Geth> ¦ rakudo: 
+
+[19:30] <Geth> ¦ rakudo: If the first element of a list is a Scalar containing the list itself
+
+[19:30] <Geth> ¦ rakudo: then method join hangs due to a deep recursion.
+
+[19:30] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/edbcd7596a
+
+[19:30] <Geth> ¦ rakudo: 7dede2d374 | (Vadim Belman)++ (committed using GitHub Web editor) | src/core.c/List.pm6
+
+[19:30] <Geth> ¦ rakudo: Merge pull request #3187 from vrurg/rakudo_1205
+
+[19:30] <Geth> ¦ rakudo: 
+
+[19:30] <Geth> ¦ rakudo: Protect List from freezing on self-recursion
+
+[19:30] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/7dede2d374
+
+[19:33] <Geth> ¦ roast/master: 4 commits pushed by (Vadim Belman)++
+
+[19:33] <Geth> ¦ roast/master: bc5cd5bfba | Add test for metassign not re-assigning its lhs Scalar
+
+[19:33] <Geth> ¦ roast/master: a5d47f4c63 | Test for freezing Junction
+
+[19:33] <Geth> ¦ roast/master: 5c858ed8e1 | Move test from metaops into junctions
+
+[19:33] <Geth> ¦ roast/master: f08aff1c86 | Merge pull request #577 from vrurg/rakudo_1205
+
+[19:33] <Geth> ¦ roast/master: review: https://github.com/perl6/roast/compare/3a4a84dd0d88...f08aff1c8695
+
+[19:40] <Geth> ¦ rakudo/revert-3187-rakudo_1205: bfe4613733 | (Vadim Belman)++ (committed using GitHub Web editor) | src/core.c/List.pm6
+
+[19:40] <Geth> ¦ rakudo/revert-3187-rakudo_1205: Revert "Protect List from freezing on self-recursion"
+
+[19:40] <Geth> ¦ rakudo/revert-3187-rakudo_1205: review: https://github.com/rakudo/rakudo/commit/bfe4613733
+
+[19:41] *** brrt joined
+[19:41] <Geth> ¦ rakudo: vrurg++ created pull request #3188: Revert "Protect List from freezing on self-recursion"
+
+[19:41] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/3188
+
+[19:42] <Geth> ¦ rakudo: bfe4613733 | (Vadim Belman)++ (committed using GitHub Web editor) | src/core.c/List.pm6
+
+[19:42] <Geth> ¦ rakudo: Revert "Protect List from freezing on self-recursion"
+
+[19:42] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/bfe4613733
+
+[19:42] <Geth> ¦ rakudo: 2bc3ac4b6b | (Vadim Belman)++ (committed using GitHub Web editor) | src/core.c/List.pm6
+
+[19:42] <Geth> ¦ rakudo: Merge pull request #3188 from rakudo/revert-3187-rakudo_1205
+
+[19:42] <Geth> ¦ rakudo: 
+
+[19:42] <Geth> ¦ rakudo: Revert "Protect List from freezing on self-recursion"
+
+[19:42] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/2bc3ac4b6b
+
+[19:50] * lizmat gets confused
+
+[19:52] <vrurg> lizmat: that's how github reverses a merged PR.
+
+[19:54] <lizmat> would have been easier to just revert the commit  :-)_
+
+[19:54] *** leont joined
+[19:54] <vrurg> I didn't know how it happens, thought they'd do just that.
+
+[19:58] <vrurg> I think there is no fast solution to protect join from freezing on recursion. Either way, I end up re-implementing gistseen.
+
+[19:59] *** Kaypie left
+[19:59] *** Kaypie joined
+[20:02] <lizmat> perhaps we need an outer "join" method that would initialize a dynamic variable $*JOIN-DEPTH, and an "inner" join logic that would increment and check that and throw when it gets too deep ?
+
+[20:02] <lizmat> I mean, if you're using self-referential structures, and you want to .join them, there's probably something wrong ?
+
+[20:04] <vrurg> m: my %h; %h<h> := %h; say ~%h
+
+[20:04] <evalable6> vrurg, rakudo-moar 2bc3ac4b6: OUTPUT: «(signal SIGHUP) «timed out after 10 seconds»»
+
+[20:04] <vrurg> Aha, same problem...
+
+[20:04] <lizmat> yes, I know it's easy to create
+
+[20:04] <vrurg> m: my %h; %h<h> := %h; say %h
+
+[20:04] <evalable6> vrurg, rakudo-moar 2bc3ac4b6: OUTPUT: «(\Hash_94339087695856 = {h => Hash_94339087695856})␤»
+
+[20:05] <vrurg> What I meant is that perhaps Str must follow .perl/.gist on this?
+
+[20:05] <vrurg> I.e. print something like the above output instead of freezing?
+
+[20:05] <brrt> does anybody know how to run prove for a single spectest?
+
+[20:06] <lizmat> make t/spec/foo/bar.t
+
+[20:06] <brrt> thank you lizmat
+
+[20:07] <lizmat> vrurg: perhaps we should only do the recursion check for .perl (aka perlseen)
+
+[20:08] <lizmat> in that case, one knows that it is intended to be looked at with a special eye
+
+[20:08] <lizmat> I'm not too sure we need the overhead in .gist or .Str
+
+[20:08] <vrurg> And have .Str (and .join for Lists) freezing?
+
+[20:10] <vrurg> I could try dying on detected recursion. Should be faster because this could be done with just nqp::where and a dynamic symbol.
+
+[20:13] <lizmat> I was just checking how Perl 5 handles that...  
+
+[20:13] <lizmat> it doesn't, as you cannot have this situation
+
+[20:13] <lizmat> you can only put a reference to an array in an array
+
+[20:14] <lizmat> if you put the array into itself, it will flatten the "old" version into itself
+
+[20:14] <lizmat> $ 5 'my @a = "baz"; @a = ("foo",@a,"bar"); say join(",",@a)'
+
+[20:14] <lizmat> foo,baz,bar
+
+[20:14] <lizmat> $ 5 'my @a = "baz"; @a = ("foo",\@a,"bar"); say join(",",@a)'
+
+[20:14] <lizmat> foo,ARRAY(0x7fb6a201d448),bar
+
+[20:24] <vrurg> lizmat: but we unwind nested structures. So, can't compare to 5.
+
+[20:25] <lizmat> indeed
+
+[20:47] *** Kaypie left
+[20:47] *** Kaypie joined
+[20:52] *** anatofuz joined
+[20:53] *** brrt left
+[20:58] *** anatofuz left
+[21:01] *** Ven`` left
+[21:34] *** anatofuz joined
+[21:46] <jnthn> AlexDaniel: I feel extensions should be decided in the rename PR; there's already been a discussion issue on the topic, and I don't care to have to read/follow another such discussion; I don't know what's to gain by delaying it.
+
+[21:46] <tellable6> 2019-09-15T03:11:36Z #perl6-dev <vrurg> jnthn junction operators cannot be diffy because it breaks reduction where they're totally ok. Perhaps deconting junction values is the only good solution which might also have good impact on performance.
+
+[21:46] <tellable6> 2019-09-15T19:20:26Z #perl6-dev <AlexDaniel> jnthn please let me know https://colabti.org/irclogger/irclogger_log/perl6-dev?date=2019-09-15#l210
+
+[21:47] <AlexDaniel> jnthn: alright, I see
+
+[21:50] <MasterDuke> AlexDaniel: mind doing an nqp+rakudo bump?
+
+[21:51] <Geth> ¦ nqp: a46eb14278 | (Aleks-Daniel Jakimenko-Aleksejev)++ | tools/templates/MOAR_REVISION
+
+[21:51] <Geth> ¦ nqp: [MoarVM Bump] Brings 31 commits
+
+[21:51] <Geth> ¦ nqp: 
+
+[21:51] <Geth> ¦ nqp: MoarVM bump brought: https://github.com/MoarVM/MoarVM/compare/2019.07.1-180-gcf3b545e5...2019.07.1-211-g2ac137c3d
+
+[21:51] <Geth> ¦ nqp: 2ac137c3d [JIT] Use the new deopt index for synthetic guards
+
+[21:51] <Geth> ¦ nqp: 07983e4cb Fix possible access to fromspace in MVM_string_flip
+
+[21:51] <Geth> ¦ nqp: 9138c6998 Fix possible access to fromspace in MVM_frame_move_to_heap
+
+[21:51] <Geth> ¦ nqp: a4a599e35 Fix possible access to fromspace in MVM_code_location
+
+[21:51] <Geth> ¦ nqp: <…commit message has 27 more lines…>
+
+[21:51] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/a46eb14278
+
+[21:51] <Geth> ¦ rakudo: daaf0277e4 | (Aleks-Daniel Jakimenko-Aleksejev)++ | tools/templates/NQP_REVISION
+
+[21:51] <Geth> ¦ rakudo: [NQP Bump] Brings 4 commits
+
+[21:51] <Geth> ¦ rakudo: 
+
+[21:51] <Geth> ¦ rakudo: NQP bump brought: https://github.com/perl6/nqp/compare/2019.07.1-94-g18d11a94e...2019.07.1-98-ga46eb1427
+
+[21:51] <Geth> ¦ rakudo: a46eb1427 [MoarVM Bump] Brings 31 commits
+
+[21:51] <Geth> ¦ rakudo: 00eaa35e8 [js] Make --libpath resolve relative path with the compile time cwd
+
+[21:51] <Geth> ¦ rakudo: 1a6d4e466 [js] Remove a no longer needed hack
+
+[21:52] <Geth> ¦ rakudo: a759b02f1 [js] Instead of turning :: into a - use directories
+
+[21:52] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/daaf0277e4
+
+[21:52] <jnthn> AlexDaniel: I think I also stated that position in the issue. Also worth checking what ugexe exactly said, in that I remember he said something about the extensions issue affected how he'd vote on the rename PR
+
+[21:52] <AlexDaniel> jnthn: he just said that he doesn't want a single extension for both modules and scripts
+
+[21:53] <AlexDaniel> so separate .rk and .rkm is fine, but .rk for modules is not
+
+[21:53] <jnthn> AlexDaniel: Yes, I'm not sure if it's implied that this should be in the rename PR, or just that he'd vote against the rename PR if it tried to drop the distinction.
+
+[21:54] <jnthn> I'm fine with separate extensions, and inclined to believe give more weight to the viewpoint put forward by the folks who actually support our tooling.
+
+[21:54] <jnthn> *believe and
+
+[21:55] <jnthn> I kind of wanted a base suffix, e.g. .rkm (module), .rkd (doc), .rkt (test) but we absolutely cannot do the last of those
+
+[21:55] <jnthn> (Taken by the racket language)
+
+[21:56] <jnthn> .rk for script, .rm for module, .rd for doc, and .rt for test might fly
+
+[21:59] <MasterDuke> vrurg: i just noticed something odd in the build output. it looks like a literal `\t` is being printed instead of a tab in some cases
+
+[21:59] <MasterDuke> vrurg: `+++ Generating\tperl6-m+++ Generating  gen/moar/perl6-debug.nqp+++ Compiling   perl6-debug.moarvm+++ Compiling\tinst-perl6-m`
+
+[22:15] <vrurg> MasterDuke: thanks! Some echos are left behind.
+
+[22:15] <AlexDaniel> jnthn: I'm a bit worried about .rm
+
+[22:15] <AlexDaniel> maybe it's unjustified, but it just looks scary :D
+
+[22:15] <MasterDuke> vrurg: btw, i like the look of the new output
+
+[22:16] <lucasb> $ rm Foo.rm
+
+[22:16] <vrurg> MasterDuke: thanks! Installation needs to be reworked too, but I got to tired of makefiles, needed a change.
+
+[22:19] <tobs> .rm does induce subtle stress over here :') But there are only so many options... the other suggestion along .rakulib etc. are kinda long.
+
+[22:19] <vrurg> AlexDaniel, jnthn – .rt is RealTime.
+
+[22:19] <lucasb> and also a bug tracker :)
+
+[22:20] *** leont left
+[22:24] <lizmat> fwiw, HEAD is *not* clean for a test suite of a client atm
+
+[22:26] <jnthn> AlexDaniel: Bad memories of (Buffering...) RealMedia? :D
+
+[22:26] <jnthn> But yeah, I'd realized the more obvious connotation too :)
+
+[22:27] <lizmat> perhaps should bite the bullet and go for longer extensions
+
+[22:28] <lizmat> when raku takes off amongst the younger folk, it will be mostly because of IDE's like Comman
+
+[22:28] <lizmat> *Comma
+
+[22:28] <lizmat> and then length of extensions shouldn't matter that much?
+
+[22:32] *** anatofuz left
+[22:32] *** anatofuz joined
+[22:33] <Geth> ¦ rakudo/new-sprintf: 5 commits pushed by (Elizabeth Mattijsen)++
+
+[22:33] <Geth> ¦ rakudo/new-sprintf: bdf04746f4 | Second attempt at working on new sprintf
+
+[22:33] <Geth> ¦ rakudo/new-sprintf: 3caced7ac8 | zprintf -> sprintf to facilitate testing
+
+[22:33] <Geth> ¦ rakudo/new-sprintf: ae0657bf1e | Another case of args-have needing an Int
+
+[22:33] <Geth> ¦ rakudo/new-sprintf: 5a5cc6f9a9 | And yet another one
+
+[22:33] <Geth> ¦ rakudo/new-sprintf: 5555589d7a | Fix up %o format
+
+[22:33] <Geth> ¦ rakudo/new-sprintf: review: https://github.com/rakudo/rakudo/compare/bdf04746f4e2^...5555589d7a68
+
+[22:33] <vrurg> lizmat: It really not that important even outside of IDEs with all the completions and considering the fact that it's not something we type very often.
+
+[22:34] <lizmat> argh... somehow the new-sprintf branch came back  :-(
+
+[22:35] <Geth> ¦ rakudo/newer-sprintf: 0f03edf891 | (Elizabeth Mattijsen)++ | src/core.e/Rakudo/Internals/Sprintf.pm6
+
+[22:35] <Geth> ¦ rakudo/newer-sprintf: Fix up %o format
+
+[22:35] <Geth> ¦ rakudo/newer-sprintf: review: https://github.com/rakudo/rakudo/commit/0f03edf891
+
+[22:36] <lizmat> sleep&
+
+[22:37] *** anatofuz left
+[22:45] *** anatofuz joined
+[22:46] *** anatofuz left
+[22:47] *** anatofuz joined
+[23:00] <releasable6> Next release in ≈5 days and ≈19 hours. R6 is down. At least 9 blockers. Please log your changes in the ChangeLog: https://github.com/rakudo/rakudo/wiki/ChangeLog-Draft
+
+[23:14] *** anatofuz left
+[23:15] *** anatofuz joined
+[23:19] *** anatofuz left
+[23:28] *** anatofuz joined
+[23:34] *** anatofuz left
+[23:35] *** anatofuz joined
+[23:39] *** anatofuz left
+[23:41] *** travis-ci joined
+[23:41] <travis-ci> Rakudo build passed. Aleks-Daniel Jakimenko-Aleksejev '[NQP Bump] Brings 4 commits
+
+[23:41] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/585320674 https://github.com/rakudo/rakudo/compare/2bc3ac4b6b05...daaf0277e4c7
+
+[23:41] *** travis-ci left

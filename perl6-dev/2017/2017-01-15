@@ -1,0 +1,483 @@
+[00:59] <samcv> would %hash{int} be faster than %hash{Int} or the same
+
+[01:01] <samcv> i think i'm going to have to nqp optimize the bitfield generation part of this script. but i'm running profile on it now
+
+[01:01] <samcv> for whatever reason something i'm doing is way slower than all the rest of the code
+
+[01:01] <geekosaur> about the same, from what was said earlier about the implementation
+
+[01:02] <samcv> yeah that's what I expected
+
+[01:02] <samcv> does push and join have a lot of overhead?
+
+[01:02] <samcv> i guess profile will tell me what's making this code slow
+
+[01:02] <samcv> once it completes...
+
+[01:02] <geekosaur> you might do better to switch to a sparse array as was recommended earlier
+
+[01:04] <samcv> how do I make a sparse array?
+
+[01:04] <samcv> and I guess shaped arrays are faster. I could use that too
+
+[01:06] <geekosaur> just don't assign it initially, it *should* hopefully be sparse enough as is.
+
+[01:06] * samcv checks the profile
+
+[01:06] <samcv> you mean `my @array` < that's sparse?
+
+[01:06] <geekosaur> conceivably it wont and that could be bad depending on the highest numbered codepoinnt you deal with, but someone else will have to answer in that case
+
+[01:06] <geekosaur> as long as you don;t initialize it, yes
+
+[01:07] <samcv> hmm. wow
+
+[01:07] <geekosaur> the spine will be allocated to the max codepoint but it won;t use space for missing values
+
+[01:07] <samcv> 58% of the exclusive time was…
+
+[01:07] <samcv> infix:<~>
+
+[01:07] <samcv> SETTING::src/core/Str.pm:2728
+
+[01:07] <samcv> :o
+
+[01:07] <samcv> did not expect that
+
+[01:08] <geekosaur> real sparse arrays generally have to be emulated but that puts you into object hash territory which is where you are now, unless someone added an actual sparse array type with reasonable behavior when I wasn't looking
+
+[01:08] * geekosaur suddenly wonders about difference lists :p
+
+[01:24] <samcv> yeah coding the concatenation in nqp sped it up so much
+
+[01:24] <samcv> this is infix ~: nqp::p6box_s(nqp::concat(nqp::unbox_s(a), nqp::unbox_s(b)))
+
+[01:24] <samcv> so it did that a whole ton of times
+
+[01:29] <samcv> geekosaur, is there a way we can optimize "this" ~ "this" ~ "this" so it doesn't have to unbox twice and rebox once for each ~
+
+[01:29] * geekosaur wonders about some way to optimize by telling it to skip .... heh
+
+[01:29] <geekosaur> there isn;t that I know of
+
+[01:29] <samcv> two ~ causes 4 unboxings and 2 boxing. and just gets bigger the more
+
+[01:29] <samcv> damn
+
+[01:30] <geekosaur> and I suspect it would require special codegen since checking a flag each time might eat up speed gains
+
+[01:31] <geekosaur> but some kind of unboxing @foo, $bar { code that can skip the unbox/rebox, unboxed on entry, boxed on close, error if something requires it to be boxed } might be clever
+
+[01:31] <samcv> yeah
+
+[01:32] <geekosaur> alternately, really clever codegen could notice there's nothing but that going on and batch them itself, but I suspect we're a long ways from being able to do that optimization as yet
+
+[01:33] <geekosaur> (it *is* on the long term plan, but you need some hairy data analysis to determine whether it's safe, much less whether it'd actually be a gain)
+
+[01:37] <samcv> i'll probably make an operator
+
+[01:37] <samcv> ⟅'string', 'otherstring', 'thing'⟆
+
+[01:37] <samcv> to concat all of them or something
+
+[01:37] <geekosaur> irony: you'd also want this if we had actual non-string hash support in the backend, since you'd likely be using an unboxed int key behind the scenes and get wins if you can directly use an unboxed p6 value
+
+[01:54] <b2gills> samcv: Actually just special case `[~] 'string', 'otherstring', 'thing'` like we have for [+] 1..100
+
+[01:55] <samcv> ah nice
+
+[01:58] <samcv> how do you have typed slurpy arrays?
+
+[01:58] <samcv> not possible?
+
+[01:58] <samcv> not sure how to special case it
+
+[02:11] <samcv> significantly faster pushing all strings to an array and joining it once
+
+[02:12] <samcv> hopefully I can get this down to fast enough even when it loads all the unicode data
+
+[03:32] <Geth> nqp: 994d2159fc | TimToady++ | src/QRegex/Cursor.nqp
+
+[03:32] <Geth> nqp: Uniqueify fates in prep for NFA optimizations
+
+[03:32] <Geth> nqp:
+
+[03:32] <Geth> nqp: Prior to now, fates were always numbered starting with 1 for protos
+
+[03:32] <Geth> nqp: and starting with 0 for alts.  We are moving to a model in which all
+
+[03:32] <Geth> nqp: fate numbers are unique across the process.  Every NFA now knows its
+
+[03:32] <Geth> nqp: own range of fates, in the range of fbeg ..^ fend.  Conveniently, for
+
+[03:32] <Geth> nqp: both protos and alts, the 0th fate name entry was already unused and
+
+[03:32] <Geth> nqp: set to 0, so we encode the new fbeg and fend into the 0th fate name.
+
+[03:32] <Geth> nqp: Eventually, the uniqueness of fates will allow us to use a top-level
+
+[03:32] <Geth> nqp: NFA scan to determine in advance exactly what some of the sub-scans
+
+[03:32] <Geth> nqp: will do.  Currently we have duplicate scans for lower-level rules;
+
+[03:32] <Geth> nqp: when the top-level scan can return multiple levels of fates to the
+
+[03:32] <Geth> nqp: <…commit message has 1 more lines…>
+
+[03:32] <Geth> nqp: review: https://github.com/perl6/nqp/commit/994d2159fc
+
+[03:32] <Geth> nqp: 2e4ea5886c | TimToady++ | tools/build/MOAR_REVISION
+
+[03:32] <Geth> nqp: bump MoarVM
+
+[03:32] <Geth> nqp: review: https://github.com/perl6/nqp/commit/2e4ea5886c
+
+[03:33] <TimToady> so...Geth replaces the final line to report that there's 1 more line...
+
+[03:42] <diakopter> revisionist history
+
+[03:48] <timotimo> TimToady: got a clue how much we'll be able to save when redundant nfa scans will be optimized away with this?
+
+[03:49] <TimToady> I know a lot of positions in the setting are lexed 4 or 5 times
+
+[03:49] <timotimo> that's alot
+
+[03:49] <timotimo> how much time all in all does NFA running take?
+
+[03:50] <TimToady> haven't measured for a while, but somewhere on the order of 10%
+
+[03:51] <timotimo> hm, fair enough
+
+[03:51] <timotimo> will we be able to improve optimization of NFAs at all with this?
+
+[03:51] <timotimo> because adding operatiors in a module makes compile time grow pretty ridiculously
+
+[03:52] <TimToady> that's one of the goals, if we can do tail-sharing on NFA graphs
+
+[03:52] <TimToady> we were talking about that a couple days ago...
+
+[03:53] <samcv> s: help
+
+[03:53] <SourceBaby> samcv, Something's wrong: â�¤ERR: [31m===[0mSORRY![31m===[0m Error while compiling -eâ�¤Undeclared routine:â�¤    help used at line 6â�¤â�¤
+
+[03:53] <samcv> SourceBaby, help
+
+[03:53] <SourceBaby> samcv, Use s: trigger with args to give to sourcery sub. e.g. s: Int, 'base'. See http://modules.perl6.org/dist/CoreHackers::Sourcery
+
+[03:53] <samcv> s: Int, '.^name'
+
+[03:53] <SourceBaby> samcv, Something's wrong: ␤ERR: Type check failed in binding to &code; expected Callable but got Nil (Nil)␤  in sub do-sourcery at /home/zoffix/services/lib/CoreHackers-Sourcery/lib/CoreHackers/Sourcery.pm6 (CoreHackers::Sourcery) line 42␤  in sub sourcery at /home/zoffix/services/lib/CoreHackers-Sourcery/lib/CoreHackers/Sourcery.pm6 (CoreHackers::Sourcery) line 33␤  in block <unit> at -e line 6␤␤
+
+[03:53] <samcv> where is the ^name method ?
+
+[03:54] <timotimo> it's in the HOW
+
+[03:54] <samcv> kk
+
+[03:54] <timotimo> likely in ClassHOW for Int
+
+[03:55] <timotimo> you can define a ^foo method in your class, which will mix in the method to the HOW specifically for that class
+
+[03:55] <timotimo> but other than that all ^bar methods live in the HOW class
+
+[03:56] * timotimo BBL
+
+[04:00] <geekosaur> s: ClassHOW, 'name', \(Int)
+
+[04:00] <SourceBaby> geekosaur, Something's wrong: â�¤ERR: [31m===[0mSORRY![31m===[0m Error while compiling -eâ�¤Undeclared name:â�¤    ClassHOW used at line 6â�¤â�¤
+
+[04:00] <geekosaur> feh
+
+[04:08] <samcv> ok so i'm going to stop using %hash{Int}, too slow
+
+[04:09] <samcv> just gonna make a sub key-sort that does nqp::fromstr_I($^a) cmp etc
+
+[04:09] <samcv> calling .WHAT on Int used 9% of the cpu time
+
+[04:11] <samcv> for sub reason trying to augment class Hash made MVM very unhappy. wouldn't even compile
+
+[04:12] <samcv> m: augment class Hash { method atetetata { } }
+
+[04:12] <camelia> rakudo-moar b7cd77: OUTPUT«5===SORRY!5=== Error while compiling <tmp>␤augment not allowed without 'use MONKEY-TYPING'␤at <tmp>:1␤------> 3augment class Hash7⏏5 { method atetetata { } }␤    expecting any of:␤        generic role␤»
+
+[04:12] <samcv> m: use MONKEY-TYPING; augment class Hash { method atetetata { } }
+
+[04:12] <camelia> rakudo-moar b7cd77: ( no output )
+
+[04:12] <timotimo> m: say Metamodel::ClassHOW
+
+[04:12] <camelia> rakudo-moar b7cd77: OUTPUT«(ClassHOW)␤»
+
+[04:12] <timotimo> s: Metamodel::ClassHOW, 'name', \(Int)
+
+[04:12] <SourceBaby> timotimo, Something's wrong: ␤ERR: No such method 'map' for invocant of type 'NQPRoutine'␤  in sub sourcery at /home/zoffix/services/lib/CoreHackers-Sourcery/lib/CoreHackers/Sourcery.pm6 (CoreHackers::Sourcery) line 25␤  in block <unit> at -e line 6␤␤
+
+[04:12] <timotimo> oh well
+
+[04:12] <samcv> ===SORRY!===
+
+[04:12] <samcv> Cannot invoke this object (REPR: Null; VMNull)
+
+[04:12] <samcv> this is what i got for some reason
+
+[04:13] <timotimo> are you writing nqp code?
+
+[04:13] <timotimo> nqp: UndefinedName()
+
+[04:13] <camelia> nqp-moarvm: OUTPUT«Cannot invoke this object (REPR: Null; VMNull)␤   at <tmp>:1  (<ephemeral file>:<mainline>)␤ from gen/moar/stage2/NQPHLL.nqp:1582  (/home/camelia/rakudo-m-inst-1/share/nqp/lib/NQPHLL.moarvm:eval)␤ from gen/moar/stage2/NQPHLL.nqp:1785  (/home/camelia/rakudo-m…»
+
+[04:13] <samcv> hm
+
+[04:13] <timotimo> ^- one of the likely causes of this
+
+[04:14] <geekosaur> oh, right, Metamodel (not that it worked...)
+
+[05:51] <Geth> rakudo: usev6++ created pull request #994: [JVM] Add missing comma in workaround for r-j
+
+[05:51] <Geth> rakudo: review: https://github.com/rakudo/rakudo/pull/994
+
+[09:18] <Geth> rakudo/nom: bb8ec30012 | (Christian Bartolomäus)++ | src/core/Rakudo/Iterator.pm
+
+[09:18] <Geth> rakudo/nom: [JVM] Add missing comma in workaround for r-j
+
+[09:18] <Geth> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/bb8ec30012
+
+[09:18] <Geth> rakudo/nom: 2140c90088 | (Zoffix Znet)++ | src/core/Rakudo/Iterator.pm
+
+[09:18] <Geth> rakudo/nom: Merge pull request #994 from usev6/patch-4
+
+[09:18] <Geth> rakudo/nom:
+
+[09:18] <Geth> rakudo/nom: [JVM] Add missing comma in workaround for r-j
+
+[09:18] <Geth> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/2140c90088
+
+[09:49] <[Tux]> This is Rakudo version 2016.12-336-g2140c9008 built on MoarVM version 2016.12-115-ged2df9ac
+
+[09:49] <[Tux]> csv-ip5xs        2.892
+
+[09:49] <[Tux]> test            12.866
+
+[09:49] <[Tux]> test-t           5.201
+
+[09:49] <[Tux]> csv-parser      13.143
+
+[10:06] <brokenchicken> s: Int.HOW, 'name', \(Int)
+
+[10:06] <SourceBaby> brokenchicken, Something's wrong: ␤ERR: No such method 'map' for invocant of type 'NQPRoutine'␤  in sub sourcery at /home/zoffix/services/lib/CoreHackers-Sourcery/lib/CoreHackers/Sourcery.pm6 (CoreHackers::Sourcery) line 25␤  in block <unit> at -e line 6␤␤
+
+[10:20] <Geth> geth: 8d5ae680eb | (Zoffix Znet)++ | lib/Geth/GitHub/Hooks.pm6
+
+[10:20] <Geth> geth: Don't bother decoding JSON for unsupported events
+
+[10:20] <Geth> geth:
+
+[10:20] <Geth> geth: Might ameliorate the leakage
+
+[10:20] <Geth> geth: review: https://github.com/perl6/geth/commit/8d5ae680eb
+
+[10:29] <Geth> geth: b2098efbbe | (Zoffix Znet)++ | 2 files
+
+[10:29] <Geth> geth: Fix compare URL for multi-commit push events
+
+[10:29] <Geth> geth:
+
+[10:29] <Geth> geth: Use 'before'/'after' keys in the webhook data instead
+
+[10:29] <Geth> geth: of shas of first/last commits.
+
+[10:29] <Geth> geth: review: https://github.com/perl6/geth/commit/b2098efbbe
+
+[10:40] <Geth> geth: 8bcea9e84f | (Zoffix Znet)++ | lib/Geth/Plugin/GitHub.pm6
+
+[10:40] <Geth> geth: Smartify commit abridger
+
+[10:40] <Geth> geth:
+
+[10:40] <Geth> geth: If we know we'll have to abridge the commit message, print fewer
+
+[10:40] <Geth> geth: lines than for maximum unabridged commit messages.
+
+[10:40] <Geth> geth: review: https://github.com/perl6/geth/commit/8bcea9e84f
+
+[11:06] <brokenchicken> oh, gee... there's even a compare url in the webhook json -_-
+
+[11:57] <jnthn> .tell TimToady I guess you get notifications of github commit comments, but just in case: https://github.com/perl6/nqp/commit/994d2159fc#commitcomment-20481890
+
+[11:57] <yoleaux2> jnthn: I'll pass your message to TimToady.
+
+[12:50] <Geth> geth: 25c0c6819e | (Zoffix Znet)++ | 3 files
+
+[12:50] <Geth> geth: Implement version bump detector
+
+[12:50] <Geth> geth:
+
+[12:50] <Geth> geth: Detect NQP/MoarVM version bump commits and include /compare/ URL
+
+[12:50] <Geth> geth: to see what commits the version bump brought in.
+
+[12:50] <Geth> geth: review: https://github.com/perl6/geth/commit/25c0c6819e
+
+[12:51] <brokenchicken> check this out....
+
+[12:51] <Geth> nqp: 1d4f071453 | (Elizabeth Mattijsen)++ | tools/build/MOAR_REVISION
+
+[12:51] <Geth> nqp: Bump Moar to get the latest goodies / fixes
+
+[12:51] <Geth> nqp: review: https://github.com/perl6/nqp/commit/1d4f071453
+
+[12:51] <Geth> nqp: version bump brought these changes: https://github.com/MoarVM/MoarVM/compare/2016.12-104-g64e2d938...2016.12-113-gd1da1ba
+
+[12:51] <brokenchicken> \o/
+
+[12:51] <brokenchicken> neat
+
+[13:23] <lizmat> Files=1164, Tests=56530, 186 wallclock secs (10.93 usr  4.71 sys + 1108.49 cusr 118.74 csys = 1242.87 CPU)
+
+[13:24] <lizmat> brokenchicken++  :-)
+
+[13:45] <jnthn> cute
+
+[13:45] <jnthn> brokenchicken++
+
+[14:13] <lizmat> m: dd (1 X 1..* X 2)[^10]   # this shouldn't timeout, should it ?
+
+[14:14] <camelia> rakudo-moar 2140c9: OUTPUT«(timeout)»
+
+[15:55] <TimToady> star: dd (1..* X 1 X 2)[^10]   # at least the useful one works right
+
+[15:55] <yoleaux2> 11:57Z <jnthn> TimToady: I guess you get notifications of github commit comments, but just in case: https://github.com/perl6/nqp/commit/994d2159fc#commitcomment-20481890
+
+[15:55] <camelia> star-m 2016.10: OUTPUT«((1, 1, 2), (2, 1, 2), (3, 1, 2), (4, 1, 2), (5, 1, 2), (6, 1, 2), (7, 1, 2), (8, 1, 2), (9, 1, 2), (10, 1, 2))␤»
+
+[15:55] <TimToady> m: dd (1..* X 1 X 2)[^10]   # at least the useful one works right
+
+[15:55] <camelia> rakudo-moar 2140c9: OUTPUT«((1, 1, 2), (2, 1, 2), (3, 1, 2), (4, 1, 2), (5, 1, 2), (6, 1, 2), (7, 1, 2), (8, 1, 2), (9, 1, 2), (10, 1, 2))␤»
+
+[19:20] <lizmat> TimToady: so maybe warn / die on non-useful combinations of lazy iterators in X ?
+
+[19:21] <lizmat> TimToady: fwiw, I'm refactoring X atm, just trying to find out what needs to be fixed  :-)
+
+[19:26] <MasterDuke> if anybody is interested, here is another set of data from --profile--compile'ing the rakudo build: https://gist.github.com/MasterDuke17/7723025658833476d5f312805c3274b5
+
+[19:36] <MasterDuke> dogbert17: re your conv in #moarvm, you could try with --debug=3
+
+[19:40] <timotimo> oh yes
+
+[19:40] <timotimo> always --debug=3
+
+[19:42] <lizmat> m: dd infix:<X>()  # would have expected an empty list here ?
+
+[19:42] <camelia> rakudo-moar 2140c9: OUTPUT«((Any,),).Seq␤»
+
+[19:42] <lizmat> I mean, a Seq with an empty list
+
+[19:43] <lizmat> no, actually an empty list, just like:
+
+[19:43] <lizmat> m: dd infix:<Z>()
+
+[19:43] <camelia> rakudo-moar 2140c9: OUTPUT«().Seq␤»
+
+[20:11] * brokenchicken too
+
+[20:17] * lizmat three
+
+[20:20] * timotimo meh
+
+[20:20] * AlexDaniel three and a half?
+
+[20:21] <AlexDaniel> u: { .chr.unival == 3.5 }
+
+[20:21] <unicodable6> AlexDaniel, U+0F2D TIBETAN DIGIT HALF FOUR [No] (༭)
+
+[20:22] <AlexDaniel> u: { .chr.unival == -0.5 }
+
+[20:23] <unicodable6> AlexDaniel, U+0F33 TIBETAN DIGIT HALF ZERO [No] (༳)
+
+[21:15] <Geth> roast: a89273d659 | usev6++ | S03-metaops/zip.t
+
+[21:15] <Geth> roast: [JVM] Unfudge now passing tests, RT #130532
+
+[21:15] <Geth> roast: review: https://github.com/perl6/roast/commit/a89273d659
+
+[22:04] <dogbert17> MasterDuke: thx, will try and update the gist if I manage to provoke the bug again
+
+[22:20] <AlexDaniel> re: ⩵ ⩶ and fixed-width fonts: it occurred to me that some characters are actually double-width
+
+[22:21] <AlexDaniel> for example, you don't expect 属 to be as wide as “a”, even if you are using a fixed-width font
+
+[22:22] <AlexDaniel> and that's exactly what I see here, by the way (⩵ and ⩶ are double-width)
+
+[22:22] <AlexDaniel> so samcv is right and I was wrong
+
+[22:23] <samcv> heh what?
+
+[22:23] <AlexDaniel> I mean, there's no reason not to support these because of whatever font reason one can come up with
+
+[22:24] <samcv> yeah i think that's a good take on it. as long as the character unambigously is the same as
+
+[22:24] <samcv> if it is ambiguous from a character perspective like the thunderbolt or any other thing, i think we may want to take that into account
+
+[22:26] <AlexDaniel> m: say ‘属’.uniprop(‘East_Asian_Width’)
+
+[22:26] <camelia> rakudo-moar 2140c9: OUTPUT«␤»
+
+[22:27] <AlexDaniel> m: say ‘a’.uniprop(‘East_Asian_Width’)
+
+[22:27] <camelia> rakudo-moar 2140c9: OUTPUT«␤»
+
+[22:29] <AlexDaniel> u: { so .uniprop(‘East_Asian_Width’) }
+
+[22:29] <unicodable6> AlexDaniel, Found nothing!
+
+[22:29] <AlexDaniel> samcv: is it a thing?
+
+[22:30] <AlexDaniel> samcv: I'm reading this http://unicode.org/reports/tr11/
+
+[22:37] <samcv> it is a thing. it's not in MVM
+
+[22:37] <samcv> yet
+
+[22:42] <AlexDaniel> :(
+
+[22:43] <AlexDaniel> should I create a ticket for that?
+
+[22:45] <timotimo> we do have a module in the ecosystem for that
+
+[22:45] <samcv> for east asian width?
+
+[22:45] <samcv> you could make an rt. there's a test in roast for it
+
+[22:46] <samcv> my stale pr from weeks ago added east asian width but other things took priority over adding loads of random properties
+
+[22:46] <samcv> but it may be useful
+
+[22:47] <timotimo> https://github.com/bluebear94/Terminal-WCWidth
+
+[22:49] <samcv> unicode didn't used to be set to wide chars except since unicode 9
+
+[22:49] <samcv> before that it was primarily only for literally… east asian width… for east asian characters ;P
+
+[22:49] <samcv> but it is good they expanded it since people wanted it
+
+[22:50] <AlexDaniel> RT #130564
+
+[22:51] <samcv> i'll add that in today AlexDaniel
+
+[22:51] <AlexDaniel> wow, hold on your horses… it's not that I actually need it :)
+
+[22:51] <samcv> too soon? ok i'll add it tomorrow then
+
+[22:51] <samcv> XD
+
+[22:51] <AlexDaniel> xD
+
+[23:23] <MasterDuke> samcv: you (or anybody interested in string handling)  might like this: https://github.com/minimaxir/big-list-of-naughty-strings
+
+[23:23] <samcv> yeah i have seen it :)
+
+[23:23] <samcv> thanks tho
+
+[23:36] <lizmat> good night, #perl6-dev!
+
+[23:38] <brokenchicken> night

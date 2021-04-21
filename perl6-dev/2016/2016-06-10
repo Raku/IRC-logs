@@ -1,0 +1,229 @@
+[07:05] <[Tux]> This is Rakudo version 2016.05-84-g87e91cc built on MoarVM version 2016.05-18-g1339332
+
+[07:05] <[Tux]> test            18.764
+
+[07:05] <[Tux]> test-t          10.907
+
+[07:05] <[Tux]> csv-parser      22.138
+
+[07:06] <[Tux]> lizmat, this version broke csv_gram.pl - No error message given
+
+[07:07] * [Tux] => $work
+
+[09:54] <stmuk_> one of my benchmarks which ran at 13 sec towards the end of last year now runs about 8 secs!
+
+[09:56] <RabidGravy> cool
+
+[09:57] <DrForr> Nice.
+
+[10:32] <|Tux|> stmuk_, thanks for testing too!
+
+[10:45] <lizmat> [Tux]: csv_gram.pl hangs for me at 0% CPU
+
+[10:45] <|Tux|> p6 csv_gram.pl </tmp/hello.csv
+
+[10:45] <|Tux|> it needs input :)
+
+[10:47] <lizmat> ah, duh  :-)
+
+[10:48] <lizmat> works ok, but then I have a much smaller hello.csv
+
+[10:48] <|Tux|> does it report a count?
+
+[10:48] <|Tux|> it should report 50000 (with my hello.csv)
+
+[10:48] <lizmat> ah, no, it didn't
+
+[10:49] <|Tux|> there you go
+
+[10:50] <lizmat> it ends after 257 iterations
+
+[10:53] <lizmat> if I MVM_SPESH_DISABLE=1, it runs to completion
+
+[10:53] * |Tux| feels like a canary again
+
+[10:53] <lizmat> yup
+
+[10:56] <timotimo> uh oh
+
+[11:01] <lizmat> This fixes it:
+
+[11:01] <lizmat> method getline(){
+
+[11:01] <lizmat> -        return $!ast;
+
+[11:01] <lizmat> +        $!ast;
+
+[11:01] <lizmat> }
+
+[11:01] <lizmat> I was put on this trail when I removed the MAIN around it and just ran it in the mainline of the program
+
+[11:02] <lizmat> it then started to say "Attempt to return outside of any Routine"
+
+[11:02] <lizmat> since this was the only return statement in the whole file, it was easy to check
+
+[11:03] <lizmat> so it looks to me it loses some stack info after 257 iterations, and then the next return will just return out of the MAIN, and we're silently done
+
+[11:03] <lizmat> because returning out of MAIN is a legal thing to do
+
+[11:04] <lizmat> I wonder how many bugs we've put under the carpet by removing "return" statements
+
+[11:04] <lizmat> otoh, I don't think it's wise to pursue this bug at this time, because of jnthn's work
+
+[11:05] <lizmat> so I'll wait until that's landed
+
+[11:05] <timotimo> that could even have a tiny bit to do with how the count-only broke?
+
+[11:05] <lizmat> possibly, yes
+
+[11:06] <lizmat> somehow it also feels this is GC related, and since frames have become GC collectable recently
+
+[11:07] <timotimo> if that's the case, maybe we can tease it out by putting force_gc in the right (randomly selected) spot?
+
+[11:07] <lizmat> lemme try
+
+[11:08] <lizmat> nope, forcing a gc inside the loop does not fix it
+
+[11:09] <timotimo> i'm not actually sure if that would help at all
+
+[11:10] <lizmat> huh
+
+[11:12] <lizmat> ok, get this:
+
+[11:12] <lizmat> removing the "return" from the method "getline" in class CSV_Actions fixes the issue
+
+[11:12] <lizmat> *HOW* does that get called anyway???
+
+[11:13] <lizmat> in my stripped down version, the return happens from lines()
+
+[11:13] <lizmat> so it looks like it is calling "getline" from the CSV_Actions class, instead of from IO::Handle
+
+[11:16] <lizmat> oops
+
+[11:16] <lizmat> maybe not  :-)
+
+[11:18] <lizmat> ok, if I have a "return outside of any Routine" error, it points to the "for lines()"
+
+[11:18] * timotimo maximum shrugs
+
+[11:19] <lizmat> perhaps that's part of the confusion
+
+[11:20] <timotimo> if it says the return happens outside of any routine, it could just be the thing that has the return got inlined into a block that isn't a routine
+
+[11:20] <timotimo> and the handlers weren't fixed up properly/fully
+
+[11:21] <lizmat> fwiw, it's not laziness in lines
+
+[11:21] <lizmat> putting the lines into an array, same problem
+
+[11:24] <timotimo> OK
+
+[11:26] <lizmat> m: class A { has $.foo; method foo { return $!foo } }; my $a = A.new(foo => 42); my $sum = 0; for ^500 { $sum += $a.foo }   # golfed
+
+[11:26] <camelia> rakudo-moar 87e91c: OUTPUT«Attempt to return outside of any Routine␤  in block <unit> at /tmp/oLh4prjqJW line 1␤␤»
+
+[11:26] <lizmat> m: class A { has $.foo; method foo { return $!foo } }; my $a = A.new(foo => 42); for ^500 { $a.foo }  # further golfed
+
+[11:26] <camelia> rakudo-moar 87e91c: OUTPUT«Attempt to return outside of any Routine␤  in block <unit> at /tmp/VNXQ9AZcD1 line 1␤␤»
+
+[11:28] <lizmat> m: class A { has $.foo; method foo { return $!foo } }; my $a = A.new(foo => 42); for ^158 { $a.foo }   # first value it breaks on 158
+
+[11:28] <camelia> rakudo-moar 87e91c: OUTPUT«Attempt to return outside of any Routine␤  in block <unit> at /tmp/9NqzgIZLo_ line 1␤␤»
+
+[11:28] <lizmat> m: class A { has $.foo; method foo { return $!foo } }; my $a = A.new(foo => 42); for ^157 { $a.foo }   # 157 is ok
+
+[11:28] <camelia> rakudo-moar 87e91c: ( no output )
+
+[11:34] * lizmat haz a ticket: https://rt.perl.org/Ticket/Display.html?id=128368
+
+[11:34] <timotimo> ooooh, good golf!
+
+[11:41] <lizmat> m: class A { method foo { return 42 } }; my $a = A.new; for ^157 { $a.foo }  # still smaller golf, no attributes neede
+
+[11:41] <camelia> rakudo-moar 87e91c: ( no output )
+
+[11:41] <lizmat> m: class A { method foo { return 42 } }; my $a = A.new; for ^158 { $a.foo }  # at 158 it fails
+
+[11:41] <camelia> rakudo-moar 87e91c: OUTPUT«Attempt to return outside of any Routine␤  in block <unit> at /tmp/OZc4EqaZLv line 1␤␤»
+
+[11:42] <lizmat> can't get it to fail with a sub
+
+[11:43] <lizmat> eh
+
+[11:43] <lizmat> m: sub foo() { return 42 }; for ^157 { foo }   # still smaller golf
+
+[11:43] <camelia> rakudo-moar 87e91c: ( no output )
+
+[11:43] <lizmat> m: sub foo() { return 42 }; for ^158 { foo }   # fails at 158
+
+[11:43] <camelia> rakudo-moar 87e91c: OUTPUT«Attempt to return outside of any Routine␤  in block <unit> at /tmp/tOCcim2lY1 line 1␤␤»
+
+[12:18] <dalek> rakudo/nom: 9cfcb96 | lizmat++ | src/core/Baggy.pm:
+
+[12:18] <dalek> rakudo/nom: Remove no-sinks from Baggy
+
+[12:18] <dalek> rakudo/nom:
+
+[12:18] <dalek> rakudo/nom: And streamline a bit
+
+[12:18] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/9cfcb96a2f
+
+[12:19] <lizmat> afk for a few hours&
+
+[12:56] <psch> nine: https://gist.github.com/peschwa/488d4bc687e7bb6c456652654d86c5d9 is the NPE i get when i put mast_frames into $*W
+
+[12:57] <psch> nine: well, it's a bit of jdb details... :)
+
+[12:58] <psch> hm, m.qbid is 7
+
+[12:59] <psch> so we're trying to add one more CodeRef than we have..?
+
+[12:59] <psch> doesn't that mean that we skip one?  'cause the NPE was because [5] was null afair
+
+[13:00] <psch> as in, we have the correct number of CodeRefs, but bad indexing
+
+[13:02] <psch> mlist[*] => qb_* is 0 => 3, 1 => 4, 2 => 2, 3 => 1, 4 => 0, 5 => 7, 6 => 6
+
+[17:03] <psch> well, however it happens, it happens during $*JMETH declarations
+
+[17:03] <psch> somehow, somewhere, we're skipping qb_5
+
+[17:08] <psch> it's especially confusing considering we preseed %*CUID_TO_QBID
+
+[17:09] <psch> so we either have the wrong cuid when instantiating the JAST::Method, or... something else?
+
+[17:34] <b2gills> Shouldn't &infix:<eqv>(Match:D $a, Match:D $b) be ｢{ $a =:= $b || [&&] ..... }｣ instead of ｢{ [&&] $a =:= $b, ...... }｣ because the current behavior is the same as just ｢{ $a =:= $b }｣ and I assume the =:= is supposed to be just an optimization
+
+[17:35] <timotimo> oh, that seems very wrong
+
+[17:35] <timotimo> spec tests didn't catch that? shameful :(
+
+[17:35] <psch> i think there's a half-finished PR for that eqv candidate..?
+
+[17:37] <timotimo> no clue :S
+
+[17:37] <timotimo> i've lost overview of pretty much everything
+
+[20:11] <lizmat> b2gills: please RT it
+
+[21:06] <dalek> rakudo/nom: 74d7ac0 | lizmat++ | src/core/List.pm:
+
+[21:06] <dalek> rakudo/nom: Remove no-sink from List.pick
+
+[21:06] <dalek> rakudo/nom:
+
+[21:06] <dalek> rakudo/nom: Plus some streamlining
+
+[21:06] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/74d7ac05ee
+
+[21:06] <dalek> rakudo/nom: 5b4470b | lizmat++ | src/core/Map.pm:
+
+[21:06] <dalek> rakudo/nom: Remove no-sink from Map.*
+
+[21:06] <dalek> rakudo/nom:
+
+[21:06] <dalek> rakudo/nom: Plus some streamlining
+
+[21:06] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/5b4470bd19
+
+[22:51] <b2gills> lizmat: I just did a PR on it with a link to the PR that added the &[eqv] candidate, which bears out my suspicion of it being intended as an optimization

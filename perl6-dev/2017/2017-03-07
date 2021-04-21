@@ -1,0 +1,601 @@
+[01:06] <samcv> heh the more i flesh out the project schedule the more I remember how many things there are to do, lol
+
+[01:14] <llfourn> nine++ # fixing require RTs
+
+[01:29] <llfourn> nine: hmmm actually it seems those require commits have broken Spit the module I released yesterday.
+
+[01:29] * llfourn investigating
+
+[01:55] <llfourn> m: class Test::Foo { }; { require Test; say Test::Foo }
+
+[01:55] <camelia> rakudo-moar 2a2e46: OUTPUT: «Could not find symbol '&Foo'␤  in block <unit> at <tmp> line 1␤␤Actually thrown at:␤  in block <unit> at <tmp> line 1␤␤»
+
+[01:55] <llfourn> ^ This is the golf of the problem
+
+[03:52] <astj> m: class Test::Foo { };  Test::Bar {}; { require Test::Foo; require Test::Bar; }
+
+[03:52] <camelia> rakudo-moar 2a2e46: OUTPUT: «===SORRY!===␤Lexical 'Test' already declared␤»
+
+[03:52] <astj> m: class Test::Foo { };  Test::Bar {}; { use Test::Foo; use Test::Bar; }
+
+[03:52] <camelia> rakudo-moar 2a2e46: OUTPUT: «===SORRY!===␤Could not find Test::Foo at line 1 in:␤    /home/camelia/.perl6␤    /home/camelia/rakudo-m-inst-1/share/perl6/site␤    /home/camelia/rakudo-m-inst-1/share/perl6/vendor␤    /home/camelia/rakudo-m-inst-1/share/perl6␤    CompUnit::R…»
+
+[03:52] <astj> oops
+
+[03:54] <astj> anyway, I found requiring multiple modules with same namespace has broken recently. https://github.com/astj/p6-Require-Bug-Demo
+
+[03:56] <llfourn> astj: if you look at the irc logs you'll find I posted a very similar golf of that problem before you came in :)
+
+[03:57] <astj> llfourn: Oh. is this? https://irclog.perlgeek.de/perl6-dev/2017-03-07#i_14216920
+
+[03:58] <llfourn> astj: yep
+
+[03:58] <llfourn> your one actually shows the problem a bit better though
+
+[03:58] <llfourn> it shows that require is also declaring too many lexical packages
+
+[03:59] <astj> llfourn: thanks. hmm..
+
+[04:00] <llfourn> I *might* have a fix coming up
+
+[04:03] <astj> :+1:
+
+[07:26] <nine> llfourn, astj: ok, looks relatively simple to fix
+
+[07:28] <nine> It's just a matter of looking if any of the $longname.components is already declared in lexical scope and re-using that instead of creating the whole package chain.
+
+[07:28] <llfourn> nine: Yeah, I was thinking you have to .WHO.merge-symbols with the outer declaration with your lexical version
+
+[07:28] <nine> Here: https://github.com/rakudo/rakudo/blob/nom/src/Perl6/Actions.nqp#L1935
+
+[07:30] <llfourn> oh but yeah you have to not re-duplicate the package chain thing but you also have to make sure you merge the symbols from the outer
+
+[07:31] <llfourn> m: m: class Test::Foo { }; { require Test; say Test::Foo } #otherwise
+
+[07:31] <camelia> rakudo-moar 2a2e46: OUTPUT: «Could not find symbol '&Foo'␤  in block <unit> at <tmp> line 1␤␤Actually thrown at:␤  in block <unit> at <tmp> line 1␤␤»
+
+[07:31] <nine> Yep. A $*W.find_symbol before blindly creating the lexical will help
+
+[07:32] <llfourn> oh if you found one you woulnd't create the lexical?
+
+[07:32] <llfourn> that's probably the smart way
+
+[07:32] <llfourn> I was overthinking it and wanted to have a lexical clone of the outer
+
+[07:34] <llfourn> m: package Foo { }; { my package Foo::Bar { } }; say Foo::Bar
+
+[07:34] <camelia> rakudo-moar 2a2e46: OUTPUT: «(Bar)␤»
+
+[07:34] <nine> I've been down that line of thought and would like it, but it could get hellishly complicated. Better to do a less elegant fix now.
+
+[07:34] <llfourn> ^ I was trying to fix that at the same time
+
+[07:34] <llfourn> it was getting complicated XD
+
+[07:34] <nine> All of this would be so much simpler if packages were no real hierarchy as they are in Perl 5 :)
+
+[07:35] <llfourn> yeah.
+
+[07:35] <llfourn> But .WHO is cool and "torture the implementor on behalf of the user" :D
+
+[07:36] <nine> Btw. copying symbols from an outer package won't be enough, since they can change anytime. You'd have to link those PseudoStashes
+
+[07:36] <llfourn> But if you got a copy at the time you declare it wouldn't that DWIM?
+
+[07:37] <llfourn> I mean symbols could be added to the outer declaration's .WHO later but I thought it would be acceptable not to get them
+
+[07:37] <llfourn> hmm...but I'm not sure how that works with stubs :\
+
+[07:37] <llfourn> you *would* want the stubs to be updated in any case
+
+[07:38] <nine> If you talk in terms of acceptable, leaking those nested packages out of the lexical scope probably is acceptable, too ;)
+
+[07:38] <llfourn> s/acceptable/expected/ :)
+
+[07:52] <nine> This kind of lexical leaking is probably not much of an issue in real code, because it stops at the compilation unit. And you'll rarely try to load conflicting symbols in the same unit. The much more probable case is one of your dependencies trying to use a different version of a module than you.
+
+[07:56] <llfourn> m: { my package Cool::Utils { } }; say Cool::Utils
+
+[07:56] <camelia> rakudo-moar 2a2e46: OUTPUT: «(Utils)␤»
+
+[07:56] <llfourn> nine: isn't that leaking past the unit?
+
+[07:57] <llfourn> nine: btw I have written tests for the issues above. Will push them when we have a fix :)
+
+[07:57] <nine> It's not leaking past the unit, but it does look a bit broken nevertheless :)
+
+[07:58] <llfourn> hmm but isn't Cool in the SETTING scope ie above the unit?
+
+[07:59] <nine> What I mean is, that if you have the above lexical package in a module, the user of your module won't see Cool::Utils
+
+[08:00] <llfourn> That's what I thought you meant. But thinking about it what you say makes sense as long as the module is precompiled.
+
+[08:01] <nine> True. A "no precompilation;" might change things a bit
+
+[08:01] <llfourn> ok good I'm on the right track :)
+
+[08:22] <lizmat> Files=1178, Tests=55991, 191 wallclock secs (11.68 usr  4.58 sys + 1146.23 cusr 107.28 csys = 1269.77 CPU)
+
+[08:27] <[Tux]> This is Rakudo version 2017.02-188-g2a2e460b1 built on MoarVM version 2017.02-20-g773711e1
+
+[08:27] <[Tux]> csv-ip5xs        2.941
+
+[08:27] <[Tux]> test            12.640
+
+[08:27] <[Tux]> test-t           5.119 - 5.234
+
+[08:28] <[Tux]> csv-parser      13.073
+
+[08:31] <samcv> o/ [Tux]
+
+[08:37] <nwc10> good *, #moarvm
+
+[08:37] <nwc10> er, no
+
+[08:37] <nwc10> good *, #perl6-dev
+
+[08:37] <nwc10> that's better
+
+[08:37] <samcv> heh
+
+[08:38] <nwc10> m-spectest6 seems to be broken. Not obvious why, and IRC logs don't mention this error message:
+
+[08:38] <nwc10> ./perl6-m -Ilib t/harness6 --fudge --tests-from-file=t/spectest.data
+
+[08:38] <nwc10> ===SORRY!===
+
+[08:38] <nwc10> Could not locate compile-time value for symbol Block::Para
+
+[08:38] <nwc10> make: *** [m-spectest6] Error 1
+
+[08:40] <lizmat> nwc10: ah, probably nine's lexical require work
+
+[08:40] <lizmat> yup, confirmed here
+
+[08:41] <samcv> e
+
+[08:41] <samcv> oops
+
+[09:06] <Geth> ¦ rakudo/nom: 5b7b7fb5c9 | (Elizabeth Mattijsen)++ | src/core/List.pm
+
+[09:06] <Geth> ¦ rakudo/nom: Stopgap fix for RT #130941
+
+[09:06] <Geth> ¦ rakudo/nom:
+
+[09:06] <Geth> ¦ rakudo/nom: Note that the fix is in the &x candidate, *not* in the Mu \x candidate.
+
+[09:06] <Geth> ¦ rakudo/nom: This needs further research and fixing.  Note that xx should really
+
+[09:06] <synopsebot6> Link:  https://rt.perl.org/rt3//Public/Bug/Display.html?id=130941
+
+[09:06] <Geth> ¦ rakudo/nom: always return a Seq anyway, so that is another thing that would need
+
+[09:06] <Geth> ¦ rakudo/nom: to get fixed.
+
+[09:06] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/5b7b7fb5c9
+
+[11:05] <IOninja> nwc10: it's the `try require`
+
+[11:05] <IOninja> Apparently try compiles to a block and we need to make not a block
+
+[11:06] <IOninja> Probably will fix a few other RTs too
+
+[11:10] <jnthn> m: try my $a = 42; say $a
+
+[11:10] <camelia> rakudo-moar 5b7b7f: OUTPUT: «42␤»
+
+[11:10] <jnthn> It gets that case right...
+
+[11:12] <IOninja> that's what nine said at least...
+
+[11:13] <jnthn> Well, it's right that it's thunked
+
+[11:13] <Geth> ¦ nqp: 0d04b34078 | (Bart Wiegmans)++ | t/moar/51-jit-div_i.t
+
+[11:13] <Geth> ¦ nqp: Better div_i JIT test
+
+[11:13] <Geth> ¦ nqp:
+
+[11:13] <Geth> ¦ nqp: Test a wider range of behaviour; split 'heating' from testing.
+
+[11:13] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/0d04b34078
+
+[11:14] <jnthn> But require happens at runtime so there's various ways to end up with stuff in the wrong place
+
+[11:16] <travis-ci> NQP build failed. Bart Wiegmans 'Better div_i JIT test
+
+[11:16] <travis-ci> https://travis-ci.org/perl6/nqp/builds/208549718 https://github.com/perl6/nqp/compare/37543adf7333...0d04b340781d
+
+[11:17] <Geth> ¦ nqp: 6a616931ad | (Bart Wiegmans)++ | t/moar/51-jit-div_i.t
+
+[11:17] <Geth> ¦ nqp: Don't cause TAP syntax errors
+
+[11:17] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/6a616931ad
+
+[11:20] <travis-ci> NQP build failed. Bart Wiegmans 'Don't cause TAP syntax errors'
+
+[11:20] <travis-ci> https://travis-ci.org/perl6/nqp/builds/208550541 https://github.com/perl6/nqp/compare/0d04b340781d...6a616931adf0
+
+[11:24] <nine> IOninja: try require is already fixed: https://github.com/rakudo/rakudo/commit/9da6de46783e83b3cfe88b862de680edc310e36a
+
+[11:25] <nine> Or should be at least. Maybe there are subtle differences in these cases.
+
+[11:25] <IOninja> Ah, cool.
+
+[11:26] <IOninja> hm, Block::Para that nwc10 mentioned is from Pod...
+
+[11:33] <nine> Ah, it's basically the same issue llfourn and I discussed this morning
+
+[11:33] <nine> A quick workaround would e.g. be: my $text = (require ::('Pod::To::Text')).render($=pod[0]);
+
+[11:34] <Geth> ¦ nqp: 3d6948a79e | (Bart Wiegmans)++ | tools/build/MOAR_REVISION
+
+[11:34] <Geth> ¦ nqp: Bump MOAR_REVISION
+
+[11:34] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/3d6948a79e
+
+[11:34] <Geth> ¦ nqp: version bump brought these changes: https://github.com/MoarVM/MoarVM/compare/2017.02-18-g5f9d698...2017.02-25-g5dd8f04
+
+[11:37] <travis-ci> NQP build failed. Bart Wiegmans 'Bump MOAR_REVISION'
+
+[11:37] <travis-ci> https://travis-ci.org/perl6/nqp/builds/208555128 https://github.com/perl6/nqp/compare/6a616931adf0...3d6948a79e58
+
+[11:49] <Geth> ¦ rakudo: bdw++ created pull request #1033: Bump NQP_REVISION to get bumped MOAR_REVISION
+
+[11:49] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/1033
+
+[11:50] <Geth> ¦ rakudo/nom: deac603914 | (Bart Wiegmans)++ | tools/build/NQP_REVISION
+
+[11:50] <Geth> ¦ rakudo/nom: Bump NQP_REVISION to get bumped MOAR_REVISION
+
+[11:50] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/deac603914
+
+[11:50] <Geth> ¦ rakudo/nom: version bump brought these changes: https://github.com/perl6/nqp/compare/2017.02-58-g37543adf...2017.02-61-g3d6948a
+
+[11:50] <Geth> ¦ rakudo/nom: ff7bfb92b6 | (Zoffix Znet)++ | tools/build/NQP_REVISION
+
+[11:50] <Geth> ¦ rakudo/nom: Merge pull request #1033 from bdw/nom
+
+[11:50] <Geth> ¦ rakudo/nom:
+
+[11:50] <Geth> ¦ rakudo/nom: Bump NQP_REVISION to get bumped MOAR_REVISION
+
+[11:50] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/ff7bfb92b6
+
+[11:50] <Geth> ¦ rakudo/nom: version bump brought these changes: https://github.com/perl6/nqp/compare/2017.02-58-g37543adf...2017.02-61-g3d6948a
+
+[11:51] <IOninja> don't really see where the Pod::Para comes into play in harness6.... the doc build works
+
+[11:52] <IOninja> Ah, right in harness6 iteself
+
+[11:53] <IOninja> "A quick workaround "... I guess that means the current version of harness6 is fine as is.
+
+[11:55] <IOninja> that hack is a bit smelly anyway. Just shell-executing whatever happened to be in an env var... We've got sub USAGE...
+
+[11:56] <nine> IOninja: yes, the code is fine as it is (even though I like my shortened version).
+
+[11:56] <IOninja> :)
+
+[11:56] <nine> It's a straight forward issue with a straight forward solution for which I should find some time this evening.
+
+[11:56] <IOninja> Sweet
+
+[13:11] <Geth> ¦ rakudo/nom: 6be395e310 | (Elizabeth Mattijsen)++ | src/core/IO/ArgFiles.pm
+
+[13:11] <Geth> ¦ rakudo/nom: Wean IO::ArgFiles away from IO::Handle.lines(:close)
+
+[13:11] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/6be395e310
+
+[13:17] <IOninja> What was the way to make stresstest use t/harness6 again?
+
+[13:17] <moritz> HARNESS_TYPE=6 make stresstest # or something along those lines?
+
+[13:18] <IOninja> Yup. Thanks
+
+[13:23] <IOninja> huh "t/spec/S15-unicode-information/uniprop.rakudo.moar ................ All 164 subtests passed"... Well, if all passed why is not just "ok" :/
+
+[13:24] <IOninja> ohohoh.. harness is busted.
+
+[13:25] <IOninja> hm, and HARNESS_TYPE=6 make t/spec/S32-str/encode.t still uses harness5
+
+[13:27] <IOninja> Got these two files that show TAP.pm6 bustitude, but when run individually t/spec/S32-str/encode.t doesn't show same error... wondering if it's a race condition there somewhere... https://gist.github.com/zoffixznet/8c801d63ae1e825dc22eea99780337e4
+
+[13:29] <moritz> IOninja: might be an exit code != 0, or garbage output after the end of the tests
+
+[13:29] <moritz> (if all subtests passed)
+
+[13:30] <IOninja> it's these tests-out-of-order thing... turned out
+
+[13:30] <moritz> ah right, another possible reason
+
+[13:31] <Geth> ¦ rakudo/nom: 8b76ce8c90 | (Zoffix Znet)++ | t/harness6
+
+[13:31] <Geth> ¦ rakudo/nom: Change USAGE generation
+
+[13:31] <Geth> ¦ rakudo/nom:
+
+[13:31] <Geth> ¦ rakudo/nom: - print usage for any wrong args, not just when --help is given
+
+[13:31] <Geth> ¦ rakudo/nom: - don't shell-execute stuff from ENV vars; there isn't that much
+
+[13:31] <Geth> ¦ rakudo/nom:     usage text to require a pager so no need to leave around
+
+[13:31] <Geth> ¦ rakudo/nom:     ways for people to run arbitrary commands.
+
+[13:31] <Geth> ¦ rakudo/nom: - reword Text::To::Pod require to avoid temporary bustitude with
+
+[13:31] <Geth> ¦ rakudo/nom:     require; new version is more concice too and can be left this
+
+[13:31] <Geth> ¦ rakudo/nom:     way even after require is fixed.
+
+[13:31] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/8b76ce8c90
+
+[13:34] <Geth> ¦ roast: f2afb87d27 | (Elizabeth Mattijsen)++ | S16-io/lines.t
+
+[13:34] <Geth> ¦ roast: We shouldn't test for IO::Handle.lines(:close)
+
+[13:34] <Geth> ¦ roast: review: https://github.com/perl6/roast/commit/f2afb87d27
+
+[13:38] <Geth> ¦ roast/6.c-errata: 63249596cd | (Elizabeth Mattijsen)++ | S16-io/lines.t
+
+[13:38] <Geth> ¦ roast/6.c-errata: We shouldn't test for IO::Handle.lines(:close)
+
+[13:38] <Geth> ¦ roast/6.c-errata: review: https://github.com/perl6/roast/commit/63249596cd
+
+[13:53] <Geth> ¦ rakudo/nom: 76a59cf838 | (Elizabeth Mattijsen)++ | src/core/IO/Handle.pm
+
+[13:53] <Geth> ¦ rakudo/nom: Remove support for IO::Handle.lines(:close)
+
+[13:53] <Geth> ¦ rakudo/nom:
+
+[13:53] <Geth> ¦ rakudo/nom: We cannot guarantee the handle will get closed if the Seq is not
+
+[13:53] <Geth> ¦ rakudo/nom: exhausted.  So better to not give the impression that we can.
+
+[13:53] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/76a59cf838
+
+[13:54] <lizmat> afk&
+
+[14:09] <IOninja> hm, well, I found what causes the test out of order, but don't get why...
+
+[14:09] <IOninja> m: use TAP; say TAP::Grammar.parse: qq|not ok 1 - ﬆ # TODO\n|
+
+[14:09] <camelia> rakudo-moar 8b76ce: OUTPUT: «｢not ok 1 - ﬆ # TODO␤｣␤ line => ｢not ok 1 - ﬆ # TODO␤｣␤  unknown => ｢not ok 1 - ﬆ # TODO｣␤»
+
+[14:09] <IOninja> ^ fails to recognize as a tap line
+
+[14:09] <IOninja> m: use TAP; say TAP::Grammar.parse: qq|not ok 1 - st # TODO\n|
+
+[14:09] <camelia> rakudo-moar 8b76ce: OUTPUT: «｢not ok 1 - st # TODO␤｣␤ line => ｢not ok 1 - st # TODO␤｣␤  test => ｢not ok 1 - st # TODO｣␤   nok => ｢not ｣␤   num => ｢1｣␤   description => ｢st｣␤   directive => ｢TODO｣␤»
+
+[14:10] <IOninja> ^ replacing the ligature fixes it..
+
+[14:10] <IOninja> m: say qq|not ok 1 - ﬆ meow # TODO foo\n| ~~ /[ '\\\\' || '\#' || <-[\n#]> ]+ <!after <[\s] - [\n]>+>/
+
+[14:10] <camelia> rakudo-moar 8b76ce: OUTPUT: «｢not ok 1 - ﬆ meow｣␤»
+
+[14:10] <IOninja> And if isolate the description regex and try to match it, it matches :S
+
+[14:11] <IOninja> Grammar that's parsing it is this: https://github.com/rakudo/rakudo/blob/nom/lib/TAP.pm6#L165-L217
+
+[14:19] <IOninja> oh huh.. it parses on 2017.02-33-g80e0bce
+
+[14:19] * IOninja bisects
+
+[14:20] <IOninja> https://github.com/rakudo/rakudo/commit/26e6993bd82a23fb701b91aeb3ee832c543a7d95
+
+[14:21] <IOninja> Geth, ver https://github.com/perl6/nqp/commit/44a3fed66bbc399902e950b7c0f9a3f6b3604583
+
+[14:21] <Geth> IOninja, version bump brought in these changes: https://github.com/MoarVM/MoarVM/compare/2017.02-7-g3d85900...2017.02-17-gec99d41
+
+[14:22] <IOninja> The only slightly related commit I see is https://github.com/MoarVM/MoarVM/commit/ab426c147702000cb857cf553c0c062ab7623d9e
+
+[14:22] <IOninja> "Change MVM_string_equal_at_ignore_case to use fc "
+
+[14:22] <jnthn> Hm, I don't see any :i used there, though... :s
+
+[14:22] <IOninja> it's in the [ SKIP \S+ | TODO ] thing
+
+[14:23] * IOninja tries to craft a regex
+
+[14:23] <jnthn> Oh, I thought the regex you mentioned above was the faulty part
+
+[14:23] <IOninja> No, it failed to find the problem, but I'm guessing that's because I didn't include the :i part that follows it
+
+[14:24] <jnthn> ah :)
+
+[14:27] <IOninja> m: my token sp { <[\s] - [\n]> }; say qq|ok 1 - ﬆ meow # TODO foo\n| ~~ /[ '\\\\' || '\#' || <-[\n#]> ]+ <!after <sp>+> <sp>* '#' <sp>* $<foo>=[ [ 'SKIP' \S* | 'TODO'] ]/
+
+[14:27] <camelia> rakudo-moar 76a59c: OUTPUT: «｢ok 1 - ﬆ meow # TODO｣␤ sp => ｢ ｣␤ sp => ｢ ｣␤ foo => ｢TODO｣␤»
+
+[14:27] <IOninja> m: my token sp { <[\s] - [\n]> }; say qq|ok 1 - ﬆ meow # TODO foo\n| ~~ /[ '\\\\' || '\#' || <-[\n#]> ]+ <!after <sp>+> <sp>* '#' <sp>* $<foo>=[:i [ 'SKIP' \S* | 'TODO'] ]/
+
+[14:27] <camelia> rakudo-moar 76a59c: OUTPUT: «Nil␤»
+
+[14:28] <IOninja> star: my token sp { <[\s] - [\n]> }; say qq|ok 1 - ﬆ meow # TODO foo\n| ~~ /[ '\\\\' || '\#' || <-[\n#]> ]+ <!after <sp>+> <sp>* '#' <sp>* $<foo>=[:i [ 'SKIP' \S* | 'TODO'] ]/
+
+[14:28] <camelia> star-m 2016.10: OUTPUT: «｢ok 1 - ﬆ meow # TODO｣␤ sp => ｢ ｣␤ sp => ｢ ｣␤ foo => ｢TODO｣␤»
+
+[14:28] <IOninja> That's first result. Adding `:i` now breaks it
+
+[14:28] * IOninja golfs it
+
+[14:32] <IOninja> m: say "ﬆ # TODO foo\n" ~~ /'#' \s* [:i 'TODO' ]/
+
+[14:32] <camelia> rakudo-moar 76a59c: OUTPUT: «Nil␤»
+
+[14:32] <IOninja> m: say "ﬆ # TODO foo\n" ~~ /'#' \s* [ 'TODO' ]/
+
+[14:32] <camelia> rakudo-moar 76a59c: OUTPUT: «｢# TODO｣␤»
+
+[14:34] <IOninja> m: say "ﬆ T" ~~ m/T/
+
+[14:34] <camelia> rakudo-moar 76a59c: OUTPUT: «｢T｣␤»
+
+[14:34] <IOninja> m: say "ﬆ T" ~~ m:i/T/
+
+[14:34] <camelia> rakudo-moar 76a59c: OUTPUT: «False␤»
+
+[14:34] <IOninja> star: say "ﬆ T" ~~ m:i/T/
+
+[14:34] <camelia> star-m 2016.10: OUTPUT: «｢T｣␤»
+
+[14:34] <IOninja> m: say "ﬆT" ~~ m:i/T/
+
+[14:34] <camelia> rakudo-moar 76a59c: OUTPUT: «｢T｣␤»
+
+[14:35] <IOninja> m: dd [.lc, .uc, .fc ] with "ﬆ"
+
+[14:35] <camelia> rakudo-moar 76a59c: OUTPUT: «["ﬆ", "ST", "st"]␤»
+
+[14:36] <IOninja> .ask MasterDuke any ideas on why this fails to match now? https://irclog.perlgeek.de/perl6-dev/2017-03-07#i_14219666  Bisectable points to a version bump that brought this commit: https://github.com/MoarVM/MoarVM/commit/ab426c147702000cb857cf553c0c062ab7623d9e
+
+[14:36] <yoleaux2> IOninja: I'll pass your message to MasterDuke.
+
+[14:37] <IOninja> And once that fixed, harness6 should stop failing with tests out of sequence.
+
+[14:37] * IOninja &
+
+[14:38] <travis-ci> Rakudo build passed. Zoffix Znet 'Merge pull request #1033 from bdw/nom
+
+[14:38] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/208558885 https://github.com/rakudo/rakudo/compare/5b7b7fb5c942...ff7bfb92b6cd
+
+[15:19] <nwc10> IOninja++ # fixing harness6
+
+[15:20] <nwc10> I nearly typoed that as 7
+
+[15:20] <IOninja> Didn't fix anything...
+
+[15:20] <nwc10> that would have got me some serious stares
+
+[15:20] <nwc10> oops, I thought that you did
+
+[15:20] <IOninja> Oh the require thing...
+
+[15:20] <nwc10> yes, that :-)
+
+[15:20] <IOninja> There's still a bug with TAP parser and fancy unicode cahrs.
+
+[15:21] <llfourn> nine: I think I've got a patch for the require issues. Just running spectest :)
+
+[15:21] <nwc10> is that why it thinks that test results are arriving out of order?
+
+[15:21] <nwc10> (I wasn't too worried (yet) about it not being the same as harness5. I was trying to provke MoarVM threading bugs by running it, not actually spectesting Rakudo)
+
+[15:22] <IOninja> Yes.
+
+[15:23] <Geth> ¦ rakudo/nom: e2db7b80e6 | (Elizabeth Mattijsen)++ | src/core/metaops.pm
+
+[15:23] <Geth> ¦ rakudo/nom: Allow hypering ops that return a Seq
+
+[15:23] <Geth> ¦ rakudo/nom:
+
+[15:23] <Geth> ¦ rakudo/nom: By lowerlevelling the push, we don't touch/interprete a possibly
+
+[15:23] <Geth> ¦ rakudo/nom: returned Seq.
+
+[15:23] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/e2db7b80e6
+
+[15:39] <Geth> ¦ roast: LLFourn++ created pull request #251: Tests for latest require issues
+
+[15:39] <Geth> ¦ roast: review: https://github.com/perl6/roast/pull/251
+
+[15:40] <Geth> ¦ roast: 12b47387cf | LLFourn++ | 4 files
+
+[15:40] <Geth> ¦ roast: Tests for latest require issues
+
+[15:40] <Geth> ¦ roast: review: https://github.com/perl6/roast/commit/12b47387cf
+
+[15:40] <Geth> ¦ roast: f5d9966639 | lizmat++ | 4 files
+
+[15:40] <Geth> ¦ roast: Merge pull request #251 from LLFourn/require-issues
+
+[15:40] <Geth> ¦ roast:
+
+[15:40] <Geth> ¦ roast: Tests for latest require issues
+
+[15:40] <Geth> ¦ roast: review: https://github.com/perl6/roast/commit/f5d9966639
+
+[15:47] <lizmat> afk&
+
+[15:49] <llfourn> .tell nine I tried. But wasn't able to totally fix require. My WIP: https://github.com/LLFourn/rakudo/commit/62834afaca690c480780d99fc6b51a240b0e1b52. It passes more tests than nom, but doesn't all of the ones I just added to roast :(.
+
+[15:49] <yoleaux2> llfourn: I'll pass your message to nine.
+
+[15:52] <IOninja> m: grammar A { token TOP (:$n) { <foo($n)> .* };  token foo ($n) { . ** {$n} } };  say A.parse("Hello world", args => \(:42n) )
+
+[15:52] <camelia> rakudo-moar e2db7b: OUTPUT: «Nil␤»
+
+[15:52] <IOninja> m: grammar A { token TOP (:$n) { <foo($n)> .* };  token foo ($n) { . ** {$n} } };  say A.parse("Hello world", args => \(:5n) )
+
+[15:52] <camelia> rakudo-moar e2db7b: OUTPUT: «｢Hello world｣␤ foo => ｢Hello｣␤»
+
+[15:52] <IOninja> Don't get why that works, considering:
+
+[15:52] <IOninja> m: my $args = \(:2n); dd [ |$args.Capture ]
+
+[15:52] <camelia> rakudo-moar e2db7b: OUTPUT: «[]␤»
+
+[15:53] <IOninja> m: my $args = \(:2n); sub x { dd [ @_, %_ ] }( |$args.Capture )
+
+[15:53] <camelia> rakudo-moar e2db7b: OUTPUT: «[[], {:n(2)}]␤»
+
+[15:53] <jnthn> Because | in [...] is not the same thing as | in an argument list
+
+[15:53] <IOninja> Oh
+
+[15:53] <jnthn> So you're really doing dd [ $args.Capture.Slip ]
+
+[15:53] <IOninja> And what does it end up as in argument list?
+
+[15:54] <jnthn> I expect .Slip would call .list to get a list to make a Slip from
+
+[15:54] <jnthn> So it gets the list part of the capture
+
+[15:54] <jnthn> but \(:2n) has an empty list part - it has no positional args
+
+[15:54] <jnthn> m: my $args = \(:2n); dd $args.list
+
+[15:54] <camelia> rakudo-moar e2db7b: OUTPUT: «()␤»
+
+[15:54] <jnthn> m: my $args = \(:2n); dd $args.hash
+
+[15:54] <camelia> rakudo-moar e2db7b: OUTPUT: «Map.new((:n(2)))␤»
+
+[15:56] <IOninja> OK, makes sense now
+
+[16:04] <llfourn> m: { require Test; note Test::.keys }
+
+[16:04] <camelia> rakudo-moar e2db7b: OUTPUT: «()␤»
+
+[16:04] <llfourn> m: use Test; note Test::.keys
+
+[16:04] <camelia> rakudo-moar e2db7b: OUTPUT: «(&todo_output EXPORT &failure_output &output)␤»
+
+[16:05] <llfourn> it's more broken than I originally understood :o
+
+[16:05] <llfourn> sleep &
+
+[16:05] <travis-ci> Rakudo build failed. Elizabeth Mattijsen 'Wean IO::ArgFiles away from IO::Handle.lines(:close)'
+
+[16:05] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/208580950 https://github.com/rakudo/rakudo/compare/ff7bfb92b6cd...6be395e31010
+
+[16:05] <buggable> [travis build above] ☠ Did not recognize some failures. Check results manually.
+
+[16:06] <timotimo> t/04-nativecall/14-rw-attrs.t          (Wstat: 139 Tests: 0 Failed: 0)
+
+[16:06] <timotimo> Non-zero wait status: 139
+
+[18:07] <travis-ci> Rakudo build passed. Zoffix Znet 'Change USAGE generation
+
+[18:07] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/208587104 https://github.com/rakudo/rakudo/compare/6be395e31010...8b76ce8c90e9
+
+[21:07] <travis-ci> Rakudo build passed. Elizabeth Mattijsen 'Remove support for IO::Handle.lines(:close)
+
+[21:07] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/208593864 https://github.com/rakudo/rakudo/compare/8b76ce8c90e9...76a59cf8386b
+
+[22:10] <nine> .tell llfourn I've made some progress...I think? https://gist.github.com/niner/349fd7432e5c2c68361b3caf5111532c
+
+[22:10] <yoleaux2> 15:49Z <llfourn> nine: I tried. But wasn't able to totally fix require. My WIP: https://github.com/LLFourn/rakudo/commit/62834afaca690c480780d99fc6b51a240b0e1b52. It passes more tests than nom, but doesn't all of the ones I just added to roast :(.
+
+[22:10] <yoleaux2> nine: I'll pass your message to llfourn.

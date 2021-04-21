@@ -1,0 +1,1277 @@
+[00:03] <ugexe> ah
+
+[00:04] <samcv> gonna try getting up to date and then hopefully this segfault will go away ack
+
+[00:06] <ugexe> https://github.com/rakudo/rakudo/blob/nom/src/core/IO/Handle.pm#L214 # if i change this to always use `self!get-line-slow-path()` it croaks during tools/install-dist.pl about invalid utf8. Is it expected that switch doesn't act the same functionally?
+
+[00:07] <samcv> ack no. segfault still here.. ugh
+
+[00:07] <samcv> not even using any async things
+
+[00:07] <samcv> gonna pull out gdb
+
+[00:11] <eveo> ugexe: reading the code, making it always slow-path would lose all the last after you finish reading the file. I presume $!decoder.is-empty is false and it won't ever consume more chars
+
+[00:18] <ugexe> grr, im not able to wrap my head around that
+
+[00:26] <eveo> ugexe: oh, OK, I misread the else branch
+
+[00:26] <eveo> ugexe: tho not entirely
+
+[00:27] <eveo> ugexe: Here you read into the decoder: https://github.com/rakudo/rakudo/blob/nom/src/core/IO/Handle.pm#L220 Since you're only using slow-path, you'll be reading too much; you'd read even when we can still produce lines with .consume-line-chars. So eventually the file is read entirely, and the "if $buf.elems {" conditional will be always false. So you always go into the else branch, which does do
+
+[00:27] <eveo> .consume-chars, but it also includes the :eof thing, which ends up calling decodertakeline with :eof set https://github.com/rakudo/rakudo/blob/nom/src/core/Rakudo/Internals/VMBackedDecoder.pm#L33 and I'm guessing that makes the decoder think there aren't any more lines and it eofed?
+
+[00:34] <Geth> ¦ rakudo/nom: bb2bafa63c | (Nick Logan)++ (committed using GitHub Web editor) | src/core/IO/Handle.pm
+
+[00:34] <Geth> ¦ rakudo/nom: Fix max byte count
+
+[00:34] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/bb2bafa63c
+
+[00:36] <ugexe> that seems like it makes sense
+
+[00:40] <MasterDuke> c: HEAD~80..HEAD~75 my int $i = 0; while ($i = $i + 1) <= 1000000 { }; say now - INIT now
+
+[00:41] <committable6> MasterDuke, ¦58c01c5: «0.5323520» ¦6805f5c: «0.5637109» ¦ccfa5e5: «0.5386451» ¦1ac7996: «0.0095736» ¦0a10082: «0.007038» ¦7fa8568: «0.0083396»
+
+[00:41] <eveo> ugexe: how come?
+
+[00:41] <eveo> Well, the "fix" bit. How come old value was broken?
+
+[00:42] <ugexe> everywhere else 100000 is used except that one
+
+[00:42] <eveo> Ah
+
+[00:58] <MasterDuke> the slowdown happens with this commit https://github.com/rakudo/rakudo/commit/ccfa5e51a21f5a613ecb0cfb24be6c15f4103752 "Stop the optimizer from using what I assume are old semantics for multi dispatch"
+
+[00:59] <eveo> m: my int $i = 0; while ($i = $i + 1) <= 1000000 { }; say now - INIT now
+
+[00:59] <camelia> rakudo-moar bb2baf: OUTPUT: «0.55452843␤»
+
+[00:59] <eveo> m: my int $i = 0; while ($i = $i + my int $ = 1) <= 1000000 { }; say now - INIT now
+
+[00:59] <camelia> rakudo-moar bb2baf: OUTPUT: «0.0894072␤»
+
+[00:59] <eveo> Yeah, it's correct.
+
+[01:00] <eveo> It was using the wrong multi before
+
+[01:03] <eveo> buggable: toast
+
+[01:03] <buggable> eveo, Between 2017.05-482-g932b10f and 2017.05: 1 (0.12%) modules got burnt; 3 (0.36%) got unsucced; 200 (24.07%) out of 831 modules appear unusable. See https://toast.perl6.party/ for details.
+
+[01:03] <eveo> And the one burn is a floppy module's tests
+
+[01:03] <eveo> one more unsucc is a deleted module, and last one.... is Inline::Perl5 with "Invalid json? File: /home/cpan/.zef/store/Inline-Perl5-0.27.tar.gz/Inline-Perl5-0.27/Build.pm"
+
+[01:04] <eveo> nine: ^ so looks like .27 still got that issue?
+
+[01:04] <eveo> gonna run a stresstest on HEAD on Windows and I think then I'm ready to release
+
+[01:09] <eveo> m: my int $i = 0; while (++$i) <= 1000000 { }; say now - INIT now
+
+[01:09] <camelia> rakudo-moar bb2baf: OUTPUT: «0.0921624␤»
+
+[01:12] <travis-ci> Rakudo build failed. Zoffix Znet 'Merge pull request #1103 from stmuk/nom
+
+[01:12] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/244014523 https://github.com/rakudo/rakudo/compare/fb50f49611ef...9435c14eb387
+
+[01:12] <buggable> [travis build above] ✓ All failures are due to timeout (0), missing build log (0), GitHub connectivity (0), or failed make test (3). Across all jobs, only 04-nativecall/06-struct.t test file failed.
+
+[01:13] <eveo> fuck
+
+[01:16] <eveo> Man, the Proc piping issue irks me. Sucks to make a release with it in it. Especially on the release where I claimed we used Toaster so everything is peachy
+
+[01:16] * eveo pokes at it some more, in hopes of finding a fix
+
+[01:18] <Geth> ¦ rakudo/nom: 44acdd2c26 | (Zoffix Znet)++ | src/core/IO/Path.pm
+
+[01:18] <Geth> ¦ rakudo/nom: Revert "Optimize newline translation in IO::Path.slurp"
+
+[01:18] <Geth> ¦ rakudo/nom:
+
+[01:18] <Geth> ¦ rakudo/nom: This reverts commit 6788833bb831da6a3540755ce2ea8855a92b59ca.
+
+[01:18] <Geth> ¦ rakudo/nom:
+
+[01:18] <Geth> ¦ rakudo/nom: Based on travis results, this commit may be causing a nativecall struct
+
+[01:18] <Geth> ¦ rakudo/nom: test failure. Can't repro this locally. Throwing this out of the
+
+[01:18] <Geth> ¦ rakudo/nom: release, just in case.
+
+[01:18] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/44acdd2c26
+
+[01:19] <ugexe> fwiw osx seems to have the io pipe problem a lot less than the linux system i test on
+
+[01:20] <ugexe> only 3 failures out of 100 for the gist you posted
+
+[01:21] <eveo> Yeah, tho 3 out of 100 may as well be 100 out of 100 if you're using it in a proper program
+
+[01:23] <ugexe> but it hints towards the problem since osx has a decently smaller default pipe buffer size than linux
+
+[01:24] <eveo> Ah
+
+[01:25] <Geth> ¦ rakudo/nom: cd547021bd | (Zoffix Znet)++ | src/core/CompUnit/Repository/Installation.pm
+
+[01:25] <Geth> ¦ rakudo/nom: Use .subst instead of fast-pathing newline translation
+
+[01:25] <Geth> ¦ rakudo/nom:
+
+[01:25] <Geth> ¦ rakudo/nom: Reverting this outta the release for same reasons as in
+
+[01:25] <Geth> ¦ rakudo/nom: https://github.com/rakudo/rakudo/commit/44acdd2c26
+
+[01:25] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/cd547021bd
+
+[01:28] <ugexe> should all the .tap's used in Proc.pm be .act's?
+
+[01:31] <eveo> no idea
+
+[01:35] * eveo millimeters closer to solution
+
+[01:41] <eveo> god, windows stresstest is a bloodbath. I guess July will be the month of fixing Windows
+
+[01:56] <eveo> ohmaigawd
+
+[01:56] <eveo> I think I see it!
+
+[01:57] * eveo compiles
+
+[01:59] <eveo> \o/ |o| /o/ -o- |o| \o\
+
+[01:59] <eveo> Yeaaaah...! Fixed it :D
+
+[01:59] <eveo> And the fix has fewer letters than the number of hours I spent hunting this bug :P
+
+[02:00] <ugexe> noice
+
+[02:10] <Geth> ¦ rakudo/nom: 239c505ea5 | (Zoffix Znet)++ | src/core/Proc/Async.pm
+
+[02:10] <Geth> ¦ rakudo/nom: Fix regression in piping output of one Proc to another
+
+[02:10] <Geth> ¦ rakudo/nom:
+
+[02:10] <Geth> ¦ rakudo/nom: In bound STDIN, we write to the proc, but forget to `await` that write,
+
+[02:10] <Geth> ¦ rakudo/nom: so we end up done-ing the supply before it finished writing, which
+
+[02:10] <Geth> ¦ rakudo/nom: closes stdin and intros a race where data piped to STDIN gets lost.
+
+[02:10] <Geth> ¦ rakudo/nom:
+
+[02:10] <Geth> ¦ rakudo/nom: Fixes flopping of t/spec/S32-io/pipe.t spectest.
+
+[02:10] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/239c505ea5
+
+[02:14] <eveo> windows spectest hangs too. Last test files in output in both cases are socket tests.
+
+[02:20] * BenGoldberg wonders if the Promises returned by .write should be automatically awaited if sunk.
+
+[02:23] <eveo> meh
+
+[02:26] <eveo> It's bad enough async react is written as `start react {}` would suck to uglify it further with `$ = start react {}`
+
+[02:26] <eveo> maybe a pragma
+
+[02:47] <BenGoldberg> I'm not suggesting all promises, just the ones from .write, since it's the kind of thing that people overlook.
+
+[02:52] <eveo> But then you're introing a special-case
+
+[02:54] <eveo> And just creating confusion on when users are supposed to await for promises instead of just sinking them
+
+[03:13] <eveo> m: class YourMom {}.WHY
+
+[03:13] <camelia> rakudo-moar 239c50: ( no output )
+
+[03:13] <eveo> m: class YourMom {}.WHY.say
+
+[03:13] <camelia> rakudo-moar 239c50: OUTPUT: «No documentation available for type 'YourMom'.␤Perhaps it can be found at https://docs.perl6.org/type/YourMom␤»
+
+[03:13] <eveo> heh
+
+[03:22] <eveo> So JVM now has an implemented Proc::Async?
+
+[03:22] <eveo> j: $*PERL.compiler.version.say
+
+[03:22] <camelia> rakudo-jvm 239c50: OUTPUT: «v2017.05.486.g.239.c.505.ea␤»
+
+[03:22] <eveo> j: Proc::Asyns.new
+
+[03:22] <eveo> j: Proc::Async.new
+
+[03:22] <camelia> rakudo-jvm 239c50: OUTPUT: «Could not find symbol '&Asyns'␤  in block <unit> at <tmp> line 1␤␤»
+
+[03:22] <camelia> rakudo-jvm 239c50: OUTPUT: «Cannot resolve caller new(Proc::Async: ); none of these signatures match:␤    (Proc::Async $: *@ (Any $path, *@args), *%_)␤  in block <unit> at <tmp> line 1␤␤»
+
+[03:23] <eveo> j: with Proc::Async.new('ls') { .stdout.tap: &say; await .start }
+
+[03:23] <camelia> rakudo-jvm 239c50: OUTPUT: «Inline-Perl5␤Perlito␤Tst.pm␤bin␤dalek-queue␤evalbot␤evalbot.log␤lala.out␤lib␤log␤mbox␤nqp-js␤p1␤p2␤p6eval-token␤perl5␤rakudo-j-1␤rakudo-j-2␤rakudo-j-inst␤rakudo-j-inst-1␤rakudo-j-inst-2␤rakudo-m-1␤rakudo-m-2␤r…»
+
+[03:23] <eveo> cool
+
+[03:24] <Geth> ¦ rakudo/nom: 03c9bd68a6 | (Zoffix Znet)++ | docs/ChangeLog
+
+[03:24] <Geth> ¦ rakudo/nom: Log all changes to date
+
+[03:24] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/03c9bd68a6
+
+[03:25] <eveo> It's hammer time
+
+[03:28] <eveo> NeuralAnomaly: status
+
+[03:28] <NeuralAnomaly> eveo, [✔] Next release is today. Since last release, there are 68 new still-open tickets (0 unreviewed and 0 blockers) and 0 unreviewed commits. See http://perl6.fail/release/stats for details
+
+[03:29] <eveo> NeuralAnomaly: cut the release
+
+[03:29] <travis-ci> Rakudo build failed. Zoffix Znet 'Merge pull request #1104 from ugexe/proc-merge
+
+[03:29] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/244090549 https://github.com/rakudo/rakudo/compare/9435c14eb387...807496671c7b
+
+[03:29] <buggable> [travis build above] ✓ All failures are due to timeout (0), missing build log (0), GitHub connectivity (0), or failed make test (3). Across all jobs, only 04-nativecall/06-struct.t test file failed.
+
+[03:29] <eveo> Come on, robot. It's me, lovable eveo!
+
+[03:30] <eveo> NeuralAnomaly: status
+
+[03:30] <NeuralAnomaly> eveo, [✘] Next release is today. Since last release, there are 68 new still-open tickets (0 unreviewed and 0 blockers) and 1 unreviewed commits. See http://perl6.fail/release/stats for details
+
+[03:30] <eveo> NeuralAnomaly: status
+
+[03:30] <NeuralAnomaly> eveo, [✔] Next release is today. Since last release, there are 68 new still-open tickets (0 unreviewed and 0 blockers) and 0 unreviewed commits. See http://perl6.fail/release/stats for details
+
+[03:30] <eveo> NeuralAnomaly: cut the release
+
+[03:30] <NeuralAnomaly> eveo, Will do! If you're feeling particularly naughty, you can watch me at http://perl6.fail/release/progress or go look at some cats http://icanhas.cheezburger.com/lolcats
+
+[03:30] <NeuralAnomaly> eveo, ♥♥♥♥♥♥ Prep done
+
+[03:30] <Geth> ¦ nqp: 836ff40a0a | (Zoffix Znet)++ | tools/build/MOAR_REVISION
+
+[03:30] <Geth> ¦ nqp: bump MoarVM version to 2017.06
+
+[03:30] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/836ff40a0a
+
+[03:30] <Geth> ¦ nqp: version bump brought these changes: https://github.com/MoarVM/MoarVM/compare/2017.05-116-ga0992f3...2017.06
+
+[03:30] <Geth> ¦ nqp: bc4ffab33a | (Zoffix Znet)++ | VERSION
+
+[03:30] <Geth> ¦ nqp: bump VERSION to 2017.06
+
+[03:30] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/commit/bc4ffab33a
+
+[03:30] <Geth> ¦ nqp: version bump brought these changes: https://github.com/MoarVM/MoarVM/compare/2017.05-116-ga0992f3...2017.06
+
+[03:40] <NeuralAnomaly> eveo, ♥♥♥♥♥♥ nqp tests OK
+
+[03:49] <NeuralAnomaly> eveo, ♥♥♥♥♥♥ nqp release tarball tests OK
+
+[03:49] <NeuralAnomaly> eveo, ♥♥♥♥♥♥ nqp release DONE
+
+[03:50] <NeuralAnomaly> eveo, ☠☠☠☠☠☠ Rakudo: generate release announcement
+
+[03:50] <NeuralAnomaly> eveo, ☠☠☠☠☠☠☠☠☠☠ ABNORMAL EXIT!
+
+[03:50] <eveo> booo
+
+[03:52] <eveo> system perl6 was set on 2016.05
+
+[03:53] <eveo> NeuralAnomaly: steps
+
+[03:53] <NeuralAnomaly> eveo, all pre nqp r post pre-r6 pre-blank-slate nqp-clone nqp-bump-vers nqp-build nqp-test nqp-tar nqp-tar-build nqp-tag nqp-tar-sign nqp-tar-copy r-clone r-prep-ann r-bump-vers r-build r-p5 r-stress r-stress-v6c r-tar r-tar-build r-tar-p5 r-tar-stress r-tag r-tar-sign r-tar-copy post-scp
+
+[03:53] <eveo> NeuralAnomaly: run r-prep-ann r-bump-vers r-build r-p5 r-stress r-stress-v6c r-tar r-tar-build r-tar-p5 r-tar-stress r-tag r-tar-sign r-tar-copy post-scp
+
+[03:54] <Geth> ¦ rakudo/nom: fe86fe1de6 | (Zoffix Znet)++ | docs/announce/2017.06.md
+
+[03:54] <Geth> ¦ rakudo/nom: Generate release announcement for 2017.06
+
+[03:54] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/fe86fe1de6
+
+[03:54] <Geth> ¦ rakudo/nom: version bump brought these changes: https://github.com/perl6/nqp/compare/2017.05-200-ged1a5d8...2017.06
+
+[03:54] <Geth> ¦ rakudo/nom: 818a530f34 | (Zoffix Znet)++ | tools/build/NQP_REVISION
+
+[03:54] <Geth> ¦ rakudo/nom: [release] bump NQP revision
+
+[03:54] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/818a530f34
+
+[03:54] <Geth> ¦ rakudo/nom: version bump brought these changes: https://github.com/perl6/nqp/compare/2017.05-200-ged1a5d8...2017.06
+
+[03:54] <Geth> ¦ rakudo/nom: c252b39e2f | (Zoffix Znet)++ | VERSION
+
+[03:54] <Geth> ¦ rakudo/nom: [release] bump VERSION to 2017.06
+
+[03:54] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/c252b39e2f
+
+[03:54] <Geth> ¦ rakudo/nom: version bump brought these changes: https://github.com/perl6/nqp/compare/2017.05-200-ged1a5d8...2017.06
+
+[04:02] <NeuralAnomaly> eveo, ☠☠☠☠☠☠☠☠☠☠ ABNORMAL EXIT!
+
+[04:02] <NeuralAnomaly> eveo, ☠☠☠☠☠☠ Rakudo: make stresstest (master)
+
+[04:03] <eveo> NeuralAnomaly: run r-stress r-stress-v6c r-tar r-tar-build r-tar-p5 r-tar-stress r-tag r-tar-sign r-tar-copy post-scp
+
+[04:05] <NeuralAnomaly> eveo, ☠☠☠☠☠☠ Rakudo: make stresstest (master)
+
+[04:05] <NeuralAnomaly> eveo, ☠☠☠☠☠☠☠☠☠☠ ABNORMAL EXIT!
+
+[04:06] <eveo> fucking 'ell
+
+[04:06] <eveo> First time seeing t/spec/S29-os/system.t flop
+
+[04:06] <eveo> NeuralAnomaly: run r-stress r-stress-v6c r-tar r-tar-build r-tar-p5 r-tar-stress r-tag r-tar-sign r-tar-copy post-scp
+
+[04:07] <eveo> man t/spec/S17-procasync/stress.t just doesn't wanna pass :/
+
+[04:08] <eveo> passes when I run it on its own :/
+
+[04:08] <NeuralAnomaly> eveo, ☠☠☠☠☠☠ Rakudo: make stresstest (master)
+
+[04:08] <NeuralAnomaly> eveo, ☠☠☠☠☠☠☠☠☠☠ ABNORMAL EXIT!
+
+[04:09] <eveo> NeuralAnomaly: run r-stress r-stress-v6c r-tar r-tar-build r-tar-p5 r-tar-stress r-tag r-tar-sign r-tar-copy post-scp
+
+[04:10] <eveo> again failed :|
+
+[04:11] <samcv> eveo, so it seems i did more work and it seems rakudobrew builds with debug=3 by default. and so it is causing segfaults for me unless i build without debugging. not sure what debug level causes my script to fail
+
+[04:11] <NeuralAnomaly> eveo, ☠☠☠☠☠☠☠☠☠☠ ABNORMAL EXIT!
+
+[04:11] <NeuralAnomaly> eveo, ☠☠☠☠☠☠ Rakudo: make stresstest (master)
+
+[04:11] <samcv> but no failure if i tell rakudobrew to bulid without debugging
+
+[04:11] <eveo> NeuralAnomaly: run r-stress r-stress-v6c r-tar r-tar-build r-tar-p5 r-tar-stress r-tag r-tar-sign r-tar-copy post-scp
+
+[04:12] <eveo> Gonna by-pass tests if this run fails. Both failing files run fine when I run them manually with t/fudgeandrun
+
+[04:12] <eveo> Hm. Wonder if the not-a-tty is a cause here tho
+
+[04:12] <eveo> failed again. don't seem to be just a flopper
+
+[04:12] <samcv> do you have the logs eveo
+
+[04:12] <eveo> samcv: for what?
+
+[04:12] <samcv> the failing tests
+
+[04:12] <eveo> https://perl6.fail/release/progress
+
+[04:13] <samcv> thanks
+
+[04:13] <eveo> It doesn't say what exactly failed
+
+[04:13] <NeuralAnomaly> eveo, ☠☠☠☠☠☠☠☠☠☠ ABNORMAL EXIT!
+
+[04:13] <NeuralAnomaly> eveo, ☠☠☠☠☠☠ Rakudo: make stresstest (master)
+
+[04:14] <ugexe> it passes for me locally on osx
+
+[04:14] <samcv> eveo, let me try running it on my system
+
+[04:14] <samcv> since i seem to be having some weidhness
+
+[04:15] <eveo> NeuralAnomaly: steps
+
+[04:15] <NeuralAnomaly> eveo, all pre nqp r post pre-r6 pre-blank-slate nqp-clone nqp-bump-vers nqp-build nqp-test nqp-tar nqp-tar-build nqp-tag nqp-tar-sign nqp-tar-copy r-custom r-clone r-prep-ann r-bump-vers r-build r-p5 r-stress r-stress-v6c r-tar r-tar-build r-tar-p5 r-tar-stress r-tag r-tar-sign r-tar-copy post-scp
+
+[04:15] <eveo> NeuralAnomaly: run r-custom
+
+[04:15] <NeuralAnomaly> eveo, ♥♥♥♥♥♥ Rakudo: custom command
+
+[04:15] <NeuralAnomaly> eveo, ☠☠☠☠☠☠☠☠☠☠ ABNORMAL EXIT!
+
+[04:15] <eveo> NeuralAnomaly: run r-custom
+
+[04:16] <NeuralAnomaly> eveo, ♥♥♥♥♥♥ Rakudo: custom command
+
+[04:16] <NeuralAnomaly> eveo, ☠☠☠☠☠☠☠☠☠☠ ABNORMAL EXIT!
+
+[04:16] <ugexe> passes on a linux vm as well
+
+[04:17] <eveo> NeuralAnomaly: run r-custom
+
+[04:17] <NeuralAnomaly> eveo, ☠☠☠☠☠☠☠☠☠☠ ABNORMAL EXIT!
+
+[04:17] <NeuralAnomaly> eveo, ♥♥♥♥♥♥ Rakudo: custom command
+
+[04:18] <samcv> i'm gonna run a whole stresstest on my system after rakudo finishes compiling...
+
+[04:18] <samcv> to make sure --debug=3 on moarvm doesn't cause any of the spectest tests to fail
+
+[04:24] <eveo> I don't get it... it says "not ok 36 - run sets $cwd and $env" for an is-deeply test but I don't see the failure diagnostics message anywhere :/
+
+[04:24] <samcv> i get failing tests
+
+[04:24] <samcv> t/spec/S17-procasync/stress.t
+
+[04:24] <eveo> Is it actually failing or just a flopper?
+
+[04:24] <samcv> i will run it again
+
+[04:24] <eveo> Seems to fail consistently in the bot when run as stresstest, but standalone it's fine
+
+[04:25] <samcv> nope it's failing
+
+[04:25] <eveo> What's the full output?
+
+[04:25] <samcv> https://gist.github.com/193454e9bf2f728f9ad2b528fced57ec
+
+[04:27] <eveo> samcv: is that with debug stuff?
+
+[04:27] <samcv> building moar with debugging yes
+
+[04:27] <samcv> which is the default rakudobrew builds... so
+
+[04:27] <samcv> tho idk how much we care about that?
+
+[04:28] <samcv> but still is something to think about
+
+[04:32] <samcv> passes fine with --debug=0 just tested
+
+[04:36] <Geth> ¦ roast: c749b6b084 | (Zoffix Znet)++ | S29-os/system.t
+
+[04:36] <Geth> ¦ roast: Fudge new test for release
+
+[04:36] <Geth> ¦ roast:
+
+[04:36] <Geth> ¦ roast: The test passes, but not when running via release bot. Probably something
+
+[04:36] <Geth> ¦ roast: to do with how $*EXECUTABLE is set or something. I changed the command
+
+[04:36] <Geth> ¦ roast: executed and I see :cwd works fine. So it's something with the test
+
+[04:36] <Geth> ¦ roast: itself.
+
+[04:36] <Geth> ¦ roast:
+
+[04:36] <Geth> ¦ roast: The test is new, added just a few days ago, and isn't part of 6.c
+
+[04:36] <Geth> ¦ roast: review: https://github.com/perl6/roast/commit/c749b6b084
+
+[04:36] <eveo> NeuralAnomaly: run r-stress r-stress-v6c r-tar r-tar-build r-tar-p5 r-tar-stress r-tag r-tar-sign r-tar-copy post-scp
+
+[04:37] <eveo> bah. Just doesn't want to pass while part of stresstest :/ Works fine when I t/fudgeandrun it, even via the bot
+
+[04:38] <eveo> the proc stresstest that is
+
+[04:38] <NeuralAnomaly> eveo, ☠☠☠☠☠☠ Rakudo: make stresstest (master)
+
+[04:38] <NeuralAnomaly> eveo, ☠☠☠☠☠☠☠☠☠☠ ABNORMAL EXIT!
+
+[04:39] <samcv> eveo, i get many failed tests
+
+[04:39] <samcv> t/spec/S17-procasync/stress.t  t/spec/S32-io/IO-Socket-Async-UDP.t  t/spec/S32-io/IO-Socket-Async.t
+
+[04:39] <samcv> t/spec/S32-io/IO-Socket-INET.t
+
+[04:39] <samcv> t/spec/S32-io/socket-recv-vs-read.t
+
+[04:39] <samcv> with debug set
+
+[04:39] <samcv> i'm gonna rerun it again though
+
+[04:39] <samcv> err. those tests individually i mean
+
+[04:41] <eveo> NeuralAnomaly: run r-stress-v6c r-tar r-tar-build r-tar-p5 r-tar-stress r-tag r-tar-sign r-tar-copy post-scp
+
+[04:42] <samcv> t/spec/S32-io/IO-Socket-Async-UDP.t fails # failed to resolve host name
+
+[04:43] <NeuralAnomaly> eveo, ♥♥♥♥♥♥ Rakudo stresstest (6.c-errata) OK
+
+[04:43] <eveo> I can repro the "process not opened for write" thing with this snippet run a few times: https://gist.github.com/zoffixznet/8b4cfcc371eb8ca024f4fa7be599b2de
+
+[04:43] <samcv> ok all those failed to resolve host name except the first one
+
+[04:44] <samcv> somehow debug must make things trigger more. flappers it seems
+
+[04:44] <samcv> or make them happen consistently
+
+[04:44] <samcv> at least that's what appears to be happening :|
+
+[04:55] * TimToady waves from not-quite-DC
+
+[04:56] <eveo> \o
+
+[05:05] <eveo> k, no idea where the race is at in proc async. Might even be in moar
+
+[05:05] * eveo continues with release
+
+[05:05] <eveo> NeuralAnomaly: run r-stress-v6c r-tar r-tar-build r-tar-p5 r-tar-stress r-tag r-tar-sign r-tar-copy post-scp
+
+[05:07] <NeuralAnomaly> eveo, ♥♥♥♥♥♥ Rakudo stresstest (6.c-errata) OK
+
+[05:15] <NeuralAnomaly> eveo, ♥♥♥♥♥♥ Rakudo release DONE
+
+[05:15] <NeuralAnomaly> eveo, ♥♥♥♥♥♥ Post: upload tarballs to rakudo.org and rakudo.perl6.org
+
+[05:15] <NeuralAnomaly> eveo, ????????????????????????????????????????????????????????????
+
+[05:15] <NeuralAnomaly> eveo, The release of **Rakudo #112 2017.06** has now been completed
+
+[05:15] <NeuralAnomaly> eveo, ????????????????????????????????????????????????????????????
+
+[05:15] * NeuralAnomaly celebrates with an appropriate amount of fun
+
+[05:16] <eveo> *phew*
+
+[05:16] <eveo> That was a ton of work.
+
+[05:16] <eveo> Toaster++ this would've been another lemon of a release without it
+
+[05:30] <Geth> ¦ rakudo/nom: 3d2a521c25 | (Zoffix Znet)++ | 3 files
+
+[05:30] <Geth> ¦ rakudo/nom: Revert "Revert "Change the way we code-gen simple for loops.""
+
+[05:30] <Geth> ¦ rakudo/nom:
+
+[05:30] <Geth> ¦ rakudo/nom: This reverts commit 932b10f6a909cbe6a0bb50891f82694e9348ec7c.
+
+[05:30] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/3d2a521c25
+
+[05:30] <Geth> ¦ rakudo/nom: 5a80412cb3 | (Zoffix Znet)++ | src/core/CompUnit/Repository/Installation.pm
+
+[05:30] <Geth> ¦ rakudo/nom: Revert "Use .subst instead of fast-pathing newline translation"
+
+[05:30] <Geth> ¦ rakudo/nom:
+
+[05:30] <Geth> ¦ rakudo/nom: This reverts commit cd547021bdf5fb47794354d1aea102d95942101b.
+
+[05:30] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/5a80412cb3
+
+[05:30] <Geth> ¦ rakudo/nom: c4e14731f6 | (Zoffix Znet)++ | src/core/IO/Path.pm
+
+[05:30] <Geth> ¦ rakudo/nom: Revert "Revert "Optimize newline translation in IO::Path.slurp""
+
+[05:30] <Geth> ¦ rakudo/nom:
+
+[05:30] <Geth> ¦ rakudo/nom: This reverts commit 44acdd2c266966ef61af37bec2cf379e10851448.
+
+[05:30] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/c4e14731f6
+
+[05:30] <Geth> ¦ roast: 8ca80ecbb4 | (Zoffix Znet)++ | S29-os/system.t
+
+[05:30] <Geth> ¦ roast: Revert "Fudge new test for release"
+
+[05:30] <Geth> ¦ roast:
+
+[05:30] <Geth> ¦ roast: This reverts commit c749b6b08456d97b415b779d23021143adf27a3a.
+
+[05:30] <Geth> ¦ roast: review: https://github.com/perl6/roast/commit/8ca80ecbb4
+
+[05:31] <Geth> ¦ rakudo/nom: ee4c3d3226 | (Zoffix Znet)++ (committed using GitHub Web editor) | docs/release_guide.pod
+
+[05:31] <Geth> ¦ rakudo/nom: 2017.06 is now in the past
+
+[05:31] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/ee4c3d3226
+
+[05:31] <eveo> NeuralAnomaly: status
+
+[05:31] <NeuralAnomaly> eveo, [✘] Next release will be in 3 weeks and 6 days. Since last release, there are 1 new still-open tickets (0 unreviewed and 0 blockers) and 3 unreviewed commits. See http://perl6.fail/release/stats for details
+
+[05:35] <eveo> .tell jnthn got two new tickets you may be interested in: "for loop no longer sinks stuff": https://rt.perl.org/Ticket/Display.html?id=131593  and "some data race in Proc::Async write" probably worth waiting until the piping is reworked as you planned to do next week. Ticket: https://rt.perl.org/Ticket/Display.html?id=131592
+
+[05:35] <yoleaux> eveo: I'll pass your message to jnthn.
+
+[05:36] <eveo> Alright. Time for a break from Perl 6.
+
+[05:36] * eveo leaves to learn C for a couple of weeks.
+
+[05:36] <eveo> The ZofBot is ever vigillant, so just say my name if you need me
+
+[06:30] <nine> .tell eveo Inline::Perl5's tar file should be fixed in 0.28
+
+[06:30] <yoleaux> nine: I'll pass your message to eveo.
+
+[08:23] <[Tux]> lizmat, noted
+
+[08:23] <yoleaux> 17 Jun 2017 20:53Z <lizmat> [Tux]: CSV can become a bit faster if you replace all m{} by //
+
+[08:24] * [Tux] now fighting code in order to track down a "Attempt to free an unreferenced scalar: SV 0x..." in perl5
+
+[08:32] <lizmat> Files=1204, Tests=62514, 216 wallclock secs (13.21 usr  5.03 sys + 1310.41 cusr 132.51 csys = 1461.16 CPU)    # pre-release
+
+[08:34] <[Tux]> This is Rakudo version 2017.06-4-gee4c3d322 built on MoarVM version 2017.06
+
+[08:34] <[Tux]> csv-ip5xs        2.477
+
+[08:34] <[Tux]> test            12.618
+
+[08:34] <[Tux]> test-t           4.032 - 4.183
+
+[08:34] <[Tux]> csv-parser      12.785
+
+[08:36] <[Tux]> if using options, like in m:m{...}, that isn't possible, right?
+
+[08:40] <timotimo> for things like ignorecase and ignoremark you can put that after the initial / in the / /
+
+[08:41] <timotimo> stuff that influences how the match will be done, like :g or :ov or :ex or :n or :th for example, won't work inside the regex
+
+[09:00] <[Tux]> m{} → // ⇒ 4.034 | 4.057 | 4.062 | 4.067
+
+[09:00] <[Tux]> so, no noticable speed gain
+
+[09:05] <timotimo> i was also wondering what about // is faster than m{}
+
+[09:10] <[Tux]> and going back to m{} last timeing was 4.007, so - as I prefer reading explicit m{} - I will keep the m{} notation
+
+[09:11] <[Tux]> I won't argue that it might speed up other modules or scripts, but it does not speed up CSV
+
+[09:12] <timotimo> mhm
+
+[09:17] <[Tux]> anyway, that shows a consisten (very) low 4.0, so I am reasonable happy
+
+[09:24] <dogbert17> with some luck it will go under 4 next week
+
+[09:27] <lizmat> m: for ^100000 { 42 ~~ /^ <[0..9]> / }; say now - INIT now
+
+[09:27] <camelia> rakudo-moar ee4c3d: OUTPUT: «1.1691020␤»
+
+[09:27] <lizmat> m: for ^100000 { 42 ~~ m/^ <[0..9]> / }; say now - INIT now
+
+[09:27] <camelia> rakudo-moar ee4c3d: OUTPUT: «9.2692342␤»
+
+[09:27] <lizmat> timotimo: ^^^
+
+[09:28] <timotimo> huh
+
+[09:29] <lizmat> m// calls Str.match, // goes straight to Regex.ACCEPTS afaict
+
+[09:30] <lizmat> m: for ^100000 { "42" ~~ /^ <[0..9]> / }; say now - INIT now   # proper string
+
+[09:30] <camelia> rakudo-moar ee4c3d: OUTPUT: «0.9959404␤»
+
+[09:30] <lizmat> m: for ^100000 { "42" ~~ m/^ <[0..9]> / }; say now - INIT now   # proper string
+
+[09:30] <camelia> rakudo-moar ee4c3d: OUTPUT: «1.267983␤»
+
+[09:30] <lizmat> hmmm
+
+[09:30] <lizmat> not quite as pronounced
+
+[09:34] <timotimo> m: for ^100000 { 42.Str }; say now - INIT now
+
+[09:34] <camelia> rakudo-moar ee4c3d: OUTPUT: «0.0334138␤»
+
+[09:40] <lizmat> timotimo: it's more about candidate selection I think
+
+[09:40] <lizmat> not about the actual coercion
+
+[09:41] <travis-ci> Rakudo build errored. Zoffix Znet 'Revert "Change the way we code-gen simple for loops."
+
+[09:41] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/244097742 https://github.com/rakudo/rakudo/compare/807496671c7b...932b10f6a909
+
+[09:41] <buggable> [travis build above] ✓ All failures are due to timeout (0), missing build log (2), GitHub connectivity (0), or failed make test (0).
+
+[09:41] <lizmat> 42 ~~ m// has to go through Cool.match
+
+[09:42] <lizmat> 42 ~~ // probably uses native auto-coercion
+
+[09:43] <lizmat> m: my int $a = 42; my str $b = $a; dd $b
+
+[09:43] <camelia> rakudo-moar ee4c3d: OUTPUT: «"42"␤»
+
+[10:30] <dogbert17> lizmat: do you know anything about a method called 'tree'?
+
+[10:32] <dogbert17> it's declared in Any.pm but does not seem to be used anywhere in the rakudo source
+
+[11:23] <timotimo> thrown out with the glr i suspect
+
+[12:43] <lizmat> dogbert17: seem to be tests for it in t/spec/S02-lists/tree.t, perhaps you can derive from that what it's supposed to do
+
+[12:43] <lizmat> dogb dogbert17: I haven't got a clue  :-)
+
+[12:43] <lizmat> afk again&
+
+[13:10] <dogbert17> perhaps jnthn or Zoffix knows what tree is used for
+
+[13:12] <timotimo> back when we had parcels which would "lazily flatten or itemize depending on context/operation", you had to use something like .lol or .tree to build a tree structure from nested parcels
+
+[13:12] <timotimo> otherwise it'd just become one flat list with .List or whateve
+
+[13:13] <dogbert17> timotimo: interesting, there seems to be some connection with lol (I assume that is not the game :-)
+
+[13:14] <timotimo> right
+
+[13:14] <timotimo> lol is probably like .tree(1)
+
+[13:14] <dogbert17> timotimo: the reason for asking is that there's a doc issue on .tree being documented but when going through the src it wasn't used so I'm wondering if it should be deprecated/removed instead
+
+[13:15] <dogbert17> *not being documented
+
+[13:17] <dogbert17> timotimo: wrt to parcels, so lists had a tendency to lose their structure before?
+
+[13:17] <timotimo> yup
+
+[13:17] <timotimo> the GLR was what got us rid of that
+
+[13:18] <dogbert17> cool, so perhaps it should go ...
+
+[13:18] <timotimo> you used to have to work for it if you wanted structure
+
+[13:18] <timotimo> and it was often bothersome to figure out what would happen in any given situation
+
+[13:18] * dogbert17 wasn't involved with Perl 6 in those ancient times :)
+
+[13:18] <timotimo> the GLR made things a whole lot more regular
+
+[13:18] <timotimo> stop it, you're making me feel old :)
+
+[13:19] <dogbert17> :)
+
+[13:19] <dogbert17> I'll ignore tree for now (doc wise)
+
+[13:19] <timotimo> bark up another method :)
+
+[13:21] <dogbert17> will do, btw do you want to investigate a SEGV?
+
+[13:22] <timotimo> i can try
+
+[13:22] <dogbert17> what happens if you run this a few times: 'perl6 t/spec/S17-procasync/stress.t'
+
+[13:23] <dogbert17> preferably with 2017.06
+
+[13:23] <timotimo> let me build some new commits
+
+[13:23] <dogbert17> :)
+
+[13:23] <travis-ci> Rakudo build canceled. Zoffix Znet 'Revert "Change the way we code-gen simple for loops."
+
+[13:23] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/244097742 https://github.com/rakudo/rakudo/compare/807496671c7b...932b10f6a909
+
+[13:23] <buggable> [travis build above] ☠ Did not recognize some failures. Check results manually.
+
+[13:33] <BenGoldberg> m: my %_ = named_slurpy => 42; say [||] %_<<optional named_names pos_slurpy pos_onearg named_slurpy>>;
+
+[13:33] <camelia> rakudo-moar ee4c3d: OUTPUT: «5===SORRY!5=== Error while compiling <tmp>␤Cannot use placeholder parameter %_ outside of a sub or block␤at <tmp>:1␤------> 3my %_7⏏5 = named_slurpy => 42; say [||] %_<<opti␤»
+
+[13:33] <BenGoldberg> m: my %meh = named_slurpy => 42; say [||] %meh<<optional named_names pos_slurpy pos_onearg named_slurpy>>;
+
+[13:33] <camelia> rakudo-moar ee4c3d: OUTPUT: «42␤»
+
+[13:43] <timotimo> may want [//] instead if falsy things are allowed to be passed
+
+[13:48] <timotimo> dogbert17: is sigpipe interesting at all?
+
+[13:50] <dogbert17> you got a broken pipe?
+
+[13:51] <timotimo> stepping through the thing in gdb is annoying
+
+[13:51] <timotimo> so many broken pipes
+
+[13:52] <dogbert17> if you make the nursery smaller it will SEGV for sure with:
+
+[13:52] <dogbert17> Program received signal SIGSEGV, Segmentation fault.
+
+[13:52] <dogbert17> 0xb7c74c67 in gc_mark (tc=0x804c468, st=0x8096da8, data=0xb28a178, worklist=0xb225cc8) at src/6model/reprs/MVMCallCapture.c:54
+
+[13:52] <dogbert17> 54             if (flag_map[flag] & MVM_CALLSITE_ARG_NAMED) {
+
+[13:52] <timotimo> oh, in a call capture, eh?
+
+[13:53] <dogbert17> looks like it, should I throw up a gist or do you want to replicate it?
+
+[13:54] <timotimo> i'll try to replicate it
+
+[13:54] <timotimo> how small is your nursery?
+
+[13:55] <dogbert17> 32768 * 8
+
+[13:58] <travis-ci> Rakudo build passed. Nick Logan 'Fix max byte count'
+
+[13:58] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/244106917 https://github.com/rakudo/rakudo/compare/932b10f6a909...bb2bafa63c1a
+
+[14:01] <timotimo> yup, i got it
+
+[14:01] <dogbert17> yay
+
+[14:01] <timotimo> i wonder how big it'll inflate when run with rr record :)
+
+[14:01] <timotimo> i mean, i reproduced it
+
+[14:02] <dogbert17> do you think this commit bu nine might be helpful: "When compiling moarvm with --debug, the MVM_dump_p6opaque(tc, obj) function is available for calling from e.g. a debugger session."
+
+[14:03] <timotimo> forgot to turn optimize down
+
+[14:03] <timotimo> not sure in this case
+
+[14:15] <travis-ci> Rakudo build passed. Zoffix Znet 'Revert "Optimize newline translation in IO::Path.slurp"
+
+[14:15] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/244116948 https://github.com/rakudo/rakudo/compare/bb2bafa63c1a...44acdd2c2669
+
+[14:24] <dogbert17> timotimo: here's som valgrind output, perhaps it might prove useful: https://gist.github.com/dogbert17/a0406d85d03b0572ba2b0f42d4d46e0c
+
+[14:26] <timotimo> i wonder if all of this happens inside the same piece
+
+[14:26] <timotimo> this callsite is set in MVM_proc_args_init and at some point it gets corrupted in some way
+
+[14:30] <dogbert17> so the valgrind output does not give any further clues?
+
+[14:37] <timotimo> hmm
+
+[14:38] <timotimo> so something was holding on to the pointer but that pointer wasn't pointed out to the gc
+
+[14:38] <dogbert17> is this some MVM_root issue?
+
+[14:38] <timotimo> or worklist adding in a gc_mark
+
+[14:43] <dogbert17> I might have been wasting time here, the failing test has the following text "run()ning two procs and passing the :out of one to the :in of the other doesn't segfault"
+
+[14:43] <dogbert17> now, I believe this is something that will be looked into next week so perhaps we can ignore it :)
+
+[14:45] <timotimo> it'd be kind of cool if i could trigger a heap snapshot from inside gdb
+
+[14:45] <dogbert17> is that possible?
+
+[14:46] <timotimo> the only problem is that the dump code is in nqp
+
+[14:46] <timotimo> it has to do a little bit of work that we use nqp for
+
+[14:46] <timotimo> we can rewrite it in C, then it could be done exclusively from inside gdb
+
+[14:47] <timotimo> it'll also have to mark all threads as blocked because gdb is still keeping them stopped
+
+[14:51] <dogbert17> so it's nothing which is available today then
+
+[14:53] <travis-ci> Rakudo build passed. Zoffix Znet 'Use .subst instead of fast-pathing newline translation
+
+[14:53] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/244118538 https://github.com/rakudo/rakudo/compare/44acdd2c2669...cd547021bdf5
+
+[14:55] <timotimo> right
+
+[14:55] <timotimo> i ate ice cream sittign at my laptop and now one of my keys is sticky :|
+
+[14:55] <timotimo> clean-up-goop to the rescue!
+
+[14:57] <dogbert17> :)
+
+[14:58] <timotimo> ick
+
+[14:59] <timotimo> it might have gotten too hot or something
+
+[15:01] <timotimo> it didn't stay in one piece when i tried to drop it back into its cage
+
+[15:01] <timotimo> i.e. some stayed stuck on my hand :<
+
+[15:01] <dogbert17> can't your cats take care of it :)
+
+[15:03] <timotimo> i don't think it'd be healthy for them
+
+[15:03] <timotimo> also it smells rather pungent :)
+
+[15:09] <timotimo> ugh, i can't set a breakpoint for "the object in question is added to a worklist" because the problem is that nothing is adding it to any worklist
+
+[15:09] <timotimo> with valgrind active i could hunt for things that point at the object
+
+[15:10] <dogbert17> wonder what kind of object it is
+
+[15:14] <travis-ci> Rakudo build failed. Zoffix Znet 'Fix regression in piping output of one Proc to another
+
+[15:14] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/244125228 https://github.com/rakudo/rakudo/compare/cd547021bdf5...239c505ea53b
+
+[15:14] <buggable> [travis build above] ☠ Did not recognize some failures. Check results manually.
+
+[15:16] <timotimo> gcc does have a find method
+
+[15:16] <timotimo> it wants a start and end point, though
+
+[15:21] <dogbert17> tricky
+
+[15:29] <timotimo> i mean i could look through the two nurseries, definitely
+
+[15:29] <timotimo> but the gen2, that's a bit trickier
+
+[15:31] <timotimo> in theory we could build a little c function that scans through all gc-managed spots
+
+[15:35] <dogbert17> sounds difficult
+
+[15:35] <timotimo> not so bad
+
+[15:35] <timotimo> it's a lot of work to do manually
+
+[15:39] <travis-ci> Rakudo build passed. Zoffix Znet 'Log all changes to date'
+
+[15:39] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/244134019 https://github.com/rakudo/rakudo/compare/239c505ea53b...03c9bd68a6e9
+
+[15:51] <dogbert17> where are the easy bugs
+
+[15:59] <timotimo> yeah
+
+[16:03] <dogbert17> m: my $sh = <a>.SetHash; for $sh.values { $_ = 0; $_ = 1 } # is this easy?
+
+[16:03] <camelia> rakudo-moar ee4c3d: ( no output )
+
+[16:04] <dogbert17> I get an error when I run this
+
+[16:07] <travis-ci> Rakudo build passed. Zoffix Znet '[release] bump VERSION to 2017.06'
+
+[16:07] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/244136794 https://github.com/rakudo/rakudo/compare/03c9bd68a6e9...c252b39e2f84
+
+[16:08] <dogbert17> for some reason this test fails: https://github.com/MoarVM/MoarVM/blob/master/src/6model/reprs/MVMHash.c#L7
+
+[16:10] <Geth> ¦ nqp: dmaestro++ created pull request #364: Issue/353 sprintf octal padding
+
+[16:10] <Geth> ¦ nqp: review: https://github.com/perl6/nqp/pull/364
+
+[16:11] <timotimo> i bet we have to set a whence on the scalar container when we've removed the value out of the set
+
+[16:12] <timotimo> so that when you put a value back in, it knows how to store it back at the same key
+
+[16:12] <dogbert17> but why does it 'work' on Camelia but not my poor 32 bit vm?
+
+[16:12] <timotimo> luck?
+
+[16:13] <dogbert17> hmm
+
+[16:13] <timotimo> oh, it does keep the values stored in there
+
+[16:13] <dogbert17> #0  get_string_key (tc=0x804c468, key=0x809fab0) at src/6model/reprs/MVMHash.c:7
+
+[16:13] <dogbert17> #1  0xb7c5e18d in bind_key (tc=0x804c468, st=0x80969e8, root=0x80a2f30, data=0x80a2f40, key_obj=0x809fab0, value=..., kind=8) at src/6model/reprs/MVMHash.c:87
+
+[16:13] <dogbert17> #2  0xb7c54a98 in MVM_repr_bind_key_o (tc=0x804c468, obj=0x80a2f30, key=0x809fab0, val=0x80a2f48) at src/6model/reprconv.c:481
+
+[16:13] <dogbert17> #3  0xb7c91a15 in add_knowhow_how_method (tc=0x804c468, knowhow_how=0x809fa90, name=0xb7d2ca85 "new_type", func=0xb7c90719 <new_type>) at src/6model/bootstrap.c:264
+
+[16:15] <timotimo> huh, really?
+
+[16:15] <dogbert17> yup
+
+[16:16] <timotimo> that's in the code you pasted above?
+
+[16:16] <dogbert17> m: my $sh = <a>.SetHash; for $sh.values { $_ = 0; $_ = 1 } # this code
+
+[16:16] <camelia> rakudo-moar ee4c3d: ( no output )
+
+[16:17] <timotimo> you got a tiny nursery perhaps?
+
+[16:17] <dogbert17> yes, from out previous experiments :)
+
+[16:17] <dogbert17> *our
+
+[16:17] <dogbert17> should I make it normal again?
+
+[16:18] <timotimo> i still have a tiny one, as well. i don't get a crash from that code
+
+[16:18] <dogbert17> does valgrind say anything?
+
+[16:20] <timotimo> no, only the destruction parts
+
+[16:20] <timotimo> i might look into that, but i'm kind of distracted and such
+
+[16:21] <dogbert17> thx
+
+[16:21] <timotimo> they don't really help any
+
+[16:22] <dogbert17> who, the cats?
+
+[16:22] <timotimo> just to make valgrind not output anything when nothing happens
+
+[16:22] <dogbert17> :)
+
+[16:22] <timotimo> no, the destruction parts that i could fix
+
+[16:24] <dogbert17> 'p IS_CONCRETE(key)' returns 1
+
+[16:31] <travis-ci> Rakudo build passed. Zoffix Znet 'Revert "Revert "Optimize newline translation in IO::Path.slurp""
+
+[16:31] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/244147543 https://github.com/rakudo/rakudo/compare/c252b39e2f84...c4e14731f6e1
+
+[16:42] <dogbert17> when the code fails 'p REPR(key)->ID' == 5 whatever that is
+
+[16:43] <dogbert17> ah 5 means P6opaque
+
+[16:56] <travis-ci> Rakudo build failed. Zoffix Znet '2017.06 is now in the past'
+
+[16:56] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/244147611 https://github.com/rakudo/rakudo/compare/c4e14731f6e1...ee4c3d322654
+
+[16:56] <buggable> [travis build above] ☠ Did not recognize some failures. Check results manually.
+
+[17:38] <ugexe> hmm on osx I'm getting segfaults when i run zef such that it has lots of dependencies to fetch/extract/test (each dependency launches a process for each phase - fetch, extract, test)
+
+[17:38] <ugexe> Segmentation fault: 11
+
+[17:38] <ugexe> always that
+
+[17:39] <ugexe> the stage that it happens seems to change if I delete precomp, but if i rerun a failed run it will segfault in the same spot
+
+[17:40] <ugexe> i assume it has to do with handles somehow... what should I try to get some more info?
+
+[17:43] <ugexe> my wild guess is it could be related to all the handle/proc workarounds in zef are leaving handles open or something
+
+[18:07] <timotimo> Semantics Fault
+
+[19:04] <ugexe> windows proc regression: `perl6 -e "shell qq|perl -E \"say 1\"|;"`
+
+[19:05] <ugexe> seems to be related to argument passing, since anything without a space works
+
+[19:05] <ugexe> in the -E "<here>"
+
+[19:06] <ugexe> otherwise its
+
+[19:06] <ugexe> Can't find string terminator '"' anywhere before EOF at -e line 1.
+
+[19:06] <ugexe> The spawned command 'perl -E "say 1"' exited unsuccessfully (exit code: 255)
+
+[19:07] <geekosaur> that sounds to me more like CMD.EXE or the C runtime that mangles the passed command line into something programs can deal with doesn't handle \"
+
+[19:11] <timotimo> wasn't there just a fix for that?
+
+[19:13] <geekosaur> I had thought so and was trying to recall if so...
+
+[19:13] <ugexe> a fix for proc::async yeah, but from what i understand that fixes some things and breaks others
+
+[19:14] <ugexe> but non-async run/shell handled both cases in 2017.05
+
+[19:15] <geekosaur> um, that would not be related
+
+[19:15] <geekosaur> hm, or maybe it is.
+
+[19:16] <geekosaur> oh, no, we don't do `` any more so that was metaquoting
+
+[19:16] <geekosaur> does that invocation work at a cmd prompt?
+
+[19:22] <ugexe> perl -E "say 1"? yes
+
+[19:23] <geekosaur> I meant the nested one
+
+[19:24] <geekosaur> oh wait, that qq|| does affect things
+
+[19:24] <geekosaur> (I hate that syntax specifically because it buries the quoting...)
+
+[19:24] <ugexe> well im confused - i showed the error message
+
+[19:24] <ugexe> i ran that command on 2017.05 and 2017.06, and it doesn't work on 2017.06
+
+[19:24] <geekosaur> yes, what I am seeing is something stopped at " ... "
+
+[19:25] <geekosaur> ignoring that one thinks \" should not be the closing "
+
+[19:26] <ugexe> it doesn't work inside a script as `shell('perl -E "say 1"')` either
+
+[19:26] <ugexe> which is what Inline::Perl5 does in its Build.pm
+
+[19:26] <ugexe> im just quoting that way so it can be pasted as a one liner
+
+[19:45] <ugexe> https://github.com/nodejs/node-v0.x-archive/issues/2318#issuecomment-10549609
+
+[20:52] * TimToady just used .tree in a program a few weeks ago, and would be sad if it went away
+
+[20:53] <lizmat> TimToady: could you document its function ?
+
+[20:53] * brrt has some trouble figuring out what a method called .tree does
+
+[20:53] <lizmat> that would help preserve it :-)
+
+[20:53] <lizmat> .oO( save the trees! )
+
+[20:53] <rightfold> m: say [1, 2, 3].tree.perl.say
+
+[20:53] <camelia> rakudo-moar ee4c3d: OUTPUT: «$((1, 2, 3).Seq)␤True␤»
+
+[20:54] <timotimo> i didn't know we kept tree, but i guess i can see its lasting appeal :)
+
+[20:55] <TimToady> I used it on a tournament structure, where we have three-dimensional arrays of rounds, locations, and teams
+
+[20:56] <TimToady> to make a double round robin, you use:
+
+[20:56] <TimToady> if $double { @rounds.append: @rounds.tree(*.self, *.reverse, *.reverse) }
+
+[20:57] <TimToady> that reverses the locations and the teams without reversing the order of the rounds
+
+[20:58] <TimToady> basically, it's a method for when each level of a tree structure want to have its own filter
+
+[20:59] <timotimo> whoa, i did not know it does that?
+
+[21:04] <TimToady> m: say (((1,2,3),(4,5,6)),((7,8,9),(10,11,12))).tree(*.self, *.reverse)
+
+[21:04] <camelia> rakudo-moar ee4c3d: OUTPUT: «(((4 5 6) (1 2 3)) ((10 11 12) (7 8 9)))␤»
+
+[21:04] <TimToady> m: say (((1,2,3),(4,5,6)),((7,8,9),(10,11,12))).tree(*.self, *.reverse, *.rotate)
+
+[21:04] <camelia> rakudo-moar ee4c3d: OUTPUT: «(((5 6 4) (2 3 1)) ((11 12 10) (8 9 7)))␤»
+
+[21:05] <TimToady> m: say (((1,2,3),(4,5,6)),((7,8,9),(10,11,12))).tree(*.self, |(*.reverse xx 10))
+
+[21:05] <camelia> rakudo-moar ee4c3d: OUTPUT: «(((6 5 4) (3 2 1)) ((12 11 10) (9 8 7)))␤»
+
+[21:05] <TimToady> m: say (((1,2,3),(4,5,6)),((7,8,9),(10,11,12))).tree(*.self, |(*.reverse xx *))
+
+[21:06] <TimToady> but that ooopsies
+
+[21:06] <camelia> rakudo-moar ee4c3d: OUTPUT: «(timeout)»
+
+[21:06] <brrt> wow. i wonder when the perl6 community will wrap its head arround that one
+
+[21:07] * dogbert17 thought it was a remnant from earlier times
+
+[21:12] <dogbert17> doc'ing this will be interesting
+
+[21:14] * lizmat gets shivers that remind her of her APL days
+
+[21:21] <dogbert17> m: (1, (2, 3, 5), 4).tree(*.self, *.map({$_ + 1})).say # test
+
+[21:21] <camelia> rakudo-moar ee4c3d: OUTPUT: «(1 (3 4 6) 4)␤»
+
+[21:22] <dogbert17> interesting
+
+[21:30] <Geth> ¦ rakudo/nom: 327c84098a | (Elizabeth Mattijsen)++ | src/core/Str.pm
+
+[21:30] <Geth> ¦ rakudo/nom: Make Str.subst(Str,Str) upto 3x faster
+
+[21:30] <Geth> ¦ rakudo/nom:
+
+[21:30] <Geth> ¦ rakudo/nom: - based on "foo".subst("o","z")
+
+[21:30] <Geth> ¦ rakudo/nom: - upto 3x faster for Str,Str     (substitute only once)
+
+[21:30] <Geth> ¦ rakudo/nom: - upto 2x faster for Str,Str,:g  (all possible substitutions)
+
+[21:30] <Geth> ¦ rakudo/nom:
+
+[21:30] <Geth> ¦ rakudo/nom: Gains caused by creating a Str:D,Str:D candidate that catches all nameds
+
+[21:30] <Geth> ¦ rakudo/nom: and then checks for :g/:global using nqp::ops, instead of always trying
+
+[21:30] <Geth> ¦ rakudo/nom: to unpack all possible nameds.
+
+[21:30] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/327c84098a
+
+[21:32] <timotimo> sweet
+
+[21:32] <timotimo> json::fast probably already uses nqp::subst directly
+
+[21:33] <lizmat> timotimo: there's an nqp::subst ??
+
+[21:33] <lizmat> m: use nqp; nqp::subst()
+
+[21:33] <camelia> rakudo-moar ee4c3d: OUTPUT: «===SORRY!===␤No registered operation handler for 'subst'␤»
+
+[21:33] <timotimo> oh, then it must use the method form and benefit greatly :)
+
+[21:43] <tadzik> aww yiss :)
+
+[21:44] <timotimo> well, maybe
+
+[21:44] <timotimo> i don't remember my last benchmark
+
+[21:44] <timotimo> so don't know how high subst ranks
+
+[21:49] <dogbert17> repos/Text-CSV6/lib/Text/CSV.pm:            $t .= subst (/( $q | $e )/, { "$e$0" }, :g);
+
+[21:49] <dogbert17> repos/Text-CSV6/lib/Text/CSV.pm:            $t .= subst (/ \x[0] /,     { $e ~ 0 }, :g) if $!escape_null;
+
+[21:50] <Geth> ¦ rakudo/nom: 19be872211 | (Elizabeth Mattijsen)++ | src/core/Rakudo/Internals.pm
+
+[21:50] <Geth> ¦ rakudo/nom: Optimize TRANSPOSE(-ONE) a bit further
+
+[21:50] <Geth> ¦ rakudo/nom:
+
+[21:50] <Geth> ¦ rakudo/nom: At the moment, having a native str in a signature prevents the method
+
+[21:50] <Geth> ¦ rakudo/nom: from being JITted.  So changed the sig to Str:D's instead, and get
+
+[21:50] <Geth> ¦ rakudo/nom: about a 10% improvement in Str.subst(Str,Str).
+
+[21:50] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/19be872211
+
+[21:50] <dogbert17> the above is what [Tux] uses
+
+[21:51] <lizmat> dogbert17: yeah, that's not Str,Str  :-)
+
+[21:51] <dogbert17> oh no :-)
+
+[21:52] <dogbert17> I remember that he uses split quite a bit, but that has already been optimized no?
+
+[21:53] <lizmat> dogbert17: split on multiple strings, yes  :-)
+
+[21:55] <dogbert17> repos/Text-CSV6/lib/Text/CSV.pm:                ?? $str.split (@re, :v, :skip-empty)
+
+[21:55] <dogbert17> repos/Text-CSV6/lib/Text/CSV.pm:        for $spec.split (";") -> $r {
+
+[21:55] <dogbert17> so the first one is covered then
+
+[21:59] <timotimo> wow
+
+[22:04] <lizmat> dogbert17: the second as well, as that is a simplified case of the other
+
+[22:06] <dogbert17> cool
+
+[22:07] <travis-ci> Rakudo build passed. Elizabeth Mattijsen 'Make Str.subst(Str,Str) upto 3x faster
+
+[22:07] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/244319041 https://github.com/rakudo/rakudo/compare/ee4c3d322654...327c84098aec
+
+[22:08] <eveo> perl6-debug-m complains --nqp-lib=blib is an invalid option. I see perl6-gdb-m has the same option and it works fine. Any idea why debug-m don't like it?
+
+[22:08] <yoleaux> 06:30Z <nine> eveo: Inline::Perl5's tar file should be fixed in 0.28
+
+[22:13] <timotimo> does it come in too late?
+
+[22:13] <timotimo> i'm not even sure what --nqp-lib was added for
+
+[22:15] <eveo> looks to be in the same place as in perl6-gdb-m. In fact, if I change perl6-debug.moarvm to perl6.moarvm, like it's in gdb one, it works. Gonna see what makes perl6-debug.moarvm; probably different path in compiler that don't take that option or something
+
+[22:16] <timotimo> i see there's a little piece somewhere that adds that
+
+[22:17] <timotimo> i'll make it compatible
+
+[22:17] <eveo> Yeah. I just copied it
+
+[22:17] <timotimo> ah
+
+[22:17] <timotimo> i would have done the same
+
+[22:17] <timotimo> i wonder why it isn't inside Perl6::Compiler though
+
+[22:17] <timotimo> or maybe the HLL::Backend?
+
+[22:18] <eveo> ¯\_(ツ)_/¯
+
+[22:28] <Geth> ¦ rakudo/nom: ee6e5df466 | (Zoffix Znet)++ | src/perl6-debug.nqp
+
+[22:28] <Geth> ¦ rakudo/nom: Remove trailing whitespace
+
+[22:28] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/ee6e5df466
+
+[22:28] <Geth> ¦ rakudo/nom: 1ab21744e7 | (Zoffix Znet)++ | src/perl6-debug.nqp
+
+[22:28] <Geth> ¦ rakudo/nom: Make perl6-debug take --nqp-lib option
+
+[22:28] <Geth> ¦ rakudo/nom:
+
+[22:28] <Geth> ¦ rakudo/nom: Same as normal perl6
+
+[22:28] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/1ab21744e7
+
+[22:35] <travis-ci> Rakudo build passed. Elizabeth Mattijsen 'Optimize TRANSPOSE(-ONE) a bit further
+
+[22:35] <travis-ci> https://travis-ci.org/rakudo/rakudo/builds/244322930 https://github.com/rakudo/rakudo/compare/327c84098aec...19be87221160
+
+[23:32] <eveo> hah, debugger is pretty damn cool.
+
+[23:32] * eveo is using it for the first time now :)
+
+[23:44] <Geth> ¦ rakudo/nom: 6d4691fbd9 | (Zoffix Znet)++ | 2 files
+
+[23:44] <Geth> ¦ rakudo/nom: Unbust the perl6-debug-m debugger
+
+[23:44] <Geth> ¦ rakudo/nom:
+
+[23:44] <Geth> ¦ rakudo/nom: The .define_slang stuff seems to be what's busting it. Unsure why.
+
+[23:44] <Geth> ¦ rakudo/nom: The breakage appears to occur whenever strings are used (so something
+
+[23:44] <Geth> ¦ rakudo/nom: to do with the switch to Quote lang?). For example -e 'say 42' won't
+
+[23:44] <Geth> ¦ rakudo/nom: crash, but -e 'say "x"' will. Even -e '"x"' crashes. Looking at the
+
+[23:44] <Geth> ¦ rakudo/nom: AST of the last one, shows (NQPMu) in the tree, where the working
+
+[23:44] <Geth> ¦ rakudo/nom: debugger's AST shows a QAST::Want for the WVal(Str)/SVal.
+
+[23:44] <Geth> ¦ rakudo/nom: review: https://github.com/rakudo/rakudo/commit/6d4691fbd9
+
+[23:44] <eveo> TimToady: ^ maybe you'll be able to make sense out of why .define_slang busts the debugger (or if the define_slang is even needed there)
+
+[23:45] * eveo goes back to taking a break from Perl 6 :)

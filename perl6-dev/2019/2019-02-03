@@ -1,0 +1,513 @@
+[01:28] *** dct_ left
+[01:41] *** softmoth joined
+[01:50] <MasterDuke> timotimo: around?
+
+[01:54] *** softmoth left
+[01:54] *** softmoth_ joined
+[01:56] *** softmoth_ left
+[01:57] <timotimo> for a little bit, aye
+
+[01:57] *** softmoth_ joined
+[01:58] <timotimo> MasterDuke: *noise*
+
+[01:58] <MasterDuke> re parsing, do you think there is anything not terribly complicated i could look into/
+
+[01:58] <MasterDuke> ?
+
+[02:00] <MasterDuke> i've heard mention of "passing fates down" or something like that, but that seems a bit more than i want to tackle
+
+[02:01] <timotimo> aye
+
+[02:02] <timotimo> i'm actually not quite sure what exactly makes our parsing slow, or what parts contribute how much
+
+[02:03] <timotimo> and i'm not entirely sure how to measure it
+
+[02:04] <MasterDuke> a --profile-compile wouldn't help?
+
+[02:04] <timotimo> i'd be interested in something more granular than that
+
+[02:04] <timotimo> like, we already emit mvm bytecode from the regexes, but there's of course many calls in there, too
+
+[02:06] <timotimo> are we perhaps doing a bad job of inlining? could that have something to do with anything?
+
+[02:07] <MasterDuke> hm, not sure how easily i can help figure those things out
+
+[02:09] <timotimo> https://nulled.red/@flussence/101508436302890919
+
+[02:10] <MasterDuke> well, a perf record with a jit map shows the top function is https://github.com/perl6/nqp/blob/master/src/QRegex/NFA.nqp#L768-L962
+
+[02:11] <MasterDuke> which is where i did some micro optimizations, but nothing jumped out at me as a next step
+
+[02:11] <MasterDuke> well, that's good news!
+
+[02:12] <timotimo> ah, of course, the NFA optimizer
+
+[02:12] <timotimo> but that's to do with creating regexes or rather grammars
+
+[02:12] <timotimo> i thought we were talking about running regexen against text/data :)
+
+[02:13] <MasterDuke> well, i was recording `multi sub infix:<[a]>(Complex $a, Complex $b) { "$a [] $b" }; multi sub infix:<[b]>(Num $a, Num $b) { "$a [] $b" }; multi sub infix:<[c]>(Int $a, Int $b) { "$a [] $b" }; multi sub infix:<[d]>(Str $a, Str $b) { "$a [] $b" }; my $a; $a = $_ [c] $_ for ^10; say $a`
+
+[02:13] <MasterDuke> so yeah, not exactly the same thing
+
+[02:13] <MasterDuke> but also annoyingly slow
+
+[02:14] <timotimo> right, defining custom operators causes the grammar to be mixed into, which means NFAs have to be updated, and they also get optimized after every step
+
+[02:15] <timotimo> how long did that whole thing take?
+
+[02:16] <timotimo> i assume it was 95% compile time or something :)
+
+[02:17] <MasterDuke> 3s, all stage parse
+
+[02:17] <timotimo> holy... that's brutal
+
+[02:18] <MasterDuke> a perf record with a jit map of juerd's mqtt regex.t doesn't show anything terribly useful
+
+[02:22] <timotimo> hm, do we generate optimal code in nqp for postcircumfix:<[ ]>? i.e. for assignment and extraction, do we use the right _i, _n, _s if possible?
+
+[02:23] <timotimo> i'd imagine we'd always do a boxing there
+
+[02:23] <timotimo> so maybe that's an attack point
+
+[02:23] <timotimo>                     if $edges[0] == $EDGE_EPSILON {
+
+[02:23] <timotimo> though of course it could be that $edges is actually an object array
+
+[02:24] <MasterDuke> i think it is
+
+[02:24] <timotimo> oh, we could measure which of the three passes is the slowest
+
+[02:26] <timotimo> can you log how often the EPSILON and the FATE branch are taken, and how often no branch is taken? if the "no branch" case is the most common one, moving the "my int $to" into the two branches could save us a little bit
+
+[02:31] <MasterDuke> building rakudo now...
+
+[02:35] <MasterDuke>   64308 EDGE_FATE
+
+[02:35] <MasterDuke>  162834 NEITHER
+
+[02:35] <MasterDuke>  237186 EDGE_EPSILON
+
+[02:35] <timotimo> wow that's a lot of epsilon edges
+
+[02:36] <timotimo> m: say 162864 / (64308 + 162834 + 237186)
+
+[02:36] <camelia> rakudo-moar 92ebc333a: OUTPUT: «0.350752␤»
+
+[02:37] <timotimo> it could still be worth moving either the declaration or at least the/an assignment into the two branches for $to
+
+[02:43] <MasterDuke> oh! that may have taken stage parse from 3s to 2.3s
+
+[02:43] *** softmoth_ left
+[02:43] <timotimo> whoa, for real?
+
+[02:43] <timotimo> no way
+
+[02:44] <timotimo> can you try what happens if you comment out all the note("blah") if $nfadeb ?
+
+[02:44] <MasterDuke> not certain, on laptop and that 3s may have been when i was doing all that debug printing
+
+[02:44] <timotimo> oh, yeah, debug prints will slow things down a whole lot for sure
+
+[02:45] <MasterDuke> i think i tried that already (commenting out if $nfadeb) and it didn't make a noticeable difference
+
+[02:45] <timotimo> OK
+
+[02:46] <timotimo>                 if +$!states[$s] {
+
+[02:46] <timotimo> ^- i wonder, isn't this equivalent to just if $!states[$s] ?
+
+[02:47] <MasterDuke> ugh, lost the original timing out of my scrollback
+
+[02:47] <MasterDuke> gotta rebuild everything...
+
+[02:48] <timotimo> d'oh
+
+[02:48] <timotimo> i wonder if your "int by default" branch does anything, too
+
+[02:48] <MasterDuke> i've been testing on my laptop, which isn't on that branch
+
+[02:49] <MasterDuke> could try it on my desktop which is on (and would also be more stable timings)
+
+[02:51] <timotimo> ah, i see
+
+[02:51] <timotimo> well, i'll go to bed real soon now
+
+[02:51] <timotimo> so no hurry from my side, though i'd love to read your results when i get back :)
+
+[02:52] <MasterDuke> cool, i'll mention then here
+
+[02:52] <timotimo> TYVM
+
+[02:52] <timotimo> i hope the improvement actually does exist, because that would be absolutely amazing
+
+[02:52] <MasterDuke> 2.2s on my branch, otherwise unmodified
+
+[02:52] <timotimo> oh
+
+[02:52] <timotimo> so perhaps the improvement was more like 0.0s
+
+[02:53] <MasterDuke> different system, my desktop is usually slightly faster
+
+[02:53] <timotimo> oh, of course
+
+[02:56] <MasterDuke> hm, now i'm not really seeing a change with moving the declaration inside the branches
+
+[02:57] <MasterDuke> 2.2s on my branch, moved the declaration inside the branches
+
+[03:02] <timotimo> i hope your desktop builds quickly enough so you can give comparing the times of the three passes a shot
+
+[03:03] <timotimo> o/
+
+[03:04] <MasterDuke> later...
+
+[03:04] <MasterDuke> aren't there 4 passes?
+
+[03:21] <MasterDuke> Hash %h = {:fifth(0.19517993927001953e0), :first(0.14771556854248047e0), :fourth(0.051312923431396484e0), :second(0.13711905479431152e0), :third(0.11382579803466797e0)}
+
+[03:22] <MasterDuke> sum of the different passes' times
+
+[03:57] *** leont left
+[07:21] *** ufobat__ joined
+[07:24] *** ufobat_ left
+[07:36] *** dct_ joined
+[09:13] *** lizmat joined
+[09:19] *** patrickb joined
+[09:24] *** lizmat left
+[09:47] *** patrickb left
+[10:13] *** dct_ left
+[10:30] <[Tux]> Rakudo version 2018.12-279-g92ebc333a - MoarVM version 2018.12-45-ga9d02578a
+
+[10:30] <[Tux]> csv-test-xs-20      0.430 -  0.452
+
+[10:30] <[Tux]> csv-ip5xs           0.762 -  0.766
+
+[10:30] <[Tux]> test-t --race       0.884 -  0.886
+
+[10:30] <[Tux]> test-t              1.928 -  2.012
+
+[10:30] <[Tux]> csv-ip5xs-20        6.684 -  6.753
+
+[10:30] <[Tux]> test                7.328 -  8.985
+
+[10:30] <[Tux]> test-t-20 --race   10.360 - 10.708
+
+[10:30] <[Tux]> csv-parser         23.225 - 25.843
+
+[10:30] <[Tux]> test-t-20          32.518 - 33.178
+
+[10:33] *** lizmat joined
+[10:57] *** lizmat left
+[11:08] *** dct_ joined
+[11:28] *** gugod joined
+[11:40] *** dct_ left
+[11:41] *** lucasb joined
+[11:43] *** dct_ joined
+[12:04] *** dct_ left
+[12:06] <gfldex> I'm also getting „realloc(): invalid next size“ in IO::Handle.read. :-/
+
+[12:06] <gfldex> this is not well tested
+
+[12:25] <MasterDuke> huh, i thought that stuff went through a round of improvement a while ago
+
+[12:25] <MasterDuke> gfldex: could you create issues?
+
+[12:25] <gfldex> Will do. May take some time tho.
+
+[12:28] *** dct_ joined
+[12:30] <timotimo> MasterDuke: aaw, the slowest one doesn't stand out as strongly
+
+[12:31] <timotimo> can you do a tiny bit of statistic analysis on these numbers? like, how many runs are there and how strongly do they diverge, if at all?
+
+[12:32] *** leont joined
+[12:35] <timotimo> it'd be cool if we could be smart about skipping some stuff in the optimizer if we had an optimized NFA already before we added some stuff
+
+[12:57] <MasterDuke> timotimo: Hash %h = {:fifth(235), :first(236), :fourth(236), :second(236), :third(236)}
+
+[12:58] <timotimo> that's how often each phase runs?
+
+[13:09] <MasterDuke> yeah
+
+[13:11] <timotimo> what's the distribution of nodes, i wonder. would probably also be interesting to count edges before optimization and after
+
+[13:12] <MasterDuke> just printing nqp::elems($edges) at start and end of the function?
+
+[13:14] <MasterDuke> or $!states?
+
+[13:16] <timotimo> let's see
+
+[13:17] <timotimo> $send doesn't change its value during optimization, so it's a good choice for "number of states"
+
+[13:17] <timotimo> the number of edges would have to be summed up from the individual state's lists
+
+[13:37] <MasterDuke> timotimo: sum of all the outputs?
+
+[13:40] <timotimo> nah
+
+[13:40] <timotimo> do you know what the NFA looks like as a datastructure?
+
+[13:40] <MasterDuke> nope
+
+[13:42] <MasterDuke> fyi, largest number of edges was 112242, occurred four times
+
+[13:42] <timotimo> the simplest explanation is a graph
+
+[13:45] <MasterDuke> yeah, makes sense
+
+[13:47] <timotimo> i would normally say "just graph it with graphviz", but ...
+
+[13:47] <timotimo> 112k nodes
+
+[13:47] <timotimo> not so fun to look at
+
+[13:47] <timotimo> oh, edges?
+
+[13:49] <MasterDuke> yeah. added this at the very end of optimize
+
+[13:49] <MasterDuke> https://gist.github.com/MasterDuke17/dfedd62e45023cac0781937d791611fa
+
+[13:52] <timotimo> that looks correct
+
+[13:52] <timotimo> what send / edges value combinations do we get?
+
+[13:53] <MasterDuke> 109 distinct
+
+[13:54] <MasterDuke> want to see them all?
+
+[13:54] <timotimo> sure
+
+[13:55] <timotimo> what'd also be interesting to see, but more work to measure, is how many distinct edges there are actually
+
+[13:55] <timotimo> i.e. how many distinct (source-state, target-state) edges there are, maybe also how often each of those occurs
+
+[13:55] <timotimo> maybe it is possible to graph that stuff actually
+
+[13:56] <timotimo> if multiple edges between the same states get collapsed into one
+
+[13:58] <MasterDuke> gist updated
+
+[13:58] <MasterDuke> is that what the dup edge remover does?
+
+[13:58] <timotimo> not quite
+
+[14:00] <timotimo> the kinds of edges we have are things like "character class" or "one specific character"
+
+[14:00] <timotimo> so perhaps there's an edge for "any digit" and also an edge for "☺", those can't be deduped sensibly
+
+[14:03] <MasterDuke> oh, are you talking about removing multiple edges to the same state just for visualizing?
+
+[14:04] <timotimo> yeah
+
+[14:04] <timotimo> it's not a viable optimization i don't think
+
+[14:04] <MasterDuke> ah
+
+[14:04] <AlexDaniel> timotimo: just 112k nodes, still “just graph it with graphviz” :)
+
+[14:04] <timotimo> though perhaps we could more closely examine what kinds of same-edge-different-kind we encounter
+
+[14:05] <AlexDaniel> not that it will produce a readable graph, but you can still graph it for sure :P
+
+[14:05] <MasterDuke> would it make sense to also put that code at the beginning to see how many edges are actually removed in total?
+
+[14:05] <timotimo> and see if there is some optimization where we can collapse some kinds
+
+[14:06] <timotimo> MasterDuke: that could be interesting, though perhaps instead log how often the individual phases "do something"
+
+[14:06] <timotimo> AlexDaniel: i recently had some program that's made for very, very large graphs
+
+[14:09] <AlexDaniel> timotimo: fwiw I learned to love graphviz when I was using yosys daily. It has some extra simple functionality on top that makes it so much easier to look at the graphs
+
+[14:09] *** dogbert17 left
+[14:10] <AlexDaniel> timotimo: one is random coloring of edges. I wonder why graphviz can't do that natively, makes life so much easier on crowded graphs
+
+[14:10] <AlexDaniel> timotimo: and another is that it has commands to select parts of netlist of your interest. So “I wanna look at X, graph things around it” and so on
+
+[14:11] <timotimo> ah, so it just generates new graphviz documents for those cases
+
+[14:12] <AlexDaniel> yeah
+
+[14:12] <AlexDaniel> maybe it's a good idea for a standalone program
+
+[14:13] <AlexDaniel> dot file in, select some nodes, dot file out
+
+[14:13] <AlexDaniel> maybe it exists already?
+
+[14:13] <timotimo> i'd like more support for changing stuff in an existing graphviz-ed graph
+
+[14:14] <timotimo> if you re-graph after changing, chances are that nodes turn up in completely different places
+
+[14:14] <AlexDaniel> definitely, yes
+
+[14:15] <timotimo> though you can ask graphviz to output its exact layouting back at you as a dot file
+
+[14:15] <MasterDuke> gist updated
+
+[14:15] *** dct_ left
+[14:16] <timotimo> so a 50% reduction isn't uncommon
+
+[14:18] <MasterDuke> seems worth it
+
+[14:20] <timotimo> hm, do we have the "name" of the nfa in question on the stack? might be interesting to compare what kind of evolution one nfa goes through as more stuff gets added
+
+[14:22] <MasterDuke> # The NFA we will actually run (with NFA REPR).     has $!nfa_object;
+
+[14:23] <timotimo> well, that's the nfa object, but i believe it gets recreated after changes
+
+[14:23] <timotimo> there's an nfatostatelist and an nfafromstatelist op
+
+[14:23] <timotimo> and the nfa object itself can't be modified
+
+[14:24] <MasterDuke> the REPR doesn't look like it has a name or anything like that
+
+[14:25] <timotimo> right, we'd have to find a name for the thing that has it
+
+[14:27] <timotimo> anyway. is it really important? not sure ...
+
+[14:55] *** dct_ joined
+[15:11] *** lucasb left
+[15:18] <Geth> ¦ rakudo/argfiles: cd3fd90d3e | (Tom Browder)++ (committed using GitHub Web editor) | src/core/Argfiles.pm6
+
+[15:18] <Geth> ¦ rakudo/argfiles: Describe creation of a new dynamic variable @*ARGFILEPATHS
+
+[15:18] <Geth> ¦ rakudo/argfiles: review: https://github.com/rakudo/rakudo/commit/cd3fd90d3e
+
+[15:20] <tbrowder> It’s just a comment for a reality check for a possible new dynamic variable. I would appreciate any criticism.
+
+[15:27] <Geth> ¦ rakudo/argfiles: 4f28185f6a | (Tom Browder)++ (committed using GitHub Web editor) | src/core/Argfiles.pm6
+
+[15:27] <Geth> ¦ rakudo/argfiles: finish the proposed replacement code
+
+[15:27] <Geth> ¦ rakudo/argfiles: review: https://github.com/rakudo/rakudo/commit/4f28185f6a
+
+[15:36] <AlexDaniel> tbrowder: I've been looking at this discussion on and off and honestly I don't understand what problem you guys are trying to solve
+
+[15:37] * leont doesn't really understand it either, TBH
+
+[15:37] <AlexDaniel> is there a ticket somewhere?
+
+[15:38] <AlexDaniel> R#2666
+
+[15:38] <synopsebot> R#2666 [open]: https://github.com/rakudo/rakudo/issues/2666 implement a new var @*ARGFILES listing paths for @*ARGS that are existing files
+
+[15:38] <AlexDaniel> tbrowder: so let me get that straight…
+
+[15:39] <AlexDaniel> user runs the script like `foo.p6 file1 file2 file3`
+
+[15:39] <AlexDaniel> one of the files doesn't exist, so it fails
+
+[15:39] <AlexDaniel> for me it makes sense. Now what are we trying to solve?
+
+[15:41] <tbrowder> saving having to produce my own list of readable fike
+
+[15:41] <tbrowder> *files from *args
+
+[15:42] <tbrowder> my new code shouldn’t fail, it skips unreadable args
+
+[15:42] <tbrowder> worst case should be ampty @*ARGFILEPATHS
+
+[15:43] <leont> I can't imagine wanting that behavior, TBH
+
+[15:44] <AlexDaniel> tbrowder: so why can't you add a CATCH block?
+
+[15:44] <AlexDaniel> like
+
+[15:44] <AlexDaniel> for lines() { .say }; CATCH { default { } }
+
+[15:44] <evalable6> AlexDaniel, rakudo-moar 92ebc333a: OUTPUT: «♥🦋 ꒛㎲₊⼦🂴⧿⌟ⓜ≹℻ 😦⦀🌵 🖰㌲⎢➸ 🐍💔 🗭…»
+
+[15:44] <evalable6> AlexDaniel, Full output: https://gist.github.com/84814d4870c8f8f31d5d5d7b9f02b18a
+
+[15:44] <AlexDaniel> … thank you evalable6…
+
+[15:45] <AlexDaniel> I see a clear problem that the exception in that case is AdHoc
+
+[15:46] <tbrowder> ok, can’t that be handled graceduk
+
+[15:46] <tbrowder> fully?
+
+[15:47] <tbrowder> got to go...back in an hour or so...bye
+
+[15:51] <AlexDaniel> R#2669
+
+[15:52] <synopsebot> R#2669 [open]: https://github.com/rakudo/rakudo/issues/2669 [6.e] Remove all AdHoc exceptions from core
+
+[15:53] *** leont left
+[16:14] <b2gills> Currently `lines()` will generate an exception, I think it should pass a Failure..3
+
+[16:16] *** Mediphira joined
+[16:16] *** Mediphira left
+[16:20] <AlexDaniel> b2gills: how is that supposed to work??
+
+[16:21] <AlexDaniel> honest question
+
+[16:22] <AlexDaniel> so you have a loop, say `for lines() -> $line { }`
+
+[16:22] <b2gills> It might be as simple as adding a check to the `lines` iterator, and have it return the error through `pull-one`
+
+[16:23] <AlexDaniel> so you get a Str in $line a bunch of times, and then suddenly you get a Failure?
+
+[16:23] <AlexDaniel> I wonder how that is going to affect lines().elems or the like
+
+[16:28] <AlexDaniel> btw I tried .resume and it said “This exception is not resumable”
+
+[16:32] <b2gills> m: sub foo (){ Seq.new: class :: does Iterator { has $!i = 0; method pull-one() { ++$!i; if $!i ==6 { return IterationEnd } elsif $!i==3 { fail 'Some Failure' } else { return $!i }}}.new}; for foo() -> $line { $line.perl.say }
+
+[16:32] <camelia> rakudo-moar 92ebc333a: OUTPUT: «1␤2␤Failure.new(exception => X::AdHoc.new(payload => "Some Failure"), backtrace => Backtrace.new)␤4␤5␤»
+
+[16:33] <tbrowder> leont: i want to do something like: “for @*ARGS ->$a { next if !$a.IO.f; say “arg $a is a readable file”.
+
+[16:34] <b2gills> Add the functionality to skip erroneous files to $*ARGFILES then you can do `my @FILES = $*ARGFILES.handles`
+
+[16:34] <tbrowder> of course it would have to be protected i guess from bad actors, but if i can do it currrently with @*ARGS, why not with an @*ARGFILES?
+
+[16:36] <tbrowder> that would work, but still gives me an unwanted handle i would have o get a path from.
+
+[16:38] <tbrowder> forget for now whether we need it or not, would my argfiles branch suggestion work as it is?
+
+[16:39] <tbrowder> i make an assumption that the $argiter is an nqp string.
+
+[16:39] <tbrowder> so that may need some tweaking...
+
+[16:46] <AlexDaniel> tbrowder: no, the proposed change is not going to work, but we can think of other ways we can make it possible to do what you want it to do
+
+[16:47] <AlexDaniel> why – because you're trying to do some checks on the file ahead of time, even though the file will be accessed much later (maybe even hours after you checked it)
+
+[16:48] <AlexDaniel> so you still have to handle exceptions/failures when reading it, meaning that the check is worthless
+
+[16:57] *** dct_ left
+[17:08] *** dct_ joined
+[17:09] <tbrowder> i must admit i’m not thinking about long-running prospcesse :-(
+
+[17:10] <tbrowder> *processes
+
+[17:13] <tbrowder> but again, i just want args that, at program init, are paths to readable files. throwing later is fine if i don’t check existence when i’m ready to use them.
+
+[17:14] <tbrowder> i do not want the handles at init time!
+
+[17:15] <tbrowder> i will try to get them later when i’m ready to use them.
+
+[17:17] <b2gills> So you are trying to get out of writing: `@*ARGS.grep(*.IO.f)` by making the already large codebase larger.
+
+[17:18] *** dct_ left
+[17:19] <tbrowder> i didn’t know we were trying to be another C.
+
+[17:19] <tbrowder> p6 is already a large language, so what’s another thp
+
+[17:20] <tbrowder> *dozen lines?
+
+[17:21] <tbrowder> imho, i would dump $*ARGFILES for @*ARGFILEPATHS.
+
+[17:43] <b2gills> The only reason $*ARGFILES exists is because of the behaviour of <> in scalar context in Perl5. Otherwise it probably wouldn't have been added.
+
+[17:53] *** b2gills left
+[17:57] *** b2gills joined
+[18:40] *** Ven`` joined
+[19:25] <AlexDaniel> b2gills: yeah I've got the same feeling
+
+[19:28] <tbrowder> probably right, i rarely ever used it...
+
+[19:35] *** vendethiel- joined
+[19:37] *** Ven`` left
+[21:37] *** vendethiel- left
+[22:24] *** sivoais joined
