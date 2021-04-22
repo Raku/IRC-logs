@@ -1,0 +1,355 @@
+[00:15] <timotimo> if i understood right, tracy can now also be used without cooperation of the target application as a sampling profiler much like perf
+
+[02:34] *** frost-lab joined
+[02:59] *** lucasb left
+[06:57] <nine> Yesterday I learned something about spesh: even with MVM_SPESH_BLOCKING and MVM_SPESH_NODELAY a frame may get hundreds of times before getting optimized. The reason is that spesh logs are collected and only shipped once they contain (the default of) 16384 entries.
+
+[06:58] <nine> Getting a new log full of entries is what then triggers the planner and creation of candidates.
+
+[06:59] <nine> What if we set that to 1, to get immediate spesh action? Well, for one you're now operating on geologic time frames. Aside from that you'll get speshed versions with minimal facts, since at most there can be a single log entry (i.e. argument type or so).
+
+[07:01] <nine> A corollary is that even with the default of 16384 log entries, we create frames where we only have a part of the possible facts. But that's not so bad since usually a frame must be called a lot before getting speshed. And a single run with partial information probably won't change anything.
+
+[07:03] <MasterDuke> jnthn: mentioned playing with number of spesh log entries as a possible solution for something recently, i don't remember exactly what, but i do remember taking a quick look and not knowing if the numbers should be adjusted up or down
+
+[07:04] <nine> Depends on the issue I guess ;)
+
+[07:04] * MasterDuke didn't mean to actually address jnthn there, but i guess it still works
+
+[07:04] <MasterDuke> maybe the problem of infix:<**> not getting inlined?
+
+[07:06] <MasterDuke> oh no, it was the change in performance and number of frames created with the now-reverted decont logging change
+
+[07:07] <MasterDuke> using Tux's test-t as the code to run
+
+[07:08] <MasterDuke> starting at https://colabti.org/irclogger/irclogger_log/moarvm?date=2021-04-09#l283
+
+[07:08] <MasterDuke> "Could try tweaking the log sizes or number of outstanding log buffers a thread can have before it stops" - jnthn
+
+[07:15] <timotimo> nine: yeah, a common thing where this happens is a frame with two long-running loops in it; we osr the first loop with no facts about the second, and currently, afaik, don't osr the second since after the osr optimization no osrpoints remain; not sure if any guards exist at that point in the second loop to deopt us out of the non-optimal version of that loop
+
+[07:17] <nine> MasterDuke: since your change increases the number of log entries made, I'd guess increasing the log since would be worth a try. But then, lowering the count so spesh reacts faster may also help. It's just something you have to try.
+
+[07:19] <timotimo> mhhh endless tunables
+
+[07:19] <MasterDuke> timotimo: yeah, there have been a couple people bit recently by trying to benchmark different ways of doing something in a single script (i.e., run first way in a loop  collect end - start time, then run second way in a loop and collect end - start time), where it looked like the second way was slower, but it wasn't if they were run in isolation
+
+[07:20] <MasterDuke> nine: ok, i'll just adjust them wildly in every direction and see what happens
+
+[07:21] <timotimo> we have a mechanism that accelerates speshing after entering a different(/new) compunit, don't we?
+
+[07:29] <nine> indeed
+
+[07:31] <timotimo> not sure if that has to do with immediately submitting a non-full spesh log or something else
+
+[07:31] <MasterDuke> timotimo: it looks like you still need to include the tracy files in your build process though? you can't use it to do sampling in a completely standalone fashion?
+
+[07:32] <MasterDuke> hm, says it doesn't require instrumentation...
+
+[07:54] *** sena_kun left
+[08:02] *** sena_kun joined
+[08:10] <MasterDuke> timotimo: have successfully captured a tracy profile of a rakudo script?
+
+[08:11] <timotimo> didn't have time to try it yet
+
+[08:20] *** zakharyas joined
+[08:23] <MasterDuke> hm. cloned to 3rdparty/tracy. added `-I3rdparty/tracy` to CINCLUDES in the Makefile. added `3rdparty/tracy/TracyC.h` to HEADERS in the Makefile. ran `TRACY_ENABLE=1 make -j12 install`. but it doesn't seem to have worked
+
+[08:26] <MasterDuke> ooo, looks like gcc 11 is supposed to be released next week
+
+[08:30] <timotimo> is TracyC a header-only thing or so?
+
+[08:32] <MasterDuke> https://github.com/wolfpld/tracy/blob/master/TracyC.h think so
+
+[08:35] <timotimo> that does look fine
+
+[08:36] <timotimo> what do you mean by "doesn't seem to have worked" tho?
+
+[08:36] <timotimo> it doesn't look like the header itself does much. also, i think there's a TRACY_ENABLED define you have to have defined everywhere
+
+[08:37] <MasterDuke> i did `TRACY_NO_EXIT=1 raku -e 'say "hi"'` while the listener was running
+
+[08:37] <MasterDuke> but it didn't say anything about collecting any data
+
+[08:38] <timotimo> see also this part of the manual
+
+[08:38] <timotimo> Unless you’re able to perform automatic call stack sampling(see chapter 3.13.5), you will have to manually instrument the application. All the user-facing interface iscontained in thetracy/Tracy.hppheader file.Manual instrumentation is best started with adding markup to the main loop of the application, alongwith a few function that are called there.
+
+[08:39] <timotimo> chapter 3.13.5 points to another chapter that tells you that automatic call stack sampling only works when your privileges are elevated, i.e. run-as-root
+
+[08:40] <MasterDuke> had forgotten that, but re-ran with sudo and no change. i'm already building with --debug=3, so should be good there
+
+[08:41] <timotimo> putting TracyAlloc and TracyFree in our MVM_malloc/MVM_calloc and MVM_free functions would already be interesting on its own
+
+[08:41] <timotimo> also, you may have to compile the thing in capture/ and that'd give you a binary you can run your actual program with
+
+[08:41] <MasterDuke> oh, 3.12 has some relevant info
+
+[08:42] <MasterDuke> "Tracy is written in C++, so you will need to have a C++ compiler and link with C++ standard library,
+
+[08:42] <MasterDuke> even if your program is strictly pure C."
+
+[08:42] <timotimo> fun
+
+[08:43] <timotimo> this may be why i wasn't too thrilled last time i tried to get tracy into moar's build process
+
+[08:44] <MasterDuke> well, added `-lstdc++` to LDLIBS, but still nothing
+
+[08:45] <timotimo> another avenue to pursue, which doesn't have to do with tracy, is chrome's tracer frontend: https://aras-p.info/blog/2017/01/23/Chrome-Tracing-as-Profiler-Frontend/
+
+[08:45] <timotimo> did you build the thing in capture/ yet?
+
+[08:45] <MasterDuke> i have a system install of tracy
+
+[08:46] <timotimo> cool
+
+[08:46] <MasterDuke> it's in the aur
+
+[08:48] <timotimo> aur lord and saviaur
+
+[08:57] <MasterDuke> also tried adding `#include "TracyC.H"` to src/main.c, but no change
+
+[08:57] <timotimo> now i understand what capture is here for, ok.
+
+[08:57] <MasterDuke> enough for now, time for some other stuff
+
+[08:58] <timotimo> well, i assume there'll have to be some -l as well for the tracy code to actually be in our program
+
+[09:50] *** sena_kun left
+[09:58] *** sena_kun joined
+[10:35] <jnthn> Note that if you set the spesh log buffer size to 1 then you'll also get a huge amount of inter-thread communication, since it sends the buffers off to the spesh thread
+
+[10:37] *** Kaiepi left
+[10:37] *** Kaiepi joined
+[10:42] <MasterDuke> jnthn, nine, et al.: do you have any thoughts re https://github.com/MoarVM/MoarVM/pull/1475/commits/7c3976207813b414550597fac1b3032269785e60 ? it speeds up a CI run by ~10m, but apparently exposes some still-existing problems with precomp on windows
+
+[10:43] *** Kaeipi joined
+[10:44] *** Kaiepi left
+[10:56] <MasterDuke> i could just remove the `-j2` from the windows prove calls, but that is where the greatest speedup was gained...
+
+[11:21] <sena_kun> Anyone to review https://github.com/MoarVM/MoarVM/pull/1473 ? It is still a release blocker and we still can make a release this weekend.
+
+[11:21] <lizmat> jnthn ^^
+
+[11:35] <nine> jnthn: like I said: you'll then be working on geological time scales :)
+
+[11:52] *** frost-lab left
+[11:52] *** frost-lab joined
+[11:55] *** zakharyas left
+[12:20] *** lizmat_ joined
+[12:24] *** lizmat left
+[12:24] *** lizmat_ is now known as lizmat
+
+[13:34] *** zakharyas joined
+[14:11] *** domidumont joined
+[14:12] *** frost-lab left
+[15:23] <MasterDuke> ugh. either i'm just not thinking well at all today, or i just shouldn't be let near the azure pipelines in general
+
+[16:49] *** zakharyas left
+[17:19] *** domidumont left
+[17:22] *** zakharyas joined
+[17:57] <nine> So I changed spesh log handling a bit to always send a log on setting a return value. This makes sure that with MVM_SPESH_BLOCKING and MVM_SPESH_NODELAY a frame is specialized after one full run. With this I finally managed to reproduce the problem in gdb and even rr :)
+
+[17:58] <nine> The reason I couldn't do so earlier really did come down to a kind of butterfly effect. Small differences in the environment (variables) caused spesh logs to fill up at different times and instead of specializing that frame after only one run we specialized after 4 runs, got different facts and the problem went away.
+
+[18:02] *** brrt joined
+[18:07] <timotimo> haha told you
+
+[18:10] <nine> We do a frightening amount of processing on those ENV vars...
+
+[18:13] <brrt> good * #moarvm
+
+[18:17] <japhb> Weird, overnight I got a CI failure for CBOR::Simple (https://github.com/japhb/CBOR-Simple/runs/2398577445?check_suite_focus=true) because, as far as I can tell, NaN has a different bitstring on Windows?  I can't see any obvious error in OP(writenum) in src/core/interp.c that would constitute a serialization bug but perhaps someone here knows a portability issue that I don't?
+
+[18:18] <timotimo> is it signaling vs non-signaling nans?
+
+[18:18] <timotimo> there are a whole load of possible nans
+
+[18:18] <brrt> I think there are several different NaN bitstrings possible iirc
+
+[18:18] <brrt> yeah, what timotimo said :-)
+
+[18:18] <nwc10> IIRC there are 2**54-2 possible NaN bitstrings
+
+[18:18] <nwc10> no, 2**52-2
+
+[18:19] <brrt> I once read about it and then forgot about it
+
+[18:19] <timotimo> it's like a whole cloister up in there
+
+[18:19] <nwc10> er, wait, it ought to be 2**53 - you have the 52 mantissa bits and the 1 sign bit, but all the mantissa bits zero is Inf or -Inf
+
+[18:19] <japhb> Wait, looking at the produced value again it looks like a sign flip?
+
+[18:20] <timotimo> convert*
+
+[18:21] <timotimo> convent*
+
+[18:21] <japhb> I tried looking for the actual IEEE754 spec, but of course it's behind a paywall because professional societies
+
+[18:22] <timotimo> i'm sure wikipedia has a bit on it that's good enough
+
+[18:22] <brrt> doesn't scihub have it? 
+
+[18:25] *** zakharyas left
+[18:26] *** lucasb joined
+[18:26] <japhb> timotimo: Wikipedia (https://en.wikipedia.org/wiki/NaN) just seems to claim that the sign bit "doesn't matter".  I kinda wonder if I should just force it 0 when serializing.
+
+[18:27] <nwc10> Some crazy (or maybe crappy) platform managed to output NaN and -NaN
+
+[18:28] <nwc10> This doesn't make sense, and I can't think that it's valid by any spec (or at least any sane spec). Having been looking at floating point stringification code, it seems to be a bug (possibly entrenched on the platform) of handling the sign bit a little too early. (ie you should be NaN, sign bit, infinity, hurrah, it's normal or subnormal)
+
+[18:29] <nwc10> although I think you have to handle 0 early, else you'll render it like a subnormal.
+
+[18:30] <japhb> I'm thinking since CBOR is a cross-platform spec, that if it wants 0 in the sign bit for NaN, that's what I'm going to give it.  :-)
+
+[18:31] <timotimo> whats a sea boar
+
+[18:31] <japhb> timotimo: cbor.io if you're serious, :-P if you're punning.  :-)
+
+[18:33] <timotimo> is there an extension for comments in the blob
+
+[18:34] <brrt> huh, interesting
+
+[18:42] <japhb> timotimo: Not as such, as far as I can tell, but given that it has tag extensions for entire MIME messages, I'm sure we could figure out something.  Besides, there's first come first served extension space.  :-)
+
+[18:42] <japhb> https://www.iana.org/assignments/cbor-tags/cbor-tags.xhtml
+
+[18:44] * japhb pushes to trigger a CI run and see if the workaround does it: https://github.com/japhb/CBOR-Simple/actions/runs/771698360
+
+[18:47] * japhb finds it somewhat humorous that Perl got the first block of tag extensions past the RFC-required set
+
+[18:50] <japhb> *cough* https://github.com/japhb/CBOR-Simple/actions/runs/771714485
+
+[18:52] <timotimo> oh, oopsie-daisies
+
+[18:58] *** brrt left
+[18:58] <japhb> Fixed!  Now to make actual *progress*.  :-)
+
+[19:00] *** lizmat_ joined
+[19:01] *** lizmat left
+[19:02] *** lizmat_ is now known as lizmat
+
+[19:02] <timotimo> "extension 69. this extension is only there to represent the numbers 69, and 420, as well as the ASCII string 'nice' alternatively 'nice.'"
+
+[19:21] *** cog joined
+[19:27] *** brrt joined
+[19:29] <nine> MasterDuke: what problems does -j2 cause?
+
+[19:29] <MasterDuke> https://colabti.org/irclogger/irclogger_log/raku-dev?date=2021-04-20#l47
+
+[19:30] <MasterDuke> though that particular problem hasn't happened since
+
+[19:32] <nine> Ah, yes. Windows doesn't make these things easy...
+
+[19:33] <MasterDuke> after all that spam from me earlier, https://github.com/MoarVM/MoarVM/pull/1475 should be in a decent state now if anybody has opinions (the third and fourth commits are the more interesting ones)
+
+[20:13] *** zakharyas joined
+[20:14] <nine> I finally reproduced it in a golf!
+
+[20:14] <nine> MVM_SPESH_NODELAY=1 MVM_SPESH_OSR_DISABLE=1 MVM_SPESH_BLOCKING=1 ./rakudo-m -e 'my $foo; my $bar; sub foo(\i) { i //= List.new; i.list.elems}; my $total; $total += foo($foo); $total += foo($bar); say $total;'
+
+[20:14] <nine> 1
+
+[20:14] <nine> This is with express log shipping enabled
+
+[20:25] <nine> And I finally understand why it breaks!
+
+[20:33] <MasterDuke> nice
+
+[20:36] <nine> At the first run, the facts we find for that function are that i is a Scalar container which deconts to an Any type object, which is entirely correct. We construct a proper guard tree to make sure this holds.
+
+[20:38] <nine> But during the run of the function, we actually assign a List object into that container. But the call i.list is made on the original argument register version r0(2). Spesh facts for that register version still claim it deconts to an Any, but at that point it wouldn't. It's now a List.
+
+[20:39] <nine> Yet we optimize the findmeth into sp_getspeshslot r5(3), sslot(7)  # [001] method lookup of 'list' on a Any
+
+[20:41] <nine> Containers essentially break the assumptions behind SSA as suddenly what we know about a register version is not stable at all.
+
+[20:43] *** zakharyas left
+[20:44] <MasterDuke> huh
+
+[20:45] <nine> Seems like this is one of those "how could we have gotten so far and not come across this?" issues
+
+[20:46] <MasterDuke> easy fix?
+
+[20:47] <nine> Right now I don't see any way to fix at all. Besides no longer relying on decont facts which would be terrible for performance.
+
+[20:51] <jnthn> nine: I thought all of that was ripped out long ago.
+
+[20:51] <jnthn> Except for at the function entry point (the spesh arg guard)
+
+[20:53] <nine> jnthn: what do you mean with "all of that"?
+
+[20:54] <jnthn> nine: Facts about what something deconts to
+
+[20:54] <nine> Well the container in question _is_ an argument
+
+[20:56] <jnthn> Anyway, the reason that we "get away with" so much is that I already eliminated this everywhere else, afaik
+
+[20:56] <nine> And now we know even for arguments it can be problematic :/
+
+[20:56] <nine> https://gist.github.com/niner/c3e07d5df98a0dc4a29969d32d68e58c is the spesh log btw.
+
+[20:59] <jnthn> Wait, are we talking about parameters or the arguments to a call we're making?
+
+[20:59] <nine> The value progresses through param_rp_o -> r1(2) -> hllize -> r2(2) -> set -> r1(3) -> set -> r0(2) -> decont -> r4(3) -> findmeth
+
+[20:59] <nine> But at the point of the findmeth we alredy changed the parameter's contents.
+
+[21:00] <nine> Sorry, I can never keep parameters and arguments apart :/
+
+[21:00] <jnthn> I'm trying to remember why we still need that there.
+
+[21:00] <nine> The thing that changes is the incoming container.
+
+[21:00] <nine> That's the \i argument of sub foo I posted above
+
+[21:01] <jnthn> Also: of course the reason we so rarely see this is because arguments are ro by default
+
+[21:02] <jnthn> And so we just decont them once at the start and that's it
+
+[21:04] <jnthn> Fun realization: with new-disp, we can introspect the signature of the callee and arrange for decont to happen on the *callee* side when we see the target argument is readonly, which means that for infix:<+> we'd only need an (Int,Int) specialization, not all the combinations of (Scalar[Int], Int) and so forth. Even better, that will mean way more EA possibilities even when we can't inline.
+
+[21:04] <jnthn> As for the current problem: I'd suggest just not setting decont_type
+
+[21:05] <jnthn> And seeing if there's any significant upshot
+
+[21:05] <jnthn> I'd kinda forgotten we do it there. Thing is that if we *do* decont then it's logged, so we'd get a guard, but guards that are met are cheap
+
+[21:06] <nine> So basically rip out the support for argument decont types?
+
+[21:06] <jnthn> Yes, in src/spesh/args.c
+
+[21:07] <nine> So another case of fixing stuff by removing code :D
+
+[21:07] <jnthn> I mean, the spesh arg guard will still care about checking them; I don't recall if it reuses the MVMSpeshFacts data structure at some point along the way
+
+[21:07] <jnthn> Hopefully in a couple of months I'll be deleting quite a bit more :)
+
+[21:07] <jnthn> The new-disp branch already has spesh plugins removed :)
+
+[21:08] * nine is looking forward to debug exiting new bugs
+
+[21:08] <jnthn> After comes the multi cache, the method cache, all the serialization and deserialization code around that, sp_findmethod, the findmethod op, the can op... :)
+
+[21:09] <jnthn> Sigh, yes, my apologies in advance. I fear I'm only a little wiser and certainly no less fallible than I was when I wrote the stuff you're debugging now.
+
+[21:10] <jnthn> otoh, I hope the new design, covering more cases with a single mechanism, will mean less code and so less places for bugs to hide
+
+[21:10] <jnthn> At least, the VM surface area should be smaller.
+
+[21:11] *** brrt left
+[21:16] <nine> And the bug disappears... It's like magic!
+
+[21:20] <jnthn> :)
+
+[21:20] <jnthn> I wish I knew why I left that behind.
+
+[21:20] <jnthn> I remember tossing it out for every other case and there was some reason I didn't do that one.
+
+[21:20] *** dogbert17 joined
+[21:24] *** dogbert11 left
+[21:35] <[Coke]> maybe rationale left in the commit ?
+
+[21:35] <[Coke]> nine++ so good
+
