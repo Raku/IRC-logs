@@ -1,0 +1,589 @@
+[00:02] *** reportable6 left
+[00:05] *** reportable6 joined
+[01:10] *** Kaeipi joined
+[01:10] *** Kaiepi left
+[01:17] *** lucasb left
+[01:59] *** frost-lab joined
+[01:59] *** frost-lab left
+[02:00] *** frost-lab joined
+[03:51] *** Voldenet left
+[03:56] *** Voldenet joined
+[03:56] *** Voldenet left
+[03:56] *** Voldenet joined
+[04:44] *** frost-lab left
+[04:45] *** frost-lab joined
+[04:45] *** frost-lab left
+[05:50] *** frost-lab joined
+[05:51] *** frost-lab left
+[05:51] *** frost-lab joined
+[06:02] *** reportable6 left
+[06:04] *** reportable6 joined
+[06:35] *** squashable6 left
+[06:38] *** squashable6 joined
+[07:50] *** Altai-man_ joined
+[07:51] *** sena_kun left
+[08:30] *** camelia left
+[08:30] *** Geth left
+[08:30] *** leont left
+[08:30] *** rba left
+[08:31] *** camelia joined
+[08:31] *** Geth joined
+[08:31] *** leont joined
+[08:31] *** rba joined
+[08:35] *** demostanis[m] left
+[08:48] *** dogbert11 left
+[08:57] *** demostanis[m] joined
+[09:40] *** gugod left
+[09:41] *** gugod joined
+[10:19] *** LizBot left
+[10:20] <MasterDuke> is decodertakechars expected to convert \r\n to \n?
+
+[10:26] <nine> Another NULL: 0x00007ffff78fde18 in MVM_interp_run (tc=tc@entry=0x403c0c0, initial_invoke=0x0, initial_invoke@entry=0x7ffff7915c90 <thread_initial_invoke>, invoke_data=0x0, invoke_data@entry=0x7ffff7915c90 <thread_initial_invoke>, outer_runloop=0x6, outer_runloop@entry=0x0) at src/core/interp.c:1981
+
+[10:26] <nine> 1981                    GET_REG(cur_op, 0).o = MVM_6model_get_how(tc,
+
+[10:26] <nine> Found in t/spec/S17-lowlevel/cas.t (with MVM_SPESH_DISABLE=1)
+
+[10:26] <MasterDuke> caught it in rr?
+
+[10:27] <nine> No, haven't managed to get any failure in rr
+
+[10:29] <nine> It actually seems to be closely related to the NULL in nqp::objectid
+
+[10:29] <MasterDuke> i was wondering about that
+
+[10:29] <nine> Mu's WHICH code does this: nqp::concat( nqp::concat(nqp::unbox_s(self.^name), '|'), nqp::objectid(self))
+
+[10:29] <nine> The NULL I just found is self in self.^name, and objectid is again called on self
+
+[10:31] <MasterDuke> i don't remember what the fix was, think that was all you
+
+[10:31] <nine> The curious part is: tracing back that NULL gives me:
+
+[10:31] <nine> 00008      set                loc_0_obj, loc_12_obj
+
+[10:31] <nine> 00011      set                loc_5_obj, loc_0_obj
+
+[10:32] <nine> 00012      decont             loc_6_obj, loc_5_obj
+
+[10:32] <nine> 00013      gethow             loc_6_obj, loc_6_obj
+
+[10:32] <nine> Work registers 0, 5 and 6 contain NULL in their object slot. But register 12 actually contains a Node object
+
+[10:37] <nine> Actually having those two related crashes tells us something more: that loc_0_obj does indeed become NULL after first containing a value. In my crash it happens just early enough to trip up gethow, while in dogbert's case it happend between gethow and objectid
+
+[10:39] <MasterDuke> this does seem like the sort of thing that's much much harder to debug when it can't be caught in rr
+
+[10:40] <nine> yeah :/ Just like yesterday's hunt
+
+[10:43] *** Kaeipi left
+[10:44] *** Kaeipi joined
+[10:44] <nine> So what do those cases have in common? They are both about highly threaded code, both have NULLs appearing and both are seeminlgy connected to garbage collection
+
+[10:45] <nine> In my case the 00009      param_sn           loc_3_obj seems to be a place where GC can happen, i.e. right after setting loc_o_obj
+
+[10:46] <nine> Oh, and it's possible that the bugs only appear in optimized builds
+
+[10:50] <nine> By adding a MVM_gc_enter_from_allocator(tc) to MVM_args_slurpy_name I seem to be able to trigger segfaults in a non-optimized build!
+
+[10:51] <MasterDuke> change anything about how catchable it is in rr?
+
+[10:53] *** Kaeipi left
+[10:53] *** Merfont joined
+[10:54] <nine> I fear not
+
+[10:54] <nine> Oh and I removed the obj && in OP(decont) to catch it earlier
+
+[10:56] <nine> Wait...what?!
+
+[10:56] <nine> (gdb) p tc->cur_frame->work[0]
+
+[10:56] <nine> Cannot access memory at address 0xffffffff00000032
+
+[10:56] <nine> (gdb) p tc->cur_frame
+
+[10:56] <nine> $7 = (MVMFrame *) 0xffffffff0000001a
+
+[10:57] <MasterDuke> that looks...not normal/correct
+
+[10:57] <nine> So...tc->cur_frame gets messed up?
+
+[10:58] *** Merfont left
+[10:58] *** Merfont joined
+[10:59] <lizmat> 1a = 26 is number of alphabetic characters ?
+
+[11:00] <nine> And yet another segfault in decont, this time in    at SETTING::src/core.c/Any.pm6:459  (/home/nine/rakudo/blib/CORE.c.setting.moarvm:infix:<===>)
+
+[11:11] <nine> I think I just found a GC issue in MVM_args_slurpy_name, though it's probably unrelated
+
+[11:18] <nine> rr finally cought something! Though it's MoarVM panic: Invalid GC status observed while blocking thread; aborting
+
+[11:18] <nine> Not exactly what I expected
+
+[11:19] *** dogbert17 joined
+[11:20] <dogbert17> nine: so now you found another bug?
+
+[11:20] <nine> After adding MVM_gc_mark_thread_(un)blocked(tc) around MVM_conditionvariable_wait in OP(condwait) I can't reproduce it anymore
+
+[11:20] <nine> I don't think that's a fix though. AFAIK marking the thread blocked just avoids deadlocks
+
+[11:27] *** cog left
+[11:32] <nine> Actually that "Invalid GC status observed while blocking thread" is thrown by my MVM_gc_mark_thread_blocked
+
+[11:36] <nine> Ah because MVM_conditionvariable_wait already marks the thread as blocked
+
+[11:36] <nine> Don't know why I didn't check that first
+
+[11:37] *** cog joined
+[11:59] <nine> I just realized that my debug-on script still contained --optimize=2
+
+[12:02] *** reportable6 left
+[12:03] *** reportable6 joined
+[12:08] <dogbert17> so, are we any closer to understanding what's going on?
+
+[12:08] <nine> I fear gcc optimizations are a crucial part of this
+
+[12:09] <nine> I can get it to explode easily with --optimize=2, but have yet to see it crash even once with --optimize=1
+
+[12:14] <dogbert17> that doesn't bode well
+
+[12:15] <lizmat> does that affect the static optimizer?
+
+[12:15] <nine> no, gcc
+
+[12:15] <lizmat> ah, ok
+
+[12:15] <nine> Let's see if I can find a specific optimization that triggers it...
+
+[12:16] <dogbert17> oddly enough, when compiling with -O1 the compiler suddenly complains a bit about the code
+
+[12:17] <dogbert17> rc/strings/iter.h:181:28: warning: ‘n_gi.next_strand’ may be used uninitialized in this function [-Wmaybe-uninitialized]
+
+[12:17] <dogbert17>   181 |             gi->next_strand++;
+
+[12:17] <dogbert17>       |             ~~~~~~~~~~~~~~~^~
+
+[12:18] <nine> yeah
+
+[12:18] <dogbert17> how is that possible
+
+[12:20] <nine> Well optimization changes the code. This may hide such issues
+
+[12:22] <dogbert17> I guess -O1 slows the code down quite a bit
+
+[12:23] <nine> That's why I hope to find no specific optimization that triggers the issue
+
+[12:23] <nine> If it's just a timing issue we're still in territory that I kinda understand :D
+
+[12:24] <nine> OTOH if an optimization causues issues, we're still at nine's debugging rule #1 "the bug is always in your own code". In this case it would mean that we're relying on undefined behavior somewhere.
+
+[12:25] <nine> It just failed with --optimize='1 -falign-functions  -falign-jumps -falign-labels  -falign-loops -fcaller-saves -fcode-hoisting -fcrossjumping -fcse-follow-jumps  -fcse-skip-blocks -fdelete-null-pointer-checks -fdevirtualize  -fdevirtualize-speculatively -fexpensive-optimizations -ffinite-loops -fgcse  -fgcse-lm  -fhoist-adjacent-loads -finline-functions -finline-small-functions -findirect-inlining 
+
+[12:25] <nine> -fipa-bit-cp  -fipa-cp  -fipa-icf -fipa-ra  -fipa-sra  -fipa-vrp -fisolate-erroneous-paths-dereference -flra-remat -foptimize-sibling-calls -foptimize-strlen -fpartial-inlining -fpeephole2 -freorder-blocks-algorithm=stc -freorder-blocks-and-partition  -freorder-functions -frerun-cse-after-loop -fschedule-insns  -fschedule-insns2 -fsched-interblock  -fsched-spec'
+
+[12:26] <dogbert17> the number of different optimizations is staggering
+
+[12:27] <nine> Well the 2x speed up of running an optimized build must come from somewhere :)
+
+[12:27] <nine> #2  0x00007ffff78cb7c1 in MVM_interp_run (tc=0x2, tc@entry=0x7fffe406c370, initial_invoke=0x7ffff36ae810, initial_invoke@entry=0x7ffff7919310 <thread_initial_invoke>, invoke_data=0x7ffff36ae810, invoke_data@entry=0x7ffff7919310 <thread_initial_invoke>, outer_runloop=0x7ffff75034a5 <__GI_raise+325>, outer_runloop@entry=0x0) at src/core/interp.c:213
+
+[12:28] <nine> That tc=0x2 somehow doesn't look right
+
+[12:28] <nine> One frame up it's still 0x7fffe406c370
+
+[12:28] <dogbert17> rr ?
+
+[12:28] <nine> By now I've given up on rr
+
+[12:30] <dogbert17> might https://github.com/MoarVM/MoarVM/issues/1431 contain any clues? (extreme longshot)
+
+[12:33] <nine> Nothing immediate stands out, but those are certainly not good
+
+[12:38] <nine> Down to --optimize='1 -fschedule-insns -falign-functions  -falign-jumps -falign-labels  -falign-loops -fcaller-saves -fcode-hoisting -fcrossjumping -fcse-follow-jumps  -fcse-skip-blocks -fdelete-null-pointer-checks -fdevirtualize  -fdevirtualize-speculatively -fexpensive-optimizations -ffinite-loops -fgcse  -fgcse-lm  -fhoist-adjacent-loads
+
+[12:39] <dogbert17> fdelete-null-pointer-checks sounds a bit scary
+
+[12:41] <nine> The check for NULL values I added to OP(set) is what triggers most often now
+
+[12:42] <nine> Just --optimize='1 -fschedule-insns -falign-functions  -falign-jumps -falign-labels  -falign-loops -fcaller-saves -fcode-hoisting -fcrossjumping -fcse-follow-jumps' now
+
+[12:44] <dogbert17> so the -f<opt> stuff is -O2 optimizations then I guess
+
+[12:45] <nine> yes
+
+[12:57] *** squashable6 left
+[12:58] *** squashable6 joined
+[13:05] *** squashable6 left
+[13:05] *** squashable6 joined
+[13:12] <nine> And the winner is: --optimize='1 -fschedule-insns'
+
+[13:12] <nine> "If supported for the target machine, attempt to reorder instructions to eliminate execution stalls due to required data being unavailable.  This helps machines that have slow floating point or memory load instructions by allowing other instructions to be issued until the result of the load or floating-point instruction is required.
+
+[13:24] <dogbert17> nine++
+
+[13:24] <dogbert17> how much does it affect perf?
+
+[13:24] *** sourceable6 left
+[13:24] *** bisectable6 left
+[13:24] *** statisfiable6 left
+[13:24] *** notable6 left
+[13:24] *** linkable6 left
+[13:24] *** benchable6 left
+[13:24] *** nativecallable6 left
+[13:24] *** quotable6 left
+[13:24] *** committable6 left
+[13:24] *** bloatable6 left
+[13:24] *** reportable6 left
+[13:24] *** coverable6 left
+[13:24] *** greppable6 left
+[13:24] *** evalable6 left
+[13:24] *** squashable6 left
+[13:24] *** unicodable6 left
+[13:24] *** releasable6 left
+[13:24] *** shareable6 left
+[13:24] *** tellable6 left
+[13:25] <jnthn> Wonder if some well-placed memory barrier insertions might prevent whatever reordering is to blame
+
+[13:26] <nine> I've tried sprinkling volatile everywhere but it didn't have any effect so far
+
+[13:29] <jnthn> Maybe try using MVM_load for loads that maybe don't want reordering
+
+[13:30] <nine> That'd be easy. If only I knew which loads that might be :D  So far it simply looks like a register is losing its value during a GC run
+
+[13:31] <nine> And yesteray's (still unsolved) issue was a node in the ConcBlockingQueue losing its value
+
+[13:33] <jnthn> Oh, I thought this was about ConcBlockingQueue, sorry.
+
+[13:34] <jnthn> (Where ordering totally could be an issue)
+
+[13:35] <nine> Btw. ConcBlockingQueue's shift already contains two MVM_barrier()
+
+[13:39] <jnthn> Yeah, I just noticed that while glancing for anything obviously missing
+
+[13:39] <jnthn> To the degree that there's anything obvious about that code :)
+
+[13:40] <jnthn> Seems silly younger me didn't leave a link to the paper describing the algorithm so now I'll have to dig it up again...
+
+[13:41] <Altai-man_> the Blin is clear
+
+[13:41] <Altai-man_> anything blocking the release?
+
+[13:45] <nine> Thinking about how NULLs in work registers or queues can be related to GC and instruction ordering issues I wondered if the GC writes NULL when trying to write the object's new address. Usually the new address comes from an allocator, but there's one place where we read it from memory set by someone else: https://github.com/MoarVM/MoarVM/blob/master/src/gc/collect.c#L226
+
+[13:45] <nine> I changed that to *item_ptr = MVM_load(&item->sc_forward_u.forwarder); and so far haven't seen a failure
+
+[13:46] <nine> until right after I wrote this of course...
+
+[13:48] <jnthn> What about a barrier after https://github.com/MoarVM/MoarVM/blob/master/src/gc/collect.c#L337 ?
+
+[13:49] <nine> Trying that right now
+
+[13:49] <nine> And for good measure a barrier before the line where we read
+
+[13:51] <jnthn> Yeah, either that or the load.
+
+[13:52] <jnthn> (I believe the load pretty much barrier then read)
+
+[13:54] <nine> Yes, MVM_load is AO_load_full and the full is about the used barrier
+
+[14:00] <nine> 10 minutes without failure! I'm starting to believe that this might be it
+
+[14:00] <nine> Also running the ConcBlockingQueue golf in a loop. So far so quiet
+
+[14:01] <nine> Altai-man_: if this turns out to be right it may be worth slipping it into the release
+
+[14:02] <jnthn> I wonder if an MVM_store would be a bit more efficient than the write and then the barrier, at least on some platforms
+
+[14:02] <jnthn> (I don't know if it'd ever be worse, but it may be better if there's a half-barrier)
+
+[14:03] <jnthn> Uh, I don't think it would ever be worse, I meant.
+
+[14:03] <jnthn> I do wonder how much this costs
+
+[14:03] <jnthn> I suspect on x64 "not much" because it's quite strongly consistent anyway
+
+[14:04] <nine> switching to a fully optimized build now and removed all volatile decorators that I added
+
+[14:17] <nine> 10 minutes later and it's still going strong. That and the fact that both the diagnosis and the fix make perfect sense, makes me declare victory :)
+
+[14:18] <jnthn> :D
+
+[14:18] <jnthn> nine++
+
+[14:18] <lizmat> I would be against slipping it into the release
+
+[14:18] <nine> lizmat: why?
+
+[14:18] <jnthn> lizmat: Why?
+
+[14:19] <lizmat> we'd at least want another Blin run for that, no?
+
+[14:19] <lizmat> .oO( in unison! )
+
+[14:19] <lizmat> well, maybe I'm over cautious
+
+[14:19] <jnthn> Famous last words, but: it feels really quite low risk to me, if it's no more than adding memory barriers
+
+[14:20] <nine> Just 2 MVM_barrier()
+
+[14:20] <jnthn> In terms of not introducing semantic regressions anyway
+
+[14:20] <jnthn> Performance is another question
+
+[14:20] <lizmat> ok   if Altai-man_ is ok with it
+
+[14:20] <lizmat> ah, performance...  what if this makes everything 2x as slow ?
+
+[14:20] <nine> Any performance impact would be limited to GC runs
+
+[14:21] <lizmat> https://logs.liz.nl/raku-dev/2021-05-21.html#16:19   # last test-t
+
+[14:21] <jnthn> An impact like 2x as slow feels hugely unlikely :)
+
+[14:22] <jnthn> I'd not be surprised if the only way to see the difference is with cachegrind
+
+[14:22] <nine> MVM_barrier compiles to a single MFENCE assembly instruction
+
+[14:23] <lizmat> ok, you've convinced *me*  :-)
+
+[14:23] <jnthn> (e.g. it's noise in any timing benchmarks)
+
+[14:24] <jnthn> I do think using MVM_load and MVM_store would be better than the full barriers, but I suspect the assembly might come out the same on x64
+
+[14:25] <nine> Since MVM_load maps to AO_load_full and MVM_store maps to AO_store_full, we'd get full barriers in any case
+
+[14:25] <nwc10> I can't look at this "today" but if you provide the two versions I can have a look on ARM, where (a) it might make a different and (b) I stand a fighting chance of understaning the assembler output
+
+[14:25] <nwc10> although this 32 bit addressing is still very new-fangled.
+
+[14:26] <nine> 1892:# define AO_load_full(addr) (AO_nop_full(), AO_load_acquire(addr))
+
+[14:26] <jnthn> Ah, OK
+
+[14:27] <jnthn> And I guess MVM_nop_full is what MVM_barrer maps to?
+
+[14:27] <nine> yes
+
+[14:27] <jnthn> Then yeah, no difference
+
+[14:27] <nine> I like the MVM_barrier() version more because we don't have to cast from size_t to MVMCollectable*
+
+[14:28] <jnthn> Yeah, makes sense if the assembly omes out the same
+
+[14:28] <jnthn> *comes
+
+[14:29] <jnthn> nwc10: (what to compare) I guess it'll just be with the commit nine will do and without
+
+[14:29] <jnthn> I'm kinda amazed that we've gotten away with this for so long.
+
+[14:29] <nine> Anyway it seems like to fix the visible symptoms at least we'd get away with an MVM_barrier when writing. Which makes sense as this will certainly block the code reordering that would make it set the CF_FORWARDER_VALID flag before actually writing the forwarder address
+
+[14:30] <nwc10> I meant ""using MVM_load and MVM_store would be better than the full barriers, but I suspect the assembly might come out the same on x64"
+
+[14:30] <jnthn> Yeah, I sorta think we might get away wiht it just there
+
+[14:30] <jnthn> nwc10: Well, since then we've realized that those two *are* doing full barriers (at the moment)
+
+[14:31] <nine> The funny bit is that in our recent job posting I wrote about me as the CTO who understands software development including "how to fix that damned threading bug in the garbage collector". Now I'll have a specific commit to link to doing just that :D
+
+[14:32] <jnthn> :D
+
+[14:33] <lizmat> nine++
+
+[14:33] <Altai-man_> nine++
+
+[14:34] <nine> Question remains: do we add a barrier before the reading instruction just to be safe?
+
+[14:34] <Altai-man_> about including it to the release: if I had a better machine I'd do a Blin run now, it'd take like a hour more maybe, just in time to write a changelong, but currently I'll assume it to be safe.
+
+[14:35] <jnthn> nine: I guess there's still a risk of the compiler moving the read of the pointer ahead of the read of the flag if we don't
+
+[14:35] <nine> Yeah, let's keep it in there
+
+[14:38] <Altai-man_> also, am I correct this commit deals with `non-AsyncTask fetched from eventloop active work list`?
+
+[14:38] <Altai-man_> or at least some case of it
+
+[14:38] <Altai-man_> as I saw it in my Cro::LDAP and it was annoying, so I'd welcome the fix very much
+
+[14:40] *** frost-lab left
+[14:41] * jnthn afk for a bit
+
+[14:49] <Geth> ¦ MoarVM: 8532c6bb3b | (Stefan Seifert)++ | src/gc/collect.c
+
+[14:49] <Geth> ¦ MoarVM: Fix object pointers getting turned into NULL by multi-threaded GC
+
+[14:49] <Geth> ¦ MoarVM: 
+
+[14:49] <Geth> ¦ MoarVM: Highly threaded code could segfault randomly because NULL values appeared in
+
+[14:49] <Geth> ¦ MoarVM: registers or e.g. a ConcBlockingQueue. The reason was that the C compiler
+
+[14:49] <Geth> ¦ MoarVM: re-ordered code when optimizing causing the MVM_CF_FORWARDER_VALID flag to get
+
+[14:49] <Geth> ¦ MoarVM: set before we actually wrote the forwarder address. This could result in a
+
+[14:49] <Geth> ¦ MoarVM: different thread reading a NULL from forwarder and using that as an item's
+
+[14:49] <Geth> ¦ MoarVM: <…commit message has 7 more lines…>
+
+[14:49] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/8532c6bb3b
+
+[15:00] <Altai-man_> by the way, during review I am deleting merged one-commit branches with fixes by nine, I hope that's ok, insult me otherwise
+
+[15:02] <nine> oh, sure
+
+[15:49] <nine> jnthn: I think we got away for it so long because it only affects multi-threaded programs with cross-thread data access
+
+[15:51] <dogbert17> nine++, do you think these changes might have fixed the insidious return-in-tap bug as well?
+
+[15:55] <Altai-man_> hmmmmm
+
+[15:55] <Altai-man_> is the CI failure related to the commit? :)
+
+[16:01] * Altai-man_ saves the log and re-runs the test
+
+[16:01] <Altai-man_> it seems we have `test plan not found` segfault every now and then
+
+[16:19] <nine> dogbert17: I don't have much hope, but wouldn't rule it out either
+
+[16:33] * Altai-man_ did a bump
+
+[16:34] <Altai-man_> hmm
+
+[16:34] <dogbert17> nine: it turns out that the error, i.e. return-in-tap, is still present
+
+[16:35] <Altai-man_> after a re-run it's a failure again
+
+[16:35] <Altai-man_> t/02-rakudo/11-deprecated.t                                   (Wstat: 256 Tests: 0 Failed: 0)
+
+[16:35] <Altai-man_>   Non-zero exit status: 1
+
+[16:35] <Altai-man_>   Parse errors: No plan found in TAP output
+
+[16:35] <Altai-man_> but with another test this time
+
+[16:35] <Altai-man_> Can https://github.com/MoarVM/MoarVM/commit/a75a206afb2faf182af82b564ae9b56cdcb43fb1 be the reason?
+
+[17:00] <Altai-man_> no, it is clearly older
+
+[17:01] <Altai-man_> I still don't like it a lot, but we can make it a blocker for the next release (hopefully)
+
+[17:10] <nine> dogbert17: IIRC return-in-tap is most probable a spesh bug
+
+[17:13] <Geth> ¦ MoarVM/release-2021.05: ee8c70c7df | Altai-man++ | docs/ChangeLog
+
+[17:13] <Geth> ¦ MoarVM/release-2021.05: Update ChangeLog for 2021.05 release
+
+[17:13] <Geth> ¦ MoarVM/release-2021.05: review: https://github.com/MoarVM/MoarVM/commit/ee8c70c7df
+
+[17:13] <Geth> ¦ MoarVM/release-2021.05: d2dc3bb01e | Altai-man++ | VERSION
+
+[17:13] <Geth> ¦ MoarVM/release-2021.05: Bump VERSION for release
+
+[17:13] <Geth> ¦ MoarVM/release-2021.05: review: https://github.com/MoarVM/MoarVM/commit/d2dc3bb01e
+
+[17:14] <Geth> ¦ MoarVM: Altai-man++ created pull request #1499: Release 2021.05
+
+[17:14] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1499
+
+[17:15] <Geth> ¦ MoarVM: ee8c70c7df | Altai-man++ | docs/ChangeLog
+
+[17:15] <Geth> ¦ MoarVM: Update ChangeLog for 2021.05 release
+
+[17:15] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ee8c70c7df
+
+[17:15] <Geth> ¦ MoarVM: d2dc3bb01e | Altai-man++ | VERSION
+
+[17:15] <Geth> ¦ MoarVM: Bump VERSION for release
+
+[17:15] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d2dc3bb01e
+
+[17:15] <Geth> ¦ MoarVM: d57f575c27 | Altai-man++ (committed using GitHub Web editor) | 2 files
+
+[17:15] <Geth> ¦ MoarVM: Merge pull request #1499 from MoarVM/release-2021.05
+
+[17:15] <Geth> ¦ MoarVM: 
+
+[17:15] <Geth> ¦ MoarVM: Release 2021.05
+
+[17:15] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d57f575c27
+
+[17:18] <nine> Altai-man_: any other output by 11-deprecated.t? Did it create a core dump?
+
+[17:19] <Altai-man_> nine, not really, I think. I see how different seemingly not related tests are failing on Windows with "TAP plan not found", it's also apparently a race we had for some time now.
+
+[17:19] <Altai-man_> and as it is something we had already, the release is done
+
+[17:22] *** Altai-man_ left
+[17:23] *** sena_kun joined
+[17:23] <nine> sena_kun++
+
+[17:40] <dogbert17> sena_kun++
+
+[19:14] *** moritz left
+[19:19] <MasterDuke> jnthn: did you see my question about decodertakechars earlier?
+
+[19:32] <MasterDuke> oh, nm i think, i see the translate_newlines option...
+
+[20:09] *** zakharyas joined
+[20:23] <MasterDuke> jnthn: in case you don't get github notifications, i would appreciate a glance at https://github.com/Raku/nqp/pull/724 to see if it's somewhat reasonable (and if so, should i implement the translate_newline checking in the other methods?)
+
+[20:30] *** ilogger2_ joined
+[20:30] *** ilogger2_ joined
+[21:20] *** zakharyas left
+[21:20] *** zakharyas left
+[21:51] *** gugod left
+[21:51] *** gugod left
+[22:06] <sena_kun> t/04-nativecall/13-cpp-mangling.t                             (Wstat: 256 Tests: 0 Failed: 0)
+
+[22:06] <sena_kun> t/04-nativecall/13-cpp-mangling.t                             (Wstat: 256 Tests: 0 Failed: 0)
+
+[22:06] <sena_kun>   Non-zero exit status: 1
+
+[22:06] <sena_kun>   Non-zero exit status: 1
+
+[22:06] <sena_kun>   Parse errors: No plan found in TAP output
+
+[22:06] <sena_kun>   Parse errors: No plan found in TAP output
+
+[22:06] <sena_kun> that's from MVM_gcc_njit_libffi
+
+[22:06] <sena_kun> that's from MVM_gcc_njit_libffi
+
+[22:06] <sena_kun> t/02-rakudo/06-is.t                                           (Wstat: 256 Tests: 0 Failed: 0)
+
+[22:06] <sena_kun> t/02-rakudo/06-is.t                                           (Wstat: 256 Tests: 0 Failed: 0)
+
+[22:06] <sena_kun>   Non-zero exit status: 1
+
+[22:06] <sena_kun>   Non-zero exit status: 1
+
+[22:06] <sena_kun>   Parse errors: No plan found in TAP output
+
+[22:06] <sena_kun>   Parse errors: No plan found in TAP output
+
+[22:07] <sena_kun> that's from Win_MVM_reloc
+
+[22:07] <sena_kun> that's from Win_MVM_reloc
+
+[22:07] <sena_kun> this looks very bad to me, so that's certainly a blocker for the next time. :S
+
+[22:07] <sena_kun> this looks very bad to me, so that's certainly a blocker for the next time. :S
+
+[22:07] <sena_kun> if the solution will be found soon, maybe a point release is necessary, though it depends
+
+[22:07] <sena_kun> if the solution will be found soon, maybe a point release is necessary, though it depends
+
+[22:09] <MasterDuke> hopefully this week i can get the nqp+rakudo ci pipelines a little more synced up with the recent changes to the moarvm ci pipeline, one benefit is getting a little more info in such cases
+
+[22:09] <MasterDuke> hopefully this week i can get the nqp+rakudo ci pipelines a little more synced up with the recent changes to the moarvm ci pipeline, one benefit is getting a little more info in such cases
+
+[22:13] <sena_kun> hmm, MoarVM repo has no `severe` tag nor `critical`. :S
+
+[22:13] <sena_kun> hmm, MoarVM repo has no `severe` tag nor `critical`. :S
+
+[22:14] <sena_kun> anyway, the ticket is created. I know this kind of info is a pathetic joke when it comes to such kinds of horrible scary issues, but I have not much on my hands, sorry. :(
+
+[22:14] <sena_kun> anyway, the ticket is created. I know this kind of info is a pathetic joke when it comes to such kinds of horrible scary issues, but I have not much on my hands, sorry. :(
+
