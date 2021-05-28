@@ -1,0 +1,155 @@
+[00:02] *** reportable6 left
+[00:05] *** reportable6 joined
+[00:42] *** ggoebel_ joined
+[00:45] *** dogbert17 left
+[00:45] *** dogbert17 joined
+[00:46] *** dogbert17 left
+[00:46] *** dogbert17 joined
+[06:02] *** reportable6 left
+[06:05] *** reportable6 joined
+[06:54] *** brrt joined
+[07:13] *** ilogger2 left
+[07:13] *** ilogger2 joined
+[07:23] <Nicholas> good *, #moarvm
+[08:01] <MasterDuke> hey hey. anybody know how to force windows/msvc to use 64-bit longs?
+[08:03] <moon-child> #define long long long
+[08:04] <MasterDuke> heh. without editing source or project files?
+[08:05] <moon-child> not afaik.  long is 32-bit under the windows abi, so changing it categorically that way would make any use of system libraries break
+[08:05] <moon-child> why do you want to do that?
+[08:05] <brrt> ohai #moarvm
+[08:06] <brrt> MasterDuke: context would be appreciated :-)
+[08:07] <MasterDuke> my gmp branch of moarvm builds fine on windows with msvc. so does nqp. but nqp fails some tests because values which fit in a long on linux no longer do on windows
+[08:07] <brrt> I see.
+[08:07] <moon-child> sounds like a bug in gmp, tbh
+[08:07] <brrt> but this means that there's somewhere where either MoarVM or libgmp is using 'long' where it should be using MVMint64 or int64_t
+[08:08] <MasterDuke> so this is a problem https://github.com/MasterDuke17/MoarVM/blob/taboege-configure-gmp/src/6model/reprs/P6bigint.c#L9-L14
+[08:09] <MasterDuke> m: use nqp; my int $a = nqp::unbox_i(nqp::fromstr_I("9223372036854775807", Int)); say $a  # so this throws
+[08:09] <camelia> rakudo-moar 4183cdaf3: OUTPUT: «9223372036854775807␤»
+[08:13] <MasterDuke> my thought for how to get around it in code is just read the limbs from the bigint manually, e.g., something like `if (mpz_sizeinbase(*a, 2) <= 1) { return (MVMint64) (mpz_getlimbn(*a, 0) + mpz_getlimbn(*a, 1)) } else  { ... }`
+[08:13] <moon-child> how about a patch to gmp?  Seems simpler
+[08:14] <MasterDuke> wrapped in a `#ifdef _MSC_VER`
+[08:15] <MasterDuke> i don't want to have to carry a gmp patch, and they have some crazy code
+[08:15] <moon-child> fair enough
+[08:17] <MasterDuke> when building GMP with regular ./configure, you can give it an `ABI=(32|64)` option, but i don't know exactly what that does, or how to try it out when building a visual studio project
+[08:17] <timo> you may have to / want to find IS_BIG for this?
+[08:17] <timo> could be the "store small bigints in half a pointer" optimization
+[08:18] <timo> how did we end up handling gmp's signal-happyness?
+[08:18] <MasterDuke> https://github.com/MasterDuke17/MoarVM/blob/taboege-configure-gmp/src/math/bigintops.c#L38-L42 and https://github.com/MasterDuke17/MoarVM/blob/taboege-configure-gmp/src/math/bigintops.c#L371-L388
+[08:19] <MasterDuke> yeah, there will likely have to be a bunch more places where i special case msvc if i can't figure out how to get it to use 64-bit longs
+[08:20] <timo> signal handlers are per-process, not per thread, aren't they?
+[08:20] <MasterDuke> i am using the 'x64' instead of the 'Win32' build target in the project file
+[08:21] <MasterDuke> i think so
+[08:21] <timo> ;_;
+[08:21] <timo> so this pretty explicitly races
+[08:22] <timo> signal man page says use sigaction instead
+[08:23] <MasterDuke> https://stackoverflow.com/questions/24643311/unix-pthreads-and-signals-per-thread-signal-handlers seems to show a possible solution
+[08:25] <MasterDuke> so the current code might/will likely be a source of bugs in threaded code that does big integer exponentiation, but first i'm going to worry about getting nqp tests to pass
+[08:25] <timo> yeah if you think "man, exponenting this huge array of integers is so slow, i'll just hyper it" then bam
+[08:55] <MasterDuke> ugh https://docs.microsoft.com/en-us/cpp/build/common-visual-cpp-64-bit-migration-issues?view=msvc-160 doesn't have a here's-how-to-force-long-to-be-64bit tip
+[09:05] <Nicholas> You can't usefully force any type to be a different type because you utterly bugger every ABI (eg your ability to call into the whole C library)
+[09:06] <Nicholas> I'm wonderin if the solution is (rougly)
+[09:06] <Nicholas> that if test with `mpz_fits_slong_p`
+[09:06] <Nicholas> and then code that checks wehther sizeof(long) < sizeof(MMVInt64)
+[09:06] <Nicholas> and in that
+[09:07] <Nicholas> do it in two halves
+[09:07] <Nicholas> get the bottom 32 bits withmpz_get_ui
+[09:07] <Nicholas> do bigint maths to divide by the constnat 2**32 (or does it have a right shift funciton)
+[09:07] <Nicholas> I assume that a right shift is cheap
+[09:07] <Nicholas> then try to see if what remains in your temp value *does* fit a 32 bit logn
+[09:08] <MasterDuke> well, i have confirmed that `mpz_getlimbn(*a, 0) + mpz_getlimbn(*a, 1)` does give the correct value
+[09:08] <Nicholas> and if so, get it, upshift it by 32 bit, and or the two parts together in C
+[09:08] <Nicholas> are limbs defined to be the same size as long?
+[09:09] <MasterDuke> don't remember, but i think so
+[09:10] *** patrickb joined
+[09:13] <MasterDuke> hm, nope. `./nqp-m.exe : Cannot unbox 63 bit wide bigint into native integer, limb 0 == 9223372036854775805`
+[09:14] <MasterDuke> where i jsut used `%llu` and `mpz_getlimbn(*a, 0)`
+[09:14] <Nicholas> mpz_sizeinbase(value, 16) might be a fast way to figure out if it fits into 64 bits
+[09:14] <Nicholas> or actually 8, as I think because of signs it needs to fit into 63 bits
+[09:14] <Nicholas> (Although -2**63 would then be a special case)
+[09:17] <MasterDuke> i think mpz_size (a) < 2 would be the fastest initial test, since that's just the number of limbs
+[09:49] <MasterDuke> ok, now t/serialization/01-basic.t is passing, just have two failing tests in t\nqp/060-bigint.t and eleven in t\hll/06-sprintf.t
+[09:56] <MasterDuke> arg, one of the fails is from nqp::div_In
+[09:56] <MasterDuke> that's scary code
+[09:58] <MasterDuke> so the test is `my $huge := nqp::pow_I(box(10), box(300), $n_type, $bi_type); nqp::iseq_n(nqp::div_In(box(1), $huge), 1e-300);`
+[09:59] <MasterDuke> on windows i'm getting 1.4932228741754776e-300 isntead
+[10:08] <MasterDuke> turns out to have been an easy fix. now just the sprintf fails
+[10:44] *** feb left
+[10:49] <MasterDuke> woohoo, all nqp tests pass
+[10:49] <MasterDuke> now to try rakudo
+[10:52] *** brrt left
+[11:54] <MasterDuke> arg. and of course my nqp was too old, and when i try to rebuild it i get the complaint about not finding gmp.h when compiling the runner. don't remember how i fixed that last time...
+[11:57] <MasterDuke> oh, another easy fix
+[12:02] *** reportable6 left
+[12:05] *** reportable6 joined
+[12:05] <MasterDuke> rakudo installs
+[12:08] <MasterDuke> couple fails in `nmake m-test`
+[12:19] <patrickb> MasterDuke: Are you working on gmp on Windows?
+[12:19] <MasterDuke> yeah
+[12:21] <patrickb> Which route did you go wrt build system?
+[12:21] <patrickb> The above reads like you've come a long way already.
+[12:21] <MasterDuke> well, i'm just working on/with msvc right now
+[12:22] <MasterDuke> so using msbuild to build the project file that the SMP fork adds to gmp
+[12:22] <MasterDuke> i haven't tried wingw yet
+[12:22] <MasterDuke> *mingw
+[12:23] <patrickb> Using msbuild seems sane. On MinGW it might just work with the linux toolchain.
+[12:23] <patrickb> MasterDuke++
+[13:15] *** ggoebel_ left
+[13:15] *** ggoebel_ joined
+[13:17] *** ggoebel_ left
+[13:17] *** ggoebel_ joined
+[13:18] *** brrt joined
+[13:49] *** brrt left
+[14:12] *** frost left
+[15:06] *** ilogger2 left
+[15:06] *** ilogger2 joined
+[15:53] *** patrickb left
+[16:00] *** ggoebel joined
+[16:03] *** ggoebel_ left
+[16:09] *** lizmat left
+[16:23] *** lizmat joined
+[16:26] *** LizBot joined
+[17:08] *** ggoebel left
+[18:02] *** reportable6 left
+[18:03] *** ggoebel joined
+[18:03] *** reportable6 joined
+[20:18] *** hankache joined
+[20:58] *** hankache left
+[21:15] *** ggoebel left
+[21:50] *** linkable6 left
+[21:53] *** linkable6 joined
+[23:39] *** benchable6 left
+[23:39] *** releasable6 left
+[23:39] *** bisectable6 left
+[23:39] *** shareable6 left
+[23:39] *** statisfiable6 left
+[23:39] *** committable6 left
+[23:39] *** unicodable6 left
+[23:39] *** greppable6 left
+[23:39] *** reportable6 left
+[23:39] *** evalable6 left
+[23:39] *** linkable6 left
+[23:39] *** notable6 left
+[23:39] *** coverable6 left
+[23:39] *** nativecallable6 left
+[23:39] *** bloatable6 left
+[23:39] *** squashable6 left
+[23:39] *** sourceable6 left
+[23:39] *** quotable6 left
+[23:39] *** tellable6 left
+[23:39] *** unicodable6 joined
+[23:39] *** statisfiable6 joined
+[23:39] *** greppable6 joined
+[23:39] *** bloatable6 joined
+[23:40] *** releasable6 joined
+[23:40] *** benchable6 joined
+[23:40] *** notable6 joined
+[23:40] *** nativecallable6 joined
+[23:40] *** squashable6 joined
+[23:40] *** evalable6 joined
+[23:41] *** committable6 joined
+[23:41] *** sourceable6 joined
+[23:41] *** bisectable6 joined
+[23:41] *** shareable6 joined
+[23:41] *** linkable6 joined
+[23:42] *** quotable6 joined
+[23:42] *** tellable6 joined
