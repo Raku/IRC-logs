@@ -1,0 +1,355 @@
+[00:01] *** gfldex left
+[00:02] *** reportable6 left
+[00:04] *** reportable6 joined
+[00:06] *** gfldex joined
+[02:20] *** Util joined
+[03:13] *** dogbert11 left
+[03:13] *** dogbert11 joined
+[03:24] *** kevin1 is now known as kjp
+
+[03:32] *** dogbert11 left
+[04:05] *** dogbert11 joined
+[04:32] *** vrurg left
+[04:41] *** vrurg joined
+[04:56] *** frost joined
+[05:03] *** dogbert11 left
+[05:03] *** dogbert11 joined
+[06:02] *** reportable6 left
+[06:05] *** reportable6 joined
+[06:23] *** linkable6 left
+[06:23] *** linkable6 joined
+[06:54] *** kjp left
+[06:55] *** kjp joined
+[07:51] <moon-child> https://0x0.st/-2Ry.txt  this file takes several minutes and over 16gb of memory to compile.  Is there any alternate way to write it to reduce those numbers?
+
+[08:06] <[TuxCM]> Rakudo v2021.05-3-gf83e55116 (v6.d) on MoarVM 2021.05-12-g4751ca6da
+
+[08:06] <[TuxCM]> csv-test-xs-20      0.380 -  0.400
+
+[08:06] <[TuxCM]> csv-ip5xs           0.876 -  0.895
+
+[08:06] <[TuxCM]> test-t --race       0.905 -  0.907
+
+[08:06] <[TuxCM]> test-t              2.031 -  2.036
+
+[08:06] <[TuxCM]> test                7.745 -  8.340
+
+[08:06] <[TuxCM]> csv-ip5xs-20        9.377 -  9.451
+
+[08:06] <[TuxCM]> test-t-20 --race    9.965 - 10.476
+
+[08:06] <[TuxCM]> csv-parser         28.263 - 28.702
+
+[08:06] <[TuxCM]> test-t-20          36.287 - 38.154
+
+[08:08] *** morayj joined
+[08:11] <raydiak> I haven't tried to write massively long things like that in raku, so not speaking from direct experience, but the most obvious thing would seem to be to break it up into multiple files. idk if it'll reduce precomp time or not, but I can't see how it wouldn't divide the memory requirements
+
+[08:19] *** patrickb joined
+[08:25] <raydiak> wonder if there's something weird going on with the parsing. just doing --target=parse it ran out of memory at 16.6 gigs and almost 10 minutes (on a ryzen 5 with 18.5 gigs available to the os)
+
+[08:27] <moon-child> maybe the use of constants for type names?
+
+[08:33] <raydiak> I honestly don't know enough to say for sure, but the constants are probably the first thing I'd break out into a separate file anyway, might as well give it a shot
+
+[08:34] <raydiak> I also don't know how --target=parse is implemented either, for all I know it tries to compile the whole thing anyway before it dumps the parse
+
+[08:59] <raydiak> it's a nativecall thing. stripping out is native(LIB) from the whole file, it only takes 12s or so (on this particular laptop)
+
+[09:00] <raydiak> at least that narrows it down. probably not a parsing issue
+
+[09:23] <raydiak> all I can say is look around in https://github.com/rakudo/rakudo/blob/master/lib/NativeCall.rakumod , and realize you're running all that setup stuff 3283 times...
+
+[09:26] <nine> That's....a good reason for a new NativeCall API
+
+[09:26] <nine> Though I suspect that compiling 2 bodies for each of those 3283 functions is what takes most of the time
+
+[09:28] <nine> No idea about where the memory usage comes from though
+
+[09:29] <raydiak> unless there's some magic "not-safe-but-fast" or "do it to all the subs at the same time" way of appling the native trait, the only options I can think of (short of rewriting nativecall) are to either split it up into many different files so people can just load the parts they need to actually use, or maybe some wrapper cleverness which applies the native trait lazily when the sub is first called
+
+[09:32] <nine> The latter is already in place and is for example what's done when you declare your native subs in a script. But we also compile those subs ahead of time as part of precompilation to speed up loading the module and avoid the runtime penalty
+
+[09:34] <raydiak> I put all his stuff in a .raku script and tried to run it, so it's not doing precomp like a module. is there a way to get it to be actually lazy in practical reality?
+
+[09:35] <raydiak> I noticed the docs suggested it should work that way by default, but that doesn't seem to be what I'm observing
+
+[09:36] <raydiak> it's just a massive list of constant and sub defs, nothing is even actually called at runtime
+
+[09:39] <nine> Ah, could be that the CHECK phaser that does this precompilation is also run in a script
+
+[09:40] <nine> https://github.com/rakudo/rakudo/blob/master/lib/NativeCall.rakumod#L760
+
+[09:40] <nine> But then, if your script doesn't use a native sub, why would it even be there?
+
+[09:41] <nine> Btw. I guess that loop could be hypered to at least use multiple CPU cores
+
+[09:42] <raydiak> I just copied his example into a script to play with, that wouldn't be the case for his purposes I'm sure
+
+[09:46] <raydiak> I'm wondering if you couldn't write it as a class with a FALLBACK which generates the routine and applies the trait dynamically, or else write each sub with a body that applies the native trait to itself dynamically and re-calls itself
+
+[09:47] <nine> what would be the point?
+
+[09:47] <nine> What's the actual problem you're trying to solve?
+
+[09:47] <raydiak> to get it to *actually* be lazy, only do all the native setup stuff when the sub is called
+
+[09:48] <raydiak> he's trying to do https://0x0.st/-2Ry.txt but it takes over 16 gigs and many minutes, that's the actual problem
+
+[09:49] <nine> No, lazyness just for the sake of it being lazy is not your actual goal. But what is?
+
+[09:49] <raydiak> ^^
+
+[09:49] <nine> Exactly. That's a module. Getting it to compile stuff lazily in a script won't help that different use case.
+
+[09:50] <nine> And having it compile lazily in a module will only hurt all of the users. That's the reason for doing it ahead of time after all
+
+[09:50] <raydiak> if he did what I'm proposing, it would be lazy even in a module, unless I'm mistaken
+
+[09:51] <raydiak> and it'd be lazy per sub. it's not like anyone is actually going to use *all* of those
+
+[09:51] <nine> But they'd still pay for the subs they use. And that will be quite a few
+
+[09:51] <nine> That's not really fixing the issue, it's just pushing it around.
+
+[09:51] <raydiak> a lot less than 3283 though
+
+[09:52] <nine> I'm trying to prevent wasting your time on that :)
+
+[09:52] <raydiak> appreciated :) I'm all ears for better suggestions
+
+[09:52] <nine> Better invest it in improving things without making them worse somewhere else
+
+[09:53] <nine> As I said, we compile 2 function bodies for each native sub. I wonder if we actually need both or if we could decide whether we can use the JIT version before compilation.
+
+[09:53] <nine> Like I also said, that loop could be trivially parallelized.
+
+[09:54] <nine> And 16G of RAM sounds quite fishy. I really wonder if we keep stuff around after compilation that we don't really need anymore.
+
+[09:54] <nine> Reducing memory usage will usually speed things up as well (a little at least)
+
+[09:56] <raydiak> even spread across 8 threads it'd still be multiple minutes. but I suppose you could just tell the user "please wait for first-run compilation, future runs will be faster" or so
+
+[09:57] <nine> I'm pretty sure Raku users are already used to long first-time compilation times ;)
+
+[09:58] <raydiak> this case seems a bit excessive, but that's true
+
+[09:59] <raydiak> and yes the 16 gigs, I have no idea what's going on there. I'm not sure how you'd track that bug down if it is one
+
+[09:59] <nine> If it turns out that we only have to compile one function body, that will cut the time roughly in half already. Parallelizing that loop can speed it up by the number of cores. That's already a huge step
+
+[10:00] <lizmat> nine: fwiw, I still think there's some On factor at work when modules need to precompile, e.g. when I create a new setting, and the logs server goes into lalaland for about 1 minute afterwards
+
+[10:01] <lizmat> still feels fishy, intend to look at that closer again in the nearer future
+
+[10:01] <nine> lizmat: O(n) would be what's expected (if n is the amount of code we have to precompile)
+
+[10:02] <lizmat> so you're saying if both module A and module B use module C, module C needs to be precompiled twice ?
+
+[10:02] <nine> no
+
+[10:03] <nine> But after a recompile of rakudo, you will have to wait for C, A and B to compile
+
+[10:03] <nine> So far I haven't seen any indication that we compile things multiple times. But feel free to investigate :) If it turns out that we do, and we fix that, that'd be a great win.
+
+[10:05] <lizmat> yeah, that is my gut feeling, that indeed modules get compiled more than once
+
+[10:06] <nine> raydiak: if I were to start on this, I'd probably comment out that loop and see what happens (probably massive reduction in compile time and memory usage) and then try more fine grained changes
+
+[10:08] <raydiak> I don't even know what $*W is or does, my general impression is that I'd be doing a lot of spelunking to learn the things necessary to mess with nativecall internals with any awareness and competency
+
+[10:09] <lizmat> $*W is the Perl6/World.nqp object that is accessible during compilation
+
+[10:09] <lizmat> please note that this will most likely *not* survive in the RakuAST branch, or at least not with the current API
+
+[10:10] <lizmat> getting rid of Perl6/World.nqp is one of the goals of the RakuAST branch :-)
+
+[10:11] <lizmat> as you could consider, in its current form, an alpha implementation of what a Perl6 compiler needed to be able to compile itself
+
+[10:11] <nine> raydiak: we all had to start somewhere. And yes, that World thing confused me, too :)
+
+[10:13] *** evalable6 left
+[10:13] *** linkable6 left
+[10:14] *** linkable6 joined
+[10:14] *** evalable6 joined
+[10:18] <raydiak> I'd also have to learn about QAST, NQP, and the MOP to understand what's happening in here. I do appreciate your encouragement, and I'm not trying to be unhelpful. I'll consider it, but the truth is I mostly just hang out and answer questions because a couple years ago I was living in a car with a massive exhaust leak, and now learning and retaining complicated things, and holding sustained focus for long
+
+[10:18] <raydiak> periods doesn't work as well as it used to. what you're proposing would be an enormous undertaking for me, and I am uncertain as to the direction and prioritization of my future at this point. If you really want to pin me down to it, that's the whole story
+
+[10:25] <nine> raydiak: sure, that's totally fine of course :)  I just say, if you're curious and got some time to kill anyway, it'd be worth the journey and you'd get lots of help here. If your priorities are elsewhere, then you ought to follow those :)
+
+[10:27] <raydiak> I don't really know right now. I do sometimes feel guilty that I'm not helping here more with the actual work on rakudo. I know we need all the hands we can get.
+
+[10:28] <lizmat> raydiak: no worries
+
+[10:28] <nine> Guilt is never a good long term motivator. If you help, do it because you want to and because it's fun.
+
+[10:28] <lizmat> we're grateful for any help :-)
+
+[10:36] <raydiak> I've considered it, I mean before this conversation, and I haven't ruled it out. I'm just a lot less sure about things these days
+
+[10:37] <raydiak> sorry if I over-shared. that's a mistake I made far too often when I was around half a decade ago, that I've been trying not to repeat. I can still remember things I learned before pretty clearly. Like 30 digits of pi or the ABCs backwards. New information just doesn't seem to stick very easily, and thinking hard about something turns me foggy until I take a nap. I didn't used to have those limitations
+
+[10:39] <raydiak> I also wonder how much is just my own self-imposed limitations stemming from negative perceptions, or if I just try hard and long enough those parts of my brain may reroute or come back. idk
+
+[10:40] <nine> The brain does indeed need training, just like our muscles
+
+[10:40] <nine> It's in fact the most pliable part of our bodies
+
+[10:41] <lizmat> fwiw, after a 6 week hospitalization, of which I was on Morphine for 2 weeks, I couldn't focus for well over a year
+
+[10:42] <lizmat> it seems I've been able to regain that :-)   although I was much younger then :-(
+
+[10:42] <raydiak> that's terrible, sorry to hear it. I do hold out hope that I just need some more time
+
+[10:43] <lizmat> raydiak: again, no worries, that was 40 years ago this year :-)
+
+[10:44] <raydiak> otoh I have noticed some advantages. less internal noise, it's easier for me to remain calm. expressing myself clearly in english seems to come easier sometimes. I started writing some
+
+[10:47] <lizmat> raydiak++   growing older :-)
+
+[10:47] <raydiak> but then I have 40 pounds to lose, and no income. my girlfriend is fine with it, but I wonder if I shouldn't be worrying more about those things. so that's where I start to wonder about priorities. am I hanging out here just because I have no remaining friends irl? am I volunteering for an open source project to hide from other things I should be doing? I try to think my way out of these circles, and it
+
+[10:47] <raydiak> just makes me so drained and foggy I end up taking a nap
+
+[10:49] <raydiak> yeah there's that too! I was late 20s when I started being active around here. now I'm 3 years from 40, a lot of it could just be noirmal result of aging and a series of less-than-healthy circumstances over the years. I know that still sounds young to many people, but I definitely feel different
+
+[10:50] <nine> Oh, you're not the only one feeling the first onset of age at that point :D
+
+[10:53] <nine> Apart from that, I can heartily recommend watching https://www.youtube.com/user/JDCav24 all day until you can't stand sitting around anymore and start getting into shape.
+
+[10:54] <nine> It's hard to overestimate the impact of physical prowess on the mind
+
+[10:54] <raydiak> thank you, bookamrked. I've been starting to exercise again, but not enough yet
+
+[10:55] <raydiak> 5 years ago I was doing 200 pushups and situps a day, and pullups with 2 fingers on each hand in sets of a few dozen. I'm lucky if I can go through a day of doing nothing without needing my inhaler at this point :D
+
+[10:55] <lizmat> fwiw, I've cycled 4000km+ this year already, that works best for me with my bad knee
+
+[10:56] <lizmat> aiming at 10K this year (to beat last year's record at 9.6K  :-)
+
+[10:56] <raydiak> nice, that's impressive
+
+[11:01] <lizmat> yeah, although it eats into my time behind the keyboard, I find I do need it for balance
+
+[11:01] <lizmat> and for those of you wandering: it's an acoustic bicycle, rather than an electric one  :-)
+
+[11:02] <raydiak> acoustic? powered by sound?
+
+[11:03] <lizmat> no amplification :-)
+
+[11:04] <raydiak> meaning regular pedals and gears and chain?
+
+[11:05] <lizmat> yup
+
+[11:06] <raydiak> got it. idk if I just don't know much about bikes, or if that's more of a european term
+
+[11:11] <lizmat> "acoustic bike" is a neologism I picked up on Twitter recently
+
+[11:14] <raydiak> ah, now I feel less confused :) a bike isn't a terrible idea, though you have to be careful around here. sketchy drivers
+
+[11:14] *** linkable6 left
+[11:14] *** evalable6 left
+[11:15] <lizmat> although the gears are special: a NuVinci 380
+
+[11:15] <lizmat> yeah, in that sense I live in bicycle paradise
+
+[11:15] <lizmat> bicycle paths almost everywhere :-)
+
+[11:16] *** evalable6 joined
+[11:17] *** linkable6 joined
+[11:17] <raydiak> there are a couple around here, but you have to get to them first, dodging kids with Hondas with big subwoofers and wheels that cost more than the car, guys with lifted turbodiesel trucks, etc
+
+[11:20] <lizmat> there's some of that here as well, but only a little fortunately
+
+[11:20] <raydiak> those gears are a CVT on a bicycle?
+
+[11:26] *** morayj left
+[11:30] <raydiak> ah shoot, just realized it's 4:30 AM here. I should go try to sleep. thank you very much for your kindness and encouragement lizmat and nine
+
+[11:32] <nine> Good night!
+
+[11:41] <lizmat> raydiak: yes, CVT on a bicycle
+
+[11:41] <lizmat> good night!
+
+[11:42] *** morayj joined
+[11:55] <dogbert11> this code snippet posted by raydiak is quite interesting
+
+[11:56] <dogbert11> removing all the sub declaration, leaving the constants, makes the compile quite snappy but perhaps that is to be expected ?
+
+[11:59] <dogbert11> 1.51user 0.06system 0:01.21elapsed 130%CPU (0avgtext+0avgdata 160116maxresident)k  - all sub declarations removed
+
+[12:00] <dogbert11> 8.65user 0.23system 0:07.89elapsed 112%CPU (0avgtext+0avgdata 442532maxresident)k  - all constants + the first 100 sub declarations
+
+[12:01] <dogbert11> 15.79user 0.47system 0:14.95elapsed 108%CPU (0avgtext+0avgdata 728580maxresident)k  - all constants + the first 200 sub declarations
+
+[12:02] *** reportable6 left
+[12:02] *** reportable6 joined
+[12:03] <dogbert11> 22.79user 0.36system 0:21.74elapsed 106%CPU (0avgtext+0avgdata 1031620maxresident)k  - all constants + the first 300 sub declarations
+
+[12:38] <dogbert11> using valgrind one can see that the amount of memory 'still reachable:' goes up rapidly
+
+[12:44] <lizmat> which is memory "in use" by Raku, right?  so a leak?
+
+[13:44] <dogbert11> lizmat: perhaps, running Raku with --full-cleanup frees it but the amount is so large that it could possibly be a leak. Nine would know.
+
+[13:57] <rba> The virtual server with most of the *.raku.org/*.perl6.org websites will be down for maintenance today 8pm CEST for approximately an hour...
+
+[14:12] <[TuxCM]> Thanks for noting. 20:00 Europe/Amsterdam, 19:00 Europe/London
+
+[14:28] *** frost left
+[14:55] <dogbert11> lizmat, nine: here's a list of the worst 'leaks': https://gist.github.com/dogbert17/49e23c192acba323d69c5b2de6e71329
+
+[15:48] *** linkable6 left
+[15:48] *** evalable6 left
+[15:49] *** linkable6 joined
+[15:50] *** evalable6 joined
+[16:13] *** patrickb left
+[16:27] <sena_kun> releasable6, status
+
+[16:27] <releasable6> sena_kun, Next release in ≈17 days and ≈2 hours. 1 blocker. 0 out of 3 commits logged
+
+[16:27] <releasable6> sena_kun, Details: https://gist.github.com/1231df37eb432b0823b15c5aee8b2dd1
+
+[17:21] <nine> dogbert11: without --full-cleanup, valgrind output doesn't say much
+
+[17:22] <nine> That said, there is a little insight to gain: it looks like compiling each of these subs individually generates quite a bit of overhead as its one comp unit per sub.
+
+[17:34] <japhb> If y'all find a big improvement for Nativecall compiles, the person working on GNOME bindings is likely to faint from happiness.  :-)
+
+[18:01] <dogbert11> nine: I'll retest with --full-cleanup but I think that the 'still reachable:' memory goes down to zero
+
+[18:02] *** reportable6 left
+[18:03] *** reportable6 joined
+[18:15] <dogbert11> and the result is '==205646== All heap blocks were freed -- no leaks are possible'
+
+[18:47] *** morayj left
+[18:51] <lizmat> meh
+
+[19:00] <lizmat> .
+
+[19:01] <lizmat> .
+
+[19:02] <dogbert11> it could be that more memory is used than what is strictly necessary
+
+[19:04] <lizmat> that, is of course, very true
+
+[19:08] *** hankache joined
+[19:41] <nine> I wonder if it's possible to put all those subs into one compilation unit. Or if that'd even be easy to test, so we would know if this overhead is the major problem
+
+[20:26] *** hankache left
+[20:42] *** Util left
+[20:51] *** sena_kun left
+[20:51] *** sena_kun joined
+[21:23] <dogbert11> That would indeed be interesting
+
+[22:29] *** ilogger2 joined
+[22:51] *** dogbert11 joined
+[22:52] *** dogbert17 joined
+[22:53] *** dogbert12 joined
+[22:56] *** dogbert11 left
+[22:57] *** dogbert17 left
+[23:04] *** Util joined
+[23:19] *** dogbert12 left
+[23:21] *** dogbert12 joined
