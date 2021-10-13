@@ -1,0 +1,180 @@
+[00:02] *** reportable6 left
+[00:06] *** reportable6 joined
+[02:11] *** japhb joined
+[02:23] *** frost joined
+[02:28] *** frost left
+[02:39] *** frost joined
+[02:40] *** frost left
+[02:40] *** frost joined
+[02:40] *** frost left
+[02:43] *** frost joined
+[04:32] *** vrurg joined
+[04:34] *** vrurg_ left
+[05:23] *** nebuchadnezzar joined
+[06:02] *** reportable6 left
+[06:05] *** reportable6 joined
+[08:40] *** linkable6 left
+[08:42] *** linkable6 joined
+[09:16] *** dogbert17 joined
+[09:20] *** squashable6 left
+[09:21] *** squashable6 joined
+[09:34] *** AlexDaniel joined
+[11:20] *** squashable6 left
+[11:21] <nine> jnthnwrthngtn: spesh needs to retain instructions when their result or side effect is needed by deoptimized code. Would it be possible to run those instructions only when we actually deoptimize? I.e. have something like deoptimization handlers akin to exception handlers?
+
+[11:21] *** squashable6 joined
+[12:02] *** reportable6 left
+[12:03] *** reportable6 joined
+[12:42] <jnthnwrthngtn> nine: Well, anything that *really* has side-effects can't be eliminated as dead anyway, unless it can prove the side-effects will be invisible. Results of pure things are another case, and there's options there.
+
+[12:42] <jnthnwrthngtn> Emitting code to run when we deoptimize is one possibility, although quite a step up in complexity.
+
+[12:43] <jnthnwrthngtn> Two other possibilities:
+
+[12:44] <jnthnwrthngtn> 1. Keep a table of registers to populate with wvals or other literals upon deopt, or perhaps to set from other registers. This may cover a lot of cases without leading to arbitrary complexity in deopt handlers.
+
+[12:44] <jnthnwrthngtn> 2. Figure out a way to move the deopt point further back in time, so we re-run a bit more of the original code during a deopt. This is...harder.
+
+[12:52] <nine> Further back in time means to a point earlier?
+
+[12:53] <jnthnwrthngtn> Yes, I mean deopt to an earlier bytecode address so that we replay more
+
+[12:53] <jnthnwrthngtn> Of course once needs to be really sure we don't duplicate side-effects
+
+[12:54] <nine> Well we do have information about which ops are pure and thus safe
+
+[12:54] <nine> I do wonder though how much this could gain us
+
+[12:54] <jnthnwrthngtn> Option 1 is at least easy to dump and understand what it will do (we already dump out the materializations we'll perform for example)
+
+[12:55] <jnthnwrthngtn> I dunno, to me it looked like mostly cheap (especially after JIT) instructions
+
+[12:56] <nine> Good news of the day: I got the Raku port of the non-trivial numerical simulation we have at work to perform as fast as the Perl + Inline C version that's in production!
+
+[12:56] <nine> Of course I need a hyper to get there (which revealed the issue I posted in #raku-dev), but even without it's only a factor of 2 off.
+
+[12:57] <jnthnwrthngtn> Oh, wow :)
+
+[12:57] <jnthnwrthngtn> Is that Raku + nativecall to C?
+
+[12:57] <nine> But...boy, one really needs to avoid NumLexRef and NumAttrRef like the plague. Which leads to odd code like foo(0e0 + $bar)
+
+[12:57] <nine> No, pure Raku
+
+[12:58] <nine> And the only nqp involved is nqp::div_n in 2 places, because the / op is so heavy, we cannot even inline it
+
+[12:58] <jnthnwrthngtn> Oh, yes, that one wants better analyses in static opt *and* perhaps some new-disp work
+
+[12:58] <nine> Also for example $distance - (my num $ = time_to_force(1e0 - $time_distance
+
+[12:58] <nine> Even though time_to_force already returns a num
+
+[12:58] <jnthnwrthngtn> .oO( At least we're all well experienced at trying to avoid plagues these days... )
+
+[12:59] <nine> I guess it's time to update that idiom :D
+
+[13:02] <jnthnwrthngtn> For sub calls that we can resolve, we can introspect the signature to see if there's rw things. Heck, even for multis we can often say "no candidate has anything that could ever need this rw"
+
+[13:09] <nine> Sounds easy to detect such situations in the static optimizer. But what would it optimize the code to?
+
+[13:33] *** lizmat left
+[13:34] *** lizmat joined
+[13:48] <jnthnwrthngtn> nine: Just reading the var rather than taking a ref to it
+
+[13:50] <jnthnwrthngtn> (The QAST::Var would have attribute or lexical as the scope, not attributeref or lexref, iirc)
+
+[15:08] <nine> Huh....looks like the static optimizer has exactly that kind of optimization already in place: simplify_refs # Looks through positional args for any lexicalref or attributeref, and if we find them check if the expectation is for an non-rw argument.
+
+[15:31] <nine> Aaah, of course! It's the static optimizer. So it will only be able to do this if it can statically find a multi candidate. And it cannot if any arguments are method calls. In those cases the other arguments will remain (lexical|attr)refs
+
+[15:58] <MasterDuke> could a spesh plugin do better?
+
+[16:13] <jnthnwrthngtn> nine: Yes, but all the multi candidates are statically known, so we could look at all of them and see that *none* want an rw arg
+
+[16:14] <nine> Ooh... +5 insightful
+
+[16:15] <jnthnwrthngtn> nine: Need to take care of anything with a \foo arg as well as explicitly raw/rw or a capture arg
+
+[16:15] <jnthnwrthngtn> But other than those details it's not so bad
+
+[16:16] <nine> Like.... multi sub infix:<->(Num:D \a, Num:D \b)
+
+[16:16] <jnthnwrthngtn> Yes, but I've no idea why that's written \ and not $
+
+[16:16] <jnthnwrthngtn> Oh, maybe I do
+
+[16:16] <nine> To avoid the Scalar
+
+[16:17] <jnthnwrthngtn> It was because historically we could emit code to produce a Scalar container in that case, but these days I'm quite sure we do not
+
+[16:17] <jnthnwrthngtn> s/could/would/
+
+[16:17] <jnthnwrthngtn> I think the Num type constraint tells us "ok, it's not iterable, so we'll get away with it"
+
+[16:18] <nine> So type constraints do actually help with optimization?
+
+[16:18] <jnthnwrthngtn> MasterDuke: (spesh plugin) They're not really in a position to help, I think. But new-disp is a bit better place.
+
+[16:18] <jnthnwrthngtn> nine: Certainly in this case, yes :)
+
+[16:19] <jnthnwrthngtn> new-disp alone isn't able to totally do it, because when we emit the call we either need to pass in a native ref or a native value
+
+[16:20] <nine> How do we know it's not a WeirdNum is Num does Iterable?
+
+[16:20] <jnthnwrthngtn> However, what new-disp will allow us to do is front-load the decont operations by making the part of th dispatch program
+
+[16:20] <jnthnwrthngtn> nine: We don't. We just hope nobody is so awful. :P
+
+[16:21] <jnthnwrthngtn> One of those cases of "I know it's a cheat but I'm pretty sure we'll get away with it".
+
+[16:22] <nine> I didn't know we had those :)
+
+[16:22] <jnthnwrthngtn> Anyway, on the new-disp thing: if the dispatch program looks at the signature, it can put the derefs (for Scalar, and with a few more ops, for native refs) into the dispatch program itself
+
+[16:22] <jnthnwrthngtn> This has multiple benefits
+
+[16:24] <jnthnwrthngtn> 1. Less variance in argument tuples, so unlike today where for :(Int, Int) we may produce 4 specializations for all combinations of value and containered value, we'd only ever produce 1.
+
+[16:24] <jnthnwrthngtn> 2. If it's a native ref, then the taking of it and deref of it is all in the caller, so even if we don't end up inlining, it's visible for spesh to eliminate.
+
+[16:25] <jnthnwrthngtn> 3. Ditto for EA; the Scalar doesn't escape, so we can do more Scalar replacements
+
+[16:25] <jnthnwrthngtn> Note that since new-disp is a runtime thing, we can do this not only for subs, for also for methods.
+
+[16:26] <jnthnwrthngtn> *but also
+
+[16:28] <jnthnwrthngtn> (Note also that the big reason that new-disp can do this is because unlike spesh plugins, where we have a 2 stage "pick a destination with these args", "invoke the chosen destination with these other args", new-disp is powerful enough to rewrite the argument capture entirely.)
+
+[17:48] *** frost left
+[18:02] *** reportable6 left
+[18:04] *** reportable6 joined
+[18:21] <MasterDuke> anyone have questions/concerns/comments about https://github.com/MoarVM/MoarVM/pull/1508 ?
+
+[18:23] <MasterDuke> it was inspired by the conversation in https://github.com/Raku/nqp/pull/728
+
+[18:28] <nine> What are those paths relative to?
+
+[18:34] <MasterDuke> in moarvm, `$(DESTDIR)/$(PREFIX)/include/`. in nqp's build, it'd be `@moar::prefix@/include/`
+
+[18:40] <MasterDuke> this is not a 100% unbreakable solution, but it will let us exchange a hard-coded list of directories in nqp/rakudo with something a little more dynamic
+
+[18:43] <nine> Why not put in the full paths from the start?
+
+[18:47] <MasterDuke> i don't really care, but since this a space separated list it seems safer to not include the full path, which is more likely to have a space in it than just the final directory names
+
+[20:24] <nine> Space separated? Oh, that sounds bad indeed
+
+[20:32] <nine> At the end of the day the Raku version of the simulation is less than a factor of 2 slower than the Perl + C version. And with parallelization it's actually some 30 % faster!
+
+[20:34] <nine> And the lovely thing about this is that instead of hardly readable C code like "double const geo_distance = SvNV(*(hv_fetch(distances_hv, name_pv, name_len, 0)));" the optimizations I did in the Raku version actually made the code more readable.
+
+[20:34] <jdv> but what does it do?
+
+[20:35] <nine> After all it's just adding type annotations to method arguments and splitting complex expressions into smaller ones so I could store the intermediary values in typed variables.
+
+[20:35] <nine> jdv: I actually gave a lightning talk on this a few years ago: https://www.youtube.com/watch?v=XasKakffdGQ
+
+[20:40] <jdv> i got some of it.  from back in the day when talk recordings were barely usable;)
+
+[20:40] <jdv> thanks
+

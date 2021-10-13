@@ -1,0 +1,44 @@
+[07:19] <nine> I managed to reproduce the leak with a pure in-memory application. I think what happens is that the responses get stuck in the Supply returned from Cro::TLS::Replier.sinker.
+
+[07:20] <nine> I only discovered this accidentally, since for my implementation of sinker I didn't look at the docs, so I didn't have it return a Supply. When I corrected this, the leak appeared again.
+
+[10:24] *** lizmat left
+[10:25] *** lizmat joined
+[10:51] <nine> Ok, it's got nothing to do with Cro after all. I could golf it down to just https://gist.github.com/niner/e21d3268d479365622d8d985b2bce7e2
+
+[10:55] <nine> Oh, all it really needs is just: my $supplier = Supplier.new; my $sinker = supply { whenever $supplier.Supply { whenever Supply.interval(1) { } } }; my $tap = $sinker.tap; loop { $supplier.emit: 1; }
+
+[11:04] <lizmat> nine: lack of back pressure?
+
+[11:05] <nine> Don't think so. Tests show one item consumed per item produced
+
+[11:06] <nine> And in the full blown Cro application this is golfed from, the test was just doing reated requests in a loop
+
+[11:08] <lizmat> Initial/Final Size: 104880 / 1094216 Kbytes
+
+[11:08] <lizmat> Total Time:           4.69 seconds
+
+[11:08] <lizmat> Total CPU Usage:     31.79 seconds
+
+[11:08] <lizmat> that's less than 5 seconds to grow to 1G
+
+[11:09] <lizmat> run with -Msnapper and press control-c after 5 seconds
+
+[12:12] <nine> Oh, I may have a fix!
+
+[12:12] <nine> For Cro::HTTP::Middleware that is
+
+[12:13] <nine> I think my golfed example leaks because no one ever closes the interval supply. And in Cro::HTTP::Middleware it's the $connection-state.early-responses Supplier
+
+[12:14] <nine> This no longer leaks:
+
+[12:14] <nine> y $supplier = Supplier.new; my $sinker = supply { whenever $supplier.Supply -> $conn { my $s = Supply.interval(1); whenever $s { } whenever $conn { LAST $s.done; } } }; my $tap = $sinker.tap; loop { $supplier.emit: 1; }
+
+[12:15] <nine> And for Cro a `LAST $connection-state.early-responses.done;` after https://github.com/croservices/cro-http/blob/master/lib/Cro/HTTP/Middleware.pm6#L184 seems to do the trick
+
+[12:25] *** xinming left
+[12:26] *** xinming joined
+[12:37] <Geth> ¦ cro-http: niner++ created pull request #151: Fix Middleware::RequestResponse leaking a Supplier on every connection
+
+[12:37] <Geth> ¦ cro-http: review: https://github.com/croservices/cro-http/pull/151
+

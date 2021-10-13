@@ -1,0 +1,207 @@
+[00:02] *** reportable6 left
+[00:17] *** linkable6 joined
+[00:33] *** cognominal_ joined
+[00:35] *** cognominal left
+[01:04] *** reportable6 joined
+[01:29] *** moon-child left
+[01:32] *** discord-raku-bot left
+[01:33] *** moon-child joined
+[01:34] *** discord-raku-bot joined
+[06:02] *** reportable6 left
+[06:05] *** reportable6 joined
+[06:32] *** Altai-man left
+[07:32] *** evalable6 left
+[07:32] *** linkable6 left
+[07:33] *** evalable6 joined
+[07:34] *** linkable6 joined
+[09:16] *** frost joined
+[09:44] *** lizmat_ joined
+[09:47] *** lizmat left
+[09:50] *** leont left
+[09:54] *** moon-child left
+[10:01] *** leont joined
+[10:05] *** moon-child joined
+[10:13] *** jdv left
+[10:14] *** jdv joined
+[10:16] *** Altai-man joined
+[12:02] *** reportable6 left
+[12:04] *** reportable6 joined
+[14:22] *** frost left
+[16:17] <nine> I may have a clue:       [Annotation: INS Deopt All (idx 10 -> pc 390; line 1037)]
+
+[16:17] <nine>       [Annotation: Cached (bytecode offset 374)]
+
+[16:17] <nine>       [Annotation: INS Deopt One Before Instruction (idx 9 -> pc 374; line 1037)]
+
+[16:17] <nine>       dispatch_o       r11(2), lits(lang-find-meth), callsite(0x67f3a0, 3 arg, 3 pos, nonflattening, interned),   r8(7),   r9(3),  r10(2
+
+[16:18] <nine> There are both a Deopt All and a Deopt One Before annotations on this dispatch_o. We know the result of the dispatch_o, which is why we optimize away pretty much the whole rest of the frame.
+
+[16:19] <nine> So, could it be that at some point we find that Deopt All annotation, look at the deopt index, see that we deopt to after this dispatch_o, so we actually continue to think that we know the result?
+
+[16:19] <nine> The Deopt One Before would throw us to an earlier place
+
+[16:23] <nine> src/spesh/manipulate.c contains a comment: "case MVM_SPESH_ANN_DEOPT_ONE_INS: /* This moves to the previous instruction, but we need to put it on the end of the list, so the earlier deopt point will win when searching for deopt points. Otherwise, we can deopt to a later place than we should have."
+
+[16:50] <nine> But just making sure that the DEOPT_PRE_INS annotation comes first doesn't fix anything either
+
+[17:03] <JRaspass> In ad-hoc middleware (e.g. before { ... }) `content 'text/html', render-template ...` still works under the latest Cro but `template ...` now dies with "Can only use 'template' inside of a request handler". Is that intentional? Seemed pretty convenient to use the short-hand in before blocks, my use-case is rendering a "pretty" 404 page.
+
+[17:05] <[Coke]> Might be a better question for #raku?
+
+[17:05] <Altai-man> or in #cro
+
+[17:05] <JRaspass> sorry i thought i was in #cro, ignore me lol
+
+[18:02] *** reportable6 left
+[19:05] *** reportable6 joined
+[19:50] <timo> maybe just generating a call to the autothreader with the proper arguments rather than slurping can be a great help, hmm.
+
+[19:54] <nine> No wonder changing annotation order doesn't fix anything. After all, after the deopt we actually do land before the dispatch op having those annotations already.
+
+[19:54] <MasterDuke> but changing the order is still a correctness fix?
+
+[19:55] <timo> oh so it wasnt that deopt kicked us past the dispatch op
+
+[19:55] <nine> No, it's that spesh pretends that the dispatch will always have the same result and doesn't mark the downstream registers as needed for deopt.
+
+[19:56] <nine> So we optimize away initialization code for other registers that those downstream ops use.
+
+[19:57] <timo> ok that sounds like we should have used pea to eliminate these but we actually just tossed them out completely with the simpler optimizations we have
+
+[19:58] <nine> Still haven't found why we don't mark them as deopt_used
+
+[20:00] <timo> if spesh thinks the dispatch will always have the same result why is it still calling it,  i wonder
+
+[20:01] <nine> It doesn't :)
+
+[20:03] <nine> It treats it like it always will return VMNull and optimizes away the non-VMNull branch after that. And since the registers used by that branch are not marked deopt_used, it optimizes away the earlier initialization code for these registers as well.
+
+[20:03] <nine> Then we deopt, follow into that branch and use uninitialized registers
+
+[20:04] <timo> were you able to get it in rr? :)
+
+[20:05] <nine> Yes, this one is trivially reproducible for a change :) MVM_JIT_DISABLE=1 MVM_SPESH_BLOCKING=1 MVM_SPESH_NODELAY=1 rr record /home/nine/rakudo/install/bin/moar --execname=/home/nine/rakudo/rakudo-m --libpath=/home/nine/rakudo --libpath=/home/nine/rakudo/blib --libpath=/home/nine/rakudo/install/share/nqp/lib /home/nine/rakudo/rakudo.moarvm -Ilib t/spec/S12-methods/parallel-dispatch.t
+
+[20:08] <timo> im still super slow with the new keyboard when it comes to symbols and modifiers
+
+[20:08] <nine> The spesh log of the second(!) specialization of dispatch:<.?> tells the story well enough though. We segfault because r14(11) is NULL, which is because of r12(13) and before that r3(2) are uninitialized.
+
+[20:09] <nine> And the facts are: r12(13): usages=0, flags=0     DeadWriter
+
+[20:09] <nine> r14(11): usages=0, flags=0     DeadWriter
+
+[20:10] <timo> im not sure if its in moars tools folder but i had a gdb script that would put breakpoints at certain steps of the spesh process, dumped the spesh log in a file, had that file in git and shows the log with diffs at the end
+
+[20:11] <nine> Oh, wait a minute! r3(2): usages=0, deopt=9, flags=9     KnTyp Concr DeadWriter (type: Capture)
+
+[20:11] <nine> So at least the start of this chain does have the deopt usage marker
+
+[20:19] <nine> The really weird thing is that PEA is definitely missing a case for MVM_SPESH_ANN_DEOPT_PRE_INS. If I wanted to create the exact kind of bug I'm looking at, leaving out that case would be the way I'd introduce it. But fixing that still doesn't change a thing
+
+[20:19] <nine> Now maybe we also need to threat MVM_SPESH_ANN_DEOPT_PRE_INS a bit differently, but I don't see how.
+
+[20:20] <MasterDuke> wave a lead pipe menacingly in its general direction?
+
+[20:23] <timo> whatever leads to the solution i guess
+
+[20:31] <timo> im not sure i actually got the same reproduction of this issue in front of me
+
+[20:34] <timo> is it between a call to flattenable hash and flattenable list?
+
+[20:34] <nine> Sigh. I feel like running in circles. It looks like the reason for PEA to "PEA: OPT: eliminated an allocation of Capture into r14(7)" is because spesh already optimized away that whole branch which would use the Capture.
+
+[20:34] <nine> Thread 1 "moar" received signal SIGSEGV, Segmentation fault.
+
+[20:34] <nine> 0x00007ffff7919ba1 in lang_meth_call (tc=0x405e40, arg_info=...) at src/disp/boot.c:348
+
+[20:34] <nine> 348         MVMHLLConfig *hll = STABLE(invocant)->hll_owner;
+
+[20:34] <nine> invocant is NULL there
+
+[20:34] <timo> ok thats the one
+
+[20:34] <timo> i guess i did not step back far enough to get pre the deopt
+
+[20:35] <nine> Just set a breakpoint on MVM_spesh_deopt_one and reverse-continue from the segfault
+
+[20:35] <nine> Should be called from sp_guardnonzero
+
+[20:39] <nine> Oh...I guess PEA is actually correct in optimizing away allocation of that Capture. After all there's also this materialization data thingy for when deopt happens. So that's where we should find information about how to restore that Capture but don't.
+
+[20:41] <timo> ah thats a good step
+
+[20:41] <nine> And the information seems to be there and to be correct!
+
+[20:41] <nine> Materializations: 0: Capture from regs r23, r24
+
+[20:42] <nine> Deopt point materialization mappings: At 9 materialize 0 into r3
+
+[20:42] <timo> in that case pea is borking the materialization 
+
+[20:42] <timo> is it because the 9 doesnt match?
+
+[20:42] <nine> [Annotation: INS Deopt One Before Instruction (idx 9 -> pc 374; line 1037)]
+
+[20:47] <nine> But: Will deopt 88 -> 374
+
+[20:47] <nine> And the deopt_idx is actually 24!
+
+[20:48] <nine>       [Annotation: INS Deopt One Before Instruction (idx 9 -> pc 374; line 1037)]
+
+[20:48] <nine>       sp_guard         r8(17),   r8(7), sslot(4), litui32(9)  # [009] Start of dispatch program translation
+
+[20:48] <nine>       sp_getspeshslot  r20(0), sslot(9)
+
+[20:48] <nine>       eq_s             r21(0),   r9(3),  r20(0)
+
+[20:48] <nine>       [Annotation: INS Deopt One Before Instruction (idx 24 -> pc 374; line 1037)]
+
+[20:48] <nine>       sp_guardnonzero  r21(1),  r21(0), litui32(24)
+
+[20:48] <nine> So we get materialization info for the sp_guard, but not for sp_guardnonzero
+
+[20:49] <nine> Even though r3(2) is used after both
+
+[20:49] <timo> hm, i dust introduced guardnonzero maybe i forgot to put a case for it somewhere
+
+[20:49] <nine> And both deopt to the same point of the bytecode
+
+[20:52] <timo> oh do we forget to copy the materialization info for the other idxes?
+
+[20:57] <nine> where would we do that? and to which other idxes?
+
+[20:59] <timo> despite how important it is i have barely read through the deopt code
+
+[21:04] <nine> Well, need to go to bed now. Good night!
+
+[21:21] *** linkable6 left
+[21:21] *** evalable6 left
+[21:22] *** linkable6 joined
+[21:24] *** evalable6 joined
+[23:16] *** releasable6 left
+[23:16] *** committable6 left
+[23:16] *** linkable6 left
+[23:16] *** evalable6 left
+[23:16] *** bisectable6 left
+[23:16] *** statisfiable6 left
+[23:16] *** unicodable6 left
+[23:16] *** coverable6 left
+[23:16] *** notable6 left
+[23:16] *** sourceable6 left
+[23:16] *** nativecallable6 left
+[23:16] *** squashable6 left
+[23:16] *** benchable6 left
+[23:16] *** quotable6 left
+[23:16] *** bloatable6 left
+[23:16] *** reportable6 left
+[23:16] *** tellable6 left
+[23:16] *** shareable6 left
+[23:16] *** greppable6 left
+[23:17] *** bloatable6 joined
+[23:17] *** notable6 joined
+[23:18] *** coverable6 joined
+[23:18] *** linkable6 joined
+[23:18] *** bisectable6 joined
+[23:19] *** evalable6 joined
+[23:19] *** benchable6 joined

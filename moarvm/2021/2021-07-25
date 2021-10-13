@@ -1,0 +1,198 @@
+[00:59] *** greppable6 left
+[00:59] *** coverable6 left
+[00:59] *** bloatable6 left
+[00:59] *** evalable6 left
+[00:59] *** bisectable6 left
+[00:59] *** tellable6 left
+[00:59] *** unicodable6 left
+[00:59] *** committable6 left
+[00:59] *** releasable6 left
+[00:59] *** statisfiable6 left
+[00:59] *** notable6 left
+[00:59] *** sourceable6 left
+[00:59] *** shareable6 left
+[00:59] *** quotable6 left
+[00:59] *** linkable6 left
+[00:59] *** benchable6 left
+[00:59] *** squashable6 left
+[01:00] *** coverable6 joined
+[01:00] *** unicodable6 joined
+[01:01] *** squashable6 joined
+[01:01] *** bisectable6 joined
+[01:02] *** committable6 joined
+[01:02] *** evalable6 joined
+[01:02] *** linkable6 joined
+[01:02] *** benchable6 joined
+[01:04] *** frost left
+[01:34] *** frost joined
+[02:01] *** frost left
+[02:18] *** notable6 joined
+[02:38] *** nativecallable6 joined
+[03:19] *** tellable6 joined
+[03:50] *** bloatable6 joined
+[04:04] *** greppable6 joined
+[04:16] *** squashable6 left
+[05:17] *** shareable6 joined
+[05:50] *** releasable6 joined
+[06:04] *** reportable6 joined
+[08:12] *** Kaiepi left
+[08:20] *** Kaiepi joined
+[08:26] *** Kaiepi left
+[08:39] *** Kaiepi joined
+[08:39] *** frost joined
+[09:04] *** statisfiable6 joined
+[09:43] *** sourceable6 joined
+[09:44] *** frost left
+[09:46] *** frost joined
+[09:50] *** frost left
+[12:02] *** reportable6 left
+[12:05] *** reportable6 joined
+[15:39] <nine> So, the "Label lost with spesh enabled (#4456)" seems to be connected to PHI elimination during facts discovery.
+
+[15:40] <nine> I could track it down to Spesh of 'push-all' (cuid: 2075, file: SETTING::src/core.c/Any-iterable-methods.pm6:365) and specifically to r10. This register only has dead writers, but if we eliminate them, we run into the "labeled next without loop construct" error.
+
+[15:41] <nine> That register is never read (except by 2 PHI nodes) and only written by the initial null instruction and then in "set r10(4), r9(6)"
+
+[15:42] <nine> Now r9(6) contains the result of "getattr_o r9(6), r8(12), r5(12), lits($!label), liti16(2)"
+
+[15:45] <MasterDuke> similar/related to the incorrect ssa bug you fixed a little while ago?
+
+[15:59] <nine> No, in this case it looks like that code is really dead. But apparently it does have some side effect that's needed. Or that's covering up the real issue
+
+[16:00] <nine> This is the spesh log in question: https://gist.github.com/niner/4138c5a635a187462e183bf407c72346
+
+[16:01] <nine> The difference between Before and After is only a couple of missing null instructions in BB 1 and removal of lines 324, 356 and 376.
+
+[16:06] <nine> And it's definitely not the null instructions. I've shrunk down the diff to just the 3 mentioned lines and it still explodes.
+
+[16:06] <nine> At least it doesn't look completely arbitrary. We've got an error message about a label and a register that's connected to $!label.
+
+[16:28] *** quotable6 joined
+[17:11] <MasterDuke> are we sure it's spesh? what about disabling spesh but enabling some of the other stressors?
+
+[17:37] <nine> Yes. I'm now certain it's that set instruction. Without it we get the error message
+
+[17:45] <MasterDuke> so a write that's theoretically unnecessary is actually necessary?
+
+[18:02] *** reportable6 left
+[18:21] <nine> for whatever reason, yes
+
+[18:41] *** discord-raku-bot left
+[18:42] *** discord-raku-bot joined
+[19:05] <timo> doesn't happen to haev to do with our partial escape analysis?
+
+[19:05] <timo> i'm not sure if very mmuch about that shows up in the spesh log
+
+[19:10] *** discord-raku-bot left
+[19:11] *** discord-raku-bot joined
+[19:14] <nine> Happens with MVM_SPESH_OSR_DISABLE=1 MVM_SPESH_PEA_DISABLE=1 MVM_JIT_DISABLE=1 MVM_SPESH_INLINE_DISABLE=1 and practically all spesh optimizations disabled.
+
+[19:14] <nine> So really, all spesh is still doing is remove that set instruction and 2 PHIs
+
+[19:18] <timo> have you tried throwing out phi elemination? they aren't instructions that actually show up in the output, after all
+
+[19:22] <nine> I have. Throwing out the PHIs is not the problem. We really need that Label in that register
+
+[19:23] <nine> We need it because it would be used by the handler. Currently trying to find the mechanism for such handlers and where they are expecting things in the code.
+
+[19:24] <nine> Looks to me like we're really just missing a usage relationship from the handler to this register.
+
+[19:26] <MasterDuke> aren't the handlers catches for control exceptions?
+
+[19:26] <nine> they are
+
+[19:27] <nine> And MVMFrameHandler has a label_reg field which I bet is pointing at our "optimized away" register.
+
+[19:27] <nine> But in all of spesh, nothing cares about such a field
+
+[19:28] <nine> While e.g. there's also a block_reg and that is checked for in is_handler_reg
+
+[19:30] <MasterDuke> i assume you've tried to catch it in rr and look for writes/reads to a label_reg?
+
+[19:31] <MasterDuke> src/spesh/inline.c:942 looks like a write to it
+
+[19:42] <nine> Got it :)
+
+[19:42] <MasterDuke> nice
+
+[19:51] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: 0ee995e3b9 | (Stefan Seifert)++ | 2 files
+
+[19:51] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: Fix spesh optimizing away still needed label register
+
+[19:51] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: 
+
+[19:51] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: Objects representing loop labels are kept in a register and may be used by loop
+
+[19:51] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: handlers (like next LABEL). Spesh did not take this relationship into account,
+
+[19:51] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: just saw a register that was written to, but not otherwise used and optimized
+
+[19:51] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: the writers of this register away. Fix by giving a handler's label_reg the same
+
+[19:51] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: treatment as block_reg.
+
+[19:51] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: review: https://github.com/MoarVM/MoarVM/commit/0ee995e3b9
+
+[19:52] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: a932b1732c | (Stefan Seifert)++ | 2 files
+
+[19:52] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: Fix spesh optimizing away still needed label register
+
+[19:52] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: 
+
+[19:52] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: Objects representing loop labels are kept in a register and may be used by loop
+
+[19:52] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: handlers (like next LABEL). Spesh did not take this relationship into account,
+
+[19:52] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: just saw a register that was written to, but not otherwise used and optimized
+
+[19:52] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: the writers of this register away. Fix by giving a handler's label_reg the same
+
+[19:52] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: treatment as block_reg.
+
+[19:52] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: 
+
+[19:52] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: Fixes Rakudo issue #4456
+
+[19:52] <Geth> ¦ MoarVM/fix_spesh_losing_label_reg: review: https://github.com/MoarVM/MoarVM/commit/a932b1732c
+
+[19:52] <nine> And PR https://github.com/MoarVM/MoarVM/pull/1522
+
+[19:54] <nine> So....CodeFactor tells me that spesh contains complex code. How observant. It also claims that this is something new and I introduced it :D
+
+[19:55] <MasterDuke> nice fix
+
+[19:55] <Nicholas> I *think* that at times it has told me that there are new "issues" or resolved "issues" in functions I didn't even touch
+
+[19:55] <nine> same this time
+
+[19:58] <timo> nine: you already investigated and fixed a case where spesh bytecode generation at the end throws an assertion about deopt indices or something?
+
+[20:00] <MasterDuke> maybe one of the moarvm github admins can look at the settings and see if we can make it only warn, not turn a pr red
+
+[20:01] <nine> timo: doesn't ring a bell
+
+[20:02] <timo> oh, ok
+
+[20:03] <nine> Maybe this one? https://github.com/MoarVM/MoarVM/commit/79027bdd0752f33922c778be58c9be95ddbf9af4
+
+[20:03] <timo> rebasing the "compile disp programs" branch on latest new-disp somehow got sp_assertparamcheck to disappear and i don't see it in the diffs any more
+
+[20:03] <timo> hmm
+
+[20:31] <vrurg> I have a terminology question. If I say that bytecode is grouped into frames – how much incorrect would it be? Trying to formulate how inner blocks are actually getting invoked.
+
+[21:09] <timo> one frame has one blob of "original" bytecode, though in moarvm's code we differentiate between static frame and frame, where the frame is one incarnation of a frame, like you'd have on a call stack
+
+[21:09] <timo> and of course there's more than just the original bytecode for frames
+
+[21:13] *** evalable6 left
+[21:13] *** linkable6 left
+[21:14] *** linkable6 joined
+[21:15] *** evalable6 joined
+[21:16] *** reportable6 joined
+[22:43] <[Coke]> double checked, the t/02-rakudo/18-pseudostash.t failure on OS X on new-disp is not happening on master.
+
+[23:38] *** linkable6 left
+[23:38] *** evalable6 left
+[23:39] *** evalable6 joined
+[23:40] *** linkable6 joined

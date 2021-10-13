@@ -1,0 +1,203 @@
+[00:30] *** linkable6 left
+[00:30] *** unicodable6 left
+[00:30] *** tellable6 left
+[00:30] *** evalable6 left
+[00:30] *** benchable6 left
+[00:30] *** greppable6 left
+[00:30] *** evalable6 joined
+[00:31] *** unicodable6 joined
+[00:33] *** greppable6 joined
+[00:33] *** tellable6 joined
+[01:31] *** benchable6 joined
+[01:32] *** linkable6 joined
+[02:29] *** japhb left
+[02:56] *** squashable6 left
+[02:58] *** squashable6 joined
+[03:28] *** MasterDuke left
+[03:58] *** japhb joined
+[04:03] *** reportable6 joined
+[06:02] *** reportable6 left
+[06:41] *** MasterDuke joined
+[08:04] *** reportable6 joined
+[08:32] *** AlexDaniel left
+[08:32] *** psydroid left
+[08:35] *** AlexDaniel joined
+[08:44] *** psydroid joined
+[09:56] *** evalable6 left
+[09:56] *** linkable6 left
+[10:37] <dogbert17> lizmat: you were correct, the error can be reproduced on master as well
+
+[10:37] <lizmat> *phew* 
+
+[10:38] <lizmat> well, that's a good data point :-)
+
+[10:40] <dogbert17> but perhaps nine won't be interested now :)
+
+[10:45] <dogbert17> another datapoint is that it has nothing to do with spesh
+
+[10:48] <nine> dogbert17: I do not discriminate among branches :D
+
+[10:48] <dogbert17> yay
+
+[10:50] <dogbert17> the MoarVM code where the latest error was thrown has the following comment: 'Bad programmer, no cookie.'
+
+[11:15] *** frost joined
+[11:21] <dogbert17> in order to repro the above more quickly copy lines 114-168 inclusive to a file. Add a 'use Test' and run it in a loop. No need to change nursery size etc.
+
+[11:21] <dogbert17> the lines, 114-168, should be taken from t/spec/S17-promise/start.t :)
+
+[11:40] <MasterDuke> how long does it take to trigger?
+
+[11:41] <MasterDuke> heh. first run segfaulted
+
+[11:43] <MasterDuke> https://gist.github.com/MasterDuke17/7d905646072fdd17901e08abeecf25b9
+
+[11:49] <nine> I just got: MoarVM oops (15787) : MVM_str_hash_lvalue_fetch_nocheck called concurrently on the same hash
+
+[11:50] <nine> Which I suspect is telling the most important part
+
+[11:50] <MasterDuke> yeah, i get a bunch of those
+
+[11:50] <MasterDuke> or `MoarVM oops: MVM_str_hash_entry_size called with a stale hashtable pointer`
+
+[11:50] <nine> Which is probably also just a sign of unsafe concurrent hash access
+
+[11:52] <MasterDuke> i'm speculating it's the `# Fresh $/ in start block` or grammar parsing in a start block
+
+[11:53] <nine> It probably is the parse. But where is that unsafely using a shared hash?
+
+[11:53] <MasterDuke> yep, down to just those two subtests and still MVM_oops
+
+[11:54] <MasterDuke> well, my gist now has the rakudo backtrace (though i assume you have one also)
+
+[11:54] <MasterDuke> `at gen/moar/Metamodel.nqp:2706  (/home/dan/Source/perl6/rakudo/blib/Perl6/Metamodel.moarvm:!rebuild_table)` looks suspicious
+
+[11:57] <MasterDuke> https://github.com/rakudo/rakudo/blob/master/src/Perl6/Metamodel/Concretization.nqp#L41 perhaps
+
+[11:58] <nine> Yes. That's also consistent with "4703560" as a hash key
+
+[11:58] <MasterDuke> or https://github.com/rakudo/rakudo/blob/master/src/Perl6/Metamodel/Concretization.nqp#L9
+
+[11:58] *** linkable6 joined
+[11:59] *** evalable6 joined
+[12:02] *** reportable6 left
+[12:03] <MasterDuke> heh. added a $lock.protect() around that hash assignment and started rebuilding rakudo. i thought i'd done something terribly wrong when stage parse almost doubled in time. but then realized i still had a moarvm with --optimize=0
+
+[12:04] *** reportable6 joined
+[12:04] <MasterDuke> ok, well that isn't sufficient
+
+[12:30] <MasterDuke> this is interesting
+
+[12:32] <MasterDuke> the patch https://gist.github.com/MasterDuke17/9d8c3cf0fbe3c929f7801076eb918947 causes t/spec/S12-class/mro-6e.t to fail (log in gist also)
+
+[12:34] <MasterDuke> but it does seem to fix the MVM_oops in the t/spec/S17-promise/start.t excerpt
+
+[12:40] *** frost left
+[12:40] <MasterDuke> vrurg: ^^^
+
+[13:18] <nine> MasterDuke: the nqp::scwbdisable's effect is a fragile thing. Maybe it's better to $lock.protect: { nqp::scwbdisable; %!conc_table{~nqp::objectid(nqp::decont($_[0]))} := nqp::decont($_[1]); nqp::scwbenable; }
+
+[13:19] <nine> Also a lock free route may be a better solution: in !rebuild_table clone the hash, modify the clone and then replace 13:58 < MasterDuke> or https://github.com/rakudo/rakudo/blob/master/src/Perl6/Metamodel/Concretization.nqp#L9
+
+[13:19] <nine> 14:03 < MasterDuke> heh. added a $lock.protect() around that hash assignment and started rebuilding rakudo. i thought i'd done something terribly wrong when stage parse almost doubled in time. but then realized i still had a moarvm with --optimize=0
+
+[13:19] <nine> Argh...accidental paste
+
+[13:20] <nine> And then replace the %!conc_table with the clone
+
+[13:20] <vrurg> MasterDuke: but it passed all specs on my side. Are you sure?
+
+[13:21] <vrurg> And, BTW, rakudo is flapping a lot lately.
+
+[13:21] <MasterDuke> you tried applying my patch?
+
+[13:22] <vrurg> MasterDuke: argh, I have very little time and didn't notice it's a patch. 
+
+[13:22] <MasterDuke> np
+
+[13:23] <vrurg> Perhaps will be able to look at it tomorrow. Today I have to compensate for yesterday day off at my job.
+
+[13:24] <MasterDuke> i'll keep experimenting
+
+[13:25] <MasterDuke> nine: i'll give those a try
+
+[13:31] <vrurg> MasterDuke: I just briefly looked into the patch again and wonder why would you need the lock anyway? You shouldn't be adding concretizations from user land.
+
+[13:33] <MasterDuke> https://github.com/Raku/roast/blob/master/S17-promise/start.t#L117-L168 causes things like `MoarVM oops: MVM_str_hash_entry_size called with a stale hashtable pointer` or `MoarVM oops (15787) : MVM_str_hash_lvalue_fetch_nocheck called concurrently on the same hash`
+
+[13:34] <MasterDuke> https://gist.github.com/MasterDuke17/7d905646072fdd17901e08abeecf25b9 has an example
+
+[13:41] <vrurg> That's weird. It must not happen. The test doesn't do any run-time metamodel. Otherwise all types should've been built by then. Ok, hopefully will have time for this tomorrow.
+
+[13:51] <vrurg> Quickly grepped through sources, it's used by MRO method dispatch. The lock makes full sense then. We were rather lucky it didn't fail earlier.
+
+[14:03] <MasterDuke> nine: just a $lock.protect around that whole for body looks like it's working (i.e., no MVM_oops in S17-promise/start.t and no fails in S12-class/mro-6e.t)
+
+[14:03] <MasterDuke> doh
+
+[14:03] <MasterDuke> spoke too soon. it took longer, but just got an oops
+
+[14:06] *** evalable6 left
+[14:06] *** linkable6 left
+[14:08] *** linkable6 joined
+[14:34] <MasterDuke> nine: interesting. locking around that for body didn't work, but the clone->modify clone->replace with modified clone has been running a lot longer now without a problem
+
+[14:44] <nine> Good thing that this is the more desirable solution anyway :)
+
+[14:45] <nine> Maybe you just missed a place where we access that hash
+
+[14:58] *** squashable6 left
+[15:15] *** discord-raku-bot left
+[15:17] *** discord-raku-bot joined
+[16:16] <nine> CI looks better now :)
+
+[17:01] *** squashable6 joined
+[18:02] *** reportable6 left
+[18:02] *** reportable6 joined
+[18:33] *** nine left
+[18:33] *** camelia left
+[18:37] *** nine joined
+[18:39] *** camelia joined
+[18:43] <nine> MasterDuke: you probably don't need the nqp::scwbdisable(); inside the loop anymore
+
+[18:44] <MasterDuke> ah, i'll try without
+
+[18:54] *** kjp_ left
+[19:00] *** Altai-man left
+[19:00] *** jdv left
+[19:00] *** jnthnwrthngtn left
+[19:00] *** timo left
+[19:00] *** jdv joined
+[19:00] *** timo joined
+[19:00] *** jnthnwrthngtn joined
+[19:00] *** Altai-man joined
+[19:08] *** evalable6 joined
+[19:26] <dogbert17> hmm, another error has suddenly cropped up
+
+[19:27] <MasterDuke> oh
+
+[19:27] <dogbert17> when running some test files under MVM_SPESH_NODELAY=1, MVM_SPESH_BLOCKING=1 and a small nursery som files suddenly fail to compile
+
+[19:27] <MasterDuke> master? or new-disp?
+
+[19:27] <dogbert17> new-disp
+
+[19:27] <dogbert17> dogbert@dogbert-VirtualBox:~/repos/rakudo$ MVM_SPESH_NODELAY=1 MVM_SPESH_BLOCKING=1 ./rakudo-m -Ilib t/spec/S04-statements/with.t
+
+[19:27] <dogbert17> ===SORRY!=== Error while compiling /home/dogbert/repos/rakudo/t/spec/S04-statements/with.t
+
+[19:27] <dogbert17> is default on shaped Scalar not yet implemented. Sorry.
+
+[19:27] <dogbert17> at /home/dogbert/repos/rakudo/t/spec/S04-statements/with.t:70
+
+[19:29] <dogbert17> MVM_GC_DEBUG=1 and nursery size is 12k
+
+[19:32] <dogbert17> using the same settings on t/spec/S32-io/utf16.t leads to a hang (deadlock ?)
+
+[19:53] *** kjp joined
+[19:59] <nine> MasterDuke: congrats! Awesome work!
+
+[22:23] *** evalable6 left
+[22:23] *** linkable6 left
+[22:25] *** evalable6 joined
+[23:25] *** linkable6 joined

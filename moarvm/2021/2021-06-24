@@ -1,0 +1,463 @@
+[00:01] *** linkable6 left
+[00:02] *** linkable6 joined
+[00:02] *** reportable6 left
+[00:04] *** reportable6 joined
+[00:12] *** m6502 left
+[00:23] *** nine left
+[00:23] *** nine joined
+[01:23] *** committable6 left
+[01:23] *** squashable6 left
+[01:23] *** reportable6 left
+[01:23] *** bisectable6 left
+[01:23] *** statisfiable6 left
+[01:23] *** quotable6 left
+[01:23] *** shareable6 left
+[01:23] *** bloatable6 left
+[01:23] *** unicodable6 left
+[01:23] *** evalable6 left
+[01:23] *** coverable6 left
+[01:23] *** benchable6 left
+[01:23] *** sourceable6 left
+[01:23] *** tellable6 left
+[01:23] *** notable6 left
+[01:23] *** nativecallable6 left
+[01:23] *** linkable6 left
+[01:23] *** releasable6 left
+[01:23] *** greppable6 left
+[01:24] *** nativecallable6 joined
+[01:24] *** shareable6 joined
+[01:24] *** squashable6 joined
+[01:25] *** reportable6 joined
+[01:25] *** linkable6 joined
+[01:25] *** greppable6 joined
+[01:25] *** releasable6 joined
+[01:25] *** bisectable6 joined
+[01:25] *** committable6 joined
+[01:25] *** quotable6 joined
+[01:25] *** statisfiable6 joined
+[01:26] *** benchable6 joined
+[01:26] *** tellable6 joined
+[01:26] *** notable6 joined
+[01:26] *** sourceable6 joined
+[01:26] *** bloatable6 joined
+[01:26] *** evalable6 joined
+[01:27] *** unicodable6 joined
+[01:27] *** coverable6 joined
+[02:49] *** discord-raku-bot left
+[02:50] *** discord-raku-bot joined
+[04:21] *** frost joined
+[06:02] *** reportable6 left
+[06:04] *** reportable6 joined
+[06:59] <nine> I've let it run all night and neither MVM_SPESH_BLOCKING=1 nor MVM_SPESH_DISABLE=1 nor gdb failed
+
+[07:04] *** evalable6 left
+[07:04] *** linkable6 left
+[07:06] *** linkable6 joined
+[07:07] *** evalable6 joined
+[07:48] <dogbert17> nine: what conclusions do you draw from that result?
+
+[07:51] <nine> None. Except that the bug is somewhat elusive. This is quite typical for bugs that depend on precise timing or memory layout to reveal themselves. Like errors you get when run in make test but not when running a test file individually.
+
+[07:52] <dogbert17> I tried turning off some spesh features. MVM_SPESH_PEA_DISABLE didn't fix the problem nor did MVM_SPESH_OSR_DISABLE. I couldn't get the problem to occur when MVM_SPESH_INLINE_DISABLE was set but perhaps it just takes longer.
+
+[07:52] <nine> Oh, wait a minute! It did actually fail in rr :)
+
+[07:53] <nine> I just forgot that I started the rr run in the shell where I previously run it without any additions (the one case where I could get it to fail)
+
+[07:53] *** patrickb joined
+[07:53] <nine> Just took 1540 tries to fail in rr
+
+[07:54] <dogbert17> that is fantastic
+
+[07:54] <MasterDuke> nice
+
+[07:57] <nine> And the bug may even be quite straight forward
+
+[07:58] <nine> We deserialize the method cache at https://github.com/MoarVM/MoarVM/blob/master/src/6model/serialization.c#L3171
+
+[07:58] <nine> Then run the work_loop to deserialize its entries. This may trigger GC. Since the cache at that point is not referenced by any root, we free it.
+
+[07:59] <nine> Serialization and deserialization runs with allocation in gen2 enabled, so we don't have tons of MVM_ROOT in the (de-)serialization code. But that only protects against pointers getting moved. Not actually against stuff getting freed.
+
+[07:59] <MasterDuke> move that ASSIGN_REF to right after the deserialize?
+
+[08:00] <nine> Yep, that sounds about right
+
+[08:05] <nine> Except for b4cd2a6555
+
+[08:05] <nine> So maybe MVM_ROOT is the way to go
+
+[08:06] *** linkable6 left
+[08:07] *** linkable6 joined
+[08:07] <MasterDuke> ha
+
+[08:09] <nine> git++
+
+[08:15] *** patrickb left
+[08:16] *** patrickb joined
+[09:36] <jnthnwrthngtn> moarning o/
+
+[09:37] * jnthnwrthngtn wonders how many days he is away from killing off that method cache... :)
+
+[09:38] <lizmat> .oO( its days are numbered! )
+
+[09:50] <Nicholas> hacking days, or calendar days?
+
+[09:51] <jnthnwrthngtn> Given I've not got that much consulting stuff on my plate in July, those might be somewhat similar for the next while :)
+
+[09:56] <Nicholas> woohoo! Party on.
+
+[10:01] <nine> Oh darn....apparently the MVMROOT did not fix the issue. After 2 hours of running the test in a loop I got the error again
+
+[10:01] <nine> jnthnwrthngtn: MVMROOTing something should keep it from getting collected, shouldn't it?
+
+[10:03] <jnthnwrthngtn> nine: Only during the time the MVMROOT is in dynamic scope
+
+[10:03] <jnthnwrthngtn> But otherwise, yes, it counts as a GC root
+
+[10:04] <nine> I.e. MVMROOT(tc, cache, { if (sr->working == 1) work_loop(tc, sr); }); when deep inside work_loop GC gets triggered
+
+[10:06] <jnthnwrthngtn> Yes, that should suffice
+
+[10:06] <jnthnwrthngtn> If it doesn't, there's something else going on
+
+[10:07] <jnthnwrthngtn> But also, I thought everything deserialized ended up in gen2 anyway
+
+[10:07] <lizmat> maybe the process itself creates objects in the nursery?
+
+[10:08] <jnthnwrthngtn> "the process"?
+
+[10:08] <lizmat> the deserialization process
+
+[10:08] <lizmat> like a loop variable?
+
+[10:08] <jnthnwrthngtn> It shouldn't, in so far as the "please allocate directly in gen2" flag shuld be set at all times when we're in the deserialization process
+
+[10:09] <nine> jnthnwrthngtn: gen2_default is definitely set. But getting into gen2 doesn't protect something from getting freed, does it? After all we may still do a full collection
+
+[10:09] <jnthnwrthngtn> nine: This is correct, yes.
+
+[10:10] <jnthnwrthngtn> But. hm
+
+[10:10] <jnthnwrthngtn> The trigger for a full collection is a full nursery
+
+[10:10] <nine> I can trigger the bug reliably by adding an MVM_gc_enter_from_allocator(tc); after cache = MVM_serialization_read_ref(tc, sr);
+
+[10:10] <nine> While if I enter gc inside the MVMROOT, nothing happens
+
+[10:10] <jnthnwrthngtn> So I guess this only happens when there's another thread working while this one is deserializing
+
+[10:13] <nine> I wonder if my fix is correct but it's just that we have a similar bug elsewhere
+
+[10:14] <nine> It did take 2 hours to trigger it again after all
+
+[10:15] <jnthnwrthngtn> Possible; the deserialization code has probably usually always been inovked as the only running thread
+
+[10:24] <nine> cache = MVM_serialization_read_ref(tc, sr);
+
+[10:25] <nine> And once you start looking. At this point in read_param_intern, ptype and its STable are not rooted: https://github.com/MoarVM/MoarVM/blob/master/src/6model/serialization.c#L2695
+
+[10:25] <nine> They are in gen2, but not referenced
+
+[10:25] <nine> And we even do a nursery allocation
+
+[10:48] <Geth> ¦ MoarVM/new-disp: c370aa1bc1 | (Jonathan Worthington)++ | src/disp/boot.c
+
+[10:48] <Geth> ¦ MoarVM/new-disp: Correct a comment
+
+[10:48] <Geth> ¦ MoarVM/new-disp: review: https://github.com/MoarVM/MoarVM/commit/c370aa1bc1
+
+[10:48] <Geth> ¦ MoarVM/new-disp: 35f3039b3f | (Jonathan Worthington)++ | src/disp/boot.c
+
+[10:48] <Geth> ¦ MoarVM/new-disp: Make boot-code-constant dispatcher handle C funcs
+
+[10:48] <Geth> ¦ MoarVM/new-disp: 
+
+[10:48] <Geth> ¦ MoarVM/new-disp: Which is just wiring it up to code that has since been written for other
+
+[10:48] <Geth> ¦ MoarVM/new-disp: purposes.
+
+[10:48] <Geth> ¦ MoarVM/new-disp: review: https://github.com/MoarVM/MoarVM/commit/35f3039b3f
+
+[10:48] <Geth> ¦ MoarVM/new-disp: 938291229b | (Jonathan Worthington)++ | 5 files
+
+[10:48] <Geth> ¦ MoarVM/new-disp: Implement the boot-code dispatcher
+
+[10:48] <Geth> ¦ MoarVM/new-disp: 
+
+[10:48] <Geth> ¦ MoarVM/new-disp: Which is like boot-code-constant, except it does not imply that the
+
+[10:49] <Geth> ¦ MoarVM/new-disp: object should be considered a constant. The latter would cause bother
+
+[10:49] <Geth> ¦ MoarVM/new-disp: with invoking closures, since we'd fixate on a given closure clone.
+
+[10:49] <Geth> ¦ MoarVM/new-disp: review: https://github.com/MoarVM/MoarVM/commit/938291229b
+
+[10:56] <Geth> ¦ MoarVM/new-disp: 95b7435c3c | (Jonathan Worthington)++ | src/disp/boot.c
+
+[10:56] <Geth> ¦ MoarVM/new-disp: Cats may be pure, but captures they are not
+
+[10:56] <Geth> ¦ MoarVM/new-disp: 
+
+[10:56] <Geth> ¦ MoarVM/new-disp: MasterDuke++ for noticing
+
+[10:56] <Geth> ¦ MoarVM/new-disp: review: https://github.com/MoarVM/MoarVM/commit/95b7435c3c
+
+[11:11] <lizmat> .oO( it haz cats? )
+
+[11:15] <jnthnwrthngtn> meow
+
+[11:15] <jnthnwrthngtn> Time for lunch
+
+[11:23] *** discord-raku-bot left
+[11:32] *** discord-raku-bot joined
+[11:37] *** discord-raku-bot left
+[11:39] *** discord-raku-bot joined
+[12:02] *** reportable6 left
+[12:03] *** reportable6 joined
+[12:28] <Nicholas> jnthnwrthngtn: you know about this?
+
+[12:28] <Nicholas> ./rakudo-m -Ilib t/spec/S06-signature/closure-parameters.rakudo.moar
+
+[12:28] <Nicholas> ...
+
+[12:29] <Nicholas> moar: src/core/interp.c:129: MVM_disp_inline_cache_get: Assertion `slot < cache->num_entries' failed.
+
+[12:29] <Nicholas> Aborted
+
+[12:39] <jnthnwrthngtn> Nicholas: You mentioned it before. I failed to repro it.
+
+[12:57] <Nicholas> Was it the same testcase?
+
+[12:57] <Nicholas> that's a spectest. I think that the previous was nqp
+
+[12:58] <jnthnwrthngtn> I already fixed the NQP build valgrind barf
+
+[12:59] <jnthnwrthngtn> I'm pretty sure the order was this one (failed to repro), the NQP one (fixed), and this one again. The assertion fail and test name look familiar, anyway
+
+[13:00] <Nicholas> *at least* one of us is confused :-)
+
+[13:00] <Nicholas> https://colabti.org/irclogger/irclogger_log/moarvm?date=2021-06-22#l83
+
+[13:01] <Nicholas> FSA assertion panic in NQP. Seems to be only on one machine I have access to
+
+[13:01] <Nicholas> valgrind error was NQP
+
+[13:01] <Nicholas> the assertion failure is a spectest
+
+[13:02] <Nicholas> oh wait, it's me
+
+[13:02] <Nicholas> https://colabti.org/irclogger/irclogger_log/moarvm?date=2021-06-21
+
+[13:03] <Nicholas> you're tracking this better than me
+
+[13:07] <jnthnwrthngtn> Ah, I had forgotten the FSA one, I'm not sure if I conclusively failed to repro that
+
+[13:18] *** patrickb left
+[13:24] <Nicholas> IIRC I only had it on that machine, so I thought it might be compiler dependant
+
+[13:37] <MasterDuke> just a plain checkout of new-disp+setting FSA_DEBUG doesn't repro it for me
+
+[13:38] <MasterDuke> but i did get some sort of crash in rakudo's t/04-nativecall/01-argless.t once, but i can't repro it
+
+[13:47] <MasterDuke> is it expected that a lot of spectests fail?
+
+[14:20] <jnthnwrthngtn> MasterDuke: Probably
+
+[14:21] <jnthnwrthngtn> MasterDuke: I've not run spectest in a while on that branch; it feels like a long shot that it'd be close to passing given things are half way between two dispatch systems
+
+[14:22] <MasterDuke> ok, won't mention the failing ones then
+
+[14:23] <jnthnwrthngtn> Segfaults are useful to know about as those absolutely shouldn't happen, but other failure modes aren't surprising. Certain things always end up in the new dispatcher, but then encounter things that aren't set up for it.
+
+[14:24] <jnthnwrthngtn> I think I've probably gone about as far as I can with "sort of keep things working but turn on new-disp with an env var"; any next step runs into too many discrepancies.
+
+[14:25] <jnthnwrthngtn> Upcoming commits will work towards switching every call and callmethod compiled on MoarVM to the new dispatch mechanism.
+
+[14:25] <jnthnwrthngtn> And then getting NQP happy again. I expect during that time even the Rakudo build will be busted.
+
+[14:26] <jnthnwrthngtn> I can't really go any further with Rakudo because the next step is to compile the setting with new-disp used for multi dispatch
+
+[14:26] <jnthnwrthngtn> Well, and everything really
+
+[14:27] <jnthnwrthngtn> But that immediately runs into the problem that trying to call trait modifiers from the compiler blows up, because NQP calls aren't using new-disp
+
+[14:27] <jnthnwrthngtn> With that road having run out under me, there's not much for it than going for switching NQP over.
+
+[14:31] <[Coke]> Makes sense to me, FWIW - Will others be able to chip in to help, or will that make it harder?
+
+[14:31] <[Coke]> (or, I suppose I mean, will others not be able to help because you'll be fixing the one next broken thing each time?)
+
+[15:02] <jnthnwrthngtn> [Coke]: I think once we're at the point where the big switchover is done and we're hunting regressed spectests, yes
+
+[15:15] <jnthnwrthngtn> Yay, got lang-call working
+
+[15:15] <jnthnwrthngtn> (dispatcher that will delegate to the appropriate HLL dispatcher)
+
+[15:16] <Nicholas> you have the beer fridge ready for later?
+
+[15:16] <jnthnwrthngtn> Yes
+
+[15:16] <Nicholas> Good. (Just checking)
+
+[15:16] <jnthnwrthngtn> Going to try and get lang-meth-call working before language class, though :)
+
+[15:49] <jnthnwrthngtn> Well, almost got it...
+
+[15:49] <jnthnwrthngtn> bbl
+
+[15:51] *** patrickb joined
+[17:22] <jnthnwrthngtn> Seems Geth is giving my push the silent treatment, but the lang-call and lang-meth-call are in :)
+
+[17:23] <jnthnwrthngtn> The next step will be to change the QAST compiler to emit dispatch ops using them for `call` and `callmethod` nodes.
+
+[17:23] <jnthnwrthngtn> And then fix the world that results :)
+
+[17:23] <Nicholas> useless bot
+
+[17:28] <jnthnwrthngtn> Anyway, all that sounds too much effort for a sunny evening when there's beer in the fridge. :)
+
+[17:29] <jnthnwrthngtn> Oh! I also have mead...
+
+[17:29] <Nicholas> #firstworldproblems
+
+[17:30] <Nicholas> have fun - it's still a bit too hot and humid outside here for me to find it enjoyable to sit outside
+
+[17:31] <jnthnwrthngtn> I'm about to test how it is here. I think it is hot and humid but there seems to be a breeze that will make it tolerable...
+
+[17:35] <leont> @jnthnwrthngtn: didn't know you were also a mead drinker 🙂
+
+[18:02] *** reportable6 left
+[18:04] *** reportable6 joined
+[18:17] <Nicholas> I realse. I think I last drank mead before I learned perl.
+
+[18:52] <MasterDuke> i always thought i would like mead, and want to, but never really have
+
+[18:53] <MasterDuke> but there is a bigger cider selection here than in the us, so i've been trying lots of different ciders
+
+[20:21] *** patrickb left
+[22:15] <jnthnwrthngtn> leont: I wasn't until relatively recently, when I ordered a bunch of beer, the shop were out of one, and by cunning or incompetence substituted it with another product of the same brewery...which happened to be a mead.
+
+[22:16] <jnthnwrthngtn> Instead of complaining, I drank it, found it pleasant enough, and ordered some more the next time. I've nowhere near enough experience to know if what I'm drinking counts as a good mead. :)
+
+[22:17] <jnthnwrthngtn> https://www.eshop-axiombrewery.cz/axiom-brewery-forest-meadow-15--6--alk--fruity-session-mead/ fwiw
+
+[22:17] <jnthnwrthngtn> Also: wow, this brewery have their own eshop now, that's new.
+
+[22:18] <jnthnwrthngtn> Now I don't have to figure who has their stuff in stock this time.
+
+[22:18] * leont has about 15 liters of homebrew mead in his cellar (a)
+
+[22:18] <jnthnwrthngtn> Oh wow :)
+
+[22:19] *** linkable6 left
+[22:19] *** frost left
+[22:19] *** sourceable6 left
+[22:19] *** tellable6 left
+[22:19] *** statisfiable6 left
+[22:19] *** bisectable6 left
+[22:19] *** releasable6 left
+[22:19] *** greppable6 left
+[22:19] *** shareable6 left
+[22:19] *** nine left
+[22:19] *** timo left
+[22:19] *** discord-raku-bot left
+[22:19] *** dogbert17 left
+[22:19] *** Voldenet left
+[22:19] *** Kaiepi left
+[22:19] *** cognominal left
+[22:19] *** MasterDuke left
+[22:19] *** reportable6 left
+[22:19] *** evalable6 left
+[22:19] *** coverable6 left
+[22:19] *** unicodable6 left
+[22:19] *** bloatable6 left
+[22:19] *** notable6 left
+[22:19] *** benchable6 left
+[22:19] *** quotable6 left
+[22:19] *** committable6 left
+[22:19] *** squashable6 left
+[22:19] *** nativecallable6 left
+[22:19] *** lizmat left
+[22:19] *** LizBot_ left
+[22:19] *** [Coke] left
+[22:19] *** rypervenche left
+[22:19] *** leedo left
+[22:19] *** jdv left
+[22:19] *** kjp left
+[22:19] *** JRaspass left
+[22:19] *** camelia left
+[22:19] *** AlexDaniel left
+[22:19] *** nebuchadnezzar left
+[22:19] *** harrow left
+[22:19] *** Nicholas left
+[22:19] *** bartolin_ left
+[22:19] *** rba left
+[22:19] *** Geth left
+[22:19] *** ugexe left
+[22:19] *** ilogger2 left
+[22:19] *** leont left
+[22:19] *** moon-child left
+[22:19] *** samcv left
+[22:19] *** vrurg left
+[22:19] *** tbrowder left
+[22:19] *** jnthnwrthngtn left
+[22:22] *** cognominal joined
+[22:22] *** Kaiepi joined
+[22:22] *** Voldenet joined
+[22:22] *** dogbert17 joined
+[22:22] *** discord-raku-bot joined
+[22:22] *** samcv joined
+[22:22] *** moon-child joined
+[22:22] *** leont joined
+[22:22] *** ilogger2 joined
+[22:22] *** leedo joined
+[22:22] *** rypervenche joined
+[22:22] *** jdv joined
+[22:22] *** jnthnwrthngtn joined
+[22:22] *** tbrowder joined
+[22:22] *** vrurg joined
+[22:22] *** linkable6 joined
+[22:22] *** frost joined
+[22:22] *** sourceable6 joined
+[22:22] *** tellable6 joined
+[22:22] *** statisfiable6 joined
+[22:22] *** bisectable6 joined
+[22:22] *** releasable6 joined
+[22:22] *** greppable6 joined
+[22:22] *** shareable6 joined
+[22:22] *** nine joined
+[22:22] *** timo joined
+[22:22] *** rba joined
+[22:22] *** MasterDuke joined
+[22:23] *** reportable6 joined
+[22:23] *** evalable6 joined
+[22:23] *** coverable6 joined
+[22:23] *** unicodable6 joined
+[22:23] *** bloatable6 joined
+[22:23] *** notable6 joined
+[22:23] *** benchable6 joined
+[22:23] *** quotable6 joined
+[22:23] *** committable6 joined
+[22:23] *** squashable6 joined
+[22:23] *** nativecallable6 joined
+[22:23] *** lizmat joined
+[22:23] *** LizBot_ joined
+[22:23] *** [Coke] joined
+[22:23] *** camelia joined
+[22:23] *** AlexDaniel joined
+[22:23] *** nebuchadnezzar joined
+[22:23] *** harrow joined
+[22:23] *** Nicholas joined
+[22:23] *** bartolin_ joined
+[22:23] *** ugexe joined
+[22:23] *** Geth joined
+[22:24] *** kjp joined
+[22:24] *** JRaspass joined
+[22:26] <leont> My stuff is a bit stronger than that though, more comparable to wine than beer. Probably quite a different drink.
+
+[22:28] *** AlexDaniel left
+[22:33] <jnthnwrthngtn> Yeah, sounds like. This one is on the sweet side, but pleasant in the summer.
+
+[23:58] <japhb> Mead always seemed to be more desert than general drink
+
