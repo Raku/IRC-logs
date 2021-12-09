@@ -1,0 +1,297 @@
+[00:03] *** reportable6 left
+[00:04] *** reportable6 joined
+[00:44] *** frost joined
+[02:28] *** vrurg left
+[02:28] *** vrurg joined
+[02:40] *** SmokeMachine left
+[02:40] *** leont left
+[02:40] *** SmokeMachine joined
+[02:41] *** leont joined
+[04:03] *** SmokeMachine left
+[04:03] *** SmokeMachine joined
+[04:04] *** leont left
+[04:21] *** leont joined
+[04:58] *** squashable6 left
+[06:02] *** reportable6 left
+[06:04] *** gfldex left
+[06:04] *** AlexDaniel left
+[06:05] *** gfldex joined
+[06:05] *** AlexDaniel joined
+[06:12] *** codesections left
+[06:13] *** codesections joined
+[06:32] *** squashable6 joined
+[06:42] <Nicholas> good *, #moarvm 
+
+[06:52] <japhb> Good *, Nicholas :-)
+
+[07:03] *** reportable6 joined
+[08:12] *** frost left
+[09:14] <nine> This is...unbelievable. I already had the suspicion that the expr JIT version of gethow is somehow involved in the gh_1202.t segfaults. So from the point of the segfault I painstakingly reverse-stepied through a bunch of JIT compiled ops to the gethow code. The relevant part is:
+
+[09:14] <nine> │   0x7f91c7e020ef  mov    rdx,QWORD PTR [rcx+0x70]                                                                                                                                                                                                                                                                        │
+
+[09:14] <nine> │   0x7f91c7e020f3  cmp    QWORD PTR [rcx+0x70],0x0                                                                                                                                                                                                                                                                        │
+
+[09:14] <nine> │   0x7f91c7e020f8  je     0x7f91c7e020fc
+
+[09:16] <nine> rcx+0x70 is STABLE(obj)->HOW which we store in rdx. Then we compare STABLE(obj)->HOW with 0 and if it's 0 jump to a call of MVM_6model_get_how which will should VMNull. But between the mov    rdx,QWORD PTR [rcx+0x70] and cmp    QWORD PTR [rcx+0x70],0x0 STABLE(obj)->HOW suddenly gets a value.
+
+[09:16] <nine> A change that gdb does not even catch, despite a watch -l on that location being in place. And AFAICT no other thread is in any code that could cause this.
+
+[09:17] <nine> The value is sensible though. It's Perl6::Metamodel::ClassHOW which is exactly what you'd expect
+
+[09:19] <nine> The expr jit template for gethow looks like: (template: gethow (let: (($how (^getf (^stable $1) MVMSTable HOW))) (if (nz $how) $how (...))))) so you'd think that the comparison would use rdx instead of reading that memory location again. But it doesn't, making this implementation thread-unsafe.
+
+[09:20] * nine summons the brrt for ^^^
+
+[09:21] <nine> The window of opportunity for this bug being just a single CPU instruction certainly explains why it needs ten thousands of runs to reproduce
+
+[09:35] <Nicholas> .tell brrt good *, brrt
+
+[09:35] <tellable6> Nicholas, I'll pass your message to brrt
+
+[09:39] <Nicholas> I think there's one line missing from your "explanation for mortals". Which is:
+
+[09:40] <Nicholas> so, if I have this right
+
+[09:40] <Nicholas> 1) we load the value from memory into a regiter
+
+[09:41] <Nicholas> 2) we have a conditional branch based on the "value" (if the value is NULL branch somewhere else), but that value we check comes from a second load of the same memory location
+
+[09:41] <Nicholas> 3) so we don't take the branch
+
+[09:41] <Nicholas> 4) and then we (attempt to) call the value in the register. Which is 0. So boom.
+
+[09:41] <Nicholas> ?
+
+[09:44] <nine> Almost. The rdx register, which we first load the value into is used as the return value of the gethow op, i.e. it will be written into a VM register and the explosion will happen when we try to decont the value in that register. The gethow op should return a VMNull pointer instead of the NULL. But since the cmp that decides whether that is necessary does find a value, we never put VMNull into rdx.
+
+[09:44] <Nicholas> aha right thanks
+
+[09:45] <Nicholas> this is "how the heck do we get a C NULL pointer in a register at all?" bugs? (where the "right" answer was a C pointer to the VMNull singleton) ?
+
+[09:45] <nine> yes
+
+[10:09] <jnthnwrthngtn> moarning o/
+
+[10:10] <Nicholas> \o
+
+[10:11] <Geth> ¦ MoarVM: 8aca849f90 | (Stefan Seifert)++ | 3 files
+
+[10:11] <Geth> ¦ MoarVM: Remove counter productive NULL checks in decont ops
+
+[10:11] <Geth> ¦ MoarVM: 
+
+[10:11] <Geth> ¦ MoarVM: Object registers must never contain NULL values, so there should be no reason
+
+[10:11] <Geth> ¦ MoarVM: to check for NULL values when deconting. Historically bugs in other parts of
+
+[10:11] <Geth> ¦ MoarVM: the code have caused NULL values to appear in registers and these checks have
+
+[10:11] <Geth> ¦ MoarVM: worked around these bugs. But in truth they just hide them and make it more
+
+[10:11] <Geth> ¦ MoarVM: difficult to debug, so better to remove them. This might cost some stability in
+
+[10:11] <Geth> ¦ MoarVM: the short term, but should enable us to fix the underlying bugs for good.
+
+[10:11] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/8aca849f90
+
+[10:11] <Geth> ¦ MoarVM: 8b69d8e26c | (Jonathan Worthington)++ (committed using GitHub Web editor) | 3 files
+
+[10:11] <Geth> ¦ MoarVM: Merge pull request #1593 from MoarVM/remove_counterproductive_null_checks
+
+[10:11] <Geth> ¦ MoarVM: 
+
+[10:11] <Geth> ¦ MoarVM: Remove counter productive NULL checks in decont ops
+
+[10:11] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/8b69d8e26c
+
+[10:16] <lizmat> feels like we should unleash this short term potential instability on the world with a MoarVM bump ?
+
+[11:06] <jnthnwrthngtn> Prolly :)
+
+[11:07] <lizmat> on it
+
+[11:07] <jnthnwrthngtn> Oh wait
+
+[11:07] <jnthnwrthngtn> Hold a moment
+
+[11:07] * lizmat waits
+
+[11:08] <Geth> ¦ MoarVM/master: 5 commits pushed by (Timo Paulssen)++, (Jonathan Worthington)++
+
+[11:08] <Geth> ¦ MoarVM/master: 0a5b37a17d | implement dispatcher-replace-arg syscall
+
+[11:08] <Geth> ¦ MoarVM/master: 4cdce310f3 | implement replace-arg-literal-obj
+
+[11:08] <Geth> ¦ MoarVM/master: ed0c8ec068 | create MVM_callsite_replace_positional and use it
+
+[11:08] <Geth> ¦ MoarVM/master: 68b8f429f4 | initialize vector to known size, MasterDuke17++
+
+[11:08] <Geth> ¦ MoarVM/master: 6e3817b6b7 | Merge pull request #1585 from MoarVM/dispatcher-replace-arg-syscall
+
+[11:08] <Geth> ¦ MoarVM/master: review: https://github.com/MoarVM/MoarVM/compare/8b69d8e26ceb...6e3817b6b784
+
+[11:08] <jnthnwrthngtn> OK, go for it
+
+[11:09] <lizmat> oki
+
+[11:13] <timo> hooray
+
+[11:15] <timo> could merge the nqp and rakudo changes before bumping rakudo as well
+
+[11:16] <timo> for the replace-arg and replace-arg-literal-obj syscalls i mean
+
+[11:28] <lizmat> ah... saw too late
+
+[11:28] <lizmat> which PRs are we talking about ?
+
+[11:32] <timo> https://github.com/Raku/nqp/pull/745
+
+[11:33] <timo> https://github.com/rakudo/rakudo/pull/4604
+
+[11:33] <lizmat> ok  will do in a mo
+
+[11:35] *** evalable6 left
+[11:35] *** linkable6 left
+[11:36] *** evalable6 joined
+[11:38] <timo> not sure if there's a "re-run all checks" button so i can have it tested against latest master + the pull request on github
+
+[11:39] *** frost joined
+[11:40] <lizmat> timo: https://github.com/rakudo/rakudo/pull/4604 has conflicts ?
+
+[11:41] <timo> ah, i'll have to check that out
+
+[11:41] <lizmat> I have merged the NQP one
+
+[11:42] <timo> yes, it does need an actual change
+
+[11:42] <lizmat> maybe I should first bump Rakudo
+
+[11:42] <lizmat> ?
+
+[11:47] <timo> didn't you already?
+
+[11:51] <timo> ah rakudo build segfaults with that change :) :)
+
+[11:57] <lizmat> ah, oops?
+
+[11:57] <timo> oops indeed
+
+[11:57] <lizmat> so, wait for a fix?
+
+[11:57] <lizmat> or revert ?
+
+[11:57] <timo> revert please
+
+[12:02] *** reportable6 left
+[12:03] *** reportable6 joined
+[12:37] <Nicholas> timo: nqp master (now) fails an assertion during build:
+
+[12:37] <Nicholas> +++ Compiling   gen/moar/stage2/nqpmo.moarvm
+
+[12:37] <Nicholas> moar: src/disp/program.c:2267: emit_args_ops: Assertion `p.path[i]->transformation == MVMDispProgramRecordingDrop' failed.
+
+[12:37] <Nicholas> Aborted
+
+[12:37] *** linkable6 joined
+[12:38] <Nicholas> that might give an idea about what the problem is
+
+[12:38] <timo> wait what
+
+[12:38] <Nicholas> MVM_SPESH_NODELAY=1 MVM_SPESH_BLOCKING=1
+
+[12:39] <Nicholas> +#define FSA_SIZE_DEBUG 1
+
+[12:39] <Nicholas> +#define MVM_GC_DEBUG 1
+
+[12:39] <Nicholas> +#define HASH_DEBUG_ITER 1
+
+[12:39] <Nicholas> +#define MVM_SPESH_CHECK_DU 1
+
+[12:39] <Nicholas> and
+
+[12:39] <Nicholas> +#undef NDEBUG
+
+[12:39] <Nicholas> they might be "helping" :-)
+
+[12:44] <Nicholas> ASAN says nothing exciting. Rebuilding and using valgrind, nothing reported before the assertion fails
+
+[12:46] <timo> oh, assertions don't work if you just --debug=3, you literally need to put a -DNDEBUG somewhere?
+
+[12:46] <timo> er, undef
+
+[12:46] <Nicholas> I put it as the first line of src/moar.h
+
+[12:47] <Nicholas> hangon. I think I'm just being paranoid
+
+[12:47] <Nicholas> I think that makes sure it's unset (so assertions are enabled) for optimised builds
+
+[12:47] <Nicholas> and ASAN generally is an "optimised" build
+
+[12:48] <Nicholas> (it's too damn slow otherwise, and also you can't use gdb on an ASAN build, so most debugging stuff isn't useful)
+
+[12:48] *** linkable6 left
+[12:50] <timo> it seems like i should easily be able to reproduce that assertion failure, but it's not happening
+
+[13:00] <timo> where do you put the other defines? when i put them at the start of moar.h i get boatloads of redefinition warnings
+
+[13:48] <timo> Nicholas: i changed the assert that explodes on your end to an if statement with an MVM_panic and it still doesn't explode :|
+
+[13:49] *** linkable6 joined
+[13:53] *** frost left
+[14:10] <timo> there it is!
+
+[14:16] <lizmat> no worries
+
+[14:16] <Geth> ¦ MoarVM: e7ebdae40f | (Timo Paulssen)++ | src/disp/program.c
+
+[14:16] <Geth> ¦ MoarVM: Make assertion more lenient to match new implementation
+
+[14:16] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/e7ebdae40f
+
+[14:42] <timo> Nicholas: does the commit fix things? we may want to bump if so
+
+[14:57] <nine> I wonder if I have even a chance of fixing the gethow race condition. So far I haven't even managed to find how the expr JIT compiler deals with let. Let alone why it loads the expression into a register and uses the register in one case, but the original expression in another.
+
+[15:00] <timo> could be a scoring thing
+
+[15:00] <timo> from the tiles, i mean
+
+[16:58] *** sena_kun joined
+[17:38] <nine>  jnthnwrthngtn: was the unlinked_dispatch thing we talked about yesterday by any chance the inspiration for the new way to handle uninitialized attributes?
+
+[17:39] <MasterDuke> nine: wow, impressive debugging re gethow. i presume you've found https://github.com/MoarVM/MoarVM/blob/master/tools/expr-template-compiler.pl#L176-L209 already?
+
+[17:40] <nine> MasterDuke: thanks. I've found that, but not much about what happens later
+
+[17:40] <MasterDuke> ah
+
+[17:42] <MasterDuke> heh. use the rakudo/moarvm debugger + Inline:Perl5 to run the template compiler...maybe too Rube Goldberg
+
+[17:43] <jnthnwrthngtn> nine: No, it goes back a while further than that.
+
+[17:43] <jnthnwrthngtn> (Can't remember exactly when during the dispatcher work I thought of it...of course at the time was too busy with new-disp things to really think it through in any detail)
+
+[17:43] <jnthnwrthngtn> For Scalar attributes it's quite straightforward. For Array and Hash a bit less so
+
+[17:45] <jnthnwrthngtn> The interesting part is where to wedge it in...
+
+[17:45] <jnthnwrthngtn> Can't do it at the point Attribute is created, because the default and required are traits so are added later
+
+[17:46] <jnthnwrthngtn> Maybe needs to happen when we query it while doing the attribute compose protocol thing
+
+[18:02] *** reportable6 left
+[18:04] *** reportable6 joined
+[19:40] <Nicholas> timo: yes, that commit to MoarVM fixed the assertion fail and I can build nqp master and rakudo master to spectest completion
+
+[20:04] <lizmat> and yet another Rakudo Weekly hits the Net: https://rakudoweekly.blog/2021/11/08/2021-45-two-commas/
+
+[21:52] *** linkable6 left
+[21:52] *** evalable6 left
+[21:54] *** evalable6 joined
+[21:54] *** linkable6 joined
+[22:07] *** dogbert17 joined
+[22:09] *** dogbert11 left
+[22:20] <timo> who knows why the nativecast sub from nativecall has a getcode + takeclosure in it at the start?
+

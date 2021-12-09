@@ -1,0 +1,366 @@
+[00:02] *** reportable6 left
+[00:06] *** reportable6 joined
+[00:53] *** shareable6 joined
+[00:53] *** evalable6 joined
+[00:54] *** bisectable6 joined
+[00:54] *** benchable6 joined
+[00:56] *** tellable6 joined
+[01:12] *** tbrowder left
+[01:15] *** tbrowder joined
+[01:46] *** frost joined
+[01:53] *** greppable6 joined
+[01:54] *** quotable6 joined
+[02:56] *** unicodable6 joined
+[04:56] *** nativecallable6 joined
+[05:52] <nine> m: my $done = 0; class Foo { submethod DESTROY { $done++ } }; loop { VM.request-garbage-collection; Foo.new; last if $done; }
+
+[05:52] <nine> Hah....seems to hang on master as well
+
+[05:52] <camelia> rakudo-moar d4f7d1742: OUTPUT: «(timeout)»
+
+[05:55] *** statisfiable6 joined
+[06:02] *** reportable6 left
+[06:05] *** coleman-x joined
+[06:07] *** colemanx left
+[07:05] *** reportable6 joined
+[08:13] *** frost left
+[08:13] *** frost joined
+[08:14] *** frost left
+[08:14] *** frost joined
+[08:36] <Nicholas> good *, #moarvm 
+
+[08:42] <MasterDuke> i'm trying out controlflag (https://github.com/IntelLabs/control-flag), intel's new static analysis tool. training on the sample data they provide took 500s. now it's scanning moarvm while pegging all my cores. top says 435:00.84 for time so far...
+
+[08:47] <MasterDuke> it's only scanned 94 files so far and i just realized i pointed it at the repo base directory, not ./src. i see it going into the .git directory, stopping now...
+
+[08:48] <MasterDuke> i think maybe i'll leave this tool for someone with a beefier machine than i have
+
+[09:15] <jnthnwrthngtn> moarning o/
+
+[09:15] <Nicholas> \o
+
+[09:17] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #1574: Improve the jit implementation of nqp::abs_i
+
+[09:17] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1574
+
+[09:41] *** squashable6 left
+[09:42] *** squashable6 joined
+[09:46] <jnthnwrthngtn> Goodness it's windy here today...
+
+[09:46] <lizmat> as it is here, fwiw  :-)
+
+[09:46] <jnthnwrthngtn> Think I have a fix for the regression in SupplyTimeWindow
+
+[09:47] <jnthnwrthngtn> A building across the street has been having a floor added and thus a new roof. The sheeting covering the roof to protect it from the rain just blew off.
+
+[09:47] <jnthnwrthngtn> At least it's only windy, not raining...
+
+[09:49] <lizmat> plenty of trees didn't make it through the night in NL
+
+[09:50] <lizmat> still have quite some leafs on them, made them less aerodynamic
+
+[09:53] <jnthnwrthngtn> yay, spectest is clean
+
+[09:53] <lizmat> and more likely to succumb
+
+[09:53] <jnthnwrthngtn> oops, I'm meant to be at a planning session for our hall...bbiab
+
+[11:21] *** linkable6 left
+[11:21] *** evalable6 left
+[11:24] *** linkable6 joined
+[12:03] *** reportable6 left
+[12:22] *** evalable6 joined
+[12:51] *** linkable6 left
+[12:53] *** linkable6 joined
+[12:55] <sena_kun> jnthnwrthngtn++ # fixing things
+
+[13:06] *** reportable6 joined
+[14:00] *** Kaiepi left
+[14:11] *** TempIRCLogger left
+[14:16] *** lizmat left
+[14:54] *** Kaiepi joined
+[15:21] <[Coke]> HECKIN WIMDY
+
+[15:26] <Nicholas> it blew one of our plant tubs over. Which turns out to need watering. But still
+
+[15:26] <Nicholas> this has not happened before
+
+[15:26] <Nicholas> (fairly big tub, fairly small plants. Does not look like an obvious sail)
+
+[15:31] <jnthnwrthngtn> Our terrace gets quite windy anyway, so when I shopped for plant pots I went for heavy ones.
+
+[15:32] <nine> I think I know why those destructors don't get called in the version with $*VM.request-garbage-collection.
+
+[15:34] <nine> request-garbage-collection does nqp::force_gc, which enters the garbage collector immediately. The GC collects the garbage and creates a list of finalizers to call. Since this list is not empty, it sets up a special return handler for the current call frame which should call the finalize_handler_caller
+
+[15:35] <nine> The special_return handler is part of the frame's ->extra
+
+[15:36] <nine> After the GC run, request-garbage-collection returns to its caller.
+
+[15:37] <nine> The return_o op calls MVM_frame_try_return which in turn calls remove_one_frame.
+
+[15:37] <nine> Now look at what remove_one_frame does as its very first action: https://github.com/MoarVM/MoarVM/blob/master/src/core/frame.c#L885
+
+[15:37] <nine> The comment says it all: /* Clear up any extra frame data. */
+
+[15:38] <nine> But the extra frame data also contains the special_return handler which is supposed to call the finalize_handler_caller!
+
+[15:38] <nine> So when are special_return handlers ever called you may ask. Well, later in remove_one_frame: https://github.com/MoarVM/MoarVM/blob/master/src/core/frame.c#L952
+
+[15:39] <nine> But we're running the special_return handler in the caller frame's extra data!
+
+[15:40] <nine> So we only ever run finalizers if the frame that happens to trigger a GC run makes any call afterwards. If it doesn't make a call but returns, we do not run the finalizers.
+
+[15:42] <jnthnwrthngtn> I really wish we could find a different way to do this. I want to kill off special return handlers as we have them today in favor of a new kind of call stack record, and we'd thus run them on unwinding and have them "for free" rather than as an explicit check for them at frame exit
+
+[15:43] <jnthnwrthngtn> Finalization is the only case I know of where we can't do that
+
+[15:43] <nine> And it's not just that we don't run those finalizers. We also keep an ever growing list of objects to finalize
+
+[15:44] <jnthnwrthngtn> Because it is also the only case where we don't set up special return things ahead of the invoke
+
+[15:44] <jnthnwrthngtn> But rather want to place it down the stack
+
+[15:44] <MasterDuke> and it's not as simple as running what's in the body of that `if (caller->extra) {` before what's currently the body of `if (returner->extra) {`?
+
+[15:44] <nine> Yeah as it is now it sucks. As it is we don't run them unless the frame makes some call between GC and exiting. If we put it into the caller's extra, we may never run them if we don't return to the caller
+
+[15:45] <jnthnwrthngtn> So let's not invest time fixing the current way, because I'm trying to replace it :)
+
+[15:45] <jnthnwrthngtn> I wonder if we can do the same technique as we have for lazy deopt :)
+
+[15:45] <jnthnwrthngtn> Except it kinda needs to compose with that so we need to be careful
+
+[15:46] <nine> A workaround for now could be to simply add a call to request-garbage-collection after nqp::force_gc. May just be tricky to ensure that this all doesn't get inlined away
+
+[15:46] <jnthnwrthngtn> But it twiddles the kind of a record on the stack so that when we return into it, it doesn't appear as a frame, but instead as something else, which we then figure out is a frame that needs deopting.
+
+[15:47] <jnthnwrthngtn> (there's an original kind for this)
+
+[15:47] <jnthnwrthngtn> Since we're in GC we know we're not running code so it's safe to do this manipulation
+
+[15:47] <jnthnwrthngtn> The bug not to repeat is to do it on the topmost frame, but instead its caller
+
+[15:48] <jnthnwrthngtn> So that the unwind logic will see what's going on
+
+[15:48] <nine> jnthnwrthngtn: why is this tied with returning in the first place?
+
+[15:49] <jnthnwrthngtn> nine: Because it's a safe point to invoke something else
+
+[15:50] <jnthnwrthngtn> And points where GC may occur are in general not
+
+[15:50] <jnthnwrthngtn> And we've ended up with a dependency on doing finalization on the same thread as the objects were allocated on.
+
+[15:52] <jnthnwrthngtn> Also because we already have some mechanism for doing something differnet upon return (and in fact rely heavily on this)
+
+[15:52] <nine> If we tie it to returning to the caller what happens if the GC is triggered from a loop we don't return from?
+
+[15:52] <nine> May osrpoints help?
+
+[15:52] <jnthnwrthngtn> Tough
+
+[15:53] <jnthnwrthngtn> No, because they're gone in specialized/JITted code.
+
+[15:53] <jnthnwrthngtn> From the perspective of Inline::Perl5, what matters? That the same thread releases the objects, or that there is no concurrency between DESTROY and the thread?
+
+[15:53] <nine> That the same thread releases the objects
+
+[15:53] <jnthnwrthngtn> OK
+
+[15:54] <jnthnwrthngtn> That means we can't have a fianlizer thread and refuse to let any of the others continue until it has done its work.
+
+[15:54] <jnthnwrthngtn> Though that'd be very fraught too
+
+[15:54] <nine> Which precludes concurrency :)
+
+[15:54] <jnthnwrthngtn> Well yes, I was pondering if we could have our cake and eat it in that sense
+
+[15:55] <jnthnwrthngtn> (A separate thread so we know it's at a safe point for invoking something, but without concurrency with the other threads)
+
+[15:57] <jnthnwrthngtn> I mean, "no concurrency" is a weaker condition than "on the same thread" :)
+
+[16:01] <jnthnwrthngtn> I guess we could try something like: tie such a check to the osrpoint in unoptimized code, and in optimized code, if we have a osrpoint, and the loop that it appears in will never call anything, then rewrite it to something else (a "deopt if we have to run finalizers" or some such op)
+
+[16:01] <jnthnwrthngtn> That only needs loop detection and abstract interpretation, how hard can it be... :)
+
+[16:02] <jnthnwrthngtn> (Though we can cheat and look for the backend after the osrpoint)
+
+[16:02] <jnthnwrthngtn> language class, bbl
+
+[16:24] <Nicholas> nine: IIRC mod_perl was crazy enough to re-map which perl interpreter structure was associated with which OS thread. So in theory that can be done
+
+[16:25] <Nicholas> but life is probably easier it one keeps OS thread and perl interpreter structure with the same 1:1 mapping. Because I don't know if some XS code assumes this. And never really had to run under whichever mod_perl variant did the crazy stuff
+
+[16:36] <nine> Nicholas: I'm not sure I am crazy enough... I mean, I'm plenty crazy, no doubt about that. But even I may have my limits :)
+
+[16:38] <nine> The only realistic alternative I see is give wrapped Perl objects a reference to their interpreter instead of tying the latter to the Raku thread. But so far I've managed to keep performance of single threaded uses untouched and I'm not sure I could keep this up.
+
+[16:52] <nine> About finalizers: I dare say it's quite common for a routine to do something that may trigger a GC run but not call anything before returning. At least compared to frames that may trigger GC but never return (or not for a very long time).
+
+[16:53] <nine> So its safer to tie finalizers to the caller or to returning to the caller, rather than to the current frame or returning into the current frame.
+
+[16:54] <nine> Worst case for that "endless" loop is running finalizers at program exit. Still bad (as it may lead to unbounded growth), but at least somewhat deterministic.
+
+[16:56] <nine> If we want to improve that via osrpoints, there's no use in checking for whether the loop calls something (as we'd run finalizers when exiting the frame the loop's in).
+
+[16:58] <nine> I wonder what makes returning a safe point to invoke something else?
+
+[16:59] <timo> hm, i wonder if we'll ever generate code so tight that we can mark a thread as unable to participate in GC while it does its whatever. like heavy number crunching?
+
+[16:59] <timo> it could probably only work with native locals in that case
+
+[16:59] <nine> timo: goto is a GC_SYNC_POINT
+
+[16:59] <nine> Hard to create loops without goto :)
+
+[17:00] <timo> make a goto2 then
+
+[17:03] <timo> like, with sufficient scalar replacement, a mandelbrot renderer could do all its calculations without touching gc-managed objects. it'd just need to put its results into like an array or something, which we don't have a scalar replacement story for yet. at the very least not for anything really big.
+
+[17:04] <timo> funnel the results out through NativeRef :D
+
+[17:05] <timo> i guess it's just a little bit of a pipe dream ;)
+
+[17:19] <nine> You think that now
+
+[17:24] <timo> for anything that wants to be interactive, say a video game perhaps, gc pauses will remain a problem in the future
+
+[17:39] <nine> Well, yes and no. Nasal (scripting language used in the FlightGear simulator) also has a stop the world GC: https://wiki.flightgear.org/How_the_Nasal_GC_works
+
+[17:45] <timo> stop the world is fine if you can get pauses to be at most n ms long, like with incremental GC
+
+[17:47] *** TempIRCLogger joined
+[17:53] *** lizmat joined
+[18:02] *** reportable6 left
+[18:05] *** reportable6 joined
+[18:16] * lizmat waves from Cologne
+
+[18:16] <gfldex> lizmat: don't let go of your hat!
+
+[18:16] <gfldex> It's very windy in germany right now.
+
+[18:30] <timo> kölöln
+
+[18:32] <timo> nine: i didn't actually read the complete page. were you pointing something particular out? they're running some scripts in separate processes (i guess you could have multiple nasals in the same process with different threads and split pools up and such? maybe they even do that already) and use IPC
+
+[18:41] <nine> timo: no nothing in particular. Only provided the link for the curious. Nasal is definitely running in the main process. Easy to tell since Flightgear just doesn't spawn any other processes at all.
+
+[18:47] <timo> oh, OK
+
+[18:55] *** TempIRCLogger left
+[18:56] * lizmat goes back home
+
+[18:56] *** lizmat left
+[19:42] <[Coke]> ... wait, you guys get to leave your house??
+
+[19:42] <[Coke]> </meme>
+
+[19:46] * gfldex hands [Coke] a ⁇
+
+[19:51] <[Coke]> Спасибо
+
+[20:02] <Nicholas> For the avoidance of doubt: https://perldoc.perl.org/5.35.5/perldelta -- for my ($left, $right, $gripping) (@moties) { ... }
+
+[20:21] <timo> i don't even know what moties are
+
+[20:24] <[Coke]> to me, moties are https://spacebattles-factions-database.fandom.com/wiki/Moties
+
+[20:25] <[Coke]> ... which now that I reread the other vars, is actually those moties too
+
+[20:37] <[Coke]> Google "mote in god's eye" for the first book, plenty of pics & plots.
+
+[20:44] *** lizmat joined
+[20:44] *** TempIRCLogger joined
+[20:56] <japhb> [Coke]: This line caught my eye further down: "Unrelated changes accidentally broke the build for the NetWare port in September 2009, and in 12 years no-one has reported this."
+
+[20:57] <japhb> I didn't even know NetWare had made it into this millenium
+
+[21:04] <japhb> Oh, I want to second timo's comment: For games and animation, if I had bounded GC pauses, where the bound was (in the best case, significantly) less than half a frame time, I'd be fine running it every frame.  It is *far* more annoying to have random stop-the-world hiccups than to have to mildly reduce world complexity to keep frame rate up.
+
+[21:07] <japhb> (Or do some extra optimization, of course)
+
+[21:12] <timo> japhb: did you have a look how the terminal drawing library performs with new-disp?
+
+[21:14] <timo> Terminal::Print i think was the name?
+
+[21:33] <japhb> timo: Oh, no I haven't.  I'll build a head and a 2021.09 and see what's the difference
+
+[21:34] <japhb> Oh, is there a pending bump?  ISTR jnthnwrthngtn and lizmat talking about it.
+
+[21:35] * japhb builds 2021.09 first, since the answer to the bump question doesn't matter for that one.
+
+[21:35] <lizmat> jnthnwrthngtn appeared to not want a bump
+
+[21:35] <lizmat> otherwise I would have done one already
+
+[21:35] <japhb> lizmat: Ah, yeah, that fits my fuzzy memory
+
+[21:36] <japhb> OK, well it turns out I'd saved a 2021.09 build from right after the previous release, so I guess it's back to doing Rakudo HEAD and see what I get
+
+[21:37] *** vrurg_ joined
+[21:37] *** vrurg left
+[21:38] <jnthnwrthngtn> lizmat: I'm a bit confused; I expected it to happen as part of the blin run being performed, but actually we have blin results but no bump...
+
+[21:38] <lizmat> well... colour me confused as well then :-)
+
+[21:38] * japhb feels less stupid now
+
+[21:40] <jnthnwrthngtn> Anyway, feel free, I don't plan anything more for master in any of the repos this side of the release
+
+[21:40] <japhb> BTW, got some progress from the CBOR standards folks: It looks like they're convinced that supporting Capture in CBOR natively is a good idea, so now it's just quibbling over some details.
+
+[21:41] <japhb> (I mention that here, because one of the use cases I discussed was high-volume tracing and debugging streams)
+
+[21:41] <jnthnwrthngtn> Ah yes, need to do the Log::Timeline work on that
+
+[21:42] <japhb> :+1:
+
+[21:45] <jnthnwrthngtn> Well, and the Comma side of it. Should get a few of the nice in-progress things finished up there first, though :)
+
+[22:10] <sena_kun> if there was no bump after the morning fix, then it is necessary. :)
+
+[22:39] <japhb> Well that doesn't bode well:   MoarVM oops: MVM_str_hash_fetch_nocheck called with a stale hashtable pointer
+
+[22:39] <japhb> (That's from really deep in the Terminal::Print library, though -- no golf yet)
+
+[22:40] <japhb> Yep, it's reliable on my multi-threaded case.  Lemme try single-threaded.
+
+[22:45] <japhb> Single threaded worked.  Here's the result for current HEAD rakudo:
+
+[22:45] <japhb> Min: 79.2 ms (12.6 fps) - Ave: 208.8 ms (4.8 fps) - Max: 403.7 ms (2.5 fps)
+
+[22:45] <japhb> 50%: 206.5 ms - 75%: 255.1 ms - 90%: 281.1 ms - 95%: 292.4 ms - 99%: 375.9 ms
+
+[22:46] <japhb> (That's statistics on frame times of the most complex Terminal::Print animation test I have)
+
+[22:46] <japhb> OK, trying again on 2021.09
+
+[22:50] <japhb> Min: 157.2 ms (6.4 fps) - Ave: 330.4 ms (3.0 fps) - Max: 562.8 ms (1.8 fps)
+
+[22:50] <japhb> 50%: 327.0 ms - 75%: 399.6 ms - 90%: 425.1 ms - 95%: 441.9 ms - 99%: 531.8 ms
+
+[22:50] <japhb> So new-disp is significantly faster (lower frame times, higher fps) for that test.
+
+[22:53] <japhb> Let's see how mandelbrot-pixels does
+
+[22:54] <japhb> 2021.09: 16 zooms of 62460 pixels each in 7.325 seconds = 136437 pixels/second
+
+[22:55] <japhb> HEAD is weirdly variable.  In three runs I got:
+
+[22:55] <japhb> 16 zooms of 62460 pixels each in 5.749 seconds = 173846 pixels/second
+
+[22:55] <japhb> 16 zooms of 62460 pixels each in 6.814 seconds = 146660 pixels/second
+
+[22:56] <japhb> 16 zooms of 62460 pixels each in 6.744 seconds = 148174 pixels/second
+
+[22:56] <japhb> (Multiple runs of 2021.09 were less than half a percent different.)
+
+[22:59] <japhb> So summarizing: Can't do multithreaded animation test because of MoarVM oops; HEAD significantly faster for `raku -Ilib examples/attacks.p6 --show-fps --bench --slow-mo=10` in a maximized terminal window, HEAD faster but unstable performance wise on mandelbrot-pixels test.
+
+[23:03] <MasterDuke> i think that oops is probably because of concurrent hash modification, which isn't allowed
+
+[23:19] <japhb> MasterDuke: Hmmm, that may be concurrent updates to the color mapping cache.  I may be able to make a per-thread cache for that, at the cost of some memory efficiency.  (Or for low bit depths, just cache all the possible cases.)
+
+[23:35] *** linkable6 left
+[23:35] *** evalable6 left
+[23:36] *** linkable6 joined
