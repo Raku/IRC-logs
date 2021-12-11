@@ -56,110 +56,67 @@
 [08:24] *** committable6 joined
 [09:01] *** jgaz left
 [09:57] <nine> This is suprising: 3KLOC in the static optimizer, but what we don't optimize is branches with constant conditions. Thus my constant \debug = 0; if debug { ... } does carry an unexpected runtime cost.
-
 [09:58] <nine> All the more surprising since it looks kinda trivial to do. It even worked on my very first try (which actually makes me a bit nervous about it)
-
 [11:01] <dogbert17> nine: are there any noticable improvements?
-
 [11:23] <nine> dogbert17: I have too many half-finished local changes to properly test
-
 [11:23] *** bloatable6 joined
 [11:31] <nine> But with "is pure" traits for NQP routines, p6callmethodhow constant folding and conditional constant folding all implemented something like uint.^unsigned ?? nqp::atpos_u(...) !! nqp::atpos_i(...) will now be optimized to just nqp::atpos_u(...)
-
 [11:32] <nine> So...win? Unfortunately not :/ Because Blob is generic, so instead of uint which is a NativeHOW with a pure unsigned method, the optimizer sees T which is a GenericHOW.
-
 [11:38] <nine> So while this was a fun exercise, I'll have to go the native_array route with a custom ^parameterize method
-
 [11:42] <lizmat> meh
-
 [12:02] *** reportable6 left
 [12:02] *** reportable6 joined
 [13:21] <nine> Huh....after moving methods into appropriate roles and adding $?CLASS.^add_role(T.^unsigned ?? UnsignedBlob[T] !! SignedBlob[T]); to Blob's role body, printing fails with "encode requires a native int array". Apparently we lose the native size along the way
-
 [13:22] <lizmat> meh again
-
 [13:58] <nine> Normally there's a ^set_array_type call on Blob followed by utf8. But now it's Blob followed by UnsignedBlob. It's not set anymore on utf8.
-
 [14:22] <nine> I don't really understand where things go wrong, but at least I have a fix anyway: teach the RoleToRoleApplier to copy over array_type just like the RoleToClassApplier does
-
 [14:23] <nine> Next up: Multi method 'AT-POS' with signature :(Buf:D: int \pos, *%_) must be resolved by class Buf because it exists in multiple roles (UnsignedBlob, UnsignedBuf)
-
 [14:23] <timo> time for "is default"?
-
 [14:26] <nine> Doesn't seem to help
-
 [14:30] <nine> FWIW the "is default" trait is not documented for this purpose anyway
-
 [14:30] <nine> And the docs saying "cause a compile-time error, which can be solved by providing a method of the same name in the class" is rather unhelpful as well. There is a reason for _not_ having these methods in the class in the first place
-
 [14:38] *** jgaz joined
 [14:43] <timo> hm, add a proto somewhere?
-
 [14:49] <nine> Replacing ::?CLASS with ::?ROLE seems to help
-
 [14:52] <nine> Though I'm not sure how Rakudo finds the right method this way. After all the resulting class does both roles
-
 [14:56] <timo> and both are in there?
-
 [15:11] *** jgaz left
 [15:21] <nine> I guess so. So far it works, so I don't feel like investigating further.
-
 [15:21] <nine> make test looks good. spectest yields a ton of "MVMArray: atpos U32 expected int register" like errors
-
 [15:25] <nine> Because e.g. class native_i does PredictiveIterator # Class for iterating native int arrays and nqp::list_i
-
 [15:26] <nine> Yes, int arrays. Not uint arrays which we're also using them for
-
 [16:08] <nine>     # Expected: Cannot unbox 101 bit wide bigint into native integer
-
 [16:08] <nine>     # Got:      Cannot unbox 101 bit wide bigint into native integer in mp_get_int64
-
 [16:08] <nine> Ah, yes...
-
 [16:08] <nine> Bad VM, giving more information...
-
 [17:07] <MasterDuke> did you make the change to the error message? looks like something i would have done
-
 [17:08] <nine> yes I did
-
 [17:08] <MasterDuke> ah
-
 [17:09] <MasterDuke> i'm pretty sure i've done something exactly like that while attempting to debug the gmp branch on windows
-
 [17:16] <[Coke]> I can volunteer to clean up roast if you have a branch for that change.
-
 [17:16] <[Coke]> (where clean up == make those error checks partial matches instead of exact)
-
 [17:44] *** CaCode joined
 [17:55] *** squashable6 left
 [17:57] *** squashable6 joined
 [18:02] *** reportable6 left
 [18:05] *** reportable6 joined
 [18:22] <nine> I may have gotten a little grumpy earlier due to the numerous road blocks. Luckily that was nothing a few more passing tests and indian cuisine can't fix :)
-
 [19:08] <[Coke]> I'm also happy to buy any core developers a curry whenever they need it. :)
-
 [19:12] *** TempIRCLogger left
 [19:12] *** Geth left
 [19:38] <bartolin> just for the record (since Geth the loggers seem to be away): I unfudged one test for the JVM backend: https://github.com/Raku/roast/commit/3dfb6eb044
-
 [19:39] <Nicholas> \o/
-
 [19:39] <Nicholas> good *, JVM
-
 [19:40] <bartolin> oops, wrong channel! but good *, MoarVM
-
 [20:59] *** discord-raku-bot left
 [21:00] *** discord-raku-bot joined
 [21:14] *** nebuchadnezzar left
 [21:42] <nine> .tell jnthnwrthngtn I'm trying to fix our handling of unsigneds (mostly in arrays). So far 20 files changed, 508 insertions(+), 188 deletions(-) in MoarVM, 13 files changed, 1249 insertions(+), 264 deletions(-) in rakudo. New uint box type, several new ops, enough trickery to avoid runtime cost.
-
 [21:42] <tellable6> nine, I'll pass your message to jnthnwrthngtn
-
 [21:43] <nine> .tell jnthnwrthngtn I wonder: am I actually on the right track? So far we've coped by mostly ignoring the signed/unsigned distinction, just like a hardware CPU does. The only difference to the VM is that we're trying to throw appropriate errors for overruns. Is all the added complexity and volume worth that? Or should we maybe push those boundary checks to HLL instead?
-
 [21:43] <tellable6> nine, I'll pass your message to jnthnwrthngtn
-
 [21:53] <MasterDuke> nine: by "push boundary checks to HLL" do you mean in something like AT-POS?
-
+[22:08] *** RakuIRCLogger left
+[22:08] *** Geth joined
+[22:08] *** RakuIRCLogger joined
 [22:10] *** TempIRCLogger joined

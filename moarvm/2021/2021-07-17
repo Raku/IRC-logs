@@ -1,7 +1,6 @@
 [00:02] *** reportable6 left
 [00:04] *** reportable6 joined
 [00:06] <MasterDuke> nine: read breakpoint in rr and see if something is accidentally reading it?
-
 [00:26] *** jgaz joined
 [01:26] *** jgaz left
 [02:34] *** discord-raku-bot left
@@ -58,435 +57,234 @@
 [07:53] *** dogbert17 joined
 [07:55] *** dogbert11 left
 [08:24] <nine> This is getting weirder and weirder: I can give the nested compiler a clone of moar_frames and it's still OK. I can also manually copy all frames from the nested compiler's mast_frames to the outer compiler's after the compilation and it still works!
-
 [08:25] <nine> So the contents of mast_frames is exactly the same as with the original code, both during the nested compilation and after it.
-
 [08:25] <nine> That can only mean that it's not about the contents of the hash. It must be about the reference to the hash itself.
-
 [08:55] *** evalable6 left
 [08:55] *** linkable6 left
 [08:56] *** linkable6 joined
 [08:57] *** evalable6 joined
 [08:58] <nine> Indeed. When I put the original mast_frames hash into a different key _and_ store it in an otherwise completely unused attribute in MASTCompilerInstance it breaks.
-
 [09:35] *** discord-raku-bot joined
 [09:59] <nine> A simple %!mast_frames := nqp::null; in MASTCompilerInstance's to_mast after the actual compilation fixes the problem. So I think there's enough evidence to conclude that somehow a reference to the MASTCompilerInstance makes it into the compiled bytecode. This will drag in a lot of objects (e.g. every closure and objects they reference).
-
 [10:00] <nine> Still, this doesn't actually explain why compilation results differ. Even if we reference everything in the world, this world should be exactly the same in each case.
-
 [10:05] <nine> Thinking some more about it, it makes even less sense. After all I have already established that it's not about references to pre-existing outer frames, nor about references to inner frames. And it can hardly be about references to outer frames compiled after the nested compiler finishes, because the bytecode will already have been written by then.
-
 [10:05] <nine> Also it's the outer compiler's bytecode that shows the differences.
-
 [11:37] <jnthnwrthngtn> In a threaded program it could be expected that the proxy readers get produced in different orders. Is the reproducible build test involving threads in the code used to test?
-
 [11:37] <jnthnwrthngtn> Though I think you also said only one gets produced, and so there'd not be an ordering question anyway
-
 [11:38] <jnthnwrthngtn> One other thought: I compile a QAST::Block, does it get wrapped for me into a QAST::CompUnit at some point, and if so, does anything in that process cause issues?
-
 [11:38] <jnthnwrthngtn> Those are the only thoughts I've had on it overnight. :)
-
 [11:40] <jnthnwrthngtn> Yesterday evening I worked on findmethod/tryfindmethod/can all getting switched over to new-disp. findmethod and trymethod go fine; switching can over makes it all the way through the CORE.c.setting build and then mysteriously explodes during setting loading.
-
 [11:41] <nine> jnthnwrthngtn: no threads, except for ones triggered by the react/whenever on the Proc::Async in method precompile. But no actual concurrency going on in the test.
-
 [11:43] <nine> Trying to get a better picture of the differences between different compilation runs, I used the strings utility on the bytecode files and looked at the diff between the strings output. It seems like actually the only differences are between those mysterious strings containing only decimal numbers.
-
 [11:43] <nine> That and different offsets, probably just caused by the difference in length of the strings section.
-
 [11:44] <nine> So now I really want to know: what the hell are those numbers?
-
 [11:49] <MasterDuke> pause in gdb/rr and then grep through /proc/<...>/moar ?
-
 [11:50] <MasterDuke> think it might be related to that regression someone (xliff perhaps?) noticed that seems to cause doubled precomp for some things?
-
 [11:51] <nine> Possible. Those may also have been caused by the regression I fixed yesterday. And there's still the occasional reproducible-builds.t failure I've seen on CI that shows differences in check_routine_sanity's bytecode that I have totally failed to debug
-
 [11:53] <nine> Those numbers are part of the serialization context.
-
 [11:59] <nine> Which means that I can at least catch and diagnose them in rr
-
 [12:01] <MasterDuke> are the numbers always the same?
-
 [12:02] *** reportable6 left
 [12:02] <nine> No, they are always different which is where the reproducibility issue comes from. But they seem to be always around 1 billion. Sometimes a little smaller, mostly a little larger. But strings containing 9 digit numbers don't seem to appear elsewhere
-
+[12:03] <nine> No, they are always different which is where the reproducibility issue comes from. But they seem to be always around 1 billion. Sometimes a little smaller, mostly a little larger. But strings containing 9 digit numbers don't seem to appear elsewhere
 [12:03] *** reportable6 joined
 [12:03] <nine> These numbers are hash keys
-
 [12:04] <MasterDuke> pointers perhaps? what else could be that large?
-
 [12:04] <nine> That's exactly what I just thought
-
 [12:04] <nine> Where do we have a hash that is keyed on pointers (or objectids)?
-
 [12:05] <nine> Labels!
-
 [12:07] <MasterDuke> btw, i just pulled all repos up to HEAD and that precomp issue is still there
-
 [12:08] <MasterDuke>  1 RMD: Repo changed:
-
 [12:08] <MasterDuke>           259C64E6436199E645AFDA4E251CCB6B06645979
-
 [12:08] <MasterDuke>           18ADFBD55CA12AE71F64CF2A31B6BE6895AE4EED
-
 [12:08] <MasterDuke>         Need to re-check dependencies.
-
 [12:08] <MasterDuke>  1 RMD: Repo chain changed:
-
 [12:08] <MasterDuke>           259C64E6436199E645AFDA4E251CCB6B06645979
-
 [12:08] <MasterDuke>           18ADFBD55CA12AE71F64CF2A31B6BE6895AE4EED
-
 [12:08] <MasterDuke>         Need to re-check dependencies.
-
 [12:08] <MasterDuke> from `RAKUDO_MODULE_DEBUG=1 raku -e 'use Test'`
-
 [12:09] <nine> There's a %!labels lookup hash in MAST::Frame keyed on the nqp::objectid of MAST::Label objects. So the chain probably is: somehow the shared mast_frames hash leads to the MASTCompilerInstance getting references, which pulls in the MAST::Frame objects and this hash and the keys differ thanks to address layout randomization
-
 [12:11] *** Merfont is now known as Kaiepi
-
 [12:11] *** Kaiepi left
 [12:11] *** Kaiepi joined
 [12:22] <nine> Replacing nqp::objectid for that labels lookup hash with an id counter (like cuid for QAST::Block) fixes the issue
-
 [12:23] <MasterDuke> does it make the precompiled setting bytecode smaller?
-
 [12:23] <nine> No. Because we still reference stuff for no good reason
-
 [12:24] <MasterDuke> ha
-
 [12:24] <MasterDuke> how hard will it be to remove the reference?
-
 [12:27] <nine> Well....usually when the struggle to find a bug is as hard as this one, as soon as you got the first candidate fix, pretty much everything you try just works :D
-
 [12:28] <nine> That's just part of the general hostility and unfairness of the universe I guess :D
-
 [12:28] <nine> Because sadly no one's gonna get that reference. It's from here: https://www.quotes.net/mquote/679153
-
 [12:31] <MasterDuke> never watched babylon 5. will probably give it a try eventually
-
 [12:32] <nine> Good time for it since despite years of claims that it's impossible, an HD remaster came out last winter
-
 [12:38] <MasterDuke> oh, nice. i remember hearing people complain about that, didn't realize one had actually happened
-
 [12:40] <nine> jnthnwrthngtn: my only guess is that the MASTCompilerInstance is referenced by a closure. Or maybe a capture? Do you have an idea where to look for those? Or can the newdisp way lead to more such references in general?
-
+[12:41] <nine> jnthnwrthngtn: my only guess is that the MASTCompilerInstance is referenced by a closure. Or maybe a capture? Do you have an idea where to look for those? Or can the newdisp way lead to more such references in general?
 [12:42] <MasterDuke> looks like i need hbo max to stream the hd version (or purchase from amazon or apple)
-
 [12:47] <jnthnwrthngtn> nine: I'm struggling to imagine where that would happen. This is the only place that I'm having new-disp do some code generation.
-
 [12:48] <jnthnwrthngtn> nine: In general, any blocks that are handed back as code to invoke by new-disp are placed at unit level, not inside the dispatcher itself.
-
 [12:55] <MasterDuke> nine: does your fix change anything about that example i pasted above?
-
 [13:01] <Geth> ¦ MoarVM/new-disp: 4fe1efd7e3 | (Stefan Seifert)++ | lib/MAST/Nodes.nqp
-
 [13:01] <Geth> ¦ MoarVM/new-disp: Fix reproducible build issue caused by changing memory addresses of labels
-
+[13:02] <Geth> ¦ MoarVM/new-disp: 4fe1efd7e3 | (Stefan Seifert)++ | lib/MAST/Nodes.nqp
+[13:02] <Geth> ¦ MoarVM/new-disp: Fix reproducible build issue caused by changing memory addresses of labels
 [13:02] <Geth> ¦ MoarVM/new-disp: 
-
 [13:02] <Geth> ¦ MoarVM/new-disp: When a QASTCompilerInstance is somehow referenced (directly or indirectly) by
-
 [13:02] <Geth> ¦ MoarVM/new-disp: compiled bytecode, this pulls in references to frames and thus the frames'
-
 [13:02] <Geth> ¦ MoarVM/new-disp: %!labels lookup hash which was keyed on the nqp::objectid of those labels.
-
 [13:02] <Geth> ¦ MoarVM/new-disp: Since nqp::objectid uses memory addresses and those may change from run to
-
 [13:02] <Geth> ¦ MoarVM/new-disp: run, this could lead to differences in build results. Use an incremented id
-
 [13:02] <Geth> ¦ MoarVM/new-disp: counter instead, just like we do for QAST::Block's cuids.
-
 [13:02] <Geth> ¦ MoarVM/new-disp: review: https://github.com/MoarVM/MoarVM/commit/4fe1efd7e3
-
 [13:02] <nine> MasterDuke: please just try this ^^^
-
 [13:16] <jnthnwrthngtn> nine: Does it help the reproducible-builds test also?
-
 [13:16] <jnthnwrthngtn> I think I've figured out the `can` problem.
-
 [13:17] <nine> jnthnwrthngtn: yes, this fixes the test
-
 [13:18] <jnthnwrthngtn> Nice, will try it
-
 [13:18] <jnthnwrthngtn> Although sounds like there's still a bit of a mystery around how things are ended up in the precomp file
-
 [13:18] <nine> definitely
-
 [13:24] *** linkable6 left
 [13:24] *** evalable6 left
 [13:24] *** evalable6 joined
 [13:24] *** linkable6 joined
 [13:26] <jnthnwrthngtn> Yup, confirmed it's no longer failing
-
 [13:26] <jnthnwrthngtn> nine++
-
 [13:27] <jnthnwrthngtn> Also my findmethod/can transition do dispatcher builds and causes no `make test` regressions, now to see about spectest (I'm hoping for one more pass)
-
 [13:30] <jnthnwrthngtn> I think there's now only 3 places that emit an invoke instruction rather than a dispatch instruction
-
 [13:31] <jnthnwrthngtn> 1. simple block invocations in the QAST compiler, 2. p6sink, which will get its own dispatcher written up, and p6bindassert (maybe the same story)
-
 [13:32] <jnthnwrthngtn> s/and/3./
-
 [13:33] <jnthnwrthngtn> Yup, integration/advent2011-day07.t is fixed
-
 [13:37] <Geth> ¦ MoarVM/new-disp: 84ec79335f | (Jonathan Worthington)++ | src/disp/boot.c
-
 [13:37] <Geth> ¦ MoarVM/new-disp: Fix a typo
-
 [13:37] <Geth> ¦ MoarVM/new-disp: 
-
 [13:37] <Geth> ¦ MoarVM/new-disp: Spotted by MasterDuke++
-
 [13:37] <Geth> ¦ MoarVM/new-disp: review: https://github.com/MoarVM/MoarVM/commit/84ec79335f
-
 [13:39] <MasterDuke> Stage parse      : 274.575     # ugh
-
 [13:40] <jnthnwrthngtn> This is the "learning to appreciate what spesh does for us" phase of things, I guess :)
-
 [13:41] <jnthnwrthngtn> m: say 1321 / 1349
-
 [13:41] <camelia> rakudo-moar 5ecc8308f: ( no output )
-
 [13:41] <jnthnwrthngtn> ?
-
 [13:41] <jnthnwrthngtn> m: say 1321 / 1349
-
 [13:41] <camelia> rakudo-moar 5ecc8308f: ( no output )
-
 [13:41] <nine> I was pretty well aware of spesh's benefits already :D
-
 [13:41] <jnthnwrthngtn> 97.9%, anyway :)
-
 [13:41] <MasterDuke> maybe since desktop video cards are impossible to find i should just replace this laptop instead
-
 [13:42] *** cognominal left
 [13:42] <MasterDuke> but (eventually) no change in that RAKUDO_MODULE_DEBUG=1 output
-
 [13:43] <MasterDuke> m: say "hi?"
-
 [13:43] <camelia> rakudo-moar 5ecc8308f: ( no output )
-
 [13:46] <dogbert17> Hmm, the commit number is over a week old
-
 [13:48] <MasterDuke> wasn't it throwing those out of space on device errors a couple days ago? 
-
 [13:48] <dogbert17> that could definitely explain things
-
 [13:49] <nine> Oh, indeed: /dev/sda2       7.7G  7.3G   37M 100% /
-
 [13:50] * jnthnwrthngtn goes to rest for a bit
-
 [13:53] <nine> Better: /dev/sda2       7.7G  5.6G  1.8G  77% /
-
 [13:55] <Geth> ¦ MoarVM/new-disp: df9e48e615 | (Stefan Seifert)++ | lib/MAST/Nodes.nqp
-
 [13:55] <Geth> ¦ MoarVM/new-disp: Fix reproducible build issue caused by changing memory addresses of labels
-
 [13:55] <Geth> ¦ MoarVM/new-disp: 
-
 [13:55] <Geth> ¦ MoarVM/new-disp: When a QASTCompilerInstance is somehow referenced (directly or indirectly) by
-
 [13:55] <Geth> ¦ MoarVM/new-disp: compiled bytecode, this pulls in references to frames and thus the frames'
-
 [13:55] <Geth> ¦ MoarVM/new-disp: %!labels lookup hash which was keyed on the nqp::objectid of those labels.
-
 [13:55] <Geth> ¦ MoarVM/new-disp: Since nqp::objectid uses memory addresses and those may change from run to
-
 [13:55] <Geth> ¦ MoarVM/new-disp: run, this could lead to differences in build results. Use an incremented id
-
 [13:55] <Geth> ¦ MoarVM/new-disp: counter instead, just like we do for QAST::Block's cuids.
-
 [13:56] <Geth> ¦ MoarVM/new-disp: review: https://github.com/MoarVM/MoarVM/commit/df9e48e615
-
 [13:57] <nine> Fixed the type issue pointed out by zhuomingliang++
-
 [13:58] <dogbert17> m: say 1321 / 1349
-
 [13:58] <camelia> rakudo-moar : OUTPUT: «sudo: /home/camelia/rakudo-m-inst/bin/perl6-m: command not found␤»
-
 [13:58] <nine> may take a bit till the cron job runs and rebuilds
-
 [13:59] <dogbert17> ah
-
 [14:09] *** cognominal joined
 [14:18] <dogbert17> m: say "hi?"
-
 [14:18] <camelia> rakudo-moar 5ecc8308f: OUTPUT: «hi?␤»
-
 [14:18] <dogbert17> m: say 1321 / 1349
-
 [14:18] <camelia> rakudo-moar 5ecc8308f: OUTPUT: «0.979244␤»
-
 [14:35] <dogbert17> m: say "test"
-
 [14:35] <camelia> rakudo-moar d668d9929: OUTPUT: «test␤»
-
 [14:35] <dogbert17> ok, so now we're at the latest version, excellent
-
 [14:35] *** squashable6 left
 [14:38] *** squashable6 joined
 [14:42] <MasterDuke> back to my roast questions/thoughts from yesterday. https://github.com/Raku/roast/commit/e657f36851fd8003e6d9dc992dfb903bd3413c58 (from 7 years ago) changed an eval_dies_ok to a throws_like
-
 [14:42] <Nicholas> Has commit 84ec79335f8dfd4c11ae251315f4f7eea995416b (temporarily) been lost from new-disp?
-
 [14:43] <MasterDuke> i'm going to assume lizmat just used the exception type it was throwing at the time (which wasn't a terrible exception)
-
 [14:44] <MasterDuke> but i think the type being thrown after my change is better
-
 [14:45] <MasterDuke> and i doubt there will be any user code at all depending on the exact exception type thrown from a malformed embedded comment
-
 [14:46] <MasterDuke> so i'm going to PR this and advocate for a roast change to go along with it
-
 [14:47] <MasterDuke> Nicholas: maybe when nine force pushed df9e48e615?
-
 [14:48] <Nicholas> I assuume that that was the cause
-
 [14:55] <Geth> ¦ MoarVM/new-disp: 7faf157570 | (Jonathan Worthington)++ (committed by Nicholas Clark) | src/disp/boot.c
-
 [14:55] <Geth> ¦ MoarVM/new-disp: Fix a typo
-
 [14:55] <Geth> ¦ MoarVM/new-disp: 
-
 [14:55] <Geth> ¦ MoarVM/new-disp: Spotted by MasterDuke++
-
 [14:55] <Geth> ¦ MoarVM/new-disp: review: https://github.com/MoarVM/MoarVM/commit/7faf157570
-
 [14:55] <Nicholas> jnthnwrthngtn: beware of revisionist historians
-
 [15:23] <nine> Oh, sorry for my inattention
-
 [17:19] <dogbert17> heh, what does this mean?
-
 [17:19] <dogbert17> ===SORRY!===
-
 [17:19] <dogbert17> Can only use manipulate a capture known in this dispatch
-
 [17:25] <dogbert17> I get it when running t/spec/S02-types/array.t with an 8k nursery
-
 [17:36] <timo> that looks like some dispatcher code is wrong and is calling a manipulation op on a value it hasn't guarded on or something like that
-
 [17:37] <timo> do dispatchers show up in backtraces? if so, it should lead you to the right spot
-
 [18:02] *** reportable6 left
 [18:04] *** reportable6 joined
 [18:20] <dogbert17> timo: I'll try it in gdb
-
 [18:44] <dogbert17> running with MVM_GC_DEBUG=3 is instant SEGV
-
 [18:45] <dogbert17> Thread 1 "moar" received signal SIGSEGV, Segmentation fault.
-
 [18:45] <dogbert17> 0x00007ffff77cf9ad in MVM_args_slurpy_positional (tc=0x55555555aea0, ctx=0x55555555b220, pos=2) at src/core/args.c:1081
-
 [18:45] <dogbert17> 1081     find_pos_arg(ctx, pos, arg_info);
-
 [18:45] <dogbert17> (gdb) bt
-
 [18:45] <dogbert17> #0  0x00007ffff77cf9ad in MVM_args_slurpy_positional (tc=0x55555555aea0, ctx=0x55555555b220, pos=2) at src/core/args.c:1081
-
 [18:45] <dogbert17> #1  0x00007ffff77e169f in MVM_interp_run (tc=0x55555555aea0, initial_invoke=0x7ffff79bf2a0 <toplevel_initial_invoke>, invoke_data=0x5555555b8220, outer_runloop=0x0) at src/core/interp.c:1277
-
 [18:45] <dogbert17> #2  0x00007ffff79bf358 in run_deserialization_frame (tc=0x55555555aea0, cu=0x5555555b7d20) at src/moar.c:492
-
 [18:50] <dogbert17> timo: using MVM_GC_DEBUG=1 instead returns the original error, i.e. SORRY etc: https://gist.github.com/dogbert17/516531bbd6f23184bb9ca268ef434ade
-
 [18:52] <timo> can you call MVM_dump_backtrace?
-
 [19:01] <dogbert17> timo: gist updated
-
 [19:02] <timo> oh i guess the program in question is boot_code and it's in the C backtrace, d'oh
-
 [19:04] <timo> hm, which of the functions in boot_code in disp/boot.c can cause allocations i wonder
-
 [19:05] <timo> with RR it might be easy to just step backwards and see where it happens
-
 [19:09] <dogbert17> I was waiting for the rr comment  :)
-
 [19:09] <timo> haha
-
 [19:09] <dogbert17> something for Nine or MasterDuke then since I still can't use rr
-
 [19:10] <dogbert17> VirtualBox and rr are not friends
-
 [19:10] <timo> would you like to try putting an MVMROOT for args_capture in the code?
-
 [19:32] *** linkable6 left
 [19:32] *** linkable6 joined
 [19:40] <dogbert17> any lines in particular?
-
 [19:41] <timo> 97 through the end of that block i assume
-
 [19:42] <dogbert17> I'm confused, as always, which file are you referring to?
-
 [19:44] <timo> src/disp/boot.c
-
 [19:45] <dogbert17> ah, I see, let me try
-
 [19:48] <dogbert17> it actually seems to work, timo++
-
 [19:50] <timo> nobody knows if that fixes everything :)
-
 [19:52] <dogbert17> I'm running a spectest now, slow as h*ell given the tiny nursery
-
 [20:08] <jnthnwrthngtn> Tiny nursery + no spesh = painfully slow, I imagine
-
 [20:09] <jnthnwrthngtn> timo++ dogbert17++ for fixing stuff
-
 [20:10] <timo> jnthnwrthngtn: you think the "compile disp programs to ops" branch needs a lot of changes to apply today?
-
 [20:17] <jnthnwrthngtn> Dunno without looking at it (which I can't usefully do right now, since dose 2 may have made my arm less sore, but it's doing just as good at fatigue...)
-
 [20:17] <jnthnwrthngtn> Nudge me on Monday or so, I'll take a look. Although I think probably getting us setting params and correlation ID is a pre-req to it being useful.
-
 [20:18] <jnthnwrthngtn> 'cus we're probably just a few commits away from nothing going through the invoke code path at this point
-
 [20:19] <timo> ah, yes, i seem to recall something about that. i think i also did that in that branch
-
 [20:19] <timo> i should look at it myself first, it's been a whole year
-
 [20:20] <jnthnwrthngtn> I think we're probably about at the point where we have few enough failures that it's worth starting to reactivate spesh to get better build times to figure out the remaining stuff
-
 [20:21] <jnthnwrthngtn> I'm a bit annoyed because some night a couple of weeks ago as I was falling asleep I figured out a really neat way to do callwith/nextwith, and told myself to just sleep, I'd remember it... I can't remember what it was. :/
-
 [20:21] <timo> if i recall correctly, the branch doesn't actually compile a single program successfully :D
-
 [20:22] <timo> some stuff that everything uses is still missing or so?
-
 [20:22] <jnthnwrthngtn> I'd probably start from guards and value results
-
 [20:22] <Nicholas> It was all a dream :-(
-
 [20:22] <Nicholas> more pragmatically, is there a workable way to do it, until you rediscover the cool way?
-
 [20:23] <jnthnwrthngtn> And once those are working, add in the invokey bits
-
 [20:23] <nine> If it was just a dream after all, there's no point in being annoyed :)
-
 [20:23] <jnthnwrthngtn> I suspect I'll figure out a decent way to do it :)
-
 [20:24] <jnthnwrthngtn> The code for specializing invocations will get a huge amount simpler
-
 [20:24] *** MasterDuke left
 [20:25] <jnthnwrthngtn> Because invoke spec goes away and multi caches go away
-
 [20:25] <jnthnwrthngtn> Inlining code gets simpler because takedispatcher and friends go away
-
 [20:26] <jnthnwrthngtn> my `d` key is going to get some wear :)
-
 [20:29] <timo> https://gist.github.com/timo/eb3a20abba0831d8f598073f44eafcf0 is the diff between the then state of new-disp and the disp-spesh-codegen branch
-
 [20:36] <timo> (now in color)
-
 [20:47] <dogbert17> timo: looks a lot better
-
 [20:48] <timo> amazing what a splash of color can do
-
 [20:48] <dogbert17> but it didn't fix everything though
-
 [20:49] <dogbert17> MoarVM panic: Collectable 0x557051db04a8 in fromspace accessed
-
 [20:50] <dogbert17> the insta-SEGV is still there as well, should be something for Nine :)
-
 [23:17] *** jgaz joined
