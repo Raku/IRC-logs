@@ -1,0 +1,320 @@
+[00:08] *** reportable6 left
+[01:11] *** reportable6 joined
+[01:35] *** linkable6 joined
+[01:36] *** evalable6 joined
+[02:07] <vrurg> A fun fact: optimizations are now vital for Rakudo to pass tests...
+
+[02:36] *** linkable6 left
+[02:36] *** evalable6 left
+[02:36] *** linkable6 joined
+[02:37] *** evalable6 joined
+[05:07] *** bisectable6 left
+[05:07] *** coverable6 left
+[05:07] *** notable6 left
+[05:07] *** greppable6 left
+[05:07] *** reportable6 left
+[05:07] *** evalable6 left
+[05:07] *** committable6 left
+[05:07] *** shareable6 left
+[05:07] *** squashable6 left
+[05:07] *** unicodable6 left
+[05:07] *** sourceable6 left
+[05:07] *** quotable6 left
+[05:07] *** releasable6 left
+[05:07] *** bloatable6 left
+[05:07] *** benchable6 left
+[05:07] *** tellable6 left
+[05:07] *** linkable6 left
+[05:07] *** nativecallable6 left
+[05:07] *** statisfiable6 left
+[05:07] *** statisfiable6 joined
+[05:08] *** committable6 joined
+[05:09] *** linkable6 joined
+[05:09] *** nativecallable6 joined
+[05:09] *** bisectable6 joined
+[05:09] *** notable6 joined
+[05:10] *** releasable6 joined
+[05:10] *** reportable6 joined
+[06:06] *** reportable6 left
+[06:07] *** coverable6 joined
+[06:08] *** quotable6 joined
+[06:09] *** bloatable6 joined
+[06:09] *** evalable6 joined
+[06:10] *** squashable6 joined
+[07:07] *** tellable6 joined
+[07:09] *** greppable6 joined
+[07:10] *** unicodable6 joined
+[07:17] *** frost left
+[07:46] <nine> vrurg: that's not very fun :)
+
+[08:07] *** benchable6 joined
+[08:09] *** shareable6 joined
+[09:08] *** reportable6 joined
+[09:09] *** sourceable6 joined
+[09:37] <MasterDuke> well, i think it's been true for a while that the "optimizer" also does correctness checking. iirc, part of rakuast is going to be breaking those out into (at least) two parts/stages, so that we can make the optimization stage truly optional and the checking stage non-optional
+
+[09:38] <MasterDuke> timo: of course any optimizations to the existing profiler are also more than welcome!
+
+[10:41] <dogbert17> just posted https://github.com/MoarVM/MoarVM/issues/1628 in case someone is interested in running rr
+
+[10:46] * dogbert17 wonders if timo is awake
+
+[10:56] *** sena_kun joined
+[11:32] <MasterDuke> heh. i kind of want to experiment with this sqlite idea, but it would involve bringing in a new 3rdparty module, and the current project i'm working on is blocked by not successfully doing just that...
+
+[11:46] <nine> I think it would be easier to implement writing into the database in Raku.
+
+[11:47] <nine> That would probably just require a new syscall or two to get the incremental data since the last call. But those are really trivial to add :)
+
+[11:49] <nine> To get the "write increment at GC time" semantics, I'd just create a throw-away-object with a destructor that does the incremental write (and create a new throw-away-object). If you do so in a separate thread, you get concurrent writing of profile data. And since all of this is just Raku code, it's easy to make it configurable/pluggable
+
+[11:51] <nine> E.g. if someone thinks a timer controlled incremental write is a better idea, they can just do that. Or write at the end of their main loop's iteration or something like that
+
+[11:59] *** frost joined
+[12:00] <MasterDuke> you mean have the use pre-create a sqlite db? so not have moarvm know anything about sqlite?
+
+[12:02] <MasterDuke> but currently rakudo doesn't know anything about profiling, right? nqp knows a little, but really it's 99% implemented in moarvm. so would we need to create some sort of profiling framework?
+
+[12:04] <nine> Actually writing the profile data is already done by HLL code. timo++ mentioned that using NativeCall in NQP would be cumbersome, but it doesn't have to be NQP. We're most interested in Raku programs after all.
+
+[12:07] *** reportable6 left
+[12:08] *** reportable6 joined
+[12:14] *** sena_kun left
+[12:14] <MasterDuke> right, writing the collected data at the end is done by HLL code (HLL turns on profiling -> vm collects data in memory -> HLL writes it all out in one go at the end). i'm proposing a modification of that process (though probably just for this particular use case of directly creating a sqlite db): HLL turns profiling on -> vm collects data in memory
+
+[12:14] <MasterDuke> and occasionally writes (some of?) it out on-the-fly -> HLL finalizes anything it needs to
+
+[12:15] *** sena_kun joined
+[12:15] *** sena_kun left
+[12:16] <nine> And I suggest that writing it out on-the-fly should be done in HLL as well
+
+[12:18] <lizmat> advocate of the devil speaking: if writing happens at GC time, and it's done in HLL, won't that open a window for race conditions / deadlocks ?
+
+[12:18] <nine> why would it?
+
+[12:18] <MasterDuke> ah. but not by adding an nqp::mvmprofiletriggerwrite? i don't really know the syscall mechanism
+
+[12:19] *** sena_kun joined
+[12:20] <nine> Currently we have nqp::mvmstartprofile and nqp::mvmendprofile ops with the latter returning the data. You'd just have to add an nqp::mvmprofiledata op (or the like) for getting the data collected since the start or last mvmprofiledata. And since syscalls are a better way to do such things, I would go the modern route right away.
+
+[12:21] <lizmat> agree
+
+[12:22] <lizmat> as a design point: the nqp::mvm*profile ops only operate on lexical scopes, right?
+
+[12:22] <lizmat> I would just *love* to be able to say "profile { ... }" and have it just profile *that* bit of code
+
+[12:22] <MasterDuke> hm. while i did explicitly mention perf tradeoffs, wouldn't that incur quite a bit more overhead than having sqlite support baked into moarvm and it doing things without going through the hll?
+
+[12:23] <lizmat> afaik, you can't do that now
+
+[12:25] <nine> lizmat: we're profiling everything happening between nqp::mvmstartprofile and nqp::mvmendprofile calls. And probably assume that those are run in the same frame. With that in mind a profile block should be trivial to implement.
+
+[12:25] <lizmat> well, I tried a while ago, and gave up  :-)
+
+[12:26] <MasterDuke> i guess could always implement it via hll+syscall and try to measure how much faster/slower and less/more mem used than currently. if it's too much slower then go to 3rdparty module + moarvm implementation
+
+[12:26] <nine> There's one caveat though: it's possible that speshed code only takes profiling into account if the profiler was active at spesh time
+
+[12:26] <nine> MasterDuke: if it's implemented in HLL, all we have to do to make it faster is improve the VM :D
+
+[12:27] <MasterDuke> smop
+
+[12:31] <MasterDuke> hm. rakudo doesn't really know anything about profiling right now, does it?
+
+[12:33] <nine> correct
+
+[12:35] <MasterDuke> so moarvm needs the new nqp::mvmprofiledata op implemented (via a syscall), and nqp needs to add it, and rakudo needs to learn about profiling and use nativecall to create the sqlite db and write to it with the data it occasionally gets from calling nqp::mvmprofiledata
+
+[12:37] <nine> nqp doesn't need to be involved for syscalls. You add them to the VM and they are just available to nqp::dispatch('boot-syscall', 'you-new-syscall' ...) calls via their name
+
+[12:38] <MasterDuke> yeah, i mean nqp just needs to add the mapping so rakudo knows about nqp::mvmprofiledata
+
+[12:39] <MasterDuke> or you mean not an actual new nqp::mvmprofiledata op?
+
+[12:39] <MasterDuke> just nqp::dispatch('boot-syscall', 'mvmprofiledata')
+
+[12:44] *** Kaiepi left
+[12:49] <nine> No need for an op when you have a syscall
+
+[12:50] <MasterDuke> timo: how tricky is it going to be to implement getting the profile data (and then clearing out what we just got)?
+
+[12:50] <MasterDuke> nine: ah, ok
+
+[12:52] <MasterDuke> think it makes sense to have the syscall return all the profile data and make rakudo store that which has to be written at the end? or should the syscall only return some of it and nqp still be responsible for writing the final bit at the end?
+
+[12:53] <nine> I'd leave coordination between the two to the upper levels
+
+[12:53] *** Kaiepi joined
+[13:06] <MasterDuke> timo: think it'll be as simple as having the syscall call MVM_profile_dump_instrumented_data, copy tc-prof_data, call MVM_profile_instrumented_free_data, and then return the copied data?
+
+[13:13] <MasterDuke> if i'm skimming the code correctly, that might indeed work as a poc with only some minor modifications, i think we'd actually want to strip MVM_profile_dump_instrumented_data down a bit for the final implementation
+
+[13:24] <timo> also have to make sure the tree doesn't get cut short, else we'll be floating in the air when we exit the routine that called the function in question
+
+[13:29] <MasterDuke> ugh, how do we do that?
+
+[13:40] <nine> .oO(I'd not worry about that until I'd be too invested to pull back, lest I'd be intimidated by the required understanding of the profiler and its data structures)
+
+[13:40] <nine> Err....don't worry, it'll be fine!
+
+[13:40] <timo> well, we already see what our current node is
+
+[13:47] <dogbert17> timo, do you have an updated version of the Perl6-github-linkify script that can link to stuff in the src/disp directory?
+
+[13:51] <dogbert17> I have version 0.3.3
+
+[13:53] *** linkable6 left
+[13:53] *** evalable6 left
+[13:54] <timo> ah, haven't updated it in a long time
+
+[13:54] <timo> right now i'm stepping into my car to drive and get a booster shot
+
+[13:55] *** linkable6 joined
+[13:56] <dogbert17> sounds like a good thing, still waiting for an oportunity to get mine
+
+[14:27] *** sena_kun left
+[14:56] *** evalable6 joined
+[15:00] *** sena_kun joined
+[15:01] *** sena_kun left
+[15:07] <MasterDuke> dogbert17: i have 0.3.4, so you are a minor version behind already
+
+[15:33] <MasterDuke> well, something happened https://gist.github.com/MasterDuke17/1daf47f370201f0f2c4afedfa41e42ee
+
+[15:39] <MasterDuke> updated gist with the minimal syscall i added
+
+[15:43] <dogbert17> MasterDuke: do you get links when the function is located in the src/disp directory with 0.3.4?
+
+[15:45] <dogbert17> t/spec/APPENDICES/A04-experimental/01-misc.t also panics, perhaps it's the same error
+
+[15:59] <nine> Ah, of course I have to make adjustments in BUILDPLAN as well. Because...there couldn't be one tricky bit in Rakudo that's left untouched by uint fixes now can there?
+
+[16:15] *** linkable6 left
+[16:15] *** evalable6 left
+[16:30] <nine> m: my uint @a; @a[0] = -1; dd @a
+
+[16:30] <camelia> rakudo-moar a10042dd9: OUTPUT: «array[uint].new(-1)␤»
+
+[16:30] <nine> There's a spec test that requires this to actually be accepted. Locally it fails with:
+
+[16:30] <nine> Type check failed in assignment to uint array element #0; expected uint but got Int (-1)
+
+[16:31] <nine> Which seems more correct. Especially since we have a lot of TODOed spec tests expecting us to reject negative values in unsigneds
+
+[16:48] <nine> fixed it nevertheless
+
+[17:15] *** sena_kun joined
+[17:17] *** linkable6 joined
+[17:36] *** TheAthlete joined
+[17:39] *** discord-raku-bot left
+[17:40] *** discord-raku-bot joined
+[17:55] *** discord-raku-bot left
+[17:55] *** discord-raku-bot joined
+[18:06] *** sena_kun left
+[18:08] *** sena_kun joined
+[18:08] *** reportable6 left
+[18:17] *** evalable6 joined
+[18:23] <nine> Still, that spec test is just wrong. While whether one should be able to write -1 into an unsigned array may be debatable, expecting to get -1 out of it again is just wrong.
+
+[18:24] <nine> Oddly enough the test https://github.com/Raku/roast/blob/master/S09-typed-arrays/native-int.t#L319 seems to enshire exactly the behaviour that was reported as wrong in https://github.com/Raku/old-issue-tracker/issues/3740 which is referenced by the comment above the test.
+
+[18:24] <nine> s/enshire/enshrine/
+
+[18:26] <nine> Even more confusing it actually expects two different results in consecutive tests: is (@arr[0] = -1), -1; ok @arr[0] > 0; How is this supposed to ever succeed?
+
+[18:27] <lizmat> nine: I think it was decided that signedness issues on natives are to be ignored
+
+[18:27] <lizmat> if you'er using natives, then you're expected to know what you're doing
+
+[18:27] <lizmat> m: my uint8 $a = -1; say $a
+
+[18:27] <camelia> rakudo-moar a10042dd9: OUTPUT: «255␤»
+
+[18:28] <lizmat> is correct in that vuew
+
+[18:28] <lizmat> m: my Uint $a = -1
+
+[18:28] <camelia> rakudo-moar a10042dd9: OUTPUT: «===SORRY!===␤Type 'Uint' is not declared.  Did you mean any of these: 'UInt',␤'uint', 'uint8', 'Int'?␤at <tmp>:1␤------> my Uint⏏ $a = -1␤Malformed my␤at <tmp>:1␤------> my⏏ Uint $a = -1␤␤»
+
+[18:28] <lizmat> m: my UInt $a = -1
+
+[18:28] <camelia> rakudo-moar a10042dd9: OUTPUT: «Type check failed in assignment to $a; expected UInt but got Int (-1)␤  in block <unit> at <tmp> line 1␤␤»
+
+[18:28] <lizmat> is also correct
+
+[18:28] <nine> Yes, but expecting $a to be -1 can then not be correct. But that test does
+
+[18:28] <lizmat> then the test is wrong
+
+[18:28] <lizmat> simple as that, in my view
+
+[18:29] <nine> which is what I was saying
+
+[18:32] <lizmat> then we are in agreement, sorry if I gave the impression I wasn't
+
+[20:10] *** reportable6 joined
+[21:03] <MasterDuke> dogbert17: i don't think so. the comment in the version i have just says `// 0.3.4 - adjust to new paths for core settings having their version letter`
+
+[21:06] <MasterDuke> hm. if i do more work in the raku scrip before i call `nqp::dispatch("boot-syscall", "instrumented-profile-data", <...>)`, i get a `0` for output and `No such method 'WHICH' for invocant of type 'BOOTTracked'`
+
+[21:08] <MasterDuke> (oh, the `0` is from the other stuff i was doing in the script)
+
+[21:57] *** Kaiepi left
+[22:02] *** TheAthlete left
+[22:58] <timo> i assume the "profiler lost sequence" happened because you returned from the frame that did profiler_start without doing profiler_end first
+
+[22:59] <timo> BOOTTracked appears in dispatch scripts, usually, not outside of them?
+
+[23:02] *** linkable6 left
+[23:02] *** evalable6 left
+[23:19] <MasterDuke> gist updated. i am calling profile_end and then profile_start, but i get the exact same errors
+
+[23:19] <MasterDuke> and yeah, i have *absolutely* no idea about the BOOTTracked business
+
+[23:24] <timo> but rr will figure it out for you if you like
+
+[23:30] <MasterDuke> getting it recorded is easy, not even sure how to start debugging it though. think it's a "legit" error, or have i corrupted memory somewhere/how
+
+[23:33] <timo> it's possibly legit without terrible things happening
+
+[23:33] <timo> i'd start by tracing where the object in question gets created
+
+[23:37] <MasterDuke> huh. a break on MVM_exception_throw_adhoc should catch that, right?
+
+[23:37] <timo> that may not find the error in question, but try it anyway
+
+[23:37] <MasterDuke> nope
+
+[23:38] <timo> reverse from the end?
+
+[23:38] <timo> we should write a gdb command or python script that creates useful breakpoints with "complicated" conditions, like allocation of objects of a specific type
+
+[23:38] <timo> since many REPRs just use the generic gc_allocate whatever function
+
+[23:42] <MasterDuke> reverse-nexting is not fast
+
+[23:47] <timo> that's why you reverse-continue
+
+[23:47] <timo> oh ah, did you "mark stdio"?
+
+[23:47] <timo> that lets you jump to the exact moment the print hapens
+
+[23:47] <timo> that should at least be somewhat close?
+
+[23:47] <timo> or is the end of the program already so short after that?
+
+[23:47] <MasterDuke> huh. i instead stuck a `say nqp::atan(2e3)` right before the nqp::dispatch and then set a breakpoint on atan(), but it doesn't hit
+
+[23:47] <timo> was it optimized away? :D
+
+[23:47] <timo> oh no say
+
+[23:48] <timo> do we calculate atan2 differently?
+
+[23:49] <MasterDuke> ah, now a break on atan2 hits
+
+[23:50] <MasterDuke> oh, why didn't i just break on my instrumented_profile_data_impl?
+
+[23:50] <timo> haha, good idea tho
+
+[23:57] <MasterDuke> well, it doesn't happen right after instrumented_profile_data_impl...
+
