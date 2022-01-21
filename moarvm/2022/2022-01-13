@@ -1,0 +1,255 @@
+[00:08] *** reportable6 left
+[00:11] *** reportable6 joined
+[00:43] *** squashable6 joined
+[01:18] *** frost joined
+[02:18] *** evalable6 left
+[02:18] *** linkable6 left
+[02:20] *** linkable6 joined
+[03:13] *** discord-raku-bot left
+[03:13] *** discord-raku-bot joined
+[05:20] *** evalable6 joined
+[06:08] *** reportable6 left
+[06:11] *** reportable6 joined
+[06:14] *** japhb left
+[06:21] *** japhb joined
+[07:07] *** MasterDuke left
+[07:25] <Nicholas> good *, #moarvm 
+
+[07:51] <nine> Fast morning, MoarVM!
+
+[07:52] <Nicholas> Today the temperature is above 0 - is it time for sunbathing?
+
+[08:39] *** MasterDuke joined
+[09:44] <lizmat> moarning!
+
+[09:44] <lizmat> "inliner has too many locals"  what does that even mean ?
+
+[09:48] <Voldenet> https://github.com/MoarVM/MoarVM/blob/962e83/src/spesh/inline.h#L4
+
+[09:54] <lizmat> hmmm.. I saw this on:
+
+[09:54] <lizmat>     infix:<-> BB(3582, 198 bytes) -> BB(3):
+
+[09:54] <lizmat>       inliner has too many locals
+
+[09:54] <lizmat> so I guess that basically means the place it would get inlined into, already had too many things inlined
+
+[10:17] <jnthnwrthngtn> That or it somehow started out with a huge number of registers used
+
+[11:14] <MasterDuke> Nicholas: is there a reason the str_hash uses *_free_at_safepoint() in `hash_demolish_internal()` and `maybe_grow_hash()`, but the other hashes don't?
+
+[11:16] <MasterDuke> also, `maybe_grow_hash()` uses `*_free_at_safepoint()` for `control_orig`, but just a regular `free()` for `control` in `hash_demolish_internal()`, is that correct/intentional?
+
+[11:19] <Nicholas> first question - yes, reason is that str_hash is exposed to user threading code so stale pointers can exist (until next GC safe point) if thread A mutates hash and thread B was midway through reading it. Hence the MVM_cas() (ish) in a few places to try to detect that. That needed the *_free_at_safepoint() so that the "old" memory block is still valid to be read by the MVM_cas
+
+[11:20] <Nicholas> second question - not sure without looking (need to go AFK) but answer might be that the memory "just" being freed had never been exposed outside of the C functions - ie was the code path for the "we had to grow twice?"
+
+[11:20] <Nicholas> AFK to buy stuff for lunch
+
+[11:23] <MasterDuke> hm, the regular free is in the block for this `if (control->cur_items == 0 && control->max_items == 0) {`, so yeah, maybe it's the case that it had never really been used
+
+[11:24] <MasterDuke> the reason i'm asking is because i just caught a segfault in my remove_fsa branch and it's dying in `MVMHash_gc_mark()` while iterating through a str_hash
+
+[11:46] <MasterDuke> this is what the diff against master looks like now https://gist.github.com/MasterDuke17/12527f89669f925c6f242d54a640f952
+
+[11:46] <MasterDuke> nqp is fine, rakudo builds, but there are some relatively consistent spectest fails
+
+[12:06] *** reportable6 left
+[12:08] <MasterDuke> rebuild with --optimize=0, now got a `mimalloc: assertion failed: at "3rdparty/mimalloc/include/mimalloc-internal.h":481, mi_page_block_size
+
+[12:08] <MasterDuke>   assertion: "bsize > 0"`
+
+[12:11] <MasterDuke> caught it in rr, maybe now can figure out what's going on
+
+[12:20] *** frost73 joined
+[12:23] *** frost left
+[12:24] *** frost73 is now known as frost
+
+[12:46] *** frost left
+[14:03] <MasterDuke> hm, just to be sure i rebuilt with --no-mimalloc and i still get double frees and such. looks like one is happening where i changed MVM_fixed_size_free_at_safepoint to MVM_free_at_safepoint
+
+[14:06] <MasterDuke> i'm a little surprised, because this all was a bit of a mechanical change
+
+[14:22] <nine> MasterDuke: could the FSA be more lenient against double frees?
+
+[14:23] <MasterDuke> maybe if they were small enough to just be in a bin?
+
+[14:23] <MasterDuke> hm, but running with fsa_debug which does everything via regular malloc should have tripped up, right?
+
+[14:25] <nine> At least with valgrind or asan
+
+[14:26] <Nicholas> yes, and it doesn't
+
+[14:26] <MasterDuke> you mean you've run stuff with FSA_DEBUG and asan/valgrind and no problems?
+
+[14:27] <Nicholas> yes, FSA_DEBUG and ASAN is what I'm usually building with. At least on x86_64
+
+[14:27] <Nicholas> (and even ppc64 seemed OK with ASAN)
+
+[14:29] <nine> MVM_free_at_safepoint is not thread safe
+
+[14:30] <MasterDuke> oh. well then
+
+[14:36] <MasterDuke> ah, i see the fsa has those `do { ... } while (!MVM_trycas(...))`
+
+[14:37] <MasterDuke> is that going to be easy to bolt into MVM_free_at_safepoint?
+
+[14:38] <MasterDuke> or use a mutex instead?
+
+[14:39] *** Techcable left
+[14:45] <nine> A mutex would reduce efficiency. Couldn't you just slavage the FSA's code from add_to_overflows_safepoint_free_list?
+
+[14:48] <MasterDuke> well, i have gotten rid of that list
+
+[14:50] <MasterDuke> but maybe it's better to switch to using that in general
+
+[14:51] <MasterDuke> https://github.com/MoarVM/MoarVM/blob/master/src/6model/6model.c#L83 is the only place MVM_free_at_safepoint() is used on master
+
+[14:53] <MasterDuke> so maybe i should just convert the regular safepoint list from a vector to a linked list and then yeah, i can copy the code from the fsa
+
+[15:07] *** reportable6 joined
+[16:04] <MasterDuke> i don't remember how to do the bootstrapping dance when i'm changing the MVMInstance or MVMThreadContext structs. istr it's not exactly the same as just adding/removing ops
+
+[16:17] <Geth> ¦ MoarVM: nwc10++ created pull request #1643: Allocations for blocks of MVM registers needs to be 8 byte aligned
+
+[16:17] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1643
+
+[16:18] <Nicholas> need moar CPU architectures to provoke breakage...
+
+[16:19] *** Techcable joined
+[16:21] <nine> MasterDuke: should only require a make clean in rakudo before building
+
+[16:24] <MasterDuke> huh, thought i ran into some weird problem when building nqp, let's see what happens...
+
+[16:26] <nine> Nicholas: just curious. Do you think a compiler like gcc is smart enough to optimize size_t frame_size_aligned = to_8_bytes(sizeof(MVMCallStackHeapFrame)); to a compile time constant?
+
+[16:36] <MasterDuke> https://gist.github.com/MasterDuke17/cc3a088dcaecf4da635e851eeeb7a2ab has the diff of my current change against my remove_fsa branch. rakudo built, but still a double free in a spectest
+
+[16:37] <MasterDuke> afk for a while, will check back this evening
+
+[17:08] *** [Coke] left
+[17:14] *** [Coke] joined
+[18:06] *** reportable6 left
+[18:48] *** linkable6 left
+[18:53] <Geth> ¦ MoarVM: 1850f91a40 | (Nicholas Clark)++ | src/core/callstack.c
+
+[18:53] <Geth> ¦ MoarVM: Allocations for blocks of MVM registers needs to be 8 byte aligned
+
+[18:53] <Geth> ¦ MoarVM: 
+
+[18:53] <Geth> ¦ MoarVM: Various MVM_callstack_allocate_* functions allocate a single block of
+
+[18:53] <Geth> ¦ MoarVM: memory, where the last section is used as an array of MVMRegister structs.
+
+[18:53] <Geth> ¦ MoarVM: This section needs to be 8 byte aligned, as on some platforms the (real)
+
+[18:53] <Geth> ¦ MoarVM: CPU's 64 bit loads from it need to be 8 byte aligned.
+
+[18:53] <Geth> ¦ MoarVM: 
+
+[18:53] <Geth> ¦ MoarVM: <…commit message has 8 more lines…>
+
+[18:53] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/commit/1850f91a40
+
+[19:06] <Nicholas> nine: I'm looking at:
+
+[19:06] <Nicholas>     size_t frame_size_aligned = to_8_bytes(sizeof(MVMCallStackHeapFrame));
+
+[19:06] <Nicholas>     tc->stack_top = allocate_record(tc, MVM_CALLSTACK_RECORD_HEAP_FRAME,
+
+[19:06] <Nicholas>             frame_size_aligned + work_size);
+
+[19:07] <Nicholas> it compiled to this:
+
+[19:07] <Nicholas> 	add	r2, r5, #12	@, work_size,
+
+[19:07] *** reportable6 joined
+[19:07] <Nicholas> ie contant folded to 12.
+
+[19:50] *** linkable6 joined
+[19:54] *** Altai-man left
+[19:54] *** sena_kun joined
+[20:20] <nine> Nice...so no need to dig into __attribute__ (const) or the like in this case
+
+[20:20] <nine> Btw. thanks for enlightening me about the intricacies of sparc
+
+[20:24] <Geth> ¦ MoarVM/spesh_unbox_i_cpointer: 962916b6a3 | (Timo Paulssen)++ (committed by Stefan Seifert) | src/6model/reprs/CPointer.c
+
+[20:24] <Geth> ¦ MoarVM/spesh_unbox_i_cpointer: Optimize passing CPointer to nativecall ever so slightly
+
+[20:24] <Geth> ¦ MoarVM/spesh_unbox_i_cpointer: 
+
+[20:24] <Geth> ¦ MoarVM/spesh_unbox_i_cpointer: We emit an unbox_i operation in a compiled nativecall body in order to
+
+[20:24] <Geth> ¦ MoarVM/spesh_unbox_i_cpointer: get the pointer value to pass to the native function. Without a spesh
+
+[20:24] <Geth> ¦ MoarVM/spesh_unbox_i_cpointer: method on the CPointer repr, this would interpret as, and jit into, a
+
+[20:24] <Geth> ¦ MoarVM/spesh_unbox_i_cpointer: call to CPointer's get_int.
+
+[20:24] <Geth> ¦ MoarVM/spesh_unbox_i_cpointer: 
+
+[20:24] <Geth> ¦ MoarVM/spesh_unbox_i_cpointer: Instead of a call, we just emit a spesh op to do the memory offset and
+
+[20:24] <Geth> ¦ MoarVM/spesh_unbox_i_cpointer: read for us, which the JIT also likes very much.
+
+[20:24] <Geth> ¦ MoarVM/spesh_unbox_i_cpointer: review: https://github.com/MoarVM/MoarVM/commit/962916b6a3
+
+[20:25] <nine> Rebased and pushed to trigger another CI run. The previous one errored out but the build is no longer available
+
+[20:50] <MasterDuke> hm. my code is pretty much just straight copied from the fsa implementation, so i'm not sure what wrong
+
+[20:51] <MasterDuke> however, i am just now wondering what's preventing the same pointer from being added to the free list multiple times?
+
+[21:07] <nine> Well....err....who would do that?
+
+[21:09] <[Coke]> doctor it hurts when I OW
+
+[21:13] <MasterDuke> so if i print to_free in MVM_free_at_safepoint i shouldn't see duplicate addresses?
+
+[21:13] <nine> Yes, I dare say, duplicate entries are bugs
+
+[21:14] <MasterDuke> heh. 56262 entries in a log, only 47941 unique
+
+[21:14] <MasterDuke> that running t/spec/S17-promise/nonblocking-await.t with a print in MVM_free_at_safepoint directed to a file
+
+[21:15] <Nicholas> memory can get re-used - are you printing an address that has been freed once, allocated, and freed again?
+
+[21:15] <nine> Oh. But the same address could be allocated multiple times
+
+[21:15] <Nicholas> snap!
+
+[21:16] <Nicholas> (usually, I'm saying "snap!" when playing Uno as a sort-of joke about playing the same card)
+
+[21:16] <nine> If you are worried about entries getting added multiple times, I'd add a debug check to MVM_free_at_safepoint
+
+[21:16] <MasterDuke> true. i find it slightly suspicious that it's aborting with double frees though
+
+[21:16] <nine> Yeah, there's definitely something wrong
+
+[21:17] <nine> The FSA's large size handling would get broken by that as well. I'm not sure about the bins though. They may have coped with having the same address multiple times in the free list. Or just lead to different error modes that are better at hiding.
+
+[21:17] <nine> Definitely worth tracking down
+
+[21:18] <Nicholas> nine: I got burned by sparc about a decade ago, due to the compiler deciding that two U32 members could be loaded as a single 64 bit load. Which failed. Because perl 5.10.x had struct PVIV defined in a way that made it 8 byte aligned, but what was allocated was only 4 byte aligned, because the 8 byte aligned member didn't really exist and wasn't allocated or accessed.
+
+[21:19] <nine> Oh the horrors
+
+[21:19] <Nicholas> D'oh the horrors
+
+[21:20] <jnthnwrthngtn> Horrors d'oeuvres
+
+[21:29] <MasterDuke> m: my $a; $a = $_**2 for ^1_000_000; say now - INIT now; say $a;
+
+[21:29] <camelia> rakudo-moar 4d78bc6ac: OUTPUT: «0.415281379␤999998000001␤»
+
+[21:29] <MasterDuke> m: my $a; $a = $_*$_ for ^1_000_000; say now - INIT now; say $a;
+
+[21:29] <camelia> rakudo-moar 4d78bc6ac: OUTPUT: «0.1952467␤999998000001␤»
+
+[21:30] <MasterDuke> completely random change of topic, but should the optimizer turn the first into the second?
+
+[22:27] *** discord-raku-bot left
+[22:28] *** discord-raku-bot joined
+[22:56] *** discord-raku-bot left
+[22:56] *** discord-raku-bot joined
