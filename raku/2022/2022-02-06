@@ -1,49 +1,61 @@
+[00:04] <ugexe> you'd have to modify https://github.com/ugexe/zef/blob/3edbbcf200e593f0f2e17f28f7c453b80d76752a/lib/Zef/Service/Shell/git.rakumod#L173 this little bit to see what the output from git it (alas the shell stuff doesn't have a way to communicate back generally yet) and then run
+[00:04] <ugexe> raku -I. -e 'use Zef::Service::Shell::git; Zef::Service::Shell::git.new.fetch(q|git@github.com:pierre-vigier/Perl6-Data-MessagePack.git|, "./bar@HEAD".IO);'
+[00:09] *** reportable6 left
+[00:15] <leont> Installed it by hand for now, kind of got my hands full on the other issue
+[00:15] *** evalable6 joined
+[00:16] *** linkable6 joined
+[00:16] *** nativecallable6 joined
+[00:16] <leont> Thread 1 is definitely hanging in Semaphore.acquire
+[00:16] <leont> Backtrace doesn't work on half of the threads though
+[00:27] *** djerius left
+[00:27] *** dextercd left
+[00:30] *** djerius joined
+[00:30] <leont> I'm beginning to see what's happening here
+[00:32] *** colemanx joined
+[00:33] <leont> https://pastebin.com/FxQeTWg3
+[00:35] <leont> I this means it will hang if you emit while it's replaying
+[00:40] <leont> Though there's still a piece I'm missing
+[00:49] <leont> I'm pretty sure that piece is react/whenever related, so probably one of the locks in ThreadPoolScheduler
+[00:55] <Voldenet> well, `react whenever` uses .act on a supply if I'm not mistaken
+[00:56] <Voldenet> m: sub n { state $n = now; say sprintf("%s%s%.1f", $*THREAD, $^t, (now - $n)) }; my $s = Supplier::Preserving.new; start { for ^10 { n("e"); $s.emit(Any); sleep .1; }; $s.done }; sleep .3; react whenever $s.Supply { n("r"); sleep .1 }
+[00:56] <camelia> rakudo-moar 1aa05bec0: OUTPUT: «Thread<4>(GeneralWorker)e0.0␤Thread<4>(GeneralWorker)e0.1␤Thread<4>(GeneralWorker)e0.2␤Thread<1>(Initial thread)r0.3␤Thread<4>(GeneralWorker)e0.3␤Thread<1>(Initial thread)r0.4␤Thread<1>(Initial thread)r0.5␤Thread<4>(GeneralWorker)r0.6␤…»
+[00:58] <Voldenet> m: sub n { state $n = now; say sprintf("%s %s%.1f", $*THREAD.id, $^t, (now - $n)) }; my $s = Supplier::Preserving.new; start { for ^10 { n("e"); $s.emit(Any); sleep .1; }; $s.done }; sleep .3; react whenever $s.Supply { n("r"); sleep .1 }
+[00:58] <camelia> rakudo-moar 1aa05bec0: OUTPUT: «4 e0.0␤4 e0.1␤4 e0.2␤1 r0.3␤4 e0.3␤1 r0.4␤1 r0.5␤4 r0.6␤4 e0.8␤4 r0.8␤4 e1.0␤4 r1.0␤4 e1.2␤4 r1.2␤4 e1.4␤4 r1.4␤4 e1.6␤4 r1.6␤4 e1.8␤4 r1.8␤»
+[00:59] <Voldenet> so no new value will be emitted until all the values were consumed
+[01:03] <Voldenet> I don't see whether docs anything about this blocking behaviour though
+[01:09] <leont> Well, deadlocks are never intentional 😉
+[01:10] *** reportable6 joined
+[01:11] <perryprog> Unless you're playing the game Rush Hour
+[01:11] <Voldenet> Well, I don't mean the deadlock, but .emit actually running the receiving block on its thread
+[01:14] *** lizmat_ left
+[01:14] *** lizmat joined
+[01:16] *** releasable6 joined
 [01:18] *** Geth joined
 [01:19] <Voldenet> once you know that, it's enormously trivial to make a deadlock:
-
 [01:19] <Voldenet> my $s = Supplier::Preserving.new; start { $s.emit(1); }; react whenever $s.Supply { $s.emit(2); }
-
 [01:19] <Voldenet> you don't even need that start, just: my $s = Supplier::Preserving.new; $s.emit(1); react whenever $s.Supply { $s.emit(2); }
-
+[01:22] *** RakuIRCLogger left
+[01:23] *** RakuIRCLogger joined
 [01:23] <Voldenet> Eh, nevermind, it's not a deadlock
-
 [01:29] *** SqrtNegInf joined
 [01:29] <lizmat> m: my $m = Promise.new; await $m
-
 [01:30] <camelia> rakudo-moar 1aa05bec0: OUTPUT: «(timeout)»
-
 [01:30] <Voldenet> Of course, but I was on about blocking `emit`
-
 [01:30] <lizmat> m: await $_ with Promise.new   # even shorter
-
 [01:31] <Voldenet> my $s = Supplier::Preserving.new; start { for ^2 { $s.emit($_); sleep .2; say "emit"; }; }; react whenever $s.Supply { $s.emit($_ + 1); }
-
 [01:31] <camelia> rakudo-moar 1aa05bec0: OUTPUT: «(timeout)»
-
 [01:31] <Voldenet> supply would be going infinitely and the thread would never emit second value
-
 [01:32] <ugexe> m: my $s = Supplier::Preserving.new; start { for ^2 { $s.emit($_); sleep .2; say "emit"; }; }; react whenever start $s.Supply { $s.emit($_); }
-
 [01:32] <camelia> rakudo-moar 1aa05bec0: ( no output )
-
 [01:32] <ugexe> m: my $s = Supplier::Preserving.new; start { for ^2 { $s.emit($_); sleep .2; say "emit"; }; }; react whenever $s.Supply { $s.emit($_); }
-
 [01:32] <camelia> rakudo-moar 1aa05bec0: OUTPUT: «(timeout)emit␤»
-
 [01:33] <Voldenet> m: my $s = Supplier::Preserving.new; start { for ^2 { $s.emit($_); sleep .2; say "emit"; }; }; react whenever $s.Supply { .say; $s.emit($_ + 1) if $_ < 5; }
-
 [01:33] <Voldenet> even more puzzling that this never completes
-
 [01:33] <camelia> rakudo-moar 1aa05bec0: OUTPUT: «(timeout)0␤»
-
 [01:34] <Voldenet> i'd expect (0 1 2 3 4 5 emit 1 2 3 4 5 emit)
-
 [01:34] <Voldenet> m: my $s = Supplier::Preserving.new; start { for ^2 { $s.emit($_); sleep .2; say "emit"; }; $s.done; }; react whenever $s.Supply { .say; $s.emit($_ + 1) if $_ < 5; }
-
 [01:34] <camelia> rakudo-moar 1aa05bec0: OUTPUT: «0␤1␤2␤3␤4␤5␤emit␤1␤2␤3␤4␤5␤emit␤»
-
 [01:34] <Voldenet> …again nevermind
-
 [02:12] *** SqrtNegInf left
 [02:15] *** unicodable6 joined
 [03:07] *** colemanx left
@@ -113,26 +125,23 @@
 [11:12] *** benchable6 joined
 [11:13] *** coverable6 joined
 [11:20] *** Sgeo left
+[11:25] <077AAD8E0> hi, just checking my nick
+[11:25] <077AAD8E0> dang!
 [11:26] *** sivoais left
 [11:28] *** suman joined
 [11:30] <suman> This is in python print("A = {:.2%}".format(1/3)) outputs A = 33.33%
-
 [11:30] <suman> Can it be similarly done in raku?
-
 [11:32] <moon-child> m: printf "%.2f\n", 1/3
-
 [11:32] <camelia> rakudo-moar 1aa05bec0: OUTPUT: «0.33␤»
-
+[11:32] <077AAD8E0> hay
 [11:32] <moon-child> % thing is cute, you would have to multiply by 100 yourself
-
 [11:37] *** sivoais joined
 [11:54] *** Xliff_ left
 [11:58] <suman> moon-child Python seems to do it without multiplying by 100
-
 [11:59] <moon-child> yes.  That is not something you can do in raku, as far as I know
-
 [12:07] *** reportable6 left
 [12:11] *** suman left
+[12:33] <077AAD8E0> but if you want that capability, you can file an issue and lobby for your case
 [12:39] *** perlbot left
 [12:39] *** simcop2387 left
 [13:15] *** jjido left
@@ -140,11 +149,8 @@
 [13:30] *** simcop2387 joined
 [13:30] *** thundergnat joined
 [13:31] <thundergnat> m: sub postfix:<%> { ($^p * 100).fmt: "%.2f%%" }; say (1/3)%
-
 [13:31] <camelia> rakudo-moar 1aa05bec0: OUTPUT: «33.33%␤»
-
 [13:31] <thundergnat> :-)
-
 [13:58] *** jjido joined
 [14:10] *** reportable6 joined
 [14:15] *** jjido left
@@ -155,6 +161,8 @@
 [15:37] *** evalable6 left
 [15:38] *** linkable6 joined
 [15:40] *** evalable6 joined
+[15:46] <077AAD8E0> well there you go, the power of raku coupled with saput it in a module and publish it
+[15:47] <077AAD8E0> *coupled with smart users
 [15:50] *** jjido joined
 [16:50] *** linkable6 left
 [16:50] *** evalable6 left
@@ -185,13 +193,9 @@
 [20:14] *** Manifest0 joined
 [20:19] *** lichtkind left
 [20:38] <ph88> what is the go to web framework on raku ?
-
 [20:41] <[Coke]> https://cro.services/
-
 [20:49] <El_Che> I couldn't follow fosdem
-
 [20:50] <El_Che> how went the raku talks?
-
 [21:03] *** colemanx joined
 [21:07] *** dogbert11 joined
 [21:10] *** dogbert17 left
@@ -199,81 +203,45 @@
 [21:39] *** dogbert11 left
 [21:39] *** dogbert11 joined
 [22:13] <Xliff> weekly: https://gist.github.com/Xliff/9a93ab12c32aceb67c195eab49c47f2d
-
 [22:13] <notable6> Xliff, Noted! (weekly)
-
 [22:14] <jdv> [Coke]: how crazy you wanna go with the copyright stuff?
-
 [22:15] <jdv> there seems to be a bunch more than just s/2021/2022/ in a bunch of repos
-
 [22:22] *** dorkdoggler joined
 [22:31] <dorkdoggler> raku has good support for unicode and even some logic/math symbols are there any libraries/modules that do SAT to 3MAP  "solving" so you could make a machine that works directly with statement/clause like A∨B∨∼C instead of having to parse encode everything? I'm looking at this python library and exercise:
-
 [22:31] <dorkdoggler> https://sahandsaba.com/understanding-sat-by-implementing-a-simple-sat-solver-in-python.html and wondering if any perlistas or rakistas(? rakuites? rakuians?) have worked on modules/libraries/grammars in the area. Where do I search raku modules?
-
 [22:33] <dorkdoggler> I found https://github.com/taboege/raku-SAT-Solver-MiniSAT
-
 [22:34] <jdv> some peeps like "rakoon".  im not a fan.
-
 [22:36] <dorkdoggler> cool ... I thought maybe there were more raku modules I might have missed somewhere. I guess I'm used to CPAN (with decades of uploads :-D) After a few weeks I conclude that raku seems to be a simpler to use language "plain" ... with more built in so less modules needed (and having had less time to build them).
-
 [22:37] <MasterDuke> i think that's a pretty accurate assessment
-
 [22:37] <jdv> perhaps.  raku is younger.  cpan is older:)
-
 [22:38] <jdv> amusingly there are raku modules ar cpan so its not so clear cut:)
-
 [22:38] <jdv> *at/on
-
 [22:40] *** oodani left
 [22:40] <dorkdoggler> MasterDuke plus OK I am so impressed that I think I must be making a mistake ... but NativeCall ... WTF???! We get to use every decently written C library in the world out of the box?!??!
-
 [22:41] *** oodani joined
 [22:42] <MasterDuke> yes(-ish, i think, i don't really use NativeCall so am not the best person to ask)
-
 [22:43] <dorkdoggler> MasterDuke yeah I used it with a couple of C libraries and am not an expert. But it made me think raku has already take over the world and no one noticed
-
 [22:48] <dorkdoggler> I don't know if it's easier or faster than FFI::Platypus (perl5) but only because FFI::Platypus is not built-in and doesn't get as much use (usually cuz there's 12 perl modules that do the thing some c library can do).
-
 [22:54] <MasterDuke> i know Xliff is a big nativecall user, he might have some insight
-
 [23:02] *** squashable6 left
 [23:03] <Xliff> dorkdoggler: Not quite out of the box. You have to tell raku how to call the routines.
-
 [23:04] <Voldenet> dorkdoggler: not "out of the box" as said earlier, but there is https://github.com/Skarsnik/gptrixie
-
 [23:04] <Xliff> Something like this: https://github.com/Xliff/p6-GLib/blob/master/lib/GLib/Raw/Array.pm6
-
 [23:04] <Voldenet> however I didn't use the tool much because it's very to write C mappings
-
 [23:04] <Voldenet> s/very/very easy/
-
 [23:05] *** squashable6 joined
 [23:05] <Xliff> Yes. gptrixie is very complex. I have a tool that will take most GLib-based .h files and covert them into Raku
-
 [23:16] *** abraxxa-home left
 [23:17] * leont now also has binds working in his async postgres client 😄
-
 [23:25] <Xliff> leont++
-
 [23:26] <moon-child> dorkdoggler: I think most languages can use c libraries
-
 [23:35] <Xliff> moon-child: But as you are aware, most languages require more work than Raku.
-
 [23:37] <Voldenet> `use` comes in different forms, not many languages can just do this ootb
-
 [23:37] <Voldenet> m: use NativeCall; sub free(Pointer) is native { * }; sub malloc(int32, –> Pointer) is native { * }; free(malloc(42))'
-
 [23:37] <camelia> rakudo-moar fefbc725f: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Malformed parameter␤at <tmp>:1␤------> ter) is native { * }; sub malloc(int32, ⏏–> Pointer) is native { * }; free(malloc␤»
-
 [23:38] <Voldenet> m: use NativeCall; sub free(Pointer) is native { * }; sub malloc(int32 –> Pointer) is native { * }; free(malloc(42))'
-
 [23:38] <camelia> rakudo-moar fefbc725f: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Malformed parameter␤at <tmp>:1␤------> inter) is native { * }; sub malloc(int32⏏ –> Pointer) is native { * }; free(mallo␤    expecting any of:␤        constraint␤        formal para…»
-
 [23:39] <Voldenet> uh, *nervous chuckle*
-
 [23:39] <Voldenet> m: use NativeCall; sub free(Pointer) is native { * }; sub malloc(int32) returns Pointer is native { * }; free(malloc(42))
-
 [23:39] <camelia> rakudo-moar fefbc725f: ( no output )
-
 [23:50] *** thundergnat left
