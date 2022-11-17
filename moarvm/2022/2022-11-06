@@ -1,5 +1,4 @@
 [00:07] <ugexe> MasterDuke: any reason to not also hook up lchown and fchown similar to node.js?
-
 [00:10] *** reportable6 left
 [00:10] *** reportable6 joined
 [00:44] *** sortiz left
@@ -16,6 +15,8 @@
 [03:58] *** Techcable left
 [03:59] *** Techcable joined
 [04:03] *** gfldex joined
+[04:07] *** RakuIRCLogger left
+[04:07] *** RakuIRCLogger joined
 [04:16] *** leont left
 [04:16] *** tbrowder left
 [04:16] *** ugexe left
@@ -56,159 +57,87 @@
 [08:42] *** samcv joined
 [08:54] *** Kaiepi joined
 [09:24] <lizmat> more memory gc oddities:
-
 [09:25] <lizmat> for ^100 { my $a = $io.slurp.substr(0,1) } on a 4MB file ends up with a max-rss of 1296336  aka about 1.2GB
-
 [09:25] <lizmat> prefix this with a `start { }`
-
 [09:25] <lizmat> and the max-rss winds up at 832080 aka about 800MB
-
 [09:26] <lizmat> with *less* CPU usage (5.73 -> 5.70)
-
 [09:30] <lizmat> If I do a force_gc for every 10 supervisor runs, max-rss goes down to 209056 (about 200MB) and time down to 5.65
-
 [09:31] <lizmat> if I do it for *every* supervisor run, it goes down to 187824
-
 [09:31] <lizmat> with wallclock / cpu slightly up
-
 [09:32] <lizmat> jnthn ^^  anything that could explain that?
-
 [09:38] <lizmat> it really looks like:
-
 [09:38] <lizmat> 1. having the supervisor running has a remarkable positive effect on memory usahe
-
 [09:38] <lizmat> *usage
-
 [09:39] <nine> Is that start { } effect with or without the force_gc in the supervisor?
-
 [09:39] <lizmat> 2. calling nqp::force_gc for every supervisor run has the potential of reducing memory usage to 20% of the original usage with minor CPU benefits
-
 [09:40] <lizmat> well, if I don't put the start {} in, there is no supervisor
-
 [09:40] <lizmat> but the effect is there even without the force_gc in
-
 [09:48] <nine> That's curious. But I'd say it's not conclusive. It could just be that the different memory usage profile just triggers the GC at more opportune times.
-
 [09:49] <lizmat> I'm creating a PR with support for a RAKUDO_GC_EVERY environment variable
-
 [09:49] <lizmat> that would allow you to force a nqp::force_gc for every N supervisor ticks
-
 [09:50] <lizmat> so we can experiment with values and see if it helps...
-
 [09:50] <lizmat> to give an example: the IRC logs server, when it is running for about a week
-
 [09:51] <lizmat> grows to about 20GB
-
 [09:51] <lizmat> yet MacOS is able to compress 7GB+ of that
-
 [09:51] <lizmat> so the actual usage is only 13GB
-
 [09:51] <nine> Side note: a tight loop dealing strings that size is a bit of a worst case. MoarVM will start a GC run when the nursery is full. The nursery is 4MB by default. String objects are only 40 bytes large with the string itself getting allocated on the heap. So the nursery can hold 100K of those 4MB strings before a GC gets triggered.
-
 [09:52] <lizmat> aha!
-
 [09:53] <lizmat> I guess parsing logs is such a worst case then, generally  :-(
-
 [09:55] <nine> Parsing logs, no. Typical log parsing would be: process a line (typical size in the 100 bytes range), get some information out of there, store the information somewhere (database, disk), then move on to the next line. I wonder what you keep that information around for?
-
 [09:55] <nine> Oh, of course one major use case doesn't even store the information. It's the one where we just print it to stderr, e.g. grep some logs
-
 [09:55] <lizmat> right   as in "rak"  :-)
-
 [10:00] <lizmat> https://github.com/rakudo/rakudo/pull/5097
-
 [10:03] <nine> FWIW I really don't like that PR and don't think it should be merged. Triggering a GC run every x seconds is downright trivial without modifications to the core and without depending on the supervisor thread: start { $*VM.request-garbage-collection; sleep 0.01 }
-
 [10:04] <lizmat> and a loop I assume :-)
-
 [10:05] <nine> Thread.run({ loop { $*VM.request-garbage-collection; sleep 0.01 } }
-
 [10:05] <nine> )
-
 [10:05] <nine> You get the idea :D
-
 [10:05] <lizmat> yeah, but that would take a thread, and in the supervisor it wouldn't
-
 [10:05] <nine> So?
-
 [10:06] <nine> If your application is multi threaded, use the start { } version which runs on the thread pool, thereby not needing its own thread at all. If your app is not multi threaded use Thread.run to avoid having the supervisor.
-
 [10:07] <nine> If you absolutely want to avoid threading for this (for some obscure reason), put that $*VM.request-garbage-collection into your main loop
-
 [10:12] *** sena_kun joined
 [10:15] <lizmat> ok, noted...   
-
 [10:15] <lizmat> going afk for most of the day&
-
 [10:45] *** samcv left
 [10:45] *** samcv joined
 [12:13] *** Altai-man joined
 [12:16] *** sena_kun left
 [12:47] *** Altai-man left
+[12:57] *** RakuIRCLogger left
+[12:58] *** RakuIRCLogger joined
 [12:58] <lizmat> thoughts about 100K 4MB strings in a nursery:
-
 [12:59] <lizmat> perhaps each item in the nursery should get a weight associated with it
-
 [12:59] <lizmat> and as soon as the entry is stale, the weight gets added to some counter
-
 [13:00] <lizmat> and if that counter exceeds X, a GC run would be initiated ?
-
 [13:01] <lizmat> I realize this is extra work in a very hot code path, but wanted to throw out this idea anyway, so it can be shot down properly (or not :-)
-
 [13:15] <nine> LOL I just noticed that I have got some 2.7 TiB of rr recordings on my disk... Thanks to (presumably) sparse files, they only took ~120 GiB of actual space though.
-
 [13:16] <lizmat> nice
-
 [13:17] <lizmat> reminds me of a situation in the early 2000's where a mod_perl server would need about 30 seconds to startup, because it would preload a *lot* of stuff
-
 [13:17] <lizmat> which would grow up to 700 MB or so
-
 [13:18] <lizmat> and then spawn about 100 children, and see memory usage go up to 70GB on a machine with 8GB of memory  :-)
-
 [13:19] <lizmat> it worked because each child only had about 10MB unique memory, and as soon as that exceeded 30MB or so, it would commit suicide  :-)
-
 [13:19] <nine> MoarVM already keeps track of unmanaged sizes and uses that for making decisions about full GC runs. I'm somewhat sceptical about using it also during allocation from nursery as like you mentioned, this is an incredibly hot path. We're allocating an unbelievable number of objects.
-
 [13:19] <lizmat> I understand
-
 [13:20] <lizmat> but I feel to these particular workflows, it's not making the right decisions
-
 [13:21] <lizmat> also: I'd be more worried about the extra memory for each nursery entry
-
 [13:21] <lizmat> anyways, going afk again&
-
 [13:21] <nine> It's always going to be a compromise. If it fits your workload very badly and more collection runs would help, there's always $*VM.request-garbage-collection
-
 [13:21] <nine> Worried how?
-
 [13:24] <lizmat> overflowing CPU caches earlier
-
 [13:24] <lizmat> actually VM.request-garbage-collection also work, no need to look up a dynamic variable
-
 [13:25] <lizmat> yes, it works...  but it requires code changes, which my PR would not:
-
 [13:25] <lizmat> it would allow you to tune *your* application externally
-
 [13:25] <nine> Expanding a bit more: even if we would want to take the performance hit and took unmanaged size into consideration, what would we do exactly? The thing is, we don't know e.g. how long those strings are going to stay around. If we start a collection, just because someone allocated 100 MiB of strings and they are actually still in use, we've done a completely unnecessary GC run which is not exactly free.
-
 [13:26] <nine> Your PR only works in applications which make use of the thread pool. So it's not exactly a generic solution either.
-
 [13:27] <lizmat> ah, duh, we don't know whether an entry in the nursery is stale *until* we do a GC run, right ?
-
 [13:27] <lizmat> was thinking with a reference counting mind  :-(
-
 [13:28] <lizmat> nine: in the PR I mentioned that maybe specifying that env variable should start the supervisor
-
 [13:28] <nine> GC tuning is a hard problem and an area of ongoing research.
-
 [13:29] <lizmat> completely understood
-
 [13:29] <lizmat> that's why I think it should be easy to tweak a setting, such as in my PR
-
 [13:31] <lizmat> afk&
-
 [13:37] <nine> That's just one knob that happens to work nicely in one specific use case. If we decide to tackle this problem, we ought to do it in a well designed way that covers a large range of use cases and provides all the knobs required for this at different layers, e.g. as APIs for applications themselves and configurables for users.
-
 [14:36] *** coleman left
 [14:36] *** coleman joined
 [14:42] *** coleman left
@@ -217,7 +146,6 @@
 [18:21] *** Altai-man joined
 [18:24] *** sena_kun left
 [20:36] <nine> Oh boy.... I finally came across my old adversary: BEGIN time EVAL
-
 [20:41] *** Altai-man left
 [21:40] *** reportable6 joined
 [21:41] *** benchable6 joined
@@ -239,11 +167,8 @@
 [21:46] *** linkable6 left
 [21:47] *** linkable6 joined
 [22:22] <MasterDuke> the jvm famously has very tunable GCs, might want to look there
-
 [22:28] <MasterDuke> ugexe: mostly because moarvm doesn't expose fchmod. but i guess lchown might be good to have
-
 [22:43] *** bisectable6 joined
 [22:45] *** sourceable6 joined
 [23:05] <MasterDuke> why can i never remember how to bump a submodule?
-
 [23:10] *** epony left
