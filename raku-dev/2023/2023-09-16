@@ -1,0 +1,396 @@
+[00:00] *** reportable6 left
+[00:02] *** reportable6 joined
+[01:43] *** linkable6 left
+[01:43] *** greppable6 left
+[01:43] *** sourceable6 left
+[01:43] *** committable6 left
+[01:43] *** bloatable6 left
+[01:43] *** tellable6 left
+[01:43] *** squashable6 left
+[01:43] *** shareable6 left
+[01:43] *** bisectable6 left
+[01:43] *** benchable6 left
+[01:43] *** evalable6 left
+[01:43] *** unicodable6 left
+[01:43] *** quotable6 left
+[01:43] *** coverable6 left
+[01:43] *** statisfiable6 left
+[01:43] *** notable6 left
+[01:43] *** reportable6 left
+[01:43] *** nativecallable6 left
+[01:43] *** releasable6 left
+[01:43] *** greppable6 joined
+[01:43] *** tellable6 joined
+[01:43] *** linkable6 joined
+[01:43] *** evalable6 joined
+[01:44] *** coverable6 joined
+[01:44] *** squashable6 joined
+[01:44] *** statisfiable6 joined
+[01:44] *** quotable6 joined
+[01:44] *** sourceable6 joined
+[01:44] *** releasable6 joined
+[01:44] *** reportable6 joined
+[01:45] *** nativecallable6 joined
+[01:45] *** committable6 joined
+[01:45] *** shareable6 joined
+[01:45] *** bloatable6 joined
+[01:45] *** benchable6 joined
+[01:45] *** notable6 joined
+[01:46] *** unicodable6 joined
+[01:46] *** bisectable6 joined
+[02:56] *** finanalyst joined
+[03:56] *** bloatable6 left
+[03:56] *** tellable6 left
+[03:56] *** evalable6 left
+[03:56] *** sourceable6 left
+[03:56] *** reportable6 left
+[03:56] *** coverable6 left
+[03:56] *** quotable6 left
+[03:56] *** nativecallable6 left
+[03:56] *** committable6 left
+[03:56] *** benchable6 left
+[03:56] *** releasable6 left
+[03:56] *** linkable6 left
+[03:56] *** notable6 left
+[03:56] *** greppable6 left
+[03:56] *** bisectable6 left
+[03:56] *** unicodable6 left
+[03:56] *** squashable6 left
+[03:56] *** statisfiable6 left
+[03:56] *** shareable6 left
+[03:57] *** bloatable6 joined
+[03:57] *** coverable6 joined
+[03:57] *** reportable6 joined
+[03:57] *** evalable6 joined
+[03:57] *** benchable6 joined
+[03:58] *** committable6 joined
+[03:58] *** linkable6 joined
+[03:58] *** bisectable6 joined
+[03:58] *** notable6 joined
+[03:58] *** shareable6 joined
+[03:58] *** unicodable6 joined
+[03:59] *** quotable6 joined
+[03:59] *** tellable6 joined
+[03:59] *** nativecallable6 joined
+[03:59] *** sourceable6 joined
+[03:59] *** greppable6 joined
+[03:59] *** statisfiable6 joined
+[03:59] *** squashable6 joined
+[03:59] *** releasable6 joined
+[04:30] *** finanalyst left
+[05:45] *** melezhik joined
+[05:50] *** melezhik left
+[06:00] *** reportable6 left
+[06:02] *** reportable6 joined
+[06:48] *** melezhik joined
+[06:58] *** melezhik left
+[07:12] <nine> I have been working on and off on replacing the fallback lookups in BEGIN time run code with what we discussed at the summit.
+
+[07:13] <nine> I started by just replacing lexical lookups with constant lookups if we're compiling dynamically. So far that gets me almost on par with main even without the new dispatcher and support for late bound subs in calls.
+
+[07:14] <nine> However, now I hit the first road block: my constant foo = (1, 2).map({ $_ }). This fails because $_ is not a constant. I.e. we can't just treat all variables as constants in BEGIN time code. Instead we must do this only for those found outside the dynamically compiled code.
+
+[07:14] *** melezhik joined
+[07:19] *** melezhik left
+[07:25] <nine> This probably means that neither resolve-lexical, nor resolve-lexical-constant is what I need.
+
+[07:26] <nine> Also that $*IMPL-COMPILE-DYNAMICALLY := 1 is not enough either. I need to konw which is the outermost scope that's compiled dynamically.
+
+[07:27] <nine> I could of course just use that scope as value for the dynamic variable. But to be honest I don't like polluting all those AST nodes with dynamic variables. Their absence has been quite nice so far.
+
+[07:29] <nine> Maybe a better option would be a special BeginTimeResolver that overrides resolve-lexical with an appropriate version.
+
+[07:34] <nine> But even that would not solve the problem with early resolution - often we need to resolve symbols already during parsing. These will then have been resolved to variable lookups which then fail at runtime (because the scope they are declared in doesn't even exist yet).
+
+[07:34] <nine> So far I've just littered the Grammar and Actions with $*IMPL-COMPILE-DYNAMICALLY but that is obviously not the real solution.
+
+[07:39] <nine> The other part that requires mass changes is that in every place where we emit a call op, instead of providing the name of the symbol to call, we need to provide the resolution result, i.e. a WVal containing the code object. There are quite a few of those places, scattered all around and they need ot know whether to do the one or the other.
+
+[07:40] <nine> Unless the resolution result itself has that knowlege and can e.g. create that call op.
+
+[07:46] <nine> Thanks for rubber ducking!
+
+[07:46] <ab5tract> Anytime, nine! It's a pleasure to have your words back in the chat
+
+[07:52] <ab5tract> so for the call op thing,what's the motivation behind changing the call op? how can they tell whether to do one or the other?
+
+[07:53] <ab5tract> I ask because I just added code which has a fair number of calls in it
+
+[08:22] <nine> Ordinarily we emit nqp::call(:name<&foo>) for leaving the lookup until runtime. Since BEGIN time code runs without any outer scope (not even a setting) we need to emit nqp::call(&foo) instead. I think I'll give RakuAST::Var an IMPL-QAST-CALL method that returns the appropriate NQP::Op.
+
+[08:22] <nine> Normally resolved symbols will emit QAST::Op.new(:name(self.lexical-name)) while those resolved through the BeginTimeResolver will return QAST::Op.new(self.resolution.compile-time-value)
+
+[08:23] <nine> At least for symbols resolved to compile time constants outside the dynamically compiled code.
+
+[08:38] <ab5tract> ah, I see what you mean now, thanks
+
+[09:06] <Geth> ¦ rakudo: ab5tract++ created pull request #5384: RakuAST: Re-formulate VarDeclaration::Implicit::State
+
+[09:06] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/5384
+
+[09:07] <lizmat> ab5tract: is there a reason why you used "min-excl" and "max-excl" in FlipFlop instead of excludes-min and excludes-max ?
+
+[09:07] <lizmat> to be consistent with the naming of Ranges ?
+
+[09:07] <ab5tract> It was the way the existing QAST was written, so it was the easiest translation
+
+[09:08] <ab5tract> But now would be a good time to clean it up
+
+[09:08] <lizmat> ok, will clean that up and fix the .raku and DEPARSE support and tests  :-)
+
+[09:11] <ab5tract> thanks for taking care of that liz
+
+[09:18] <ab5tract> latest PR is "just" a cleanup, but it makes things a lot cleaner imo
+
+[09:20] <lizmat> cool
+
+[09:20] <lizmat> clarity is what we need!  :-)
+
+[09:39] <lizmat> ab5tract: would it make sense to have the excludes-min / max functionality just depend on the actual operator passed ?
+
+[09:42] <lizmat> yeah, I think it does :-)
+
+[09:43] <ab5tract> It could be done that way, yeah. In fact, from a user perspective that's probably much better
+
+[09:43] <ab5tract> sorry not to have taken that route
+
+[09:44] <lizmat> no worries...  it also simplies .raku and .DEPARSE a lot  :-)
+
+[09:44] <lizmat> as in it being handled by Infix  :-)
+
+[09:52] <ab5tract> nine: do you have any idea how this could be fixed?
+
+[09:53] <ab5tract> m: my $i; say $i += (state $s = $_) for ^2
+
+[09:53] <camelia> rakudo-moar 770ac47bf: OUTPUT: «Use of uninitialized value of type Any in numeric context␤0␤0␤  in block  at <tmp> line 1␤Use of uninitialized value of type Any in numeric context␤  in block  at <tmp> line 1␤»
+
+[09:54] <ab5tract> m: Q|my $i; say $i += once { 21 } for ^2 | .AST.EVAL
+
+[09:54] <camelia> rakudo-moar 770ac47bf: OUTPUT: «Cannot resolve caller prefix:<+>(Mu:U); none of these signatures matches:␤    (\a)␤  in block <unit> at <tmp> line 1␤␤»
+
+[09:56] <ab5tract> basically the p6stateinit doesn't seem to get propagated when the state is defined in the compunit
+
+[09:56] <ab5tract> *on the compunit
+
+[09:57] <ab5tract> m: Q|my $i; say $i += once { $_ } for ^2 | .AST.EVAL
+
+[09:57] <camelia> rakudo-moar 770ac47bf: OUTPUT: «Cannot resolve caller prefix:<+>(Mu:U); none of these signatures matches:␤    (\a)␤  in block <unit> at <tmp> line 1␤␤»
+
+[09:58] <ab5tract> ah, that matches the "Use of uninitialized value of type Any" output from the state example in my cleaned up branch
+
+[10:00] <ab5tract> anyway, the state variable is being accessed without being bound because p6stateinit op never appears to return true for these instances
+
+[10:04] <ab5tract> I don't know where to really start with that one
+
+[10:06] <ab5tract> m: my $i; say $i += once { $_ } for ^2; # IIUC this works because of statement_id and in_stmt_mod annotations on QAST nodes
+
+[10:06] <camelia> rakudo-moar 770ac47bf: OUTPUT: «0␤0␤»
+
+[10:06] <ab5tract> m: my $i; say $i += once { $_ } for 1,2; # IIUC this works because of statement_id and in_stmt_mod annotations on QAST nodes
+
+[10:06] <camelia> rakudo-moar 770ac47bf: OUTPUT: «1␤2␤»
+
+[10:21] <Geth> ¦ rakudo/main: 866e431035 | (Elizabeth Mattijsen)++ | 4 files
+
+[10:21] <Geth> ¦ rakudo/main: RakuAST: simplify creation of ::FlipFlop objects
+
+[10:21] <Geth> ¦ rakudo/main: 
+
+[10:21] <Geth> ¦ rakudo/main: The name of the given operator is be enough information
+
+[10:21] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/866e431035
+
+[10:27] <Geth> ¦ rakudo/main: ded9b37c89 | ab5tract++ (committed using GitHub Web editor) | 2 files
+
+[10:27] <Geth> ¦ rakudo/main: RakuAST: Re-formulate VarDeclaration::Implicit::State
+
+[10:27] <Geth> ¦ rakudo/main: 
+
+[10:27] <Geth> ¦ rakudo/main: The class needed some re-work to function properly for other use cases
+
+[10:27] <Geth> ¦ rakudo/main: like in RakuAST::StatementPrefix::Once.
+
+[10:27] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/ded9b37c89
+
+[11:12] <Geth> ¦ rakudo/main: 6f73a9c231 | (Elizabeth Mattijsen)++ | t/12-rakuast/operators.rakutest
+
+[11:12] <Geth> ¦ rakudo/main: RakuAST: add tests for RakuAST::FlipFlop
+
+[11:12] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/6f73a9c231
+
+[11:27] <Geth> ¦ rakudo/main: 0079b03ba2 | (Elizabeth Mattijsen)++ | src/core.c/RakuAST/Deparse.rakumod
+
+[11:27] <Geth> ¦ rakudo/main: RakuAST: fix deparsing of ::Feed objects in ApplyListInfix
+
+[11:27] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/0079b03ba2
+
+[12:00] *** reportable6 left
+[12:01] *** reportable6 joined
+[12:11] <Geth> ¦ rakudo/main: 6d3904d017 | (Elizabeth Mattijsen)++ | t/12-rakuast/operators.rakutest
+
+[12:11] <Geth> ¦ rakudo/main: RakuAST: add tests for RakuAST::Feed
+
+[12:12] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/6d3904d017
+
+[13:14] *** squashable6 left
+[13:15] *** squashable6 joined
+[14:15] *** coverable6 left
+[14:15] *** greppable6 left
+[14:15] *** committable6 left
+[14:15] *** statisfiable6 left
+[14:15] *** quotable6 left
+[14:15] *** nativecallable6 left
+[14:15] *** tellable6 left
+[14:15] *** benchable6 left
+[14:15] *** notable6 left
+[14:15] *** bisectable6 left
+[14:15] *** shareable6 left
+[14:15] *** sourceable6 left
+[14:15] *** evalable6 left
+[14:15] *** bloatable6 left
+[14:15] *** squashable6 left
+[14:15] *** unicodable6 left
+[14:15] *** linkable6 left
+[14:15] *** reportable6 left
+[14:15] *** releasable6 left
+[14:16] *** sourceable6 joined
+[14:16] *** committable6 joined
+[14:16] *** evalable6 joined
+[14:16] *** squashable6 joined
+[14:16] *** releasable6 joined
+[14:16] *** reportable6 joined
+[14:17] *** tellable6 joined
+[14:17] *** quotable6 joined
+[14:17] *** benchable6 joined
+[14:17] *** bisectable6 joined
+[14:17] *** linkable6 joined
+[14:17] *** shareable6 joined
+[14:18] *** greppable6 joined
+[14:18] *** unicodable6 joined
+[14:18] *** notable6 joined
+[14:18] *** nativecallable6 joined
+[14:18] *** statisfiable6 joined
+[14:18] *** bloatable6 joined
+[14:18] *** coverable6 joined
+[16:28] *** ab5tract left
+[16:42] *** jgaz left
+[16:52] <Geth> ¦ rakudo/main: 60ec27c6f8 | (Elizabeth Mattijsen)++ | src/Raku/Actions.nqp
+
+[16:52] <Geth> ¦ rakudo/main: RakuAST: streamline package-def action method
+
+[16:52] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/60ec27c6f8
+
+[17:02] <Geth> ¦ rakudo/main: 40a94e23e5 | (Elizabeth Mattijsen)++ | src/Raku/Grammar.nqp
+
+[17:02] <Geth> ¦ rakudo/main: RakuAST: package declarators don't need to capture <sym>
+
+[17:02] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/40a94e23e5
+
+[17:18] *** squashable6 left
+[17:20] *** squashable6 joined
+[17:44] *** coleman left
+[17:45] *** coleman joined
+[17:51] <Geth> ¦ rakudo/main: 97683f98a1 | (Elizabeth Mattijsen)++ | src/Raku/Grammar.nqp
+
+[17:51] <Geth> ¦ rakudo/main: RakuAST: prevent some more unnecessary captures
+
+[17:51] <Geth> ¦ rakudo/main: 
+
+[17:51] <Geth> ¦ rakudo/main: And somei grammar streamlining
+
+[17:51] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/97683f98a1
+
+[18:00] *** reportable6 left
+[18:02] *** reportable6 joined
+[18:12] <nine> ab5tract: sorry, I don't know anything about all about how state variables are implemented
+
+[18:12] <tellable6> nine, I'll pass your message to ab5tract
+
+[18:20] <nine> p6stateinit seems to check a flag on the frame. That flag should get set if the frame contains declarations of state variables
+
+[18:32] <Geth> ¦ rakudo/main: ef0aa2b6a6 | (Elizabeth Mattijsen)++ | 2 files
+
+[18:32] <Geth> ¦ rakudo/main: Allow translation of "constraint-where"
+
+[18:32] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/ef0aa2b6a6
+
+[18:32] <lizmat> meh, that actually is a RakuAST commit
+
+[19:53] <nine> It's quite possible that at time of resolving we don't know yet whether a symbol needs to be resolved to a variable or to a constant (cf early resolution)
+
+[20:02] <nine> Actually that shouldn't matter all that much since we resolve names we found in the setting to constants anyway and declarations usually have compile time values (their meta object)
+
+[21:54] *** coverable6 left
+[21:54] *** squashable6 left
+[21:54] *** greppable6 left
+[21:54] *** statisfiable6 left
+[21:54] *** unicodable6 left
+[21:54] *** tellable6 left
+[21:54] *** releasable6 left
+[21:54] *** bloatable6 left
+[21:54] *** committable6 left
+[21:54] *** benchable6 left
+[21:54] *** linkable6 left
+[21:54] *** evalable6 left
+[21:54] *** shareable6 left
+[21:54] *** quotable6 left
+[21:54] *** nativecallable6 left
+[21:54] *** sourceable6 left
+[21:54] *** notable6 left
+[21:54] *** bisectable6 left
+[21:54] *** reportable6 left
+[21:55] *** evalable6 joined
+[21:55] *** greppable6 joined
+[21:55] *** tellable6 joined
+[21:55] *** shareable6 joined
+[21:56] *** squashable6 joined
+[21:56] *** bloatable6 joined
+[21:56] *** reportable6 joined
+[21:56] *** sourceable6 joined
+[21:56] *** statisfiable6 joined
+[21:56] *** unicodable6 joined
+[21:57] *** notable6 joined
+[21:57] *** releasable6 joined
+[21:57] *** benchable6 joined
+[21:57] *** coverable6 joined
+[21:57] *** quotable6 joined
+[21:57] *** linkable6 joined
+[21:57] *** bisectable6 joined
+[21:57] *** committable6 joined
+[21:58] *** nativecallable6 joined
+[22:58] *** unicodable6 left
+[22:58] *** evalable6 left
+[22:58] *** reportable6 left
+[22:58] *** coverable6 left
+[22:58] *** benchable6 left
+[22:58] *** bloatable6 left
+[22:58] *** statisfiable6 left
+[22:58] *** releasable6 left
+[22:58] *** nativecallable6 left
+[22:58] *** squashable6 left
+[22:58] *** committable6 left
+[22:58] *** notable6 left
+[22:58] *** linkable6 left
+[22:58] *** tellable6 left
+[22:58] *** sourceable6 left
+[22:58] *** bisectable6 left
+[22:58] *** quotable6 left
+[22:58] *** greppable6 left
+[22:58] *** unicodable6 joined
+[22:58] *** evalable6 joined
+[22:58] *** linkable6 joined
+[22:58] *** reportable6 joined
+[22:59] *** greppable6 joined
+[22:59] *** committable6 joined
+[22:59] *** nativecallable6 joined
+[23:00] *** coverable6 joined
+[23:00] *** notable6 joined
+[23:00] *** releasable6 joined
+[23:00] *** sourceable6 joined
+[23:00] *** quotable6 joined
+[23:00] *** bisectable6 joined
+[23:00] *** statisfiable6 joined
+[23:00] *** squashable6 joined
+[23:01] *** benchable6 joined
+[23:01] *** bloatable6 joined
+[23:01] *** tellable6 joined
