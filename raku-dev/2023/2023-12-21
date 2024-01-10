@@ -1,0 +1,293 @@
+[00:04] *** discord-raku-bot left
+[00:05] *** discord-raku-bot joined
+[02:11] *** MasterDuke joined
+[02:59] <MasterDuke> man, that hyper timing result is weird...
+
+[03:03] <MasterDuke> hm. the non-hyper version did 1276 GCs, but the hyper version did only 184
+
+[03:04] <MasterDuke> but the hyper version did a full GC, so the time spent in GC was only ~2x for the non-hyper version
+
+[03:06] <MasterDuke> the hyper profile numbers are all a bit suspect though, since many of them are noticeably corrupted (we don't really support profiling multi-threaded programs)
+
+[03:12] <MasterDuke> huh. the non-hyper version shows a cpu usage that's never greater than 100% (according to top). but the hyper version even with `degree => 1` shows slightly over 100%, like 107%. so maybe it is starting another/new thread and not competing with the main and/or spesh thread?
+
+[09:22] <lizmat> MasterDuke: yeah, it's weird
+
+[09:35] *** epony left
+[09:50] *** MasterDuke left
+[10:18] *** sena_kun joined
+[10:40] *** patrickb left
+[10:44] *** patrickb joined
+[10:55] *** epony joined
+[11:04] <lizmat> So, looking at snapper output: https://gist.github.com/lizmat/879d924d3bcc314a22e6f5047bd0b034
+
+[11:06] <lizmat> the CPU usage for both is the same per time period, it's just that the hyper => 1 case is much faster
+
+[11:09] <lizmat> so I wonder: either the CPU telemetry is wrong at a very low level  (which I doubt)
+
+[11:10] <lizmat> or: when running on a worker thread, maybe the code gets run on a CPU that's much more capable at handling this particular workload
+
+[11:11] <lizmat> if that's the case, I wonder if it would make sense to *always* run the mainline on a worker thread
+
+[11:12] <lizmat> aka, wrap the mainline in an: await Promise.start(&mainline)
+
+[11:17] *** Altai-man joined
+[11:18] *** patrickb left
+[11:18] *** patrickb joined
+[11:20] *** jdv left
+[11:21] *** jdv joined
+[11:21] *** sena_kun left
+[13:59] <ugexe> that seems unlikely imo
+
+[14:01] <lizmat> m: say (^Inf).grep(*.is-prime).skip(999999).head; say now - ENTER now
+
+[14:02] <camelia> rakudo-moar f562e6b12: OUTPUT: «15485863␤4.487197684␤»
+
+[14:02] <lizmat> m: await start say (^Inf).grep(*.is-prime).skip(999999).head; say now - ENTER now
+
+[14:02] <camelia> rakudo-moar f562e6b12: OUTPUT: «15485863␤5.013915359␤»
+
+[14:04] <lizmat> so the only thing different between ^^ and the hyper => 1 case, is that the worker thread gets many more separate jobs, instead of a single big onne
+
+[14:04] <lizmat> (looking at snapper output)
+
+[14:34] <jdv> looks like the blin blockers haven't been fixed in time
+
+[14:34] <jdv> so we either ship today and any fixes have to wait til the jan release in about a month or we defer
+
+[14:35] * lizmat looks at the blin blockers
+
+[14:39] <jdv> looks like vrurg is into it now
+
+[14:40] <vrurg> lizmat: I'm about to commit a fix for Tier if spectest is OK locally.
+
+[14:45] <vrurg> *Trie
+
+[14:47] <lizmat> vrurg: I think the problem is related to my int64 @ats[$TZ_MAX_TIMES];
+
+[14:47] <lizmat> where my $TZ_MAX_TIMES = 2000;
+
+[14:49] <lizmat> and/or possibly has int8          @.types[$TZ_MAX_TIMES]
+
+[14:51] <lizmat> m: my $size = 10; my @a[$size]; my int @b = ^10; @a = @b    # vrurg golf!
+
+[14:51] <camelia> rakudo-moar f562e6b12: OUTPUT: «Cannot assign an array of shape * to an array of shape 10␤  in block <unit> at <tmp> line 1␤␤»
+
+[14:52] <lizmat> both need to be native types
+
+[14:52] <lizmat> m: my $size = 10; my @a[$size]; my @b = ^10; @a = @b
+
+[14:52] <camelia> rakudo-moar f562e6b12: ( no output )
+
+[14:52] <lizmat> m: my $size = 10; my @a[$size]; my @b = ^10; @a = @b; dd @a
+
+[14:52] <camelia> rakudo-moar f562e6b12: OUTPUT: «Array.new(:shape(10,), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])␤»
+
+[14:53] <lizmat> actually the source needs to be native
+
+[14:53] <lizmat> the destination must not be
+
+[14:53] <lizmat> m: my $size = 10; my int @a[$size]; my int @b = ^10; @a = @b; dd @a
+
+[14:53] <camelia> rakudo-moar f562e6b12: OUTPUT: «array[int].new(:shape(10,), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])␤»
+
+[14:54] <Geth> ¦ rakudo/main: 52aec48cdb | (Vadim Belman)++ | 3 files
+
+[14:54] <Geth> ¦ rakudo/main: Fix arrays and hashes sharing same backing storage
+
+[14:54] <Geth> ¦ rakudo/main: 
+
+[14:54] <Geth> ¦ rakudo/main: Instantiation of a concrete collection type tries to preserve content of
+
+[14:54] <Geth> ¦ rakudo/main: the generic original by passing the original into constructor call of
+
+[14:54] <Geth> ¦ rakudo/main: the instantiation. While not being a big deal on its own when mapping
+
+[14:54] <Geth> ¦ rakudo/main: 1-to-1, this is major problem when the instantiation is used as
+
+[14:54] <Geth> ¦ rakudo/main: attribute container initializer as in this case the object gets
+
+[14:54] <Geth> ¦ rakudo/main: <…commit message has 5 more lines…>
+
+[14:54] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/52aec48cdb
+
+[14:56] <lizmat> vrurg: this does not fix:
+
+[14:56] <lizmat> m: my $size = 10; my @a[$size]; my int @b = ^10; @a = @b
+
+[14:56] <camelia> rakudo-moar f562e6b12: OUTPUT: «Cannot assign an array of shape * to an array of shape 10␤  in block <unit> at <tmp> line 1␤␤»
+
+[15:00] <vrurg> lizmat: As I mentioned in the issue comment: TimeZone is in works.
+
+[15:01] <lizmat> sorry, missed that, hope that my golf helped
+
+[15:04] <lizmat> confirmed Trie is ok now
+
+[15:04] <vrurg> The golf will make it much easier for sure. Thanks!
+
+[15:05] <lizmat> afk for a few hours&
+
+[15:18] <vrurg> lizmat: the golf, actually fails both on 2023.10 and 2023.11. I never used shaped arrays, but the failure looks as a legitimate one. But I'd need to figure out what broke the module.
+
+[15:25] <[Tux]> Rakudo v2023.11-99-g52aec48cd (v6.d) on MoarVM 2023.11-1-gbe03e26fc
+
+[15:25] <[Tux]> csv-test-xs-20      0.141 -  0.143
+
+[15:25] <[Tux]> csv-ip5xs           0.268 -  0.275
+
+[15:25] <[Tux]> test-t --race       0.284 -  0.286
+
+[15:25] <[Tux]> test-t              0.420 -  0.427
+
+[15:25] <[Tux]> csv-ip5xs-20        1.133 -  1.165
+
+[15:25] <[Tux]> test-t-20 --race    1.219 -  1.249
+
+[15:25] <[Tux]> csv-parser          1.510 -  1.515
+
+[15:25] <[Tux]> test                1.932 -  1.939
+
+[15:26] <[Tux]> test-t-20           5.169 -  5.247
+
+[15:27] <vrurg> lizmat: With TimeZone, it's not a regression, I unintentionally fixed a bug, that was letting the module to work. :)
+
+[15:29] *** epony left
+[15:31] *** epony joined
+[15:49] <jdv> thanks lizmat and vrurg.  i gotta run but i'll get to the release in a few hours.
+
+[16:32] <[Coke]> jdv++
+
+[17:43] <lizmat> bisectable6 old=2023.02 my @a[10]; my int @b = ^10; @a = @b
+
+[17:43] <lizmat> bisectable6: old=2023.02 my @a[10]; my int @b = ^10; @a = @b
+
+[17:43] <bisectable6> lizmat, On both starting points (old=2023.02 new=52aec48) the exit code is 1 and the output is identical as well
+
+[17:43] <bisectable6> lizmat, Output on both points: «Cannot assign an array of shape * to an array of shape 10␤  in block <unit> at /tmp/LTS1kkJKRW line 1␤␤»
+
+[17:43] <lizmat> interesting
+
+[17:44] <lizmat> m: my @a[10] = ^10; dd @a    # if this is ok
+
+[17:44] <camelia> rakudo-moar 52aec48cd: OUTPUT: «Array.new(:shape(10,), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])␤»
+
+[17:44] <lizmat> m: my @a[10]; my @b = ^10; @a = @b; dd @a   # and this is ok
+
+[17:44] <camelia> rakudo-moar 52aec48cd: OUTPUT: «Array.new(:shape(10,), [0, 1, 2, 3, 4, 5, 6, 7, 8, 9])␤»
+
+[17:45] <lizmat> m: my @a[10]; my int @b = ^10; @a = @b; dd @a  # then this should be ok as well
+
+[17:45] <camelia> rakudo-moar 52aec48cd: OUTPUT: «Cannot assign an array of shape * to an array of shape 10␤  in block <unit> at <tmp> line 1␤␤»
+
+[17:45] <lizmat> but I will take that on after the 2023.12 release, as it clearly is a longer standing issue
+
+[18:41] <lizmat> .oO( sometimes I wonder whether we could use a parameter attribute trait to indicated it should be deconted, rather than reconted
+
+[18:41] <lizmat> )
+
+[19:12] <lizmat> s/attribute//
+
+[20:26] <jdv> changelogs are up.  will begin the actual releases in a bit.
+
+[21:28] <Geth> ¦ rakudo/release-2023.12: 7f4beaadf6 | (Justin DeVuyst)++ | 3 files
+
+[21:28] <Geth> ¦ rakudo/release-2023.12: Update changelog + announcement
+
+[21:28] <Geth> ¦ rakudo/release-2023.12: 
+
+[21:28] <Geth> ¦ rakudo/release-2023.12: Deliberately not logged:
+
+[21:28] <Geth> ¦ rakudo/release-2023.12: 
+
+[21:28] <Geth> ¦ rakudo/release-2023.12: [73470580][2e21b9d7][f562e6b1][ccd375b3][bd9e0be0][e305eb59]
+
+[21:28] <Geth> ¦ rakudo/release-2023.12: [69d61680][7f97bdd4][ce46b15c][28ebb7ac][d2f8bb6f][1b73d18d]
+
+[21:28] <Geth> ¦ rakudo/release-2023.12: [20c0c5e0][dd239016][a6c36008][7a92c6f5][3151bca6][3434e54d]
+
+[21:28] <Geth> ¦ rakudo/release-2023.12: [f9586cea][e1a86f11][a01033db][621709b3][ffd7b14a][0a62cd70]
+
+[21:28] <Geth> ¦ rakudo/release-2023.12: [b5455721][c3e68caa][9b65e880][4e0bd4f9]
+
+[21:28] <Geth> ¦ rakudo/release-2023.12: review: https://github.com/rakudo/rakudo/commit/7f4beaadf6
+
+[21:32] <Geth> ¦ rakudo/release-2023.12: e6b0e99947 | (Justin DeVuyst)++ | 3 files
+
+[21:32] <Geth> ¦ rakudo/release-2023.12: Update changelog + announcement
+
+[21:32] <Geth> ¦ rakudo/release-2023.12: 
+
+[21:32] <Geth> ¦ rakudo/release-2023.12: Deliberately not logged:
+
+[21:32] <Geth> ¦ rakudo/release-2023.12: 
+
+[21:32] <Geth> ¦ rakudo/release-2023.12: [73470580][2e21b9d7][f562e6b1][ccd375b3][bd9e0be0][e305eb59]
+
+[21:32] <Geth> ¦ rakudo/release-2023.12: [69d61680][7f97bdd4][ce46b15c][28ebb7ac][d2f8bb6f][1b73d18d]
+
+[21:32] <Geth> ¦ rakudo/release-2023.12: [20c0c5e0][dd239016][a6c36008][7a92c6f5][3151bca6][3434e54d]
+
+[21:32] <Geth> ¦ rakudo/release-2023.12: [f9586cea][e1a86f11][a01033db][621709b3][ffd7b14a][0a62cd70]
+
+[21:32] <Geth> ¦ rakudo/release-2023.12: [b5455721][c3e68caa][9b65e880][4e0bd4f9]
+
+[21:32] <Geth> ¦ rakudo/release-2023.12: review: https://github.com/rakudo/rakudo/commit/e6b0e99947
+
+[23:00] <Geth> ¦ nqp/main: b9290ecbb1 | (Justin DeVuyst)++ | tools/templates/MOAR_REVISION
+
+[23:00] <Geth> ¦ nqp/main: [release] Bump MoarVM revision to 2023.12
+
+[23:00] <Geth> ¦ nqp/main: review: https://github.com/Raku/nqp/commit/b9290ecbb1
+
+[23:00] <Geth> ¦ nqp/main: 599ccb7be9 | (Justin DeVuyst)++ | VERSION
+
+[23:00] <Geth> ¦ nqp/main: [release] Bump VERSION to 2023.12
+
+[23:00] <Geth> ¦ nqp/main: review: https://github.com/Raku/nqp/commit/599ccb7be9
+
+[23:00] <Geth> ¦ rakudo/release-2023.12: a969489388 | (Justin DeVuyst)++ | tools/templates/NQP_REVISION
+
+[23:00] <Geth> ¦ rakudo/release-2023.12: [release] Bump NQP revision to 2023.12
+
+[23:00] <Geth> ¦ rakudo/release-2023.12: review: https://github.com/rakudo/rakudo/commit/a969489388
+
+[23:00] <Geth> ¦ rakudo/release-2023.12: ae1289817e | (Justin DeVuyst)++ | VERSION
+
+[23:00] <Geth> ¦ rakudo/release-2023.12: [release] Bump VERSION to 2023.12
+
+[23:00] <Geth> ¦ rakudo/release-2023.12: review: https://github.com/rakudo/rakudo/commit/ae1289817e
+
+[23:03] *** RakuIRCLogger left
+[23:06] <Geth> ¦ rakudo: jdv++ created pull request #5503: Release 2023.12
+
+[23:06] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/5503
+
+[23:07] <Geth> ¦ rakudo/main: 4 commits pushed by (Justin DeVuyst)++
+
+[23:07] <Geth> ¦ rakudo/main: e6b0e99947 | Update changelog + announcement
+
+[23:07] <Geth> ¦ rakudo/main: a969489388 | [release] Bump NQP revision to 2023.12
+
+[23:07] <Geth> ¦ rakudo/main: ae1289817e | [release] Bump VERSION to 2023.12
+
+[23:07] <Geth> ¦ rakudo/main: 462a933d21 | Merge pull request #5503 from rakudo/release-2023.12
+
+[23:07] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/compare/52aec48cdb15...462a933d2137
+
+[23:23] <jdv> the release is done
+
+[23:23] <jdv> patrickb: release happened
+
+[23:24] <jdv> .tell El_Che release happened
+
+[23:24] <jdv> is that how to do that here?
+
+[23:25] *** bisectable6 left
+[23:25] *** bisectable6 joined
+[23:25] <tellable6> jdv, I'll pass your message to El_Che
+
+[23:26] *** Altai-man left
+[23:34] <lizmat> jdv++
+
+[23:38] *** JRaspass left
+[23:38] *** JRaspass joined
