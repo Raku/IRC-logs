@@ -1,0 +1,148 @@
+[08:12] *** sena_kun joined
+[08:13] <nine> Yeah, moar --dump on an .mbc or precomp file. AFAIK we don't have anything for dumping serialized data though.
+
+[08:17] <nine> I'm a bit confused here. We have already established that binding attributes is not atomic as it has to copy the inlined object. That is sufficient to explain a temporary NULL value in a multi-threaded application. Thus I would check which code is called by multiple threads and does attribute assignment while other threads would want to read those attributes.
+
+[08:23] <lizmat> nine: that's what I've been doing the past months now
+
+[08:24] <lizmat> this is a case where by all accounts an attribute *should* be non-null, but is still null something
+
+[08:24] <lizmat> *sometimes
+
+[08:25] <lizmat> and the theory is now, that multiple threads try to deserialize the same object, where the second is assuming it's ready to be used, while the first is still busy deserializing
+
+[08:25] <nine> Do all readers and writers to/from this attribute acquire the same lock?
+
+[08:27] <lizmat> you mean to say that $mro := $!mro would require to use the same lock as the code that atomically writes it???
+
+[08:27] <nine> yes
+
+[08:28] <nine> Because writing to it is _not_ atomic
+
+[08:28] <lizmat> ok, then I'm getting to be *really* confused, as jnthn claims that *is* atomic
+
+[08:28] <lizmat> *it is
+
+[08:29] <nine> Ok, the answer depends on whether that attribute is inlined into its parent or not
+
+[08:29] <lizmat> how can one know ?
+
+[08:35] <nine> Ok, maybe it is after all. A quick glance seems to indicate that the deciding factor is the storage spec. It's set to MVM_STORAGE_SPEC_INLINED for P6int, P6bigint, P6num, P6str and NativeCall REPRs.
+
+[08:37] <lizmat> my assumption the past months was that it is safe to read list and hash attributes as long as they are updated atomically
+
+[08:38] <lizmat> in the case of the REA crash, I'm 99.999% sure that that is covered
+
+[08:38] <lizmat> also, in the case of the NQPClassHOW: it was already precompiled into the bootstrap
+
+[08:39] <lizmat> I assume the deserializer does an nqp::create(NQPClassHOW) and then starts setting the attributes
+
+[08:39] <nine> Yeah, I'm coming around to your view.
+
+[08:39] <lizmat> inbetween the nqp::create and all the attributes having been set, there's a window in which $!mro is null
+
+[08:40] <nine> But that's a quite obvious race condition. I'd honestly be quite surprised if that ever made it into the code and even more if it stayed hidden for so long.
+
+[08:40] <lizmat> I guess deserializing is pretty fast?
+
+[08:41] <lizmat> I mean, it's done at the VM level with internal knowledge about how the REPR is laid out in memory
+
+[08:41] <lizmat> and it's also todo with the number of attributes in a class
+
+[08:42] <lizmat> NQPClassHOW has 21, which I'd say is above average  :-)
+
+[08:53] <lizmat> I think also the reason is we don't see more of this, is the code path the REA is taking, is relatively unused because of the use of the Proxy in IO::Handle.nl-i
+
+[08:53] <lizmat> n
+
+[08:56] <nine> I wonder if this could be due to use of an ordinary MVMuint32 as "working" flag in MVMSerializationReader. When this flag is set to 0 we just get the pointer to the object from the SC. If it's set to 1 we call MVM_serialization_demand_object which will lock the mutex first before checking availability of the object.
+
+[09:00] * lizmat nods while being rubberducker
+
+[09:01] <lizmat> *d
+
+[09:12] <Geth> ¦ MoarVM/main: d5dafa9b47 | (Stefan Seifert)++ | 3 files
+
+[09:12] <Geth> ¦ MoarVM/main: Use atomic operations for on SerializationReader's working flag
+
+[09:12] <Geth> ¦ MoarVM/main: 
+
+[09:12] <Geth> ¦ MoarVM/main: This flag is read from different threads than it is written to. This
+
+[09:12] <Geth> ¦ MoarVM/main: means that when using a plain integer, a thread could read an outdated
+
+[09:12] <Geth> ¦ MoarVM/main: value from a CPU cache leading to it believing that no deserialization
+
+[09:12] <Geth> ¦ MoarVM/main: is running when it actually is. This in turn could cause us to read from
+
+[09:12] <Geth> ¦ MoarVM/main: half-deserialized objects.
+
+[09:12] <Geth> ¦ MoarVM/main: 
+
+[09:12] <Geth> ¦ MoarVM/main: lizmat++ for all the heavy debugging work on this
+
+[09:12] <Geth> ¦ MoarVM/main: review: https://github.com/MoarVM/MoarVM/commit/d5dafa9b47
+
+[09:12] <nine> lizmat: please try with this commit. No guarantees, but it seems obvious enough for me to push straight to main
+
+[09:12] <lizmat> ok, will do now  :-)
+
+[09:15] <lizmat> in hindsight, I think this could also explain some flappers in make spectest
+
+[11:13] *** evalable6 left
+[11:18] *** evalable6 joined
+[11:54] *** sena_kun left
+[14:47] *** [Coke] left
+[14:47] *** [Coke] joined
+[15:58] *** MasterDuke left
+[17:37] *** sena_kun joined
+[17:44] <lizmat> so I'm working on a module for MoarVM bytecode introspection
+
+[17:45] <lizmat> some interesting preliminary statistics: the core.c setting has 38033 string on the string heap, 21672 of them are the numeric values 0 .. 21671
+
+[17:45] <lizmat> this feels... wasteful ?
+
+[17:51] <lizmat> or at least potentially subject to re-use, like making them the first 21672 elements in the string heap, so that it could be used for int -> str conversion ?
+
+[18:31] <jdv> nine: how does a stale cpu cache get read in that case?
+
+[18:55] <nine> jdv: one thread writes to that flag (or counter actually), another thread reads from it. If the other thread's CPU already has that memory location in a loaded cache line, there's no reason for it to load it from main memory. After all, that's what the cache is for.
+
+[18:56] <nine> jdv: when one wants to use such an integer to communicate between threads, one has to use atomic operations. These tell the compiler that cross-thread communication is wanted and the compiler then issues memory barriers accordingly.
+
+[19:19] *** MasterDuke joined
+[19:21] <MasterDuke> this is kind of interesting. i'm printing some of numbers in runNFA (e.g., size of fates arrray, number of states, total fates produces) and the numbers start to differ between the moarvm and jvm backends pretty quickly
+
+[19:23] <MasterDuke> as in, the third line shows the moarvm backend producing 1 fate and the jvm backend producing 2. then on the fourth line the moarvm backend produces 1 fate and jvm backend produces 26
+
+[19:24] <MasterDuke> a lot of the lines do have the same values, but i expected much more agreement
+
+[19:30] <lizmat> could that be because the JVM backend doesn't have NFG ?
+
+[19:31] <lizmat> I'm thinking specifically re newlines
+
+[19:31] <MasterDuke> could be
+
+[19:35] <MasterDuke> but wouldn't that only make a difference if the files had carriage returns + newlines? which the nqp sources don't (i think)
+
+[19:36] <lizmat> if I remember correctly, \n, \r\n and \r are all the same synthetic on MoarVM
+
+[19:37] <lizmat> to simplify matching on end-of-lines  :-)
+
+[19:39] <MasterDuke> hmm. and ugh
+
+[20:18] <lizmat> https://raku.land/zef:lizmat/MoarVM::Bytecode    :-)
+
+[20:18] <lizmat> and that concludes my hacking for today
+
+[20:30] <MasterDuke> nice
+
+[21:04] *** sena_kun left
+[21:05] *** sena_kun joined
+[23:00] <MasterDuke> interesting. i just realized that https://github.com/Raku/nqp/blame/main/src/vm/jvm/runtime/org/raku/nqp/runtime/Ops.java#L6966-L6983 has been untouched in 11 years (aside from my recent changes), and is not in the moarvm backend...
+
+[23:02] <MasterDuke> but the jvm build (on main, not my WIP branch) dies almost instantly with it removed...
+
+[23:29] *** sena_kun left
+[23:46] <coleman> lizmat++
+
