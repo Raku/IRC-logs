@@ -1,0 +1,151 @@
+[07:48] *** sena_kun joined
+[13:28] *** MasterDuke joined
+[13:39] <MasterDuke> is there a bounds of the size of the resulting string https://github.com/MoarVM/MoarVM/blob/main/src/strings/utf8.c#L171-L173 based on the number of bytes?
+
+[13:39] <tellable6> hey MasterDuke, you have a message: https://gist.github.com/04c6f91794cc5471da6d42ce5b5a3d7d
+
+[13:45] <lizmat> I'd say the maximum size is 4 * bytes ?
+
+[13:46] <lizmat> ah, it already starts out that way I see
+
+[13:46] <lizmat> https://github.com/MoarVM/MoarVM/blob/main/src/strings/utf8.c#L179-L180
+
+[13:47] <lizmat> hmmm
+
+[13:47] <nine> I don't think there's anything else one can do
+
+[13:48] <lizmat> so I'd see the realloc would be rare?   Or do you see it happen more often MasterDuke ?
+
+[13:49] <MasterDuke> well, that was really just  a tangent. i'm trying to get rakudo to build with the in-situ strings and happened to see that and wondered
+
+[13:49] <Voldenet> there is no upper bounds of codepoints in grapheme cluster
+
+[13:49] <MasterDuke> still trying to figure out how this "Requested synthetic 85 when only 1 have been created." happens
+
+[13:50] <MasterDuke> Voldenet: right, but the number decoded from a fixed number of bytes should be upper bounded i believe
+
+[13:51] <Voldenet> HM, the reverse is probably true
+
+[13:54] *** MasterDuke left
+[13:54] <nine> MasterDuke: time to pull out rr?
+
+[13:54] <tellable6> nine, I'll pass your message to MasterDuke
+
+[13:55] <nine> I don't see how a buffer with x utf-8 encoded bytes could lead to more than x graphemes
+
+[13:55] <nine> Isn't it a strict 1:n between graphemes and code points and between code points and bytes?
+
+[13:58] *** MasterDuke joined
+[13:59] <MasterDuke> nine: yep, annoyingly had to rebuild rr first
+
+[13:59] <tellable6> 2024-05-06T13:54:48Z #moarvm <nine> MasterDuke: time to pull out rr?
+
+[14:06] <Voldenet> one codepoint can't represent multiple graphemes, `malloc(sizeof(MVMuint32) * bufsize)` was in MVM_string_utf8_decode from the start
+
+[14:08] <Voldenet> and realloc (well, malloc + memcpy) was there from the start
+
+[14:08] <Voldenet> I do think there's a subtle error in that code
+
+[14:09] <Voldenet> if it started with `malloc(sizeof(MVMGrapheme32) * bufsize / 4)` it'd represent most cases well
+
+[14:10] <Voldenet> eh wait, nevermind, grapheme is always 32 bits
+
+[14:12] <nine> sizeof(MVMGrapheme32) * bufsize will most of the time be the correct size
+
+[14:12] <lizmat> not true: I think there's also an 8-bit representation if only ASCII chars ?
+
+[14:12] <lizmat> of graphemes I mean ?
+
+[14:13] <lizmat> MVMGrapheme8  vs MVMGrapheme32
+
+[14:14] <Voldenet> > typedef MVMint32 MVMGrapheme32;
+
+[14:15] <Voldenet> since this decoder allocates buffer as MVMGrapheme32[buflen], isn't the realloc pointless?
+
+[14:16] <nine> That's what I think
+
+[14:16] <Voldenet> it'd only make sense if one byte could somehow become multiple graphemes
+
+[14:17] <MasterDuke> which it looks like it can, if you follow the MVM_unicode_normalizer_process_codepoint_to_grapheme call
+
+[14:18] <lizmat> hmmm  maybe if the decoding is utf8-c8 ?
+
+[14:18] <nine> Aaah NFD
+
+[14:19] <lizmat> of course, decomposing composed codepoints
+
+[14:19] <lizmat> is what you mean, nine?
+
+[14:21] <MasterDuke> hm. i've tracked back to where that -85 is assigned. unfortunately the previous value was -48, which is still not a value i want to see
+
+[14:22] <[Coke]> m: say (-85,-48...*)[2]
+
+[14:22] <camelia> rakudo-moar 69a335640: OUTPUT: «-11␤»
+
+[14:23] <nine> lizmat: yes
+
+[14:24] <lizmat> but composed codepoints would still be only one grapheme ?
+
+[14:25] <lizmat> perhaps NFD should generate just integers, instead of graphemes ?
+
+[14:49] <Voldenet> Wait, so you're saying there's a case where for 1 byte of an input becomes more than 4 bytes?
+
+[14:51] <MasterDuke> the string in question (re too many synthetics, not the bytes question) is ":«"
+
+[14:52] <MasterDuke> and i think the problem might be that it's represented as an in_situ_32 (in_situ_32 = {58, 171}), and then it tries to convert to an in_situ_8
+
+[15:09] <ab5tract> MasterDuke: that's interesting.. why would it want to downgrade its representation? it seems like things should go towards 32, but not the other way around
+
+[15:11] <ab5tract> (keep in mind, I've still got a lot to learn about MVMGrapheme8 and MVMGrapheme32)
+
+[15:18] <lizmat> RakuIRCLogger 
+
+[15:21] <nine> ab5tract: Grapheme8 is more memory and cache efficient.
+
+[15:23] <ab5tract> that much is clear, sure. but if something is store as Grapheme32, I would presume that it is taking advantage of the more expansive representation.
+
+[15:24] <ab5tract> *stored
+
+[15:29] <nine> No, that's just the default. We get to Grapheme8 by scanning a Grapheme32 string and noticing that 8 is enough
+
+[15:30] <ab5tract> Ah got it, thanks
+
+[17:37] <lizmat> and yet another Rakudo Weekly News hits the Net: https://rakudoweekly.blog/2024/05/06/2024-19-behaviorally-constrained/
+
+[18:38] <MasterDuke> heh. thought i figured out what the problem was, now the nqp build fails...
+
+[19:19] <MasterDuke> got the nqp build working again...
+
+[19:26] <MasterDuke> well, starting compiling CORE.c, but `Directive f not applicable for value of type BOOTNum`. *no* idea how that happens
+
+[19:35] *** MasterDuke left
+[20:08] *** MasterDuke joined
+[20:09] <MasterDuke> rakudo just built and installed with in-situ-strings
+
+[20:10] *** MasterDuke left
+[20:36] <[Coke]> nice
+
+[21:32] *** MasterDuke joined
+[21:33] <MasterDuke> and `make m-test` had one fail in t/02-rakudo/reproducible-builds.t, but `make m-spectest` passed
+
+[21:34] <lizmat> fwiw, I also see t/02-rakudo/reproducible-builds.t occasionally (feels about 2% of the tome)
+
+[21:34] <lizmat> *time
+
+[21:35] <MasterDuke> yeah, i've seen a rare fail before. but somewhat ironically, this fail appears to be 100% reproducible
+
+[21:36] <lizmat> ah, that'd be different  :-)
+
+[21:37] <MasterDuke> wow, that test spews a ton of output to my console when run directly
+
+[21:37] <lizmat> yeah  :-)
+
+[21:39] <MasterDuke> i assume it's related to the fact that this branch adds two new storage_type's to MVMString
+
+[21:40] <MasterDuke> if anyone is interested, https://github.com/MoarVM/MoarVM/compare/main...MasterDuke17:in-situ-strings is the current state
+
+[21:48] <MasterDuke> it's not really ready to be PRed yet though. there's a bunch of cleanup and optimization, but nine, timo1, et at., if you take a look and have any suggestions please let me know
+
+[22:38] <[Coke]> MasterDuke++
+
+[23:34] *** sena_kun left

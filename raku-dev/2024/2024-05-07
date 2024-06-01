@@ -1,0 +1,142 @@
+[07:12] *** MasterDuke left
+[08:14] *** sena_kun joined
+[08:43] <Geth> ¦ problem-solving: lizmat unassigned from samcv Issue Add `nomark` for striping accents, `samemark` is counterintuitive and slow for that purpose. https://github.com/Raku/problem-solving/issues/427
+
+[09:43] <nine> Timing remains the hardest thing in RakuAST. E.g. signatures on methods create the implicit parameter for the invocant. To do this at the time the signature decides whether to do this it must already know wheter it is on a method. That generated parameter will look for its "owner", i.e. the block it's attached to.
+
+[09:44] <nine> Begin time is loosely defined as running when we are done parsing an element, e.g. that method. Now if at this begin time we trigger BEGIN for this implicitly created parameter, the resolver will be just outside that method, so the parameter will find the wrong owner.
+
+[09:46] <nine> I got around this by violating that BEGIN definition and re-entering the method's scope before triggering BEGIN. Of course if it's good for methods it should be good for other routines as well, right? But doing the same on other routines causes us to look for protos in the wrong scope. Because, you know, BEGIN is supposed to happen just after we parsed the element so the current scope should be the 
+
+[09:46] <nine> routine's surroundings, i.e. a good place to look for a proto.
+
+[09:51] <nine> You might think that maybe BEGIN is just too late for creating that implicit invocant parameter? After all, isn't the point of rakuast-phase-cleanup to introduce a separate PARSE phase? But PARSE for a method is defined as the time when we're entering it. It's far too early to process a signature as we haven't even parsed it yet.
+
+[09:52] <nine> And even if I move routine's PARSE to after parsing the signature (after all, rakuast-phase-cleanup gives us that kind of control), it's still too early. Because we have placeholder parameters, i.e. the full signature is really only known after we're done parsing the full routine body.
+
+[09:58] *** finanalyst joined
+[10:21] <ab5tract> Ahh.. that is mega complex
+
+[10:24] <ab5tract> I don’t suppose the answer could bee a new phase?
+
+[10:24] <ab5tract> Probably not, if the goal is to enter only once..
+
+[10:30] <nine> A reasonable question would be: how does this work on current main then? The answer is that there the Parameter's (and other's) attach method gets called multiple times. It just so happens that later invocations usually get the right environment. This reliance on luck is a thing that the branch tries to fix.
+
+[10:33] <nine> How can later invocation get the right environment when we have long left that scope? While IMPL-CHECK traverses the tree and call's IMPL-CHECK on children it also pushes lexical scopes onto the resolver's stack. I.e. we enter and exit scopes as we traverse.
+
+[10:36] <nine> In that sense my workaround may not be all that wrong. It's the method's PERFORM-BEGIN that calls the signature's IMPL-ENSURE-IMPLICITS. I.e. this happens outside the normal tree traversal that would keep track of lexical scopes.
+
+[10:37] <nine> So adding this enter-scope to the Actions would restore the original system. But still it feels fragile and makes me wonder if there's a more regular way to get this.
+
+[10:44] <nine> Actually there is :) I realized that I had a .to-begin-time($resolver, $context) right where I created that implicit parameter. Usually that's the right thing to do for such artificial nodes as that's the equivalent timee to having just parsed them. But in this case we are just not in the right state of the resolver. Later on we will be.
+
+[11:01] *** finanalyst left
+[11:19] <ab5tract> \m/
+
+[11:35] *** finanalyst joined
+[11:47] <Geth> ¦ rakudo/lizmat-nomark: 04547b813f | (Elizabeth Mattijsen)++ | src/core.e/Fixups.rakumod
+
+[11:47] <Geth> ¦ rakudo/lizmat-nomark: Add Cool.nomark in 6.e
+
+[11:47] <Geth> ¦ rakudo/lizmat-nomark: 
+
+[11:47] <Geth> ¦ rakudo/lizmat-nomark: As suggested in https://github.com/Raku/problem-solving/issues/427
+
+[11:47] <Geth> ¦ rakudo/lizmat-nomark: 
+
+[11:47] <Geth> ¦ rakudo/lizmat-nomark: Notes on implementation:
+
+[11:47] <Geth> ¦ rakudo/lizmat-nomark: - Cool.nomark converts to string and delegates to Str.nomark
+
+[11:47] <Geth> ¦ rakudo/lizmat-nomark: - in Str.nomark: check if empty string, return invocant if so
+
+[11:47] <Geth> ¦ rakudo/lizmat-nomark: <…commit message has 8 more lines…>
+
+[11:47] <Geth> ¦ rakudo/lizmat-nomark: review: https://github.com/rakudo/rakudo/commit/04547b813f
+
+[11:47] <Geth> ¦ rakudo: lizmat++ created pull request #5562: Add Cool.nomark in 6.e
+
+[11:47] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/5562
+
+[12:33] *** finanalyst left
+[14:21] <[Coke]> lizmat: should it be #!jvm or #moar ? Are we ignoring JS these days (which makes sense given it has no maintainers)
+
+[14:28] *** sjn left
+[15:12] <nine> Of course when you change anything about timing, the whole whatever currying house of card immediately falls down :/
+
+[15:13] <nine> The current implementation relies on IMPL-BEGIN-BEFORE-CHILDREN running after the whole expression has been parsed but on the way down the tree.
+
+[15:15] <nine> ab5tract: I seem to remember that thing working bottom up at some point? I.e. we'd curry the inner most expression first and when processing its parent, uncurry that inner expression and instead curry the parent.
+
+[15:22] <ab5tract> I couldn’t expand it to work on all the cases it wasn’t working for :(
+
+[15:22] <ab5tract> I tried to design something sturdier than a house of cards, but perhaps I failed
+
+[15:27] <nine> AFAICT what you did is actually eschew the standard tree traversal entirely and instead traverse it yourself at the earliest opportunity after its fully assembled
+
+[15:30] <nine> The standard traversals we have all really happen bottom up. But then we at least now got two of those, so I wonder if we can make use of this. So my first attempt was also bottom up, but really in a single phase, i.e. do all the work for a node and then undo that work at a higher node. Maybe we can split the work: first collect information bottom up and then use this information to decide where to apply 
+
+[15:30] <nine> the transformation on the second bottom up run.
+
+[15:35] <ab5tract> ISTR it being mostly impossible to align the argument positions going bottom up
+
+[15:40] <nine> It wouldn't at all be that much different from what we have now. I'd still have the outer most parent do the actual currying. All we need is to be able to tell the child "don't bother, I'll take care of the curry".
+
+[15:41] <nine> This communication happens implicitly on main by virtue of the parent replacing the child's Whatever argument with a WhateverCode::Argument
+
+[15:43] <nine> We have one mechanism that allows for a node to get information about its parent, that's $resolver.find-attach-target. I think we could use this also for the child to determine whether it needs to curry or not.
+
+[15:46] <nine> Alas attach target currently is very much tied to scopes. I.e. we only even ask whether to push an attach target when entering a scoep
+
+[15:46] <ab5tract> I can’t recall why I stayed away from the find attach target method, but I do remember trying to figure out how introspect the parent node
+
+[15:55] <ab5tract> Do all nodes actually attach?
+
+[15:57] <nine> ?
+
+[16:00] <ab5tract> Not at all computer at the moment so I can’t check easily
+
+[16:00] <nine> I somehow doubt that I'd be able to add some enter-expr/leave-expr like think into the expression parsing code, so that kinda kills the attach-target idea.
+
+[16:01] <nine> That brings us back to bottom up which we know can't work. Or can it? All the current code needs to succeed is for the children to be returned to their original state once we determined that the parent should do all the currying.
+
+[16:02] <nine> That's basically just un-thunking (which we already can do) and replacing those WhateverCode::Arguments back with Whatevers
+
+[16:02] <nine> Then the current code is good to go again.
+
+[16:07] <ab5tract> Hmm, yeah that should work
+
+[16:08] <nine> Actually there are still quite a few IMPL-UNCURRY calls left even now
+
+[16:10] <ab5tract> Only piece I’m missing conceptually is doing the check on the parent node. If it’s always only one level up, I suppose it should be manageable but the “should we” logic can be a bit complex
+
+[16:11] <ab5tract> One thing that’s good here is that deeply nested whatevercodes are possible, but also uncommon
+
+[16:12] <ab5tract> So some back and forth on the thunking shouldn’t be too bad performance wise
+
+[16:12] <nine> I'm no longer proposing having the child check the parent as we simply don't have a good way of doing that.
+
+[16:13] <nine> I'd just let IMPL-CURRY-ACROSS-ALL-CHILDREN to the cleanup in its initial fact finding run
+
+[16:21] <nine> Though to be honest I still wonder what the exact trouble with the bottom up approach was? Adjusting argument numbers is certainly tedious, but couldn't we just have the parent re-assign them? I.e. have the parent do a DFS traversal on its children and assign new numbers as it finds WhateverCode::Arguments?
+
+[16:55] <lizmat> [Coke]: I just followed the same conditional that samemark has
+
+[17:20] <[Coke]> lizmat: so, nothing new - perfecto.
+
+[17:20] <[Coke]> Thanks for letting me know
+
+[17:20] <lizmat> yw  :-)
+
+[17:34] *** finanalyst joined
+[17:50] <ab5tract> nine: now that whatevercode argument is a thing, that might work. Before that everything used Var::Lexical, which was unwieldy in a DFS
+
+[17:50] <ab5tract> Here’s the final commit before I implemented whatever applicable: https://github.com/rakudo/rakudo/commit/b4f4247258fd2939e5b1b730879d2cf634135d03
+
+[17:57] <nine> Yes, I think your refactors including that role make things a lot easier to grok
+
+[18:26] *** finanalyst left
+[19:22] *** finanalyst joined
+[21:20] *** finanalyst left
+[23:26] *** sena_kun left
