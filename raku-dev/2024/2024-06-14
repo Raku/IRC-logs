@@ -1,0 +1,192 @@
+[01:43] *** MasterDuke joined
+[02:23] <MasterDuke> i saw the discussion about IO.lines.elems and had a dumb idea that might hopefully inspire some better ideas. currently .lines has to do the work of actually creating the strings that make up the sequence. is there a way to indicate that it's being called in sink context (i.e., we only care that there is/was another element of the sequence, not
+
+[02:23] <MasterDuke> what it was) and then not actually create the string? and does this idea make more sense generally? sort of similar to the PredictiveIterator, but for cases where we can't actually predict
+
+[02:24] <MasterDuke> also, i was somewhat surprised that adding `:enc<ascii>` or `:enc<iso-8859-1>` didn't speed up the raku version
+
+[07:04] *** sena_kun joined
+[07:36] *** finanalyst joined
+[07:49] *** finanalyst left
+[08:18] *** sena_kun left
+[08:20] *** sena_kun joined
+[10:37] <ab5tract> It seems to me that this is exactly where a RakuAST-aware optimizer could kick in, in that it could notice the immediate call to elems and replace the method chain with a more appropriate one.
+
+[10:38] <ab5tract> I’m fully aware that this might be a dumb idea of a case of mistaken expectations, which was why I was asking about it in the first place :)
+
+[10:39] <ab5tract> “dumb idea or a case…”
+
+[10:42] <nine> Again that would require the compiler to know with absolute certainty the type of the original object the first method is called on. Easy with "foo.txt".IO.lines.elems and very hard with $foo.IO.lines.elems.
+
+[10:49] <ab5tract> I guess I’m missing something crucial here. Whatever is in $foo has to become an IO::Path after the IO call..
+
+[10:52] <ab5tract> But also, is every optimization required to be universally applicable in order to be implemented? If it works for Str objects then that covers a huge portion of the use cases
+
+[10:54] <nine> m: class Foo { method IO() { class :: { method lines() { class :: { method elems() { "gotcha" } }.new } }.new } }; my $foo = Foo.new; say $foo.IO.lines.elems
+
+[10:54] <camelia> rakudo-moar 46511d59c: OUTPUT: «gotcha␤»
+
+[10:55] <nine> Method calls are late bound. In general you don't know what code will be called until you do the call at runtime. The compiler *must not* make any assumptions about that.
+
+[11:01] <nine> What the compiler can do is for $foo.IO.lines.elems generate code equvalent to `do { my $tmp := $foo.IO; $tmp.WHAT =:= IO::Path ?? $tmp.fast-line-count !! $tmp.lines.elems }` and indeed that's in a way what newdisp does with its guards.
+
+[11:04] <ab5tract> Well that answers my question in the affirmative, not the negative. A RakuAST-aware optimizer can indeed replace the method chain with a better suited set of code.
+
+[11:05] <ab5tract> s/that/that seems to/
+
+[11:06] <nine> But is that code really better? While my gotcha example would still work just fine it would also be slower now.
+
+[11:08] <ab5tract> That feels very much like a DIHWIDT, not a reason to make the rest of the Raku user base suffer
+
+[11:09] <nine> Shouldn't the same be said about if foo -> $seq { .say for $seq }?
+
+[11:09] <ab5tract> And if the cost of that bind, type check, and ternary is so expensive, we have other problems
+
+[11:10] <nine> And of course that was just a very contrieved example. Point is that optimizations can have real downsides, too.
+
+[11:10] <nine> It's not just the cost of the operations themselves. It also increases the code size which in turn decreases the chance of inlining that code.
+
+[11:13] <ab5tract> I’d prefer 0.8 seconds to 30+ seconds, and I think most users would agree. If the answer is simply “sorry, that will not happen because it could affect outliers” then… I don’t know. Except that it makes me very sad.
+
+[11:21] <nine> I don't understand that argument given that I already pointed at an alternative that would fix .IO.lines.elems without the downsides of a compiler optimization.
+
+[11:21] <nine> In fact I pointed out two such alternatives. It's just that one of them has other consequences (but also broader benefits)
+
+[11:25] <ab5tract> Fair point for this specific case. But I was also asking about the general expectations and constraints surrounding RakuAST-based optimizations
+
+[11:27] <nine> In the general case your numbers don't apply anymore. We could be talking about 5.7 vs. 5.8s or literally any other combination of timings. And anyway I did not say such optimizations would be out of the question. I just cautioned against applying them too liberally. It's always a trade off.
+
+[11:57] <ab5tract> The numbers do apply in the sense of proportion. I wouldn't advocate for a 0.1s shave off, but I would advocate for an over 30x one.
+
+[11:58] <ab5tract> lizmat: re: `.read().indices("\n".ord)` -->. `No such method 'indices' for invocant of type 'Buf[uint8]'`
+
+[11:59] <lizmat> yeah, found that out myself, apparently you need to do .grep(..., :k)
+
+[11:59] <ab5tract> lizmat++
+
+[11:59] <lizmat> which is... slow, because not optimized for .Buf
+
+[11:59] <ab5tract> :(
+
+[12:00] <lizmat> I wonder whether a :count named arg on .grep could help
+
+[12:01] <ab5tract> or maybe this should be doing something at the VM level?
+
+[12:02] <lizmat> how could it be at the VM level
+
+[12:02] <lizmat> ?
+
+[12:02] <lizmat> .grep is entirely HLL
+
+[12:15] <ab5tract> No, I meant getting the line count
+
+[12:15] <ab5tract> Apologies for the ambiguous use of “this” :)
+
+[13:47] *** MasterDuke left
+[14:16] <[Coke]> do we have any docs on raku community modules support, management, etc.?
+
+[14:21] <[Coke]> I would love to have things like "licenses we can adopt" (we have some non-A2 licenses in there)
+
+[14:22] <[Coke]> reasons why we'd adopt a module, standards about how we do releases, how do we decommission a module, how do we manage tickets in a project (including standards for labels...)
+
+[14:22] <[Coke]> I can drive this if we don't already have it
+
+[14:23] <[Coke]> also: can someone please make me an admin (or at least a contributor) in raku-community-modules?
+
+[14:35] *** sena_kun left
+[14:37] <ab5tract> That all sounds super useful! Maybe a problem solving ticket would be the best place to track it?
+
+[14:40] *** sena_kun joined
+[14:40] <ab5tract> unfortunately can't help with the admin/contributor question, as  I'm a lowly member myself
+
+[14:51] <Geth> ¦ problem-solving: coke self-assigned The raku-community-modules organization and its problems.  https://github.com/Raku/problem-solving/issues/210
+
+[14:51] <[Coke]> https://github.com/Raku/problem-solving/issues/210
+
+[14:57] <[Coke]> ab5tract: added some notes
+
+[15:00] *** sena_kun left
+[15:00] *** sena_kun joined
+[16:26] *** sena_kun left
+[16:27] *** sena_kun joined
+[17:56] <nine> With regard to compiler optimizations one should also keep in mind that every optimization will slow down compilation of every program. After all you have to check whether the optimization even applies. Thus we should stick to optimizations of common patterns.
+
+[17:57] <nine> This is also a good segue into a reply to an unanswered question: what would a RakuAST based optimizer look like? Ostensibly it would be a separate compiler pass just like in the old compiler. Main difference that it should be much easier to find things to optimize and to perform these optimizations.
+
+[17:59] <nine> But, the warning about the cost of optimization also hints the downsides of this approach: this additional compiler pass would again traverse the whole tree. For some things it would be much cheaper to do those checks in the initial compilation pass. Main downside is that it'd further complicate the AST node implementations.
+
+[17:59] <nine> It could also make debugging harder (as you can't as easily compare ASTs before and after optimization)
+
+[18:00] <lizmat> fwiw, I think optimization levels should also be settable as compunit wide pragmas
+
+[18:00] <lizmat> *and* be able to specify in module space
+
+[18:01] <nine> Why?
+
+[18:01] <lizmat> use really-badass-but-expensive-optimization;
+
+[18:01] <lizmat> 1. to try out different optimization techniques outside of core
+
+[18:02] <nine> Is that a decision that depends on the code the optimization is applied to? Or is it a decision that depends on the user's preferences?
+
+[18:02] <lizmat> 2. if in a module, not so bad if it slows down precomping, at the decision of the implementor
+
+[18:03] <lizmat> I mean: I have a module App::Rak, that I use a lot day to day
+
+[18:03] <nine> As a developer of the code in question I'd probably rather turn off all optimizations. Same for me as a user of a one time script. But as a packager of Raku modules for openSUSE I really don't care at all about compilation times and would rather devliver the fastest code possible.
+
+[18:03] <lizmat> I wouldn't mind it would take 2 times as long to install to make a better runtime experience
+
+[18:04] <lizmat> as a module developer, I'd rather also deliver the fastest code possible
+
+[18:04] <nine> So even the same user would care less about compilation time during installation and more during a debuggin session.
+
+[18:07] <lizmat> personally, I would always take the highest possible optimization level while developing modules
+
+[18:08] <lizmat> 1. because it will make testing faster
+
+[18:08] <lizmat> 2. it will be the same as a user would get
+
+[18:09] <lizmat> even if it would take a little longer (when you're used to compiling the rakudo setting, everything is fast  :-)
+
+[18:09] <nine> If my reduced test case during debugging takes .2s to execute but the really-badass-but-expensive-optimization takes 2 full seconds, I'd want it off
+
+[18:10] <Geth> ¦ rakudo/main: 141228a3dc | (Elizabeth Mattijsen)++ | src/core.c/Rakudo/Iterator.rakumod
+
+[18:10] <Geth> ¦ rakudo/main: Micro-optimize .head(N)
+
+[18:10] <Geth> ¦ rakudo/main: 
+
+[18:10] <Geth> ¦ rakudo/main: The pull-one on the underlying iterator: no need to check for
+
+[18:10] <Geth> ¦ rakudo/main: IterationEnd as you're going to return that anyway
+
+[18:10] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/141228a3dc
+
+[18:15] *** Altai-man joined
+[18:18] *** sena_kun left
+[19:40] <Geth> ¦ rakudo/main: 078651400f | (Elizabeth Mattijsen)++ | src/core.c/Seq.rakumod
+
+[19:40] <Geth> ¦ rakudo/main: Give Seq some .head shortcuts
+
+[19:40] <Geth> ¦ rakudo/main: 
+
+[19:40] <Geth> ¦ rakudo/main: To make sure they don't take the potential long way of first
+
+[19:40] <Geth> ¦ rakudo/main: completely vivifying the entire iterator into a list, and *then*
+
+[19:40] <Geth> ¦ rakudo/main: taking the first number of elements.
+
+[19:40] <Geth> ¦ rakudo/main: 
+
+[19:40] <Geth> ¦ rakudo/main: Also make Seq.head(*) and Seq.head(Inf) return the invocant, as
+
+[19:40] <Geth> ¦ rakudo/main: these are essentially no-ops
+
+[19:40] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/078651400f
+
+[20:38] *** sena_kun joined
+[20:40] *** Altai-man left
+[22:35] *** sena_kun left
+[22:47] <ab5tract> I have hope that we can find a way to accommodate debug optimizing options versus “normal” or “installation “ ones
+
