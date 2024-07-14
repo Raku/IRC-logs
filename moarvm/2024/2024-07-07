@@ -1,0 +1,80 @@
+[08:58] *** sena_kun joined
+[17:46] *** MasterDuke left
+[19:20] <timo1> slurping a very big file into a buf is very inefficient because we only grow our arrays to twice their size up to 4096 entries
+
+[19:21] <timo1> actually, i'm not using binary slurp, just .IO.slurp, so it'd give me a string, but first it slurps everything into a buf to decode it afterwards
+
+[19:22] <timo1> recording samples from the first few minutes it spends 75% in memmove, which comes from the realloc
+
+[19:23] <timo1> in fact, 96.6% time spent in set_size_internal
+
+[19:25] <timo1> with a change to "double the size always" it finishes quite quickly, but i do get some warnings from mimalloc
+
+[19:25] <timo1> mimalloc: warning: unable to allocate aligned OS memory directly, fall back to over-allocation (1082130432 bytes, address: 0x7ffa1b800000, alignment: 33554432, commit: 1)
+
+[19:25] <timo1> mimalloc: warning: unable to allocate aligned OS memory directly, fall back to over-allocation (2860515328 bytes, address: 0x7ff96f800000, alignment: 33554432, commit: 1)
+
+[19:25] <timo1> m: say 1082130432 / 1024 / 1024
+
+[19:26] <camelia> rakudo-moar 692677ff3: OUTPUT: «1032␤»
+
+[19:35] <timo1> m: say +("x" x 100000)
+
+[19:35] <camelia> rakudo-moar 692677ff3: OUTPUT: «Cannot convert string to number: base-10 number must begin with valid digits or '.' in '⏏xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx…»
+
+[19:35] <timo1> ^- this outputs a hundred thousand bytes of characters from the string it couldn't convert :D
+
+[19:35] <timo1> ask me how i figured that out
+
+[19:41] <timo1> parsing a pretty large json file with in situ strings + the string deduplication thing has a pretty good hit rate for the cache
+
+[19:46] <timo1> oh wow, the silly little json parse benchmark i have here used to spend 12% time in gc_worklist_presize_for, but making presize_for use size doubling instead of exact sizing makes it go to 0.2%
+
+[20:50] <timo1> i might have been working with a moar with --optimize=1 or 0 LOL
+
+[21:19] *** MasterDuke joined
+[21:24] <MasterDuke> timo1: very interesting! do those numbers change much with an optimized moarvm?
+
+[21:32] <MasterDuke> and yeah, i've noticed we spent *tons* of time in set_size_internal and wondered about how best to improve that
+
+[21:45] <MasterDuke> timo1: are you using a system mimalloc? because we're a couple minor versions behind (we're at 2.0.9, their last release is 2.1.7). the differences haven't looked major, but they do mention alignment a couple times so maybe now is a good time to bump
+
+[21:46] <timo1> i think i'm using built-in mimalloc
+
+[21:48] <MasterDuke> might want to try bumping that locally and seeing if that changes anything
+
+[21:52] <timo1> what workloads were you seeing much time in set_size_internal with, do you remember?
+
+[21:53] <MasterDuke> building rakudo (compiling CORE.c is my default workload to benchmark). reading in large files. i feel like it shows up in a lot of places
+
+[21:54] <timo1> yeah reading large files, depending on how exactly you do it, probably tickles the same issue i saw
+
+[21:55] <timo1> but really, any time we add a boatload of elements to an array in either individual additions, or with large chunks and splice, we'd be resizing an unfavorable amount of times
+
+[21:56] <timo1> with the IO::Path slurp path, we can perhaps get the right size up front and do almost no resizes later on
+
+[21:57] <MasterDuke> for one, doubling is a bad choice, we should be using 1.5 or anything other than doubling
+
+[21:57] <timo1> 2.1x is not doubling! :P
+
+[21:57] <timo1> you got a specific source for that?
+
+[21:58] <MasterDuke> https://github.com/facebook/folly/blob/main/folly/docs/FBVector.md#memory-handling
+
+[22:05] <timo1> cool thanks
+
+[22:05] <MasterDuke> i'm pretty sure there's an issue or PR for moarvm that mentions this
+
+[22:08] <MasterDuke> well, i thought there was, but i can't find it
+
+[22:10] <MasterDuke> btw, what do you mean about getting the right size for IO::Path slurping?
+
+[22:11] <MasterDuke> probably afk for a while, hope to be back later this evening
+
+[22:14] <timo1> i saw the PR now
+
+[22:15] <timo1> well, the IO::Path slurp i was working with was adding slurp-size sized chunks to the array, and it was growing by little bits a whole bunch of times
+
+[22:15] <timo1> if instead the buf it's been appending into had been the size of the file from the start, growing would not hav been needed
+
+[23:03] *** sena_kun left

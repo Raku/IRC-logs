@@ -1,0 +1,280 @@
+[00:01] <timo1> i've randomly become interested in how the worklists in our collect phase of the gc behave
+
+[00:23] <[Coke]> timo! ~~
+
+[00:30] <timo1> ohai coke
+
+[00:30] <timo1> i'm actually already dreadfully late to bed so i'll share my findings tomorrow at the earliest
+
+[00:31] <[Coke]> ~~
+
+[00:31] <timo1> i was looking what alloc sizes the worklists ended up with when a gc run finished, and what reprs were causing it to double its size, and what reprs were causing it to grow by an exact amount with the "presize_for" function
+
+[00:33] <timo1> amusingly(?) there's some bits in our code where we first use presize_for to set an exact size based on some variable length array inside of an object, and then immediately use the regular worklist_add which, if the presize_for had just set the size exactly, will immediately cause a doubling of the size
+
+[00:33] <timo1> so that's not optimal, but it's also possibly not important at all
+
+[00:34] <timo1> then there's the core setting compile where i haven't run it to the end yet with my debug output spew, but the size of the worklist grows more and more over time, and i think a lot of that is driven by a single hash that becomes bigger and bigger
+
+[00:37] <timo1> i have a very rough prototype where objects that have a boatload of pointers in a row and want them all to be in the worklist can instead put a pointer to the start of these pointers, the distance between pointers, and the amount of pointers, into a separate thing inside the worklist so the collect process can grab pointers from there without copying them to a worklist first
+
+[00:38] <timo1> but this doesn't immediately work for hashes, because they are More Complicated, though not by very much
+
+[00:42] <timo1> just before stage mbc starts, there's a 590 kilobyte big worklist
+
+[00:52] <timo1> without my patch, at the end of stage parse the worklist is 100117 pointers (782 kbytes)
+
+[00:53] <timo1> 75650 pointers (591 kbytes) before stage mbc starts
+
+[00:53] <timo1> ah, that means no change probably?
+
+[07:55] *** sena_kun joined
+[11:17] <timo1> i have been thinking for a while if maybe a small cache of recently moved or seen collectables that can be rewritten immediately 
+
+[11:17] <timo1> would work at all, and at what size
+
+[11:20] <timo1> i'll just fprintf every address i see to a log file, easy peasy! that will surely only result in a few megabytes of text! (smash cut to my hard drive exploding violently in a cloud of sharp spinning bits)
+
+[11:24] <timo1> boom, literally the first screenful of pointers are just three different pointers :D
+
+[11:29] <lizmat> timo1++
+
+[11:35] <timo1> this cache i'm thinking of may just have overhead that it can't bring back in
+
+[11:57] *** sena_kun left
+[12:32] <timo1> welp, first result seems to say the cache sucks
+
+[12:35] <lizmat> it's easy to underestimate the overhead a cache involves
+
+[12:37] <timo1> this result is just from hit/miss percentages
+
+[12:37] <timo1> so here's my thinking on this:
+
+[12:37] <timo1> when we go collecting, we add every pointer an object has that goes to a collectable to the worklist, and then we take the next work item from the worklist
+
+[12:38] <timo1> when working on a work item, that's when we check, for example, if the object we're pointing to already has a valid forwarder, so the pointer can just be updated
+
+[12:39] <timo1> this involves following the pointer, so an indirect memory access
+
+[12:39] <timo1> if we happened to know with relative certainty that the target of the pointer is still available in the CPU's cache, then it would surely be cheaper to immediately follow the pointer to get the forwarder and update the pointer, instead of putting it into the worklist
+
+[12:41] <timo1> if we just always immediately check the forwarder, i think that would be an unfavorable memory access pattern? maybe?
+
+[12:42] <timo1> i'm not so sure about that any more tbh
+
+[12:46] <timo1> one thing that's beneficial about the "array refs" thing i came up with yesterday (that i turned off for this test, maybe i should turn it back on) is that instead of plopping a boatload of pointers into the worklist, then going through these worklist entries, this will interleave taking pointers from the array ref and updating them
+
+[12:46] <timo1> and currently my "check the cache if the pointer was recently updated" lives in the spot where a pointer gets added to the worklist
+
+[12:47] <timo1> so imagine an array with a few thousand pointers to the same object
+
+[12:47] <timo1> without arrayref, every one of these pointers would immediately be checked against "is it in the cache?" and would get "nope" unless it just happened to be in there already from an earlier reference to it
+
+[12:48] <timo1> and after the thousand pointers go in the worklist, they are checked and can go into the cache
+
+[12:48] <timo1> but at least then they are surely in the cpu cache instead, at least L3
+
+[12:56] <timo1> i've also been wondering if it's worth doubling the size of the worklist by storing the position of the pointer as well as the value of the pointer so we can skip one indirect memory lookup when taking a work item off the list
+
+[12:56] <timo1> but that should still be in the cpu cache as well? if the worklist doesn't balloon too much?
+
+[14:14] <jnthn> A common case is a pointer within the bounds of the fromspace, which will very likely be in the cache. 
+
+[14:15] <jnthn> So chasing that immediately should be cheap
+
+[14:30] <timo1> i'll have a look at counting that case vs the other case
+
+[14:33] <timo1> do you have a feeling about changing the order we traverse the worklist in? right now it's a FIFO i.e. we pop items off the end, maybe it should be a LIFO instead, a queue
+
+[14:38] <timo1> i'm also thinking we should maybe round up to next power of two when "presize_for" bumps us over the alloc limit, so we don't do it like five times in a row by like 1000 units
+
+[15:33] *** [Coke] left
+[15:35] *** [Coke] joined
+[15:57] <timo1> .o( jit-compile gc_mark for different P6Opaque layouts ... )
+
+[17:25] <timo1> turns out 100% of gc_mark_slots in P6opaque in core setting compilation has P6str in them, so a fast path there to call the target function directly based on the repr might be worth 0.01%
+
+[17:26] <lizmat> that feels like a lot of work for little gain?
+
+[17:30] <timo1> yeah, my tuit-shape today is very strange
+
+[17:36] <lizmat> timo1: are you aware of https://github.com/MoarVM/MoarVM/pull/1802 ?
+
+[17:37] <lizmat> it appears stalled
+
+[17:42] <timo1> the only issue i can tell from the conversation on the pull request is the flapping reproducible builds error; if it's a flapper, should we ignore it? doesn't seem like a good idea tbh. maybe i'll investigate that further
+
+[17:43] <lizmat> always good to have a set of knowledgeable eyes on a problem
+
+[17:51] *** MasterDukeMobile joined
+[17:53] <MasterDukeMobile> FYI, for 1802, the reproducible build test fails 100% of the time
+
+[17:55] <MasterDukeMobile> I also had seen it flap about less than 1% of the time on main, but it’s consistent on that branch
+
+[17:56] *** MasterDukeMobile left
+[17:57] *** MasterDukeMobile joined
+[17:58] <MasterDukeMobile> I had hoped rebootstrapping would fix it, but no such luck
+
+[17:59] <timo1> ohai there
+
+[17:59] <MasterDukeMobile> I guess it’s something about strings changing their storage type during deserialization from wheat they were serialized as?
+
+[18:00] <MasterDukeMobile> I have no real idea, but that seems like the only thing that’s changed
+
+[18:01] <MasterDukeMobile> Hm, but then shouldn’t a third serialize/deserialize cycle be the same as the second?
+
+[18:02] <MasterDukeMobile> timo1: btw, happy to see you’ve got more optimization ideas
+
+[18:05] <MasterDukeMobile> And if you have any more ideas about where/how to make in-situ-strings I’m all ears
+
+[18:08] <timo1> oh, we sometimes serialize strings better if we know they have no synthetics? i remember something like that, that kind of fits your description
+
+[18:11] <MasterDukeMobile> I think something like that, though I can’t find it in the PR right now (on phone)
+
+[18:11] <timo1> yup, i'll look into it right now
+
+[18:12] <timo1> Binary files QRegex.moarvm.three and QRegex.moarvm.two differ
+
+[18:13] <timo1> -0000c670: 0211 3802 114b 0211 1602 1119 0211 1a02  ..8..K..........
+
+[18:13] <timo1> +0000c670: 0211 3702 114b 0211 1602 1119 0211 1a02  ..7..K..........
+
+[18:14] <MasterDukeMobile> Maybe the names of the funky capture variable? E.g., $€
+
+[18:14] <timo1> how nice of it to have a single byte difference in one of these spots, and even visible ascii
+
+[18:15] <timo1> but yeah there's multiple differences, QRegex is the smallest of the files that differ
+
+[18:15] <MasterDukeMobile> I didn’t think to look at the actual binary. I just looked at the dumps produced in the test, but I didn’t find them helpful
+
+[18:16] <timo1> i haven't looked at these dumps yet
+
+[18:16] <timo1> i thought it'd be simpler to check in nqp before going to rakudo in the hopes that it'll be wrong there already, and easier to spot
+
+[18:17] <MasterDukeMobile> ISTR lots of different frame numbers, but I had no intuition about why that was happening
+
+[18:17] <timo1> ok it compares the output of moar --dump then?
+
+[18:17] <MasterDukeMobile> Yep
+
+[18:17] <timo1> it dumps the same in the QRegex case :D
+
+[18:18] <timo1> the moar --dump output could even be a red herring
+
+[18:18] <MasterDukeMobile> Doh
+
+[18:19] <lizmat> perhaps https://raku.land/zef:lizmat/MoarVM::Bytecode could be helpful ?
+
+[18:20] <MasterDukeMobile> Hm, I remember thinking of that, but don’t remember if I actually used it…
+
+[18:21] <timo1> ah nice
+
+[18:26] <MasterDukeMobile> Is nqp supposed to have a reproducible build? If so, a test there would be nice, since like timo1 said it should be less to compare
+
+[18:28] <lizmat> I think it has?
+
+[18:29] <timo1> i haven't checked if it isn't or doesn't
+
+[18:29] <lizmat> t/serialization/*.t
+
+[18:30] <timo1> but i would expect nqp is even less fussy than rakudo about the build being deterministic
+
+[18:30] <lizmat> hMmm maybe not indeed
+
+[18:30] <MasterDukeMobile> Well, all the nqp test pass with the PR, so something isn’t getting tickled the same as it is in/with rakudo
+
+[18:31] <timo1> MoarVM::Bytecode tests aren't passing, probably some version/compatibility drift?
+
+[18:32] <MasterDukeMobile> Are you testing it with a MoarVM built on the branch?
+
+[18:34] <timo1> yeah
+
+[18:34] <timo1> could be something wrong with the branch you think?
+
+[18:36] <MasterDukeMobile> Well, we know there something going on with bytecode, right? Whether it’s “wrong”-error or just “wrong”-missing-some-adaptation I think is tbd
+
+[18:38] <timo1>         my uint $offset = -1;
+
+[18:38] <timo1> hehe. i see.
+
+[18:39] <MasterDukeMobile> Completely unrelated, but you (and a lot of the people in this channel) mind find https://godbolt.org/z/dTEME34fn interesting
+
+[18:42] <timo1> i'm not sure what i'm seeing. compiler bug, or unexpected behaviour of some compiler flags?
+
+[18:42] <MasterDukeMobile> Compiler bug
+
+[18:42] <timo1> ah, the left output completely does that work at compile time
+
+[18:44] <MasterDukeMobile> Found because of https://github.com/jeaiii/itoa/issues/17
+
+[18:45] <MasterDukeMobile> Probably afk for a while, hopefully on later this evening
+
+[18:46] <timo1> oh MoarVM::Bytecode is looking for all files that end in .moarvm inside my ~/raku, where there's also the folder of a fuzzing campaign
+
+[18:47] <lizmat> hehe... you *can* be specific, no?
+
+[18:47] <MasterDukeMobile> Ha, I think I have that same folder somewhere
+
+[18:49] *** sena_kun joined
+[18:51] <timo1> oh yeah quite interesting find
+
+[18:51] *** MasterDukeMobile left
+[19:16] <timo1> MoarVM::Bytecode doesn't seem to handle dispatch_* ops correctly yet, which makes sense since they are Special and New
+
+[19:20] <lizmat> timo1: could you please make an issue for that, with examples ?
+
+[19:27] <lizmat> and if you have any suggestions, please add them as a separate issue
+
+[19:27] <timo1> rakudo --ll-exception -e 'use MoarVM::Bytecode; my $c = MoarVM::Bytecode.new("c"); $c.frames.raku.say'
+
+[19:27] <timo1> chars requires a concrete string, but got null
+
+[19:28] <timo1> how did i do this :D
+
+[19:28] <lizmat> m: my str $a; use nqp; say nqp::chars($a)
+
+[19:28] <camelia> rakudo-moar fd72fc3e1: OUTPUT: «0␤»
+
+[19:28] <lizmat> well, in nqp then
+
+[19:29] <lizmat> hmmm
+
+[19:30] <lizmat> m: use nqp; my $s := nqp::list_s; nqp::chars(nqp::atpos_s($s,0))
+
+[19:30] <camelia> rakudo-moar fd72fc3e1: OUTPUT: «chars requires a concrete string, but got null␤  in block <unit> at <tmp> line 1␤␤»
+
+[19:41] <timo1> there you go: https://github.com/lizmat/MoarVM-Bytecode/issues/1
+
+[19:45] <timo1> but i do see code that looks like it's meant to handle dispatch so i'm not sure what's going wrong
+
+[19:54] <timo1> i changed the title to reflect that
+
+[19:56] <timo1> i don't think i actually need to have this feature work properly for the purposes of finding the difference between the files
+
+[20:01] <timo1> yeah ok there's differences in the sc area
+
+[20:02] <timo1> i'll try the reproducible-builds test now just in case nqp is actually not expected to be reproducible
+
+[20:13] <timo1> i think i see the problem
+
+[20:27] <timo1> i may already have a fix
+
+[20:29] <timo1> we were comparing strings wrong, depending on the way they are stored
+
+[20:29] <timo1> that's kind of hard to test in a regular spectest, since we have no way to force a string to have a very specific storage type, and no way to introspect it either
+
+[20:29] <timo1> so even with nqp code it's tough to test
+
+[20:34] <timo1> as i see it, the code was accidentally comparing an in-situ-8 string with whatever bytes were in the storage attribute of the other, same with 32, which in some cases turned out to be string vs pointer?
+
+[21:43] <timo1> string storage types counts:    MVM_STRING_GRAPHEME_32        45022    MVM_STRING_GRAPHEME_ASCII        44    MVM_STRING_GRAPHEME_8        186097    MVM_STRING_STRAND            173176    MVM_STRING_IN_SITU_8         658137    MVM_STRING_IN_SITU_32          2257
+
+[21:43] <timo1> this is the last gen2 collection during setting compilation, just adding the number of strings seen on the heap with each storage type
+
+[22:04] *** sena_kun left
+[22:13] <timo1> https://gist.github.com/timo/530e0e99bb6aefb6104db33345c8c0b2  looks kinda promising
+
+[22:28] <timo1> surprised to see that str_hash_demolish is so far up in allocations, like it's creating a large amount of entries in the "free at safepoint" linked list?
+
+[22:46] <timo1> i guess it's not such a huge amount in total
+
