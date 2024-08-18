@@ -1,0 +1,218 @@
+[00:01] <timo> MVM_nfg_is_concat_stable also takes a good chunk of time. i wonder if there's easy wins there that are also helpful outside of microbenchmarks
+
+[00:03] <timo> oops, because we use #ifdef instead of #if we have always had the null check at the start of MVM_gc_root_temp_push instead of turning it off when not desired for debugging
+
+[00:07] <timo> i'm slightly surprised that there are actually calls to MVM_gc_root_temp_push even though it's MVM_STATIC_INLINE
+
+[00:23] <MasterDuke> i was under the impression with modern compilers that one could only suggest to inline, not force it
+
+[00:26] <MasterDuke> with my changes mi_malloc and mi_free essentially disappear, but are 4.3% and 3.4% respectively without
+
+[00:28] <MasterDuke> huh, why can't i annotate functions in perf? `Couldn't annotate MVM_nfg_is_concat_stable: Internal error: Invalid -1 error code`. never seen that before
+
+[00:35] <MasterDuke> why isn't it inlining MVM_nfg_crlf_grapheme!! that's just `return tc->instance->nfg->crlf_grapheme;`
+
+[00:37] <MasterDuke> oh, and `src/strings/siphash/csiphash.h:37:#define MVM_STATIC_INLINE static` is the only definition of MVM_STATIC_INLINE?
+
+[00:44] <MasterDuke> marking MVM_unicode_relative_ccc and MVM_nfg_crlf_grapheme as inline drops the time for 10m iterations down to ~0.39s and the instruction count for 1m iterations down to ~753m
+
+[01:26] <MasterDuke> we don't have anything else with just a plain `inline` annotation, but it definitely helps runtime
+
+[01:27] <MasterDuke> at least for that micro-benchmark
+
+[01:51] <MasterDuke> we spend a lot of time in MVM_disp_program_run when building rakudo
+
+[03:09] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #1829: Fast path for concatenating two in_situ_8 strings
+
+[03:09] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1829
+
+[03:15] *** vrurg joined
+[03:16] *** vrurg_ left
+[03:34] *** vrurg left
+[03:34] *** vrurg joined
+[07:11] *** sena_kun joined
+[08:15] <timo> yeah, disp programs do a lot of work, so it makes sense it'd be hot
+
+[08:17] <timo> some dispatch programs are compiled down to moar bytecode as part of spesh, you'll see them in spesh log output, it's mostly guards and sp_*get_* operations and whatnot
+
+[08:17] <timo> could be interesting to get statistics of which dispatch program runs how often and for how much time
+
+[08:17] <timo> or even from where it's called most often
+
+[08:34] <Geth> ¦ MoarVM/main: f1108304ae | MasterDuke17++ (committed using GitHub Web editor) | src/strings/ops.c
+
+[08:34] <Geth> ¦ MoarVM/main: Fast path for concatenating two in_situ_8 strings
+
+[08:34] <Geth> ¦ MoarVM/main: 
+
+[08:34] <Geth> ¦ MoarVM/main: This happens pretty frequently when building Rakudo (~650k times), so
+
+[08:34] <Geth> ¦ MoarVM/main: adding a check for it turns out to be beneficial.
+
+[08:34] <Geth> ¦ MoarVM/main: review: https://github.com/MoarVM/MoarVM/commit/f1108304ae
+
+[08:42] <timo> MVM_STATIC_INLINE is supposed to be defined in config.h or something like that? the build system figures out what the used compiler needs it to look like
+
+[08:44] <timo> the define for MVM_STATIC_INLINE in csiphash.h seems incorrect, but at least harmless since it only does it if MVM_STATIC_INLINE is not defined yet
+
+[08:44] <timo> you probably didn't find the one in config.h because it's in .gitignore since it is not meant to be checked in, and many tools don't show search results in such files
+
+[08:50] <Geth> ¦ MoarVM/main: 39b9b88c83 | (Timo Paulssen)++ | src/gc/roots.h
+
+[08:50] <Geth> ¦ MoarVM/main: fix check for root debug mode
+
+[08:50] <Geth> ¦ MoarVM/main: 
+
+[08:50] <Geth> ¦ MoarVM/main: We used #ifdef here even though we unconditionally define
+
+[08:50] <Geth> ¦ MoarVM/main: the symbol further up, but we set it to 0 by default. However,
+
+[08:50] <Geth> ¦ MoarVM/main: the 0 we set it to makes it defined, so we accidentally were
+
+[08:50] <Geth> ¦ MoarVM/main: building the debug check for temp roots all the time
+
+[08:50] <Geth> ¦ MoarVM/main: review: https://github.com/MoarVM/MoarVM/commit/39b9b88c83
+
+[08:52] <lizmat> would that have performance effects, timo ?
+
+[08:52] <timo> this last one? yes it would.
+
+[08:52] <timo> probably not huge, though
+
+[08:52] <lizmat> ok, will have CI run through it and then bump
+
+[08:53] <timo> it'll make a bigger difference on something like MD's last microbenchmark, which spends a very large percentage in a function that pushes multiple temp roots every time (MVM_string_concatenate), and less in "real code" where lots of stuff happens outside of such functions
+
+[08:55] <lizmat> well, MD's last fix ate about .5 second of stage parse of the core.c setting for me
+
+[08:55] <lizmat> I'll take every .5 second there, as I tend to do that a *lot*
+
+[08:55] <timo> you mean improved the time?
+
+[08:55] *** sena_kun left
+[08:57] <timo> that's pretty great
+
+[08:58] <timo> i don't expect the temp root push fix to give anything remotely close to that
+
+[09:39] <lizmat> hmmm looks like it breaks all CI tests ?
+
+[09:40] <lizmat> ahhh... caused by rakudo breakage
+
+[09:52] <lizmat> yeah, looks like... restarting all CI to make sure
+
+[10:13] <lizmat> yeah.. more like .05 second improvement by the looks of it, and hat
+
+[10:13] <lizmat> *that's well within noise levels
+
+[10:26] *** MasterDuke left
+[11:29] <timo> after:       sp_runcfunc_o    r8(12),  r17(7), callsite(0x45bf44551a0, 3 arg, 3 pos, nonflattening, interned) - 'dispatcher_drop_n_args_impl'
+
+[11:30] <timo> before:       sp_runcfunc_o     r1(2),  r28(0), liti64(5903873283424),   r0(2),   r6(1)
+
+[12:43] *** patrickb left
+[12:44] *** patrickb joined
+[12:58] <lizmat> and yet another Rakudo Weekly News hits the Net: https://rakudoweekly.blog/2024/08/05/2024-32-de-python/
+
+[13:14] <jdv> wow, quite early.  going for a longer ride?
+
+[13:15] <lizmat> hehe... sadly, no...  just other things I'm working on that need quality time today, and the Weekly inbetween would affect the quality of the remaining time  :-)
+
+[13:25] <jdv> its been terrible weather for riding here, also sadly.  Haven't been out much at all.
+
+[13:28] <lizmat> well, I understand Debby is going to drop 470mm of rain in the coming days in some places...
+
+[13:46] <timo> ok so we have an optimization that turns a "get slurpy args" into "fastcreate a hash, then directly bind the arguments by their name into the hash"
+
+[13:47] <timo> mostly, the next thing that happens in the code is checking for the number of elements in the hash and then branching
+
+[13:47] <timo> i now have a piece of code that can give a constant result of 0 for elems if nothing is bound into the freshly created hash, eliminating a branch and the BBs that follow it in that case
+
+[13:48] <timo> making it return the correct elems even when stuff is bound into it would also be possible with a bit more work
+
+[13:49] <timo> slurpy named args*
+
+[13:55] <timo> and the award for most elems eliminated goes to  src/Perl6/Actions.nqp:9480 with 22 eliminations
+
+[14:03] <timo> Frame size: 45814 bytes (5512 from inlined frames) Specialization took 100550us (total 119637us) JIT was successful and compilation took 12983us Bytecode size: 148668 byte  last BB: 912
+
+[14:03] <timo> Frame size: 44082 bytes (3860 from inlined frames) Specialization took  99936us (total 119158us) JIT was successful and compilation took 12802us Bytecode size: 142081 byte  last BB: 893
+
+[14:54] <timo> 38,851.92 msec task-clock / 39,347.00 msec task-clock hmmm
+
+[14:55] <timo> 208,480,312,092      cycles    58,528,061,857      stalled-cycles-frontend
+
+[14:55] <timo> 213,014,411,336      cycles    59,423,848,534      stalled-cycles-frontend
+
+[14:56] <timo> that was with the optimizations in the first line, without the optimizations in the second line
+
+[14:57] <lizmat> so that'd be just under 2% improvement?
+
+[15:03] <timo> with a +/- of 0.4s on the improved one and 0.1s on the unimproved one, somehow
+
+[15:11] <timo> i think sp_boolify_iter* are no longer used anywhere
+
+[15:15] * timo runs with a few more optimization thingies, 30 repeats, and takes a nap
+
+[15:20] <[Coke]> timo++
+
+[15:24] *** vrurg_ joined
+[15:25] *** vrurg__ joined
+[15:27] *** vrurg left
+[15:29] *** vrurg_ left
+[16:55] *** lizmat_ joined
+[17:00] *** lizmat left
+[17:26] <timo> 37.664 +- 0.117 seconds time elapsed  ( +-  0.31% )
+
+[17:26] <timo> 38.424 +- 0.117 seconds time elapsed  ( +-  0.30% )
+
+[17:29] <timo> i dunno, it looks like an actual improvement
+
+[17:36] *** sena_kun joined
+[18:10] <Geth> ¦ MoarVM/runcy_funcy_optimizations: a9e08475b8 | (Timo Paulssen)++ | 3 files
+
+[18:10] <Geth> ¦ MoarVM/runcy_funcy_optimizations: optimize some runcfunc into moar operations
+
+[18:10] <Geth> ¦ MoarVM/runcy_funcy_optimizations: 
+
+[18:10] <Geth> ¦ MoarVM/runcy_funcy_optimizations: those can then be further optimized, for example boolify_boxed_int
+
+[18:10] <Geth> ¦ MoarVM/runcy_funcy_optimizations: to unbox_i that then becomes to sp_get_i64 or maybe a set from the
+
+[18:10] <Geth> ¦ MoarVM/runcy_funcy_optimizations: original source that boxed the object in the first place.
+
+[18:10] <Geth> ¦ MoarVM/runcy_funcy_optimizations: review: https://github.com/MoarVM/MoarVM/commit/a9e08475b8
+
+[18:10] <Geth> ¦ MoarVM/runcy_funcy_optimizations: 55c6002b30 | (Timo Paulssen)++ | src/spesh/optimize.c
+
+[18:10] <Geth> ¦ MoarVM/runcy_funcy_optimizations: optimize elems in rare cases
+
+[18:10] <Geth> ¦ MoarVM/runcy_funcy_optimizations: 
+
+[18:10] <Geth> ¦ MoarVM/runcy_funcy_optimizations: such as when we have the create or fastcreate for the elems directly
+
+[18:11] <Geth> ¦ MoarVM/runcy_funcy_optimizations: in front of it and nothing changes it. This happens when we optimize
+
+[18:11] <Geth> ¦ MoarVM/runcy_funcy_optimizations: a "get slurpy named arguments" and we know what arguments there
+
+[18:11] <Geth> ¦ MoarVM/runcy_funcy_optimizations: are.
+
+[18:11] <Geth> ¦ MoarVM/runcy_funcy_optimizations: 
+
+[18:11] <Geth> ¦ MoarVM/runcy_funcy_optimizations: Currently we only optimize elems to a constant 0 if nothing is put
+
+[18:11] <Geth> ¦ MoarVM/runcy_funcy_optimizations: into the object, but in the future we could get the exact number.
+
+[18:11] <Geth> ¦ MoarVM/runcy_funcy_optimizations: review: https://github.com/MoarVM/MoarVM/commit/55c6002b30
+
+[18:11] <timo> lizmat_: you could give this branch a try and see what it does to performance
+
+[18:28] *** lizmat_ left
+[18:28] *** lizmat joined
+[19:26] *** vrurg__ left
+[19:27] *** vrurg joined
+[20:55] *** Altai-man joined
+[20:57] *** sena_kun left
+[21:22] *** Altai-man left
+[21:57] *** MasterDuke joined
+[21:59] <MasterDuke> timo: i must admit i didn't follow your before/after earlier. before had some large literal value and after had a dispatcher call?
+

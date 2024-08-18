@@ -1,0 +1,346 @@
+[01:34] *** [Coke] left
+[01:56] *** [Coke] joined
+[02:19] <MasterDuke> nice
+
+[08:31] *** sena_kun joined
+[12:18] <lizmat> FWIW, it appears I got a ===SORRY!=== Error while compiling /Users/liz/Github/RAKU/Needle-Compile/t/01-basic.rakutest
+
+[12:18] <lizmat> MoarVM panic: Internal error: invalid thread ID -1913322176 in GC work pass
+
+[12:18] <lizmat> more often recently
+
+[12:19] <lizmat> wonder whether the in-situ string changes are related to it somehow, e.g. by tickling an underlying bug
+
+[12:31] <nine> I have struggled with segfaults due to NULL pointers in objects collected by the GC recently. Tried finding any recent change responsible for that but it was not caused by anything since 2024.03
+
+[12:36] <nine> Except, maybe it was! The one change I couldn't easily revert without recompiling rakudo and losing my semi-reproducible test case was ab5tract's commits on spawn result and file handle mode.
+
+[12:37] <nine> And lo and behold, commit f1173cb26a19ecee14c0577931cd1ab8a3bbe0bd "Attach the spawn_result when it contains an error code" does look fishy when looked at from a GC correctness perspective.
+
+[12:37] <linkable6> (2024-05-26) https://github.com/MoarVM/MoarVM/commit/f1173cb26a Attach the spawn_result when it contains an error code
+
+[12:54] <ab5tract> Dang :(
+
+[12:55] <ab5tract> IIRC that change was reviewed pretty thoroughly. Since I clearly don’t have a grasp on it, would you mind explaining what makes it fishy WRT to GC?
+
+[13:20] <nine> MVM_repr_box_int can allocate. Thus arr created in the same block needs to be anchored somewhere, lest the GC thinks it's unreferenced and collects it or even if it doesn't, it will move the object, causing that local pointer to become out of date.
+
+[13:21] <nine> My favourite fix would be:
+
+[13:21] <nine> -                    MVM_repr_push_o(tc, arr, MVM_repr_box_int(tc, tc->instance->boot_types.BOOTInt, spawn_result)); MVM_repr_push_o(tc, ((MVMAsyncTask *)async_task)->body.queue, arr);
+
+[13:21] <nine> +                    // Add spawn result only after arr got pushed to the queue to anchor it for the GC
+
+[13:21] <nine> +                    MVM_repr_push_o(tc, arr, MVM_repr_box_int(tc, tc->instance->boot_types.BOOTInt, spawn_result));
+
+[13:22] <nine> But I'm not 100 % sure if that's correct. Depends on whether it's ok to push an incomplete array to the task queue. No problem if there's only one thread accessing that queue but may be a problem if a different thread is consuming that queue.
+
+[13:55] <timo> nine, is that gcc plugin that looks for missing gc roots still runnable, or did it rot too much? should we perhaps make that part of our CI?
+
+[14:06] <nine> I guess it's still ok. It just needs integration into the build system and the hard coded list of allocators could maybe use an update.
+
+[14:14] <Geth> ¦ MoarVM/main: c2ca1c0088 | (Timo Paulssen)++ | .gitignore
+
+[14:14] <Geth> ¦ MoarVM/main: add .su files and .cache folder to gitignore
+
+[14:14] <Geth> ¦ MoarVM/main: review: https://github.com/MoarVM/MoarVM/commit/c2ca1c0088
+
+[14:30] <ab5tract> Ah, I see, makes sense
+
+[14:30] <ab5tract> Do you want me to push a fix or is already in your line of sight?
+
+[14:51] <nine> Well someone would need to affirm that my proposed fix is ok
+
+[14:52] <lizmat> fwiw, jnthn is offline for at least another week: holiday afk!
+
+[15:18] <[Coke]> good for him, hope it's something fun!
+
+[15:20] <lizmat> knowing jnthn I'm sure he and Iryna will
+
+[16:43] *** japhb_ joined
+[16:47] *** jnthn left
+[16:47] *** japhb left
+[16:47] *** ingy left
+[16:47] *** timo left
+[16:48] *** jnthn joined
+[16:48] *** timo joined
+[16:55] <timo> does something speak against just adding one more MVMROOT?
+
+[16:56] <timo> i think "only ever have valid objects in the task queue" sounds like a reasonable default?
+
+[16:58] *** ingy joined
+[17:32] <nine> Yeah, if in doubt, an MVMROOT would be preferable
+
+[17:36] <timo> i'm still wishing for a way for our MVMROOT to not cause trouble with debuggers, since the whole MVMROOT line plus its code body is supposed to be considered a single "line of code"
+
+[17:38] <timo> gcc offers a variable annotation called "cleanup (cleanup_function)" which "runs a function when the variable goes out of scope". it "can only be applied to auto function scope variables", i don't know what that means?
+
+[17:39] <timo> clang also supports this attribute with the same semantics it looks like
+
+[17:41] <timo> probably no chance to have it in MSVC though
+
+[17:43] <timo> oh ... hmm ... i have a *terrible* idea ...
+
+[17:43] <timo> oh, this is *evil*
+
+[17:43] <nine> Oh noes! Hide the children!
+
+[17:44] <timo> ok how terrible does it sound to no longer be able to "continue" or "break" inside the body of an MVMROOT block?
+
+[17:46] <nine> That may suck
+
+[17:47] <timo> if we had a way to warn if that happens ...
+
+[17:48] <timo> hey wait a minute
+
+[17:49] <timo> MVMROOT already puts a do { ... } while(0) around your block, so continue and break already don't work when used inside MVMROOT
+
+[17:49] <timo> so there is not even a regression there
+
+[17:54] <timo> yeah this looks usable
+
+[18:02] <nine> Oh you meant the C statements, not gdb commands!
+
+[18:04] <timo> yes right
+
+[18:16] <timo> do you know a quick and easy way to find every MVMROOT and, crucially, the exact }); that goes along with it?
+
+[18:16] <nine> don't think so
+
+[18:17] <timo> ok i'll go with the trivial solution and fix any trouble by hand
+
+[19:50] <Geth> ¦ MoarVM/coolroot: 53a77fd383 | (Timo Paulssen)++ | 97 files
+
+[19:50] <Geth> ¦ MoarVM/coolroot: An alternative to MVMROOT macros
+
+[19:50] <Geth> ¦ MoarVM/coolroot: 
+
+[19:50] <Geth> ¦ MoarVM/coolroot: where we don't have to put the code block inside the macro's argument
+
+[19:50] <Geth> ¦ MoarVM/coolroot: list, which means the whole block is no longer considered a single
+
+[19:50] <Geth> ¦ MoarVM/coolroot: statement by tools like gdb, profilers, and so on.
+
+[19:50] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/53a77fd383
+
+[19:50] <timo> check it out!
+
+[19:51] <timo> i'll try to put all the temp root pushes into the for (...) arguments, but the first attempt to do that didn't work in a mysterious way
+
+[19:59] <timo> grrr, the syntax of for forces me to put an assignment, but i'm not allowed to just assign from a void function without an error
+
+[20:00] <timo> and now all these "unused variable" errors for my dummy variables that i was forced to create olololo
+
+[20:11] <timo> ugh i hate this :) :) :) :) :)
+
+[20:30] <Geth> ¦ MoarVM/coolroot: e963b52b4d | (Timo Paulssen)++ | src/gc/roots.h
+
+[20:30] <Geth> ¦ MoarVM/coolroot: Fix the coolroot macro to expand to just one thing
+
+[20:30] <Geth> ¦ MoarVM/coolroot: 
+
+[20:30] <Geth> ¦ MoarVM/coolroot: Prevents unexpected results when you put it on, for example, the
+
+[20:30] <Geth> ¦ MoarVM/coolroot: line right after an if, for, or while without curly braces
+
+[20:30] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/e963b52b4d
+
+[20:31] <timo> i actually made it work. it's not pretty to look at though.
+
+[20:33] <timo> the optimizer better make all these silly variables completely free ...
+
+[20:44] <MasterDuke> you're a braver man than i with that macro work
+
+[20:45] <Geth> ¦ MoarVM/coolroot: a00e6101d5 | (Timo Paulssen)++ | src/gc/roots.h
+
+[20:45] <Geth> ¦ MoarVM/coolroot: Fix copy-pasto in coolroot macros
+
+[20:45] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/a00e6101d5
+
+[20:46] <timo> haha, it just means that the pain was getting sufficiently big to make me push through the nonsense
+
+[20:46] <timo> sure hope the name COOLROOT doesn't stay around for like 10 years even though i explicitly made it up to be unreasonable to keep the same
+
+[20:52] <lizmat> .oO( HOTROD )
+
+[20:53] <timo> a trodder of hos?
+
+[20:54] <timo> if we use MVMROOT* for the new impl, anything that uses MVMROOT in its own code that relies on it will break. i don't think that's anything apart from rakudo's extops? not sure if MVMROOT can be considered public API?
+
+[20:55] <MasterDuke> greppable6: MVMROOT
+
+[20:55] <greppable6> MasterDuke, Found nothing!
+
+[20:55] <MasterDuke> it's corpus hasn't been updated in years, but that's at least a good sign
+
+[21:01] <lizmat> rak MVMROOT -n
+
+[21:01] <lizmat> no entries
+
+[21:01] <lizmat> with -n being: --paths=~/Github/nqp/src
+
+[21:02] <MasterDuke> only one use in rakudo
+
+[21:02] <timo> https://gist.github.com/timo/297e2a5844ee1ebbec9524987869f10e there's also the ad-hoc grammar i wrote to replace MVMROOT with COOLROOT in moarvm's source without b0rking on things like nested MVMROOTs and comments and strings and such
+
+[21:03] <timo> so, other names? WITH_ROOTS? WITH_ROOTED? ROOTED? with MVM in front? ROOT_BLOCK?
+
+[21:03] <timo> or i guess we steal MVMROOT
+
+[21:04] <MasterDuke> one use in Inline::Perl6
+
+[21:05] <MasterDuke> none in Inline::Perl5 or Inline::Python
+
+[21:05] <MasterDuke> looks like it wouldn't be too much trouble to just replace MVMROOT
+
+[21:07] <lizmat> nine might have some idea bout Inline::Perl6 though
+
+[21:08] <Geth> ¦ MoarVM/coolroot: 39419ac5c6 | (Timo Paulssen)++ | 98 files
+
+[21:08] <Geth> ¦ MoarVM/coolroot: COOLROOT is now called MVMROOT.
+
+[21:08] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/39419ac5c6
+
+[21:08] <timo> for the time you're not sure which kind of MVMROOT macro the moar you're compiling against has, you can just write the MVM_gc_root_temp_push and _pop function calls by hand
+
+[21:22] <Geth> ¦ MoarVM: timo++ created pull request #1828: Replace MVMROOT(... {...}); with MVMROOT(...) {...}
+
+[21:22] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1828
+
+[21:24] <timo> the pull request also has a screenshot of something i came up with to give helpful errors when someone puts the code block inside instead of outside the MVMROOT
+
+[21:24] <MasterDuke> fyi, it's used in Inline::Perl6, not 5
+
+[21:25] <timo> oops :)
+
+[21:25] <MasterDuke> which i suspect is not used as much
+
+[21:25] <timo> i edited the text to put it in
+
+[21:28] *** sena_kun left
+[21:29] <MasterDuke> could you add a temp commit that modifies tools/build/checkout-repos-for-test.pl or azure-pipelines.yml (don't remember exactly if either of those are the correct locations) so rakudo builds moarvm from the branch?
+
+[21:29] <MasterDuke> otoh, maybe just building moarvm is proof enough
+
+[21:31] <timo> maybe keeping MVMROOT as before around with a new name like MVMROOT_OLD would be good so replacing the code doesn't require any changes that go beyond a single line
+
+[21:35] <Geth> ¦ MoarVM/coolroot: 4a82aa4b6c | (Timo Paulssen)++ | src/gc/roots.h
+
+[21:35] <Geth> ¦ MoarVM/coolroot: Anticipate errors from the MVMROOT change
+
+[21:35] <Geth> ¦ MoarVM/coolroot: 
+
+[21:35] <Geth> ¦ MoarVM/coolroot: and give a direct hint for how to fix it
+
+[21:35] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/4a82aa4b6c
+
+[21:35] <timo> this also puts MVMROOT*_OLD in
+
+[21:37] <MasterDuke> i don't see the *_OLD?
+
+[21:38] <Geth> ¦ MoarVM/coolroot: b6a554a857 | (Timo Paulssen)++ | src/gc/roots.h
+
+[21:38] <Geth> ¦ MoarVM/coolroot: Put MVMROOT*_OLD macros back in
+
+[21:38] <Geth> ¦ MoarVM/coolroot: 
+
+[21:38] <Geth> ¦ MoarVM/coolroot: Because it's much easier to search&replace just the
+
+[21:38] <Geth> ¦ MoarVM/coolroot: name of the macro, otherwise you have to also chase
+
+[21:38] <Geth> ¦ MoarVM/coolroot: the closing brace and its parenthesis.
+
+[21:38] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/b6a554a857
+
+[21:38] <timo> that should be better
+
+[21:40] <timo> uhhh i'm not sure how i could find output from the azure builds
+
+[21:41] <MasterDuke> https://dev.azure.com/MoarVM/MoarVM/_build/results?buildId=1481&view=results
+
+[21:41] <timo> i guess i have to wait for it to fail again before i get to see any logs?
+
+[21:41] <timo> oh there is one!
+
+[21:41] <MasterDuke> you can click on the jobs
+
+[21:48] <Geth> ¦ MoarVM/coolroot: 877dfcddbe | (Timo Paulssen)++ | azure-pipelines.yml
+
+[21:48] <Geth> ¦ MoarVM/coolroot: Try building a coolroot rakudo on azure for now
+
+[21:48] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/877dfcddbe
+
+[21:49] <timo> let's see if that does it
+
+[21:52] <timo> > error: pathspec 'coolroot' did not match any file(s) known to git
+
+[21:52] <timo> ehhhh
+
+[21:53] <MasterDuke> i think github caches some things. so the moarvm pr might not see the new rakudo
+
+[21:53] <Geth> ¦ MoarVM/coolroot: e5722e2274 | (Timo Paulssen)++ | azure-pipelines.yml
+
+[21:53] <Geth> ¦ MoarVM/coolroot: Try building a coolroot rakudo on azure for now
+
+[21:53] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/e5722e2274
+
+[21:53] <timo> no there's actually something further up that is meant for this purpose i think
+
+[21:54] <MasterDuke> ah yeah, that's what i was thinking of
+
+[21:56] <timo> not like this clearly
+
+[21:57] <timo> i guess it has to be rev-coolroot
+
+[21:58] <timo> no it needs a - in there somewhere, it has to be a full long name
+
+[21:59] <Geth> ¦ MoarVM/coolroot: 1b7df6fe41 | (Timo Paulssen)++ | azure-pipelines.yml
+
+[21:59] <Geth> ¦ MoarVM/coolroot: Try building a coolroot rakudo on azure for now
+
+[21:59] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/1b7df6fe41
+
+[22:03] <timo> oh, the - is supposed to give a http url to check out from
+
+[22:04] <Geth> ¦ MoarVM/coolroot: 4e0d60d357 | (Timo Paulssen)++ | azure-pipelines.yml
+
+[22:04] <Geth> ¦ MoarVM/coolroot: Try building a coolroot rakudo on azure for now
+
+[22:04] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/4e0d60d357
+
+[22:11] <timo> looks promising
+
+[22:12] <timo> so what exactly are the _reloc targets? do we still need them?
+
+[22:15] <MasterDuke> builds a relocatable rakudo
+
+[22:47] <MasterDuke> ugh, figuring out all the steps to concat two strings into an in-situ and not be less efficient than before is annoying
+
+[22:51] <MasterDuke> though it does get a lot simpler if i just ignore strands for now...
+
+[22:58] <timo> ok cool it's all green
+
+[22:59] <MasterDuke> uh, building rakudo there were 650k in_situ_8 + in_situ_8 string concats that i now have as just two memcpy's into the resulting in_situ_8
+
+[22:59] <MasterDuke> i didn't expect that many
+
+[23:00] <MasterDuke> and nice for the macro work. i wonder how that will change the perf results i look at occasionally?
+
+[23:01] <timo> i hope it'll give more helpful outputs
+
+[23:01] <MasterDuke> good deal
+
+[23:02] <timo> i hope it also gives better results for things like heaptrack
+
+[23:13] <MasterDuke> `nqp-m -e 'my str $a := "foo"; my str $b := "bar"; my str $c; my int $i := 0; while $i++ < 1_000_000 { $c := nqp::concat($a, $b); }; print($c); print("\n")'` goes from ~830k instructions to ~771k instructions. wall clock is pretty much the same. heaptrack reports 1m fewer allocation functions
+
+[23:13] <MasterDuke> oh, ~830m and ~771m instructions, not k
+
+[23:14] <MasterDuke> afk for a while, hopefully will PR at least this minimal change later tonight
+
+[23:16] <MasterDuke> if i up the repetitions to 10m, the time difference is more pronounced, ~0.47s to ~0.42s
+
+[23:57] <timo> i haven't tried your branch yet, but when i perf record -g -F 100000 i get 5.6% time spent in mi_free; i assume it's a whole lot less with your branch
+
+[23:58] <timo> i wonder if we can get a bit better performance out of the temp root pushing if we do multiple at once, since it does some checks inside like "does the temp root array need to be grown?" with a shortcut for when it's less than the static minimum size
+
