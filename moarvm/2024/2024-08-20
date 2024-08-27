@@ -1,0 +1,551 @@
+[01:00] <timo> sounds like we'd want a syscall for determining if an exception is resumable without actually resuming it, yeah
+
+[01:11] *** kjp left
+[01:13] *** kjp joined
+[01:14] *** kjp left
+[01:14] *** kjp joined
+[01:48] <MasterDuke> timo: i checked and @fates where that patch is never has more than 5 elems. and switching to using last instead of $EMPTY isn't any faster (in a microbenchmark at least)
+
+[01:48] <MasterDuke> but then again, i just noticed and why is it using pop? just indexing might be a very tiny bit faster
+
+[02:03] <MasterDuke> huh. callgrind reports that `nqp -e 'my $a; my $i := 0; while $i++ < 500_000 { my $b := nqp::list_i(0, 1, 2, 3, 4); my int $j := nqp::elems($b); while $j-- >= 0 { $a := nqp::atpos_i($b, $j); last if $a == 1 } }; say($a)'` is ~929m instructions, but `nqp -e 'my $a; my $i := 0; while $i++ < 500_000 { my $b := nqp::list_i(0, 1, 2, 3, 4); while
+
+[02:03] <MasterDuke> nqp::elems($b) { $a := nqp::pop_i($b); last if $a == 1 } }; say($a)'` is only ~870m instructions (both with MVM_SPESH_BLOCKING=1)
+
+[02:03] <MasterDuke> wasn't expecting that
+
+[02:39] <timo> in the spesh log, does one have noticeably larger jit bytecode? is there roughly the same difference with jit disabled?
+
+[02:44] <MasterDuke> with jit disabled, ~1.24b for pop version and ~1.44b for indexing version
+
+[02:49] <MasterDuke> 81716 total jit bytecode size for pop version and 82314 total jit bytecode size for indexing version
+
+[02:49] <timo> i do see some things that aren't optimal
+
+[02:51] <timo> so, i'm looking at the spesh log for the version that uses pop right now. r9 is the register that has the inner array in it, so $b
+
+[02:52] <timo> going into the loop we have r9 version 4 with its known type
+
+[02:53] <timo> in the first block where the jump back meets up with the step into the loop we merge register versions 4 and 6 together into version 5, and we don't know what the type of version 6 is, so the resulting facts for the new version 5 is "dunno"
+
+[02:54] <timo> the next block we merge versions 0, 5, and 6 together into version 6, and version 0 i'm not sure where it comes from actually. it has nothing known about it at all, and there's no writer to it anywhere either
+
+[02:54] <MasterDuke> ha
+
+[02:54] <timo> so i'm not sure if this is "the" problem, but the version 0 of register 9 is definitely not helpful here
+
+[02:55] <timo> so inside the loop all our reprops, which are elems and pop_i, are not even devirtualized
+
+[02:57] <timo> on the other version we have the inner array in register 9 as well, funnily enough
+
+[02:58] <MasterDuke> so the pop version is not well optimized, but it's still faster...
+
+[02:58] <timo> we go into the loop with version 4 (known type), version 5, and version 6. version 6 is created later from merging together versions 0, 5, and 6, and here's the odd version 0 of the register coming in again
+
+[02:58] <timo> if this were fixed properly, both versions would benefit at least a little bit
+
+[02:59] <timo> one more thing about the version with the counter is that we're boxing the integer and not skipping the unbox, so even though we optimize the unbox_i into a low-level sp_get_i64, the overhead from having to box integers is still there
+
+[02:59] <timo> i imagine it hits the int cache every time, though
+
+[03:04] <MasterDuke> huh. the difference is smaller if both use list_n, but the total instructions for each increases
+
+[03:05] <timo> do we maybe lack some optimization for num arrays?
+
+[03:05] <timo> like, somewhere someone just didn't bother to write out the case for floats and doubles?
+
+[03:08] <MasterDuke> if only there was a utility to easily diff spesh logs...
+
+[03:11] <MasterDuke> _n version spends a bunch of time in coerce_boxed_num_to_int_impl
+
+[03:12] <MasterDuke> huh. even if i change it to `== 1.0`
+
+[03:13] <timo> https://gist.github.com/timo/8376214a9b7bb6d3cc213bfae03fe9ce take this early version of comparify_jits and run with it if you like, i have to go to bed
+
+[03:14] <timo> be aware it will fill your working directory with many files
+
+[03:15] <MasterDuke> ah, `my num $a;` plus using num literals drops it back down to the same as the _i version
+
+[03:16] <MasterDuke> i'm off to bed too, i'll check it out tomorrow
+
+[03:16] <timo> ok good knight
+
+[03:16] <MasterDuke> later
+
+[03:17] <timo> the most likely explanation i have for the version 0 of the register coming into play is that BB 0 becomes a predecessor of every block that is part of a frame handler, which is necessary for some reason. and in BB 0, which is before every actual op, of course all registers have version 0
+
+[03:18] <timo> not sure if we rely upon this behaviour to prevent us from optimizing stuff we can't prove stuff about
+
+[08:24] *** MasterDuke left
+[09:03] <jnthn> iirc, it was to avoid having to initialize object registers to VMNull; write a prelude that nulls every register, and then all those that are initialized reliably before read leave the nulling out instructions with zero usages, and they're thus removed as part of the usual dead instruction elimination
+
+[09:45] <lizmat> I have a fairly reproducible case of Moar crashing using App::Rak
+
+[09:51] <lizmat> I've collected a few of the lldb outputs in: https://gist.github.com/lizmat/8f8c3413b5fd65b06b04fe9c85c72b9d
+
+[09:51] <lizmat> hope they'll make sense to someone other than: memory corrupted
+
+[09:55] <lizmat> I have a hunch this is somehow related to the ConcBlockingQueue repr
+
+[09:55] <lizmat> ParaSeq uses quite a few of them...  and it feels less stable than .hyper
+
+[09:56] <lizmat> which only uses one of them, if I remember correctly
+
+[10:48] <timo> that just looks like memory corruption to me :(
+
+[10:49] <lizmat> also the almost last one?  if (REPR(new_addr_obj)->gc_mark)  ?
+
+[10:51] <timo> yeah, that'd likely be the st pointer being wrong
+
+[10:51] <timo> since REPR(o) is like o->header.st->repr or something like that
+
+[10:51] <lizmat> check
+
+[10:52] <timo> could also be the STable has been corrupted
+
+[10:52] <timo> oh actually
+
+[10:52] <timo> it says the bad address is 0x10
+
+[10:52] <timo> so that's an offset to a null pointer
+
+[10:54] <timo> that offset fits the st pointer in MVMObject
+
+[10:54] <timo> have you looked at the crossthreadwritelog? i think it's very noisy and i haven't used it often, so not sure how useful it will be to you
+
+[10:55] <timo> it might even be bit rotted a little bit and need some more recent additions ported to it
+
+[11:29] <lizmat> no I haven't, how do I activate that ?
+
+[11:51] <timo> it's an env var
+
+[11:51] <timo>     MVM_CROSS_THREAD_WRITE_LOG  Log unprotected cross-thread object writes to stderr
+
+[11:52] * lizmat tries
+
+[11:53] <lizmat> so ideally that should be empty, right?
+
+[11:54] <lizmat> a lot of: Thread 7 bound to an attribute of an object (ThreadPoolScheduler::GeneralWorker) allocated by thread 1
+
+[11:58] <lizmat> this is updating stats of total number of runs donne
+
+[11:58] <lizmat> which is a native int attribute
+
+[11:59] <lizmat> that was $!stats, similar for $!working
+
+[12:00] <lizmat> Thread 7 bound to an attribute of an object (IO::Handle) allocated by thread 1
+
+[12:00] <lizmat> is more interesting maybe
+
+[12:01] <lizmat> resetting either $!PIO or $!decoder
+
+[12:01] <timo> there are valid reasons to write across threads, so it's expected for it to not be empty
+
+[12:01] <lizmat> so, is a cross-thread write to a native attribute safe or not ?
+
+[12:02] <lizmat> in the case of $!total, it feels it should be an atomic if we want to trust the stats
+
+[12:03] <lizmat> also $!times-nothing-completed appears to be needing to be atomic
+
+[12:05] <lizmat> Thread 1 bound to a hash key of an object (BOOTHash) allocated by thread 4
+
+[12:05] <lizmat>    at src/Raku/ast/compunit.rakumod:421
+
+[12:07] <lizmat>         if !$!precompilation-mode
+
+[12:07] <lizmat>             && !$*INSIDE-EVAL
+
+[12:07] <lizmat>             && +(@*MODULES // []) == 0
+
+[12:07] <lizmat>             && (my $main := self.find-lexical('&MAIN'))
+
+[12:07] <lizmat> I'm not seeing a BOOTHash there?
+
+[12:07] <lizmat> nine ??
+
+[12:09] <lizmat> ah, probably $!live-decl-map{$name} // $!scope.find-generated-lexical($name) // Nil  in resolver.rakumod:1271
+
+[12:09] <lizmat> hmmm no, that wouldn't bind ?
+
+[12:11] <lizmat> it's basically from RakuAST::Node.EVAL
+
+[12:12] <lizmat> Thread 4 bound to an attribute of an object (Channel) allocated by thread 1
+
+[12:12] <lizmat>    at SETTING::src/core.c/Channel.rakumod:281
+
+[12:12] <nine> Maybe @*MODULES auto-vivifies in a hash where we store dynamic variables?
+
+[12:13] <nine> If those natives should be atomic depends on whether we prefer correctness over speed. If it's just statistical analysis feeding a heuristic decision we may be able to live with losing a few counts in races in favor of less book keeping overhead
+
+[12:14] <lizmat> indeed... but are we sure that cross-thread writes to native int attributes are safe?
+
+[12:14] <lizmat> the Channel one is about closing the channel
+
+[12:16] <lizmat> Thread 4 bound to an attribute of an object (Rakudo::Internals::SupplySequencer) allocated by thread 1
+
+[12:16] <lizmat> also a write to a native int
+
+[12:16] <lizmat> attribute
+
+[12:19] <lizmat> Thread 4 bound to an attribute of an object (Rakudo::Internals::SupplySequencer) allocated by thread 1
+
+[12:19] <lizmat>    at SETTING::src/core.c/Rakudo/Internals.rakumod:681
+
+[12:19] <lizmat> feels like an odd one, as the line in question is:
+
+[12:19] <lizmat>                 if $!buffer-start-seq == $!done-target {
+
+[12:19] <lizmat>                     &!on-completed();
+
+[12:19] <lizmat>                 }
+
+[12:20] <lizmat> both native ints, &!on-completed obviously not...  
+
+[12:20] <lizmat> but where does it bind there?
+
+[12:21] <lizmat> another interesting one:
+
+[12:21] <lizmat> Thread 4 shifted an object (BOOTArray) allocated by thread 1
+
+[12:21] <lizmat>    at SETTING::src/core.c/Rakudo/Internals.rakumod:678
+
+[12:21] <lizmat> &!on-data-ready(nqp::shift($!buffer))
+
+[12:21] <nine> Well if in doubt switching it to an atomic is certainly preferrable. Especially when the failure mode might be a deadlock or crash.
+
+[12:22] <lizmat> that last shift appears to be safe, as only executed inside a protect block
+
+[12:24] <lizmat> ok, that's it for this log
+
+[12:29] <lizmat> ok, so: raku -I. bin/rak lizmat -i --count-only --matches-only ../../REA/META.json 
+
+[12:29] <lizmat> crashes for me roughly 20% of the time
+
+[12:30] <lizmat> either zsh: segmentation fault or MoarVM panic: Internal error: zeroed target thread ID in work pass
+
+[12:30] <lizmat> with MVM_CROSS_THREAD_WRITE_LOG=1 I can not get it to crash
+
+[12:30] <lizmat> I guess Heisenberg applies  :-(
+
+[16:48] <timo> lizmat: sorry i was busy workworkworking all day
+
+[16:54] <timo> interesting, i'm zef installing --deps-only . in App-Rak and i'm getting two versions of ParaSeq installed
+
+[16:56] <timo> i guess i also want rak cloned locally to futz around with it if i need to
+
+[17:01] *** sena_kun joined
+[17:01] <lizmat> interesting...  hmmm
+
+[17:02] <lizmat> ah... I forgot to update JSON::Fast::Hyper...
+
+[17:02] <timo> i was looking for a way to have dependencies of a module shown, maybe even as a tree, but i can't get anything out of "zef depends" other than "Failed to resolve some missing dependencies" (with no details what exactly)
+
+[17:02] <timo> zef rdepends on 'App::Rak:ver<0.3.12>:auth<zef:lizmat>' gives me a few App::Rak::Complete entries at least, after like 40 seconds of full cpu usage %)
+
+[17:02] <lizmat> the raku.land page is very informative
+
+[17:08] <[Coke]> timo: https://raku.land/zef:coke/App::Zef-Deps ?
+
+[17:08] <timo> neat
+
+[17:08] <[Coke]> (which is just a front end for some zef stuff)
+
+[17:08] <timo> yes that's perfect
+
+[17:17] <[Coke]> oh good
+
+[17:19] <timo> oh
+
+[17:19] <timo> > Failed to resolve some missing dependencies (use e.g. --exclude="git" to skip)
+
+[17:19] <timo> this is the error message i was getting
+
+[17:19] <timo> i thought the "git" was just an example
+
+[17:20] <timo> now i was able to see for myself that yes, ParaSeq 0.2.6+ is in rak, and ParaSeq:ver<0.2.5> is in JSON::Fast::Hyper
+
+[17:29] <[Coke]> which should *theoretically* work, yes?
+
+[17:52] <timo> yeah it should be no problem, and i don't think it's causing any trouble
+
+[17:57] <timo> got a little zef ticket out of it, just a minor thing though
+
+[17:57] <timo> i can't give it a label like "low priority" or so, i hope it's not annoying
+
+[17:57] <timo> wow, REA big huh
+
+[17:59] <timo> all the individual files in it are .tar.gz, i wonder if mumble-mumble not compressing them on that level will mumble-mumble give better results because different versions of the same module can be compressed as a whole when git makes its packfiles
+
+[18:01] <timo> lizmat: why can you use -i and i get a message that i'm supposed to use --ignorecase instead?
+
+[18:01] <timo> but i do get a segfault, so that's good progress
+
+[18:02] <timo> > Invalid value '1' for :degree on method hyper.
+
+[18:02] <timo> huh
+
+[18:04] <timo> i also get alternatingly 1072 matches and 1071 matches in 1 file, hehe.
+
+[18:05] <timo> so yeah something smells an awful lot like unsafe concurrency being used
+
+[18:12] <timo> is rak doing any automatic sensing of what degree it should use for hypers? i'm not sure why i have to run it with --degree=2 or higher if i want it to not error out with the "invalid value for :degree" error when recording with rr
+
+[18:12] <timo> actually i can pass --degree=1 just fine in the commandline and not get the error
+
+[18:24] <timo>   --num-cores=N              pretend to have N cores (rr will still
+
+[18:24] <timo> ^- this might be required then
+
+[18:25] <lizmat> rak takes cpucores - 1 by default
+
+[18:25] <timo> what gives me cpucores?
+
+[18:26] <lizmat> re 1072/1071  yeah, that's still something I don't understand, as the counting should be done in a threadsafe manner
+
+[18:26] <timo> do the splits not overlap or something?
+
+[18:26] <lizmat> they shouldn't
+
+[18:26] <lizmat> it's a JSON::Fast::Hyper file
+
+[18:27] <timo> ok
+
+[18:27] <lizmat> each top-level JSON is a single line
+
+[18:30] <timo> Floating point exception (core dumped)
+
+[18:30] <timo> whew
+
+[18:31] <timo> i even get 1070 results
+
+[18:31] <timo> well, it could be memory corruption messing with stuff
+
+[18:32] <lizmat> looks like 1071 is the current correct number
+
+[18:32] <lizmat> fg
+
+[18:35] <timo> ok, --num-cores=10 gives me 10 for Kernel.cputcores, so that part works at least. rak is still not crashing under "rr record"
+
+[18:35] <lizmat> well, that's the thing: also with MVM_CROSS_THREAD_WRITE_LOG=1 I could not get it to crash
+
+[18:36] <lizmat> so it feels very timing dependent
+
+[18:36] <timo> yeah, piping the stdout to something seems to cause a change as well
+
+[18:36] <timo> the -h flag to rr randomizes scheduling decisions, so that should theoretically do something as well
+
+[18:38] <timo> cool, turning spesh off keeps the crashyness
+
+[18:38] <timo> one less system to worry about
+
+[18:51] <timo> also, it's probably relevant that the crossthreadwritelog writes to standard error which usually means stdio.h which has some locking going on
+
+[18:52] <timo> and i imagine the writing out of the stack trace is also not very cheap
+
+[18:53] <timo> haha yeah 35% of time spent in fprintf, woof
+
+[18:54] <timo> i also got 1073 this time while using "perf record" :D
+
+[18:55] <lizmat> that I find weird: I can create a mental model of missing increments, but not of additional increments
+
+[18:55] <timo> have you gotten it to apparently infinite-loop yet?
+
+[18:55] <lizmat> yes, once today
+
+[18:56] <timo> wow those stacks be messed *up*
+
+[19:27] <lizmat> timo: I think I got a standalone version of something that does weird things
+
+[19:28] <timo> cool, that might help
+
+[19:28] <lizmat> https://gist.github.com/lizmat/d0f1eb60e77a7728bac5d291ba670daa
+
+[19:28] <lizmat> all is fine *until* the / lizmat / is introduced
+
+[19:29] <lizmat> .contains("lizmat") is ok
+
+[19:29] <lizmat> so looks like something regexy going off the reails
+
+[19:29] <lizmat> *rails
+
+[19:32] <timo> hm, people might take the wrong thing from this huh :P
+
+[19:36] <lizmat> well... there's context
+
+[19:37] <timo> well, i will not stop introducing / lizmat / to things
+
+[19:37] <lizmat> hehe
+
+[19:41] <timo> phew, building rakudo with asan is quite slow
+
+[19:42] <lizmat> another datapoint: .contains(/ lizmat /) does not crash either
+
+[19:42] <timo> oh, does contains accept a regex?
+
+[19:42] <lizmat> yes, ever since it was created  :-)
+
+[19:43] <lizmat> .contains(/foo/) basically only runs a single cursor and sees if it hit anything
+
+[19:43] <lizmat> does not create a Match object and does not set $/
+
+[19:43] <timo> neat
+
+[19:44] <lizmat> so: I'd conclude that the cursor logic is not an issue
+
+[19:44] <lizmat> but the full creation of a Match object *and* setting $/ is
+
+[19:44] <lizmat> and I would suspect setting $/ first
+
+[19:45] <lizmat> hmmmm
+
+[19:46] <lizmat>             for @lines {
+
+[19:46] <lizmat>                 $ib.push($_) if .match(/ lizmat /);
+
+[19:46] <lizmat>             }
+
+[19:46] <lizmat> is also fine, so scratch that
+
+[19:46] <lizmat> that sets $/
+
+[19:47] <timo> why did i even think asan would be good enough to still get a crash .. but i do get 1072; 1071 was supposed to be correct yes?
+
+[19:47] <lizmat> that's what I get, yes
+
+[19:47] <timo> ah yes there's a 1071 again
+
+[19:48] <lizmat> vi also things 1071
+
+[19:48] <lizmat> 1,$s/lizmat/fooo/
+
+[19:48] <timo> and 1070 too :D
+
+[19:49] <timo> AddressSanitizer can not provide additional info.
+
+[19:54] <timo> wow i actually got a segfault with asan and i've got an rr recording
+
+[19:55] <lizmat> fwiw, I'm on Apple silicon, so no JIT...
+
+[19:55] <lizmat> so if you're on Intel, maybe disable the JIT, might make things easier ?
+
+[19:56] <timo> i should have thought to disable the jit since it makes stack traces happier and so on, but with rr it's often not such a big deal
+
+[19:56] <timo> nooooo the program finished without crashing in the recording wtf
+
+[20:01] <timo> Dispatch callback failed to delegate to a dispatcher
+
+[20:01] <timo>   in block  at standalone_crash.raku line 78
+
+[20:01] <timo>   in block  at standalone_crash.raku line 59
+
+[20:01] <timo> what on earth is all that
+
+[20:02] <lizmat> disp/program.c  line 3102
+
+[20:02] <timo> Cannot resolve caller Bool(Nil:U: ); none of these signatures matches, Bool(Match:U: ) and Bool(Nil:U )
+
+[20:02] <lizmat> yeah, that's a weird message in of itself
+
+[20:05] <lizmat> fwiw, if you write the for loop out
+
+[20:05] <timo> well, the numbers i get differ, for example 657
+
+[20:06] <timo> should i refresh the gist and get your latest?
+
+[20:06] <lizmat> gist updated
+
+[20:07] <lizmat> inn that version, it crashes in the same way with RAKUDO_RAKUAST=1
+
+[20:07] <lizmat> which implies to me the problem is in NQP or deeper
+
+[20:07] <lizmat> as that is what the legacy grammar and Raku grammar share
+
+[20:08] <lizmat> hmmm  could also be the setting...  hmmm
+
+[20:13] <lizmat>  / foo /   ASTs to: Regex.clone($_, $/)
+
+[20:13] <lizmat> and that's         nqp::p6bindattrinvres(
+
+[20:13] <lizmat>             nqp::p6bindattrinvres(self.Method::clone, Regex, '$!topic', $topic),
+
+[20:13] <lizmat>             Regex, '$!slash', $slash)
+
+[20:14] <lizmat> I wonder if nqp::p6bindattrinvres is suspect
+
+[20:14] <timo> does clone not make a new one right there?
+
+[20:14] <lizmat> it does
+
+[20:17] <lizmat> changing the nqp::p6bindattrinvres( into bindattrs does not make a difference
+
+[20:17] <lizmat> so I guess we can rule p6bindattrinvres our for now
+
+[20:17] <timo> right, it's just a small desugar op right?
+
+[20:19] <lizmat> yeah, think so
+
+[20:24] <timo> oh, ew, MVM_dump_backtrace actually interacts with the GC i never realized that
+
+[20:26] <timo> the way your code is corrupting the hell out of the moarvm is quite an impressive sight
+
+[20:26] <timo> i wonder if i can actually figure it out
+
+[20:27] <lizmat> well, I tried very hard to golf it down
+
+[20:27] <lizmat> do you need more explanation about the code ?
+
+[20:29] <timo> i think for now i can do without
+
+[20:30] <lizmat> it's basically the ParaSeq logic stripped down, with the backpressure logic removed
+
+[20:31] <lizmat> https://raku.land/zef:lizmat/ParaSeq#hypering-control-flow
+
+[20:33] <timo> i think i've seen the module
+
+[20:43] <timo> i think we're in src/vm/moar/dispatchers.nqp on line 2895 when we try to call &multi-no-match-handler and that somehow goes kaboom, but that's still downstream of the actual cause, i bet
+
+[20:45] <lizmat> getting there is already wrong, I'd say
+
+[20:46] <lizmat> that's really to catch Junctions, and no junctions are in play
+
+[20:46] <lizmat> so it's getting there for the wrong reason, I'd say
+
+[21:03] <timo> so the moment - or just before - things are going wrong, two threads are in a dispatcher in the Bool method at the same time. i don't expect the dispatcher code to be racy, but at least that's where i'll be looking
+
+[21:04] <lizmat> location?
+
+[21:04] <lizmat> I'll be looking at that tomorrow then
+
+[21:05] <timo> i think it's Match.BOOL
+
+[21:05] <timo> er, Match::Bool
+
+[21:06] <lizmat>     proto method Bool(|) {*}
+
+[21:06] <lizmat>     multi method Bool(Match:U: --> False) { }
+
+[21:06] <lizmat>     multi method Bool(Match:D:) { nqp::hllbool($!pos >= $!from) }
+
+[21:06] <lizmat> not a lot to dispatch there...
+
+[21:07] * lizmat replaces the multi by an only
+
+[21:10] <lizmat> ok, doesn't fix the problem, but now my test program hangs half of the time
+
+[21:11] <lizmat> and the other half crashes
+
+[21:11] * lizmat is going to sleep over it
+
+[22:30] *** sena_kun left
+[22:47] <timo> when i give the block in line 78 a "my $/" it stops behaving bed
+
+[22:47] <timo> bad*
+
+[22:48] <timo> but taking away the my $/ again seems to only cause wrong "seen" numbers right now, i don't see the crashes any more
+
+[22:50] <timo> "Cannot resolve caller Bool(Nil:U: ); none of these signatures matches" now again after i upped the optimize level in moar compilation from -Og (optimize for debugging) to -O2
+
+[22:51] <timo> it's quite possible that the dispatcher code got unhappy because the value of the scalar was changing from under it?
+
+[22:53] <timo> turning spesh off makes it worse, which makes sense because when spesh is on, dispatch recordings get turned into compiled code, so it's no longer using the dispatchers but instead building guards and such, and when the guards fail we deopt and try again i think? at which point the value is possibly stable again for a little moment
+

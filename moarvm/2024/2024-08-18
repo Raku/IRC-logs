@@ -1,0 +1,277 @@
+[01:05] <timo> did we ever have a discussion about zstd put right into moarvm vs only system-wide dependency?
+
+[01:05] <timo> i would be okay with shipping it
+
+[01:17] <MasterDuke> i always assumed it'd be a 3rdparty with a --has-zstd option like most of the other external libs we use
+
+[01:22] *** japhb joined
+[01:22] <timo> that's how it is now i think
+
+[01:28] <MasterDuke> it's not in 3rdparty
+
+[01:33] <timo> oh yes i misread
+
+[01:54] <timo> wonder what else we may want to try zstd for
+
+[01:56] <timo> one thing you can't have when you have to decompress stuff before you use it is sharing the memory from stuff you mmapped off disk with other processes
+
+[01:57] <timo> unless you decompress, use, and immediately throw away the decompressed bits again, then you're at least not keeping a copy per process of the stuff around
+
+[01:58] <timo> there's many places where we use random access, too. like in our serialized blobs
+
+[02:00] <timo> on the other hand, if the compression ratio is truly huge, having to read a little bit extra in order to find the spot you want might not matter in the end
+
+[02:02] <timo> and of course if you have one single object that has a huge serialized blob all on its own, you don't need to random-access into the middle, you only need to reliably and quickly seek to the beginning of any one serialized object
+
+[02:09] <MasterDuke> why/when do we randomly access out serialized blobs? aren't they deserialized linearly?
+
+[02:10] <timo> when we "demand" one object, like the first time a specific wval is called, we jump to the spot where it lives and start reading sequentially, but objects do have inter-dependencies, and when we hit one of those, we jump to many different points in the blob
+
+[02:10] <MasterDuke> ah, didn't realize
+
+[02:34] <timo> https://gist.github.com/timo/0c52f79d46e7193668cfa1c0ec68ef2b here's a printout of "make install" of rakudo with any object that is serialized to a blob of over 2048 printed out
+
+[02:35] <timo> i'm a little surprised to see MAST::Bytecode objects be put into serialization. i wonder what that's from
+
+[02:41] <timo> aah, i suppose NativeCall generates bytecode? could that be it?
+
+[02:43] <MasterDuke> the two biggest are an NQPArray (158707) and an NFAType (214023). any idea what's in them?
+
+[02:45] <timo> i bet the first array is actually the same as what's in the NFAType :P
+
+[02:48] <MasterDuke> doh
+
+[02:49] <timo> the gist has a patch in it now, feel free to experiment
+
+[02:49] <timo> also, there's other kinds of things than just objects that we may serialize, you can copy the same thing into their functions, but the "get debug name" won't work for non-objects. there's a different get debug name function for STables though
+
+[02:50] <timo> and you can breakpoint the fprintf and look at the object in question
+
+[02:50] <timo> heading out o/
+
+[08:26] *** sena_kun joined
+[09:33] <timo> the gist now has compression results (but not yet timings) for the serialized blobs at different compression levels
+
+[10:04] <timo> so even at the highest compression levels, for the majority of rakudo build files the savings are relatively modest
+
+[10:08] <timo> exceptions do exist, such as one NQPArray that apparently turned to 10% its size at levels 19 and above
+
+[10:08] <timo> and a few arrays that probably just have the same value from start to end in them? they get factors of like 150x and up
+
+[10:10] <timo> outside of that, there are no spots where the compressed serialized blob is compressed better than 10x
+
+[10:12] <timo> i'm limiting compression attempts to anything larger than 512 (i started with 2048)
+
+[10:18] <timo> going to the smaller sizes should really benefit from training a dictionary, but that leaves the issue of managing the dictionary since a .moarvm file would become unreadable without the correct dictionary available
+
+[10:21] <timo> even with the lower limit at 256 bytes, core setting serialized blob gets "Considered compression for 1592633 bytes vs not for 3327807 bytes (32.368%)", so 68% are blobs smaller than 256 bytes
+
+[10:42] <nine> Why would we need to compress sources when using them for annotation? Even the complete CORE.c setting is just 3.2 MB of sources. That's tiny by today's standards. Even more so when comparing with the 14 MB of bytecode this source compiles to. 14 vs. 17 MB, who would even notice?
+
+[10:55] <timo> nine: do you know where all the MAST::Bytecode objects come from in the core modules installation?
+
+[10:55] <nine> Not sure what you mean
+
+[10:56] <timo> https://gist.github.com/timo/0c52f79d46e7193668cfa1c0ec68ef2b#file-install-core-dists-debugged-txt-L556
+
+[10:56] <timo> i'm not sure i'm reading the RMD output correctly
+
+[10:56] <timo> MAST::Frame and MAST::Bytecode objects make it into that serialization
+
+[10:57] <nine> MAST::Bytecode is basically a lightweight Buf
+
+[10:57] <timo> the name i see pop up before and after this bit is NativeCall::Types, but i'm not sure why that module would have many of these objects, and so big, too
+
+[10:57] <timo> right, that's what i figured
+
+[10:58] <nine> It's used for several things by QASTCompilerMAST including call site identifiers
+
+[10:59] <timo> ok but call site identifiers are probably not 32 kilobytes big :D
+
+[10:59] <nine> Sounds more like an SC
+
+[11:00] <timo> hm, rr can figure this out
+
+[11:02] <timo> [FATAL src/ReplayTask.cc:130:validate_regs()] 
+
+[12:27] <timo> it occurs to me that before merging the new mvmroot i should really make sure the code that our target compilers generate for them isn't total trash
+
+[12:44] <timo> ahahaha, i copied the source, replaced MVMROOT with MVMROOT_OLD in the copy, and gcc compiles the function to just a jmp to the other function
+
+[12:49] <timo> and i found a way to make the code less terrible
+
+[13:30] <Geth> ¦ MoarVM/coolroot: 3f0058ba69 | (Timo Paulssen)++ | src/gc/roots.h
+
+[13:30] <Geth> ¦ MoarVM/coolroot: chain one nonvoid root push into the next
+
+[13:30] <Geth> ¦ MoarVM/coolroot: 
+
+[13:30] <Geth> ¦ MoarVM/coolroot: This frees us from having to declare one trash variable
+
+[13:30] <Geth> ¦ MoarVM/coolroot: per object we want to root.
+
+[13:30] <Geth> ¦ MoarVM/coolroot: 
+
+[13:30] <Geth> ¦ MoarVM/coolroot: Also, ensure there's enough temp root space once up
+
+[13:30] <Geth> ¦ MoarVM/coolroot: front and then do all the pushes with a fast path for
+
+[13:30] <Geth> ¦ MoarVM/coolroot: hopefully more efficient code generated by
+
+[13:30] <Geth> ¦ MoarVM/coolroot: our Sufficiently Smart Compiler™.
+
+[13:30] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/3f0058ba69
+
+[13:36] <Geth> ¦ MoarVM/coolroot: c5e0c37210 | (Timo Paulssen)++ | src/gc/roots.h
+
+[13:36] <Geth> ¦ MoarVM/coolroot: chain one nonvoid root push into the next
+
+[13:36] <Geth> ¦ MoarVM/coolroot: 
+
+[13:36] <Geth> ¦ MoarVM/coolroot: This frees us from having to declare one trash variable
+
+[13:36] <Geth> ¦ MoarVM/coolroot: per object we want to root.
+
+[13:36] <Geth> ¦ MoarVM/coolroot: 
+
+[13:36] <Geth> ¦ MoarVM/coolroot: Also, ensure there's enough temp root space once up
+
+[13:36] <Geth> ¦ MoarVM/coolroot: front and then do all the pushes with a fast path for
+
+[13:36] <Geth> ¦ MoarVM/coolroot: hopefully more efficient code generated by
+
+[13:36] <Geth> ¦ MoarVM/coolroot: our Sufficiently Smart Compiler™.
+
+[13:36] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/c5e0c37210
+
+[13:44] <timo> 170403169 ensure space for 2 roots
+
+[13:44] <timo> 12225803 ensure space for 4 roots
+
+[13:44] <timo> 1296490 ensure space for 3 roots
+
+[13:53] <timo> https://godbolt.org/z/8Y3Gx744d
+
+[13:53] <timo> here's some example code that (i hope!) doesn't allow the compiler to make unreasonable shortcuts
+
+[14:04] <timo> https://godbolt.org/z/YnvbW1GEK also with MSVC now
+
+[14:04] <timo> i don't see anything obviously wrong with it right away
+
+[14:04] <timo> but also, my eyes kind of glaze over
+
+[14:47] <timo> clang thinks my code doesn't deserve to exist in the output
+
+[14:52] <timo> got it. final(?) godbolt link in the github pull request
+
+[14:55] <timo> how do y'all feel in here about using MVM_ROOT for the coolroot and keep MVMROOT for the oldroot?
+
+[15:31] <timo> so, i'm thinking the relation between how often we push and pop roots compared to how often we run GC ... it's a pretty huge rift, right?
+
+[15:32] <timo> i'm not saying we should do stack walking instead of explicit pushes and pops, but ... :) :) :) :)
+
+[16:40] <timo> for a core setting compile i get 0.4575% hits in the gc_root_temp_push function
+
+[16:40] <timo> so ... i guess it's not really worth trying to optimize too much?
+
+[16:46] <Geth> ¦ MoarVM/coolroot: 80a3790551 | (Timo Paulssen)++ | src/gc/roots.h
+
+[16:46] <Geth> ¦ MoarVM/coolroot: fix wrong check for need to grow temp root array
+
+[16:46] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/80a3790551
+
+[16:46] <Geth> ¦ MoarVM/coolroot: 91b9ebbcd7 | (Timo Paulssen)++ | src/gc/roots.h
+
+[16:46] <Geth> ¦ MoarVM/coolroot: fix check for MVM_TEMP_ROOT_DEBUG (like in main branch)
+
+[16:46] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/91b9ebbcd7
+
+[16:46] <Geth> ¦ MoarVM/coolroot: 354e624bf2 | (Timo Paulssen)++ | src/gc/roots.h
+
+[16:46] <Geth> ¦ MoarVM/coolroot: mark need for growing temp root array unlikely
+
+[16:46] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/354e624bf2
+
+[16:47] <timo> nine: since you already have experience with gcc plugins, how hard do you think is it to write a checker that at a given point there's never more than x temp roots on the temp root stack?
+
+[16:48] <timo> then we could have an *even cheaper* temproot variant for functions that we have statically proven don't need to check if tc->num_temproots is above 16 or below
+
+[17:36] <nine> Doesn't sound very hard
+
+[17:38] <timo> though a good chunk of these functions are probably public API so we couldn't do that in the first place
+
+[17:42] <nine> I wish someone would take care of MoarVM's stability issues :/
+
+[17:43] <timo> that sounds like a tricky and fuzzy target
+
+[17:44] <nine> Program terminated with signal SIGSEGV, Segmentation fault.
+
+[17:44] <nine> #0  0x00007ff57525ce74 in MVM_gc_collect_free_gen2_unmarked (executing_thread=executing_thread@entry=0x3a929e40, tc=tc@entry=0x3a929e40, global_destruction=global_destruction@entry=0) at src/gc/collect.c:773
+
+[17:44] <nine> 773                         if (REPR(obj)->gc_free)
+
+[17:44] <nine> [Current thread is 1 (Thread 0x7ff575953b80 (LWP 188986))]
+
+[17:44] <nine> Missing separate debuginfos, use: zypper install glibc-debuginfo-2.40-1.1.x86_64 libtommath1-x86-64-v3-debuginfo-1.3.0-1.1.x86_64 libuv1-debuginfo-1.48.0-1.1.x86_64 libzstd1-x86-64-v3-debuginfo-1.5.6-1.1.x86_64
+
+[17:44] <nine> (gdb) p obj
+
+[17:44] <nine> $1 = (MVMObject *) 0x3ffbd460
+
+[17:44] <nine> (gdb) p *obj
+
+[17:44] <nine> $2 = {header = {sc_forward_u = {forwarder = 0x0, sc = {sc_idx = 0, idx = 0}, st = 0x0}, owner = 0, flags1 = 0 '\000', flags2 = 2 '\002', size = 0}, st = 0x0}
+
+[17:45] <MasterDuke> nine: didn't you fix something recently? i have seen a lot less flapping since whatever it was you did
+
+[17:45] <MasterDuke> but yeah, guess there still are some bugs...
+
+[17:46] <timo> nine: any chance of a rr recording?
+
+[17:48] <timo> and which exact moar version?
+
+[17:48] <timo> i don't think obj->st should be allowed to be zero
+
+[17:58] <nine> Of course it defies rr
+
+[17:58] <MasterDuke> chaos mode?
+
+[17:58] <nine> That's what I'm trying. Though that has never helped me before
+
+[18:06] <Geth> ¦ MoarVM/coolroot: 12 commits pushed by (Timo Paulssen)++
+
+[18:06] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/compare/354e624bf2da...229a6f2c007a
+
+[18:06] <timo> ^- rebase on top of current main, plus adding the missing root that nine found recently
+
+[18:09] <MasterDuke> oh, i was going to ask about that, but i thought the old name used the new code so it would have been picked up automatically?
+
+[18:10] <timo> you mean the MVMROOT?
+
+[18:11] <MasterDuke> yeah
+
+[18:11] <timo> the new macro uses the old name, but it's not source-compatible, you do have to rewrite your code to use it
+
+[18:11] <MasterDuke> oh, right
+
+[18:12] <timo> MVMROOT(tc, a, {...}); becomes MVMROOT(tc, a) {...}
+
+[18:35] <MasterDuke> i just tried this patch https://gist.github.com/MasterDuke17/664351001a98dd24d18d69343f834d50 and the total number of allocations and number of temporary allocations when compiling CORE.c dropped from ~69.7m and ~6.4m to ~68.8 and ~5.4m
+
+[18:36] <MasterDuke> but it doesn't seem to be any faster or reduce the total memory used
+
+[19:46] <MasterDuke> a different patch+rebootstrapping nqp to handling getting a VMNull from runproto drops allocations and temp allocations to ~66.7m and ~4m
+
+[19:47] <lizmat> that feels like becoming significant ?
+
+[20:14] <patrickb> Random guess, could the recent moar instability be caused by us disabling exprjit?
+
+[20:15] <lizmat> feels unexpected to me, but still possibe: bugs hiding other bugs is not an uncommon phenomenon
+
+[20:17] <nine> I'm pretty sure the instability was there before
+
+[20:19] <lizmat> also: some instability may be caused by recent speed improvements, making undiscovered race conditions more likely?
+
+[20:19] <lizmat> the disable of exprjit might well be one of those
+
+[22:08] *** sena_kun left

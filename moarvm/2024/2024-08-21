@@ -1,0 +1,546 @@
+[01:43] *** MasterDuke joined
+[06:47] *** sena_kun joined
+[07:01] *** sena_kun left
+[07:07] *** sena_kun joined
+[07:30] *** sena_kun left
+[08:32] *** harrow left
+[08:55] *** harrow joined
+[09:11] <lizmat> timo: I think the difference between .match(/foo/) and /foo/ is that in the .match case, the $/ is looked up by the .match method,
+
+[09:11] <lizmat> whereas with /foo/ it is passed as a raw argument to Regex.clone
+
+[09:12] <timo> somewhere in there something must be trying to $/.Bool or something
+
+[09:12] <lizmat> I wouldn't be surprised that the $/ in that case gets unhinged and writing to it will just randomly write into some memory location
+
+[09:13] <lizmat> I will try this theory by adding another method to Regex, not pass $/ but have it looked up like with .match, and adapt codegenning that way
+
+[09:13] <timo> well, it shouldn't be just some memory location, but if the Scalar gets shared around, maybe the type between one getlex and another changes and we wrongfully assume in speshed code that the type is known and use some low-level accesses on the value??
+
+[09:13] <timo> we should have enough guards for that though
+
+[09:16] <lizmat> so it basically codegens: if / lizmat /.clone(:topic($_), :slash($/));
+
+[09:16] <lizmat> and running it like that, also fails
+
+[09:22] <timo> hmm. all of that is strange
+
+[09:22] <timo> does the result change with spesh turned off?
+
+[09:23] <lizmat> MVM_SPESH_DISABLE=1 right?
+
+[09:24] <lizmat> in that case, no
+
+[09:27] <timo> that's the right var yeah
+
+[09:27] <timo> you got different errors from me right? actual segfaults and panics and such? because with your reproduction example i only got the dispatcher errors and wrong total counts
+
+[09:29] <lizmat> no segfaults or panics in my sample code, nno
+
+[09:29] <lizmat> an occasional hang
+
+[09:30] <lizmat> ok, I just tried the different approach with $/ and $_ being looked up, and that also fails
+
+[09:31] <lizmat> I just realized that another difference between / foo / and .match(/foo/) is, is that in the former case the match is being done because the Regex object is being sunk
+
+[09:38] <lizmat> nvm... even with an explicit .Bool it crashes
+
+[09:47] <lizmat> timo: I've golfed the code down to 30 lines in https://gist.github.com/lizmat/d0f1eb60e77a7728bac5d291ba670daa
+
+[09:53] <lizmat> changing the use of ParaQueue to Channel, also produces the same errors
+
+[09:53] <lizmat> so I'd say it's not related to ParaQueue
+
+[10:22] <lizmat> managed to get the golf down to 14 lines
+
+[10:23] <lizmat> what appears to be important, is the outer .cue
+
+[10:23] <lizmat> also, just got this error:
+
+[10:23] <lizmat> Invocant of method 'Bool' must be a type object of type 'Mu', not an
+
+[10:23] <lizmat> object instance of type 'Match'.  Did you forget a 'multi'?
+
+[10:23] <lizmat> which would indicate indeed a dispatch issue
+
+[10:24] <lizmat> what also appears to be important, is that the code *should* have some matches
+
+[10:25] <lizmat> changing the pattern to something that isn't found, and all is well
+
+[10:25] <lizmat> so a recap:
+
+[10:25] <timo> yeah i imagine the error "must be a ..." means the dispatch code first decided with the given arguments it must be one particular candidate, then tries to call the candidate, and dies because the arguments changed in between
+
+[10:26] <lizmat> the problem shows itself is:
+
+[10:26] <lizmat> - calling Bool on a Regex
+
+[10:26] <lizmat> - inside cued code inside cued code
+
+[10:27] <lizmat> - there must be an occasional match
+
+[10:28] <lizmat> - adding a "my $/" in either the for scope, or the inner .cue scope, evades the issue
+
+[10:53] <lizmat> further datapoint: this appears only on .Bool, not on .defined
+
+[10:55] <lizmat> aha!   Regex.Bool turns out to be interesting reading
+
+[10:58] <timo> it checks $/?
+
+[10:58] <lizmat> ($!slash = topic.match(self)).Bool
+
+[11:00] <lizmat> updated gist again as to not need the REA file
+
+[11:01] <timo> oh, whoops, it modifies an attribute of the Regex object? but we clone that first, right?
+
+[11:01] <lizmat> yes
+
+[11:01] <lizmat>  / foo /    codegens as    /foo/.clone($_, $/)
+
+[11:02] <timo> oh, does it take the $/ as a Scalar and binds it, and the $/ Scalar is what's shared?
+
+[11:02] <timo> so the clone isn't helping for this particular case
+
+[11:03] <lizmat> Regex.clone sets $!topic and $!slash in the clone of the Regex object
+
+[11:04] <lizmat> raw, so basically its containers
+
+[11:05] <lizmat> but every scope should get its own, fresh $/ should it not?
+
+[11:07] <lizmat> hmm. intriguingL
+
+[11:07] <lizmat> m: my $/; { "foo" ~~ / foo / }; say $/
+
+[11:07] <camelia> rakudo-moar 70059eb1a: OUTPUT: «Potential difficulties:␤    Redeclaration of symbol '$/'.␤    at <tmp>:1␤    ------> my $/⏏; { "foo" ~~ / foo / }; say $/␤｢foo｣␤»
+
+[11:07] <lizmat> m: { my $/; { "foo" ~~ / foo / }; say $/ }
+
+[11:07] <camelia> rakudo-moar 70059eb1a: OUTPUT: «｢foo｣␤»
+
+[11:07] <lizmat> so the inner / / is setting the $/ in the outer scope
+
+[11:08] <lizmat> and apparently the compunit has a hard definition of $/ that can be "found"
+
+[11:08] <lizmat> and it won't be found if the code is inside a .cue { } block
+
+[11:08] <lizmat> m: { "foo" ~~ / foo / }; say $/
+
+[11:08] <camelia> rakudo-moar 70059eb1a: OUTPUT: «｢foo｣␤»
+
+[11:09] <lizmat> m: { my $/; { "foo" ~~ / foo / } }; say $/
+
+[11:09] <camelia> rakudo-moar 70059eb1a: OUTPUT: «Nil␤»
+
+[11:10] <timo> oh, i seem to recall something about taking the outer's $/, or was that $_?
+
+[11:10] <lizmat> $_ and $/ both, actually
+
+[11:16] <timo> i guess it does that for every scope that doesn't get its own $/, plus some optimization that leaves it out when it's proven to not be needed?
+
+[11:23] <lizmat> adding a "my $/" to ThreadPoolScheduler!run-one doesn't make the problem go away
+
+[11:23] <timo> i think it's probably more about lexical scopes than dynamic scopes?
+
+[11:23] <timo> so it would be a change near where the regex lives or is cloned or executed that determines it?
+
+[11:24] <lizmat> well, since it's only Regex.Bool that's causing the issues, and not Regex.defined, I'd say there's something in Regex.Bool doing it
+
+[11:25] <lizmat> aha!
+
+[11:25] <lizmat> m: $_ = "foo"; with / foo / { .say }
+
+[11:25] <camelia> rakudo-moar aada362ff: OUTPUT: «/ foo /␤»
+
+[11:25] <lizmat> Regex.Bool is special!
+
+[11:26] <lizmat> m: $_ = "foo"; if / foo / { .say; say $/ }
+
+[11:26] <camelia> rakudo-moar aada362ff: OUTPUT: «foo␤｢foo｣␤»
+
+[11:26] <lizmat> m: $_ = "foo"; with / foo / { .say; say $/ }
+
+[11:26] <camelia> rakudo-moar aada362ff: OUTPUT: «/ foo /␤Nil␤»
+
+[11:32] *** MasterDuke left
+[11:32] <timo> makes sense that .Bool does more work than .defined
+
+[11:32] <timo> Regex.Bool actually runs the regex against $_ or something, doesn't it?
+
+[11:33] <lizmat> ($!slash = topic.match(self)).Boo
+
+[11:33] <lizmat> l
+
+[11:33] <lizmat> where: my \topic = $!topic
+
+[11:37] <lizmat> ok, it turns out the outer .cue is not needed to cause the issue
+
+[11:38] <lizmat> golf now 11 lines
+
+[11:39] <timo> so we're getting the $/ from the for loop that's the same scalar every go-around so everything cued on the scheduler tries to share one $/?
+
+[11:40] <timo> because the block that we're cue-ing doesn't generate its own $/ and therefore just binds the parent scope's $/?
+
+[11:48] <timo> we should be able to put a $/.VAR.WHERE or $/.VAR.WHICH in a few places to see if we're looking at the same, or at different $/ scalars
+
+[11:49] <lizmat> will do that
+
+[11:49] <lizmat> meanwhile:
+
+[11:49] <lizmat> looking at: ($!slash = $!topic.match(self)).Bool
+
+[11:49] <lizmat> the last Bool is a Match.Bool or a Nil.Bool
+
+[11:50] <lizmat> so the theory that:
+
+[11:50] <lizmat> Cannot resolve caller Bool(Nil: ); none of these signatures matches:
+
+[11:50] <lizmat>     (Match:U $:: *%_ --> Bool::False)
+
+[11:50] <lizmat>     (Match:D $:: *%_)
+
+[11:50] <timo> .o( unless the topic in use is not a Str but some custom user class )
+
+[11:50] <lizmat> is caused by $/ having been changed when the dispatcher thinks it's static, makes a lot of sense
+
+[11:50] <timo> yeah that's my working theory
+
+[11:52] <timo> m: for ^1000 { my $lol = 99; await start { $lol = "hi"; $lol = [1, 2, 3]; $lol = Nil; $lol = %(:1a, :2b, :3c); }, start { for ^10 { my $result = so $lol } }; }
+
+[11:52] <camelia> rakudo-moar aada362ff: ( no output )
+
+[11:52] <timo> m: for ^1000 { my $lol = 99; await start { for ^50 { $lol = "hi"; $lol = [1, 2, 3]; $lol = Nil; $lol = %(:1a, :2b, :3c); } }, start { for ^50 { my $result = so $lol } }; }
+
+[11:52] <camelia> rakudo-moar aada362ff: OUTPUT: «An operation first awaited:␤  in block <unit> at <tmp> line 1␤␤Died with the exception:␤    Type check failed in binding to parameter '<anon>'; expected Str but got Hash ({:a(1), :b(2), :c(3)})␤      in block  at <tmp> line 1␤␤»
+
+[11:53] <timo> ^- this is a big no-no do not do that you will get much pain
+
+[11:53] <timo> but the $lol here is explicitly shared and the responsibility of the user
+
+[11:53] <timo> with the $/ problem that you're experiencing, it's not so clear
+
+[11:54] <lizmat> right, so $/ is breaking the async contract
+
+[11:54] <timo> m: my @ex; for ^1000 { my $lol = 99; await start { for ^50 { $lol = "hi"; $lol = [1, 2, 3]; $lol = Nil; $lol = %(:1a, :2b, :3c); } }, start { for ^50 { my $result = so $lol } }; CATCH { default { @ex.push($_) } } }; say @ex.map({ .WHAT.^name }).Bag
+
+[11:54] <camelia> rakudo-moar aada362ff: OUTPUT: «Bag(X::Multi::Ambiguous+{X::Await::Died}(30) X::Multi::NoMatch+{X::Await::Died}(25) X::Parameter::InvalidConcreteness+{X::Await::Died}(870) X::TypeCheck::Binding::Parameter+{X::Await::Died}(35))␤»
+
+[11:54] <timo> i wouldn't call it "async" necessarily
+
+[11:55] <timo> m: my @ex; for ^1000 { my $lol = 99; await start { for ^50 { $lol = "hi"; $lol = [1, 2, 3]; $lol = Nil; $lol = %(:1a, :2b, :3c); } }, start { for ^50 { my $ldc = $lol<>; my $result = so $ldc } }; CATCH { default { @ex.push($_) } } }; say @ex.map({ .WHAT.^name }).Bag
+
+[11:55] <camelia> rakudo-moar aada362ff: OUTPUT: «Bag()␤»
+
+[11:55] <timo> ^- an early decont can help, since we then only read the scalar once at the start and not again later
+
+[11:56] <timo> but we do want to operate with the Scalar accessible most of the time when dealing with $/
+
+[11:58] <lizmat> well, $/ needs to be set with the result of the match
+
+[11:58] <lizmat> otherwise a *lot* of spectest will fail  :-)
+
+[11:59] <timo> one thing we can do is hold on to the result of $!topic.match(self) in a local variable, assign it into $!slash to make it available, and check the local variable for its .Bool, instead of the return value of the assignment which will be the scalar container with "what we think we just assigned" in it
+
+[12:00] <lizmat> ok so maybe a decont would work
+
+[12:00] <timo> it will at least not blow up
+
+[12:00] <timo> but
+
+[12:01] <timo> we may get the .Bool of what some other thread stored into the same $/ in the mean time if we're unlucky
+
+[12:01] <lizmat> aaaahhh... that would explain the higher than possible values that we've seen
+
+[12:02] <timo> right
+
+[12:02] <timo> this is probably a good idea to do it like that just in general
+
+[12:02] <lizmat> ok, the decont makes the dispatch issue go away
+
+[12:18] <lizmat> https://github.com/rakudo/rakudo/commit/29a032138c
+
+[12:21] <lizmat> and: https://github.com/rakudo/rakudo/issues/5626
+
+[12:25] <timo> right. the question i have now is, is it actually specified by the language definition that the { } block that you give to cue there is supposed to have a fresh $/ or not
+
+[12:26] <lizmat> good question: the design of $/ predates async thoughts  :-)
+
+[12:26] <timo> when you manually cue a block on the scheduler, that's a bit more low-level than using start, which we would expect users to use when they want the scheduler to do something at some point, or the other APIs like Supply.interval or Promise.after or what it's called
+
+[12:29] <timo> as in, is using "cue" without knowing absolutely for certain what you're doing an expected footgun or not
+
+[12:29] <timo> of course raku shouldn't be full of footguns
+
+[12:32] <lizmat> hmmm  indeed, the problem doesn't exist with start...
+
+[12:32] <lizmat> but it *does* with Promise.start...
+
+[12:32] <timo> start does a lot of work for its variables and also for dynamics
+
+[12:32] <lizmat> intriguing
+
+[12:32] <timo> but only the start { ...} syntax, not the Promise.start method
+
+[12:33] <lizmat> actually, Promise.start does the dynamics bits as well
+
+[12:33] <timo> also a potential problem when someone innocently refactors start {...} into Promise.start({...})
+
+[12:37] <lizmat> ok, looks like start { } does a Promise.start( nqp::p6capturelex(Block.clone) )
+
+[12:43] <timo> is capturelex + Block.clone also something we do in code-gen when we just naturally enter a block that has inner blocks?
+
+[12:43] <timo> because i think it might bse
+
+[12:43] <timo> be*
+
+[12:44] <lizmat> ah, actually we do
+
+[12:44] <timo> i'm fuzzy on how this works exactly. i imagine nine knows a lot more about scopes and blocks and such
+
+[13:23] <timo> now i'm wondering if we have to make spesh a lot more conservative about removing type checks when deconting
+
+[13:24] <timo> even when we know the decont type of an object, if another thread goes and modifies it concurrently, we can corrupt memory, and corrupting memory is Very Bad. but how much do we actually want to sacrifice so that code that unsafely multithreads doesn't crash and burn
+
+[13:26] <lizmat> good question...  with all of the experience of the past day, I'm adapting ParaSeq and Needle::Compile, and see if that results in a stabler environment
+
+[13:26] <lizmat> I mean, generally it is understood that you shouldn't be setting / reading the same lexical from multiple threads
+
+[13:27] <lizmat> it's just that $/ is one that goes under everybody's radar
+
+[13:27] <timo> the funny thing is that spesh is a lot more careful about lexicals
+
+[13:27] <timo> but here we're getting the Scalar directly passed around in arguments and attributes
+
+[13:27] <nine> I'd argue that if you write code that unsafely multithreads it *should* crash and burn - explosively
+
+[13:28] <timo> so many more of spesh's "check once, then run more optimized code" stuff applies
+
+[13:28] <timo> ideally the explosions are also reproducible under "rr record" :D
+
+[13:29] <lizmat> nine: many people would not consider / foo / unsafe code
+
+[13:29] <timo> yeah, the unsafe part is giving a single { } to cue multiple times where the outer defines the $/ that's shared
+
+[13:30] <timo> is there some involvement of the "lazily create $/ Scalar" optimization perhaps?
+
+[13:30] <timo> which i think we also have for $_
+
+[13:36] <nine> lizmat: it does not matter what they consider. It *is* unsafe. And as long as it is, it's better that people are aware of it early and can educate themselves on safe ways to use it. Much better than have us wipe that problem under the rug and have it appear only once every couple of months in a giant code base.
+
+[13:38] <lizmat> so you're saying I should revert https://github.com/rakudo/rakudo/commit/29a032138c ?
+
+[13:39] <lizmat> afk for a bit&
+
+[14:52] <nine> So we cannot easily get rid of the implicit $/. I do wonder however if we could give every block a specific $/ instead of only those with statement prefixes?
+
+[14:52] <lizmat> this used to be the case, if I remember correctly, and that was causing a significant slowdown *then*
+
+[14:53] <lizmat> but that was before we have newdisp
+
+[14:58] <nine> That sounds surprising. Why would having a potentially unused $/ variable declaration slow things down?
+
+[15:01] <lizmat> memory churnn
+
+[15:02] <lizmat> is what I remember
+
+[15:02] <lizmat> actually, we can NOT give each block its own $/
+
+[15:02] <lizmat> m: { "foo" ~~ / foo / }; say $/
+
+[15:02] <camelia> rakudo-moar e1ffa0fe1: OUTPUT: «｢foo｣␤»
+
+[15:03] <lizmat> m: { my $/; "foo" ~~ / foo / }; say $/
+
+[15:03] <camelia> rakudo-moar e1ffa0fe1: OUTPUT: «Nil␤»
+
+[15:03] <lizmat> and that is spec
+
+[15:03] <nine> Maybe it would even help. If we mandate that *every* block has a $/ variable, then we could use the absence of such a variable a the sign that the Match object is not needed. I.e. we create a $/ lexical on every block, but only if it is actually accessed. And if the block does not contain that variable, we do not have to set it.
+
+[15:04] <nine> That is a spec that's worth re-visiting I'd say. I totally get "foo" ~~ /<foo>/; say $<foo>; But why the nested block thing?
+
+[15:06] <lizmat> m: if "foo" ~~ / foo /  { say $/ }
+
+[15:06] <camelia> rakudo-moar e1ffa0fe1: OUTPUT: «｢foo｣␤»
+
+[15:07] <lizmat> m: if "foo" ~~ / foo /  { my $/; say $/ }
+
+[15:07] <camelia> rakudo-moar e1ffa0fe1: OUTPUT: «(Any)␤»
+
+[15:10] <nine> That is quite the killer argument
+
+[15:10] <lizmat> yeah  :-(
+
+[15:53] *** japhb left
+[15:54] *** japhb joined
+[16:38] <timo> yeah making that a special case that makes the block take $/ instead of $_ when a regex is involved sounds like a very WAT
+
+[16:39] <timo> asking people to write -> $/ { ... } everywhere also kind of sucks
+
+[16:39] <timo> even though that would immediately work
+
+[17:57] <Geth> ¦ MoarVM/coolroot: b4bb554f9f | (Timo Paulssen)++ | 99 files
+
+[17:57] <Geth> ¦ MoarVM/coolroot: rename the new MVMROOT to MVM_ROOT, keep old MVMROOT
+
+[17:57] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/b4bb554f9f
+
+[18:05] <Geth> ¦ MoarVM/coolroot: 41a44241d8 | (Timo Paulssen)++ | 100 files
+
+[18:05] <Geth> ¦ MoarVM/coolroot: An alternative to MVMROOT macros
+
+[18:05] <Geth> ¦ MoarVM/coolroot: 
+
+[18:05] <Geth> ¦ MoarVM/coolroot: where we don't have to put the code block inside the macro's argument
+
+[18:05] <Geth> ¦ MoarVM/coolroot: list, which means the whole block is no longer considered a single
+
+[18:05] <Geth> ¦ MoarVM/coolroot: statement by tools like gdb, profilers, and so on.
+
+[18:05] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/41a44241d8
+
+[18:06] <timo> squished down into a single commit, rebased on top of latest main branch state, i think it's good to merge. rakudo doesn't need the patch that changes the code using MVMROOT any more since MVMROOT is now as it was before and the new one is MVM_ROOT
+
+[18:07] <Geth> ¦ MoarVM/coolroot: 233326cd1f | (Timo Paulssen)++ | 99 files
+
+[18:07] <Geth> ¦ MoarVM/coolroot: An alternative to MVMROOT macros
+
+[18:07] <Geth> ¦ MoarVM/coolroot: 
+
+[18:07] <Geth> ¦ MoarVM/coolroot: where we don't have to put the code block inside the macro's argument
+
+[18:07] <Geth> ¦ MoarVM/coolroot: list, which means the whole block is no longer considered a single
+
+[18:07] <Geth> ¦ MoarVM/coolroot: statement by tools like gdb, profilers, and so on.
+
+[18:07] <Geth> ¦ MoarVM/coolroot: review: https://github.com/MoarVM/MoarVM/commit/233326cd1f
+
+[18:07] <timo> and now i tossed the change to azure-pipelines.yml out, which should not be merged to main
+
+[18:42] <timo> i want to add a field to MVMInstance, but i'd like to put it where it fits better than at the end, but on the other hand it's kind of public API huh
+
+[18:42] <patrickb> The $/ misery keeps hitting hard. I remember a group whining session about this at the last RCS. The "-> $/ { ... } everywhere" idea also came up and was dismissed as "we can't do this, too late".
+
+[18:45] <patrickb> I acknowledge that it kills a bit of the whipuptotude of raku, but the $/ thing is one of the most magical corners in Raku that could use some demagicalization.
+
+[18:45] <timo> oh what luck! there is literally a 1 byte hole right where i want to put my 1 bit
+
+[18:46] <nine> I could warm up to the idea of having to write -> $/ there. It's 6 characters more that solve a lot of problems.
+
+[18:48] <patrickb> I tend to agree. I welcome ideas that make it work with less, but if we can't come up with a shorter solution, I'd welcome those 6 chars. From a learning-Raku perspective having $/ explicitly there is a good entry point to understand $0,... and Match objects. It's be a nice on ramp.
+
+[19:29] <[Coke]> Seems a reasonable thing to add to a new language version.
+
+[19:42] <timo> let's bring "use strict" back :P
+
+[19:43] <[Coke]> that does not seem like a reasonable thing to add to a new language version.
+
+[19:56] <timo> i would like to push the button on the coolroot pull request
+
+[20:01] <[Coke]> IANA core developer, but isn't it going to be confusing having two similarly named macros? Is there a plan to migrate to the new one eventually?
+
+[20:02] <timo> yeah i'd like to get rid of the old one at some point
+
+[20:02] <[Coke]> perhaps dumb question: Should the "get rid of" happen in this same PR?
+
+[20:03] <timo> no, the reason this doesn't get rid of it immediately is so that any code that #include "moar.h" for some reason can continue compiling without intervention
+
+[20:03] <timo> otherwise i'd just have named it the same
+
+[20:03] <[Coke]> ok.
+
+[20:04] <[Coke]> I appreciate the caution, but: do we promise any stability in moarVM (vs. raku language level) ?
+
+[20:04] <timo> oh, now i can remove the comment again about the error message
+
+[20:04] <timo> i'm not sure
+
+[20:06] <[Coke]> ok. abundance of caution is good.
+
+[20:06] <nine> I don't think we have ever promised anything there.
+
+[20:06] <timo> nine: your Inline::something module is pretty much the only thing outside raku that we found
+
+[20:06] <timo> how do you feel about just having MVMROOT change how it's used?
+
+[20:07] <nine> I'm not sure how much usage Inline::Perl6 has seen so far.
+
+[20:13] <timo> are you testing it against newer rakudo versions regularly?
+
+[20:13] <nine> nope
+
+[20:14] <nine> I haven't looked at it in years
+
+[20:15] <timo> well, i'd like to just replace MVMROOT with coolroot immediately, and inside rakudo do a commit that bumps and immediately changes the tiny amount of code that uses the old MVMROOT syntax to the new one
+
+[20:19] <nine> Would be fine with me.
+
+[20:20] <nine> Let's find out whether someone actually uses Inline::Perl6 and upgrades rakudo regularly :D
+
+[20:37] <timo> i've been changing debug log stuff in spesh around to put more stuff into a single zstd compression call and got the compression ratio from around 9 to about 15.3
+
+[20:41] <timo> when compressing it with just the zstd commandline utility, which can use the entire file for context, it gets a lot better, but of course then i can't efficiently seek in the file
+
+[20:41] <ab5tract> I convinced a colleague to bundle Perl 6 (as it was back then) as an installable package based on the justification that it was needed to package Inline::Perl6
+
+[20:42] <ab5tract> That module never made it into production, but for a good while I was able to yum install perl6 on any box and I considered that a significant win :)
+
+[20:46] <timo> funny enough level 0 gets better compression than level 1 at faster compression *and* decompression speed
+
+[20:49] <timo> Frames  Skips  Compressed  Uncompressed  Ratio  Check  Filename
+
+[20:49] <timo>  21397      1     104 MiB      1.56 GiB  15.342   None  /tmp/speshlog.blorb.3303317.txt.zst
+
+[20:50] <timo> this is how it comes out of spesh right now. the ratios i'm seeing while benchmarking range from 17x to 56x
+
+[20:52] <timo> https://gist.github.com/timo/490f0e2394f9bb072c10287531b76e39
+
+[21:00] <ab5tract> timo: sick!
+
+[21:01] <timo> spesh logs are highly, highly repetetive
+
+[21:25] *** sena_kun joined
+[21:46] <Geth> ¦ MoarVM/zstd_speshlog: a59905fd23 | (Timo Paulssen)++ | 4 files
+
+[21:46] <Geth> ¦ MoarVM/zstd_speshlog: compress spesh log output with zstd
+
+[21:46] <Geth> ¦ MoarVM/zstd_speshlog: review: https://github.com/MoarVM/MoarVM/commit/a59905fd23
+
+[21:46] <Geth> ¦ MoarVM/zstd_speshlog: 5e2cf9cdc1 | (Timo Paulssen)++ | 8 files
+
+[21:46] <Geth> ¦ MoarVM/zstd_speshlog: check SPESH_LOG for .zst, store flag, fix truncated bits
+
+[21:46] <Geth> ¦ MoarVM/zstd_speshlog: review: https://github.com/MoarVM/MoarVM/commit/5e2cf9cdc1
+
+[21:46] <Geth> ¦ MoarVM/zstd_speshlog: 1c145b0474 | (Timo Paulssen)++ | 6 files
+
+[21:46] <Geth> ¦ MoarVM/zstd_speshlog: DumpStr->MVMDumpStr, keep more stuff in one ds to zstd at once
+
+[21:46] <Geth> ¦ MoarVM/zstd_speshlog: 
+
+[21:46] <Geth> ¦ MoarVM/zstd_speshlog: This gives drastically better compression rate. We can use the
+
+[21:46] <Geth> ¦ MoarVM/zstd_speshlog: spots where one frame ends and another starts to efficiently skip
+
+[21:46] <Geth> ¦ MoarVM/zstd_speshlog: through the compressed file and identify semantically relevant pieces
+
+[21:46] <Geth> ¦ MoarVM/zstd_speshlog: even when loading really big spesh logs (like the core setting
+
+[21:47] <Geth> ¦ MoarVM/zstd_speshlog: compilation generating a ~1.5GiB file)
+
+[21:47] <Geth> ¦ MoarVM/zstd_speshlog: review: https://github.com/MoarVM/MoarVM/commit/1c145b0474
+
+[21:47] <timo> oops, that says "rate" but i mean "ratio"
+
+[21:49] <Geth> ¦ MoarVM/zstd_speshlog: 487dd75cf9 | (Timo Paulssen)++ | src/spesh/optimize.c
+
+[21:49] <Geth> ¦ MoarVM/zstd_speshlog: Add a append_null i forgot
+
+[21:49] <Geth> ¦ MoarVM/zstd_speshlog: review: https://github.com/MoarVM/MoarVM/commit/487dd75cf9
+
+[21:57] <timo> neat, my "skip over zstd frames" script takes just 0.38s (including rakudo startup, and module loading) to skip through (and of course record the start/end positions of the frames in) the 105MB big file (that's really representing 1.5 gigabytes of data)
+
+[22:03] <timo> correction, i might not actually be getting everything?
+
+[22:07] <timo> actually takes 0.9s
+
+[23:09] *** sena_kun left
