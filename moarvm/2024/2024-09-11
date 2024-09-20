@@ -1,0 +1,140 @@
+[00:09] *** vrurg joined
+[00:11] *** vrurg__ left
+[00:11] *** vrurg_ joined
+[00:13] *** vrurg left
+[02:20] *** MasterDuke joined
+[06:22] *** [Coke] left
+[08:19] <patrickb> I read up on ptys a bit more. I think I know what I need to do.
+
+[08:19] *** [Coke] joined
+[08:20] <patrickb> Curiously, libuv forks when creating new processes (as that's the only way on *nix this shouldn't be surprising), and it's not an issue for Moar.
+
+[08:22] <patrickb> Anyways, to put the child behind a pty that the parent created, we need to execute some code in the child (so after fork, but before exec). As libuv provides no callback to do so, I think the only way out is to create a helper program that does the needed initialization and then execs again.
+
+[08:25] <patrickb> The sequence would be: - parent sets up pty. - parent calls uv_spawn and passes the pseudo tty fd to the child. - uv_spawn forks and puts the fd in place and execs our helper program. - the helper program creates a new session and makes the fd the controlling tty. - the helper program execs the program we actually want to run.
+
+[08:26] <patrickb> Does that sound sane?
+
+[08:27] <patrickb> How nightmare-ish will it be to find the helper program in a rakudo installation? Should I just rely on $PATH?
+
+[08:36] *** MasterDuke left
+[12:19] *** [Coke] left
+[12:28] <timo> so the spesh failure that MasterDuke golfed looks to come down to this: calling sink on NumPosRef, which happens inside of the dies-ok when it sinks the return value of the little block that just does @arr[5], is being optimized to just "return Nil". however, pre-optimization it used to decont the NumPosRef, at which point it would notice that the index is not valid
+
+[12:29] <timo> i think throwing that exception on deconting is probably too late
+
+[12:32] <timo> now the question is, should atposref already throw an exception when the index is out of bounds?
+
+[12:35] <lizmat> are they not supposed to return nqp::null ?
+
+[12:35] <timo> please specify "they"?
+
+[12:35] <lizmat> atposref
+
+[12:36] <lizmat> when index is oob
+
+[12:36] <lizmat> well, 0..Inf I mean
+
+[12:37] <timo> m: use nqp; my Mu $a := nqp::list_s(); my $v := nqp::atposref_s($a, -1);
+
+[12:37] <camelia> rakudo-moar 7ddaf755f: ( no output )
+
+[12:37] <timo> m: use nqp; my Mu $a := nqp::list_s(); my $v := nqp::atposref_s($a, -1); say $v;
+
+[12:37] <camelia> rakudo-moar 7ddaf755f: OUTPUT: «MVMArray: Index out of bounds␤  in block <unit> at <tmp> line 1␤␤»
+
+[12:37] <timo> well, they are currently not :D
+
+[12:37] <timo> but who likes bounds checks anyway
+
+[12:38] <timo> we currently prevent negative numbers from reaching atposref by checking in postcircumfix:<[ ]> right?
+
+[12:38] <timo> m: use nqp; my Mu $a := nqp::list_s(); my $v := $a[-1];
+
+[12:38] <camelia> rakudo-moar 7ddaf755f: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Unsupported use of a negative -1 subscript to index from the end.  In␤Raku please use: a function such as *-1.␤at <tmp>:1␤------>  Mu $a := nqp::list_s(); my $v := $a[-1]⏏;␤»
+
+[12:39] <timo> so if someone goes at the list itself with nqp:: ops and they get something silly, that's on them?
+
+[12:39] *** [Coke] joined
+[12:40] <lizmat> m: use nqp; my Mu $a := nqp::list_s(); my $v := nqp::atposref_s($a, 99); say nqp::isnull_s($v);
+
+[12:40] <camelia> rakudo-moar 7ddaf755f: OUTPUT: «1␤»
+
+[12:40] <timo> so getting the value from a reference that's oob is what gives nqp::null
+
+[12:40] <lizmat> m: use nqp; my Mu $a := nqp::list_s("foo"); my $v := nqp::atposref_s($a, -1); say nqp::isnull_s($v);
+
+[12:40] <camelia> rakudo-moar 7ddaf755f: OUTPUT: «0␤»
+
+[12:41] <lizmat> m: use nqp; my Mu $a := nqp::list_s("foo"); my $v := nqp::atposref_s($a, -1); say $v
+
+[12:41] <camelia> rakudo-moar 7ddaf755f: OUTPUT: «foo␤»
+
+[12:41] <timo> oh, i get an oob for -1 there because there's 0 elems
+
+[12:41] <lizmat> righh
+
+[12:41] <lizmat> t
+
+[12:41] <timo> m: use nqp; my Mu $a := nqp::list_s("a", "b"); my $v := nqp::atposref_s($a, -1); say $v
+
+[12:41] <camelia> rakudo-moar 7ddaf755f: OUTPUT: «b␤»
+
+[12:41] <timo> m: use nqp; my Mu $a := nqp::list_s("a", "b"); my $v := nqp::atposref_s($a, 3);
+
+[12:41] <camelia> rakudo-moar 7ddaf755f: ( no output )
+
+[12:42] <timo> m: use nqp; my Mu $a := nqp::list_s("a", "b"); my $v := nqp::atposref_s($a, 3); say $v
+
+[12:42] <camelia> rakudo-moar 7ddaf755f: OUTPUT: «concatenate requires a concrete string, but got null␤  in block <unit> at <tmp> line 1␤␤»
+
+[12:42] <timo> m: use nqp; my Mu $a := nqp::list_n(0e0, 1e0); my $v := nqp::atposref_n($a, 3);
+
+[12:42] <camelia> rakudo-moar 7ddaf755f: ( no output )
+
+[12:42] <timo> m: use nqp; my Mu $a := nqp::list_n(0e0, 1e0); my $v := nqp::atposref_n($a, 3); say $v
+
+[12:42] <camelia> rakudo-moar 7ddaf755f: OUTPUT: «0␤»
+
+[12:42] <timo> m: use nqp; my Mu $a := nqp::list_n(0e0, 1e0); my $v := nqp::atposref_n($a, 3); say $v.WHAT
+
+[12:42] <camelia> rakudo-moar 7ddaf755f: OUTPUT: «(Num)␤»
+
+[12:42] <timo> oh, this is the difference between array and shaped arrays though
+
+[12:42] <timo> silly me, i was making a nonshaped array here
+
+[12:44] <lizmat> aah  ok
+
+[12:51] <timo> they should probably asplode earlier, not "lazily"
+
+[16:04] *** sena_kun joined
+[16:23] *** sena_kun left
+[16:26] *** sena_kun joined
+[16:34] *** sena_kun left
+[17:35] <Geth> ¦ MoarVM/trash_debugspam_for_azure: 571effbd4e | (Timo Paulssen)++ | src/gc/orchestrate.c
+
+[17:35] <Geth> ¦ MoarVM/trash_debugspam_for_azure: spew backtraces whenever we run GC
+
+[17:35] <Geth> ¦ MoarVM/trash_debugspam_for_azure: review: https://github.com/MoarVM/MoarVM/commit/571effbd4e
+
+[20:06] *** [Coke] left
+[20:23] *** [Coke] joined
+[20:53] <Geth> ¦ MoarVM/trash_debugspam_for_azure: 9c8e321903 | (Timo Paulssen)++ | 2 files
+
+[20:53] <Geth> ¦ MoarVM/trash_debugspam_for_azure: put telemeh init into moar.c instead of main.c for windows
+
+[20:53] <Geth> ¦ MoarVM/trash_debugspam_for_azure: review: https://github.com/MoarVM/MoarVM/commit/9c8e321903
+
+[21:22] *** sena_kun joined
+[22:04] *** sena_kun left
+[22:28] <Geth> ¦ MoarVM/trash_debugspam_for_azure: e8e5c3eea9 | (Timo Paulssen)++ | src/gc/orchestrate.c
+
+[22:28] <Geth> ¦ MoarVM/trash_debugspam_for_azure: try stack trace dump after instead of before gc run
+
+[22:28] <Geth> ¦ MoarVM/trash_debugspam_for_azure: review: https://github.com/MoarVM/MoarVM/commit/e8e5c3eea9
+
+[22:56] <timo> https://dev.azure.com/Rakudo/rakudo/_build/results?buildId=6132&view=logs&jobId=70f6b8a1-f3cf-5727-bd79-d08ddb1caf67&j=70f6b8a1-f3cf-5727-bd79-d08ddb1caf67&t=7f3c3c77-5739-5720-9512-d79212d915f5 finally some actual output
+
+[22:56] <timo> well, it's not telling us where it's breaking, but it is showing us what parts of rakudo get reached
+
