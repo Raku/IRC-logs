@@ -1,0 +1,219 @@
+[05:25] *** kjp left
+[05:26] *** kjp joined
+[05:29] *** kjp left
+[05:30] *** kjp joined
+[05:31] *** kjp left
+[05:32] *** kjp joined
+[09:11] *** sena_kun joined
+[13:30] *** dogbert17 joined
+[13:38] <dogbert17> m: await (^5).map({start { print qqx{echo $_} } })
+
+[13:38] <camelia> rakudo-moar 6edab9f9e: OUTPUT: «2␤0␤4␤1␤3␤»
+
+[13:40] <dogbert17> There's an insidious bug hiding here. Sometimes the code is terminated with "MoarVM panic: Collectable 0x2000a329230 in fromspace accessed"
+
+[13:40] <dogbert17> I'm running with MVM_GC_DEBUG=2 and a small nursery
+
+[13:43] <lizmat> does it also happen without JITting?
+
+[13:44] <dogbert17> I can check ...
+
+[13:46] <dogbert17> It does happen with MVM_JIT_DISABLE=1 as well
+
+[13:48] <dogbert17> The stack trace in gdb always looks the same
+
+[13:49] <dogbert17> #0  MVM_panic (exitCode=1, messageFormat=0x7ffff79a8e70 "Collectable %p in fromspace accessed") at src/core/exceptions.c:855
+
+[13:49] <dogbert17> #1  0x00007ffff771235c in check_reg (tc=0x2000a130f00, reg_base=0x200120c1bb0, idx=20) at src/core/interp.c:13
+
+[13:49] <dogbert17> #2  0x00007ffff7712da5 in MVM_interp_run (tc=0x2000a130f00, initial_invoke=0x7ffff7779736 <thread_initial_invoke>, invoke_data=0x2000a0931c0, outer_runloop=0x0) at src/core/interp.c:231
+
+[13:49] <dogbert17> #3  0x00007ffff77798e9 in start_thread (data=0x2000a0931c0) at src/core/threads.c:101
+
+[13:49] <dogbert17> #4  0x00007ffff734eac3 in start_thread (arg=<optimized out>) at ./nptl/pthread_create.c:442
+
+[13:49] <dogbert17> #5  0x00007ffff73e0850 in clone3 () at ../sysdeps/unix/sysv/linux/x86_64/clone3.S:81
+
+[14:36] *** Geth__ joined
+[14:38] *** japhb_ joined
+[14:38] *** jnthn1 joined
+[14:41] *** Geth left
+[14:41] *** japhb left
+[14:41] *** jnthn left
+[14:52] *** [Coke] left
+[16:36] <timo> did we get the recent spawn setup gc root fix wrong?
+
+[16:49] *** [Coke] joined
+[19:19] <timo> https://raku.zulipchat.com/user_uploads/56534/2fTD6YhNmoa_ukWmPE_3IVZ1/image.png
+
+[19:20] <timo> for ^100 { await (^120).map({ start { print qqx{echo $_ > /dev/null}; } }); note ((ENTER now) R- now) }
+
+[19:20] <timo> 92.41%     0.00%  async io thread  libmoar.so            [.] uv_spawn
+
+[19:32] <dogbert17> timo: on a higher level it looks like this
+
+[19:33] <dogbert17> (gdb) p MVM_dump_backtrace(tc)
+
+[19:33] <dogbert17>    at SETTING::src/core.c/ThreadPoolScheduler.rakumod:406  (/home/dilbert/repos/rakudo/blib/CORE.c.setting.moarvm:affinity-queue)
+
+[19:33] <dogbert17>  from SETTING::src/core.c/ThreadPoolScheduler.rakumod:841  (/home/dilbert/repos/rakudo/blib/CORE.c.setting.moarvm:queue)
+
+[19:33] <dogbert17>  from SETTING::src/core.c/Proc/Async.rakumod:419  (/home/dilbert/repos/rakudo/blib/CORE.c.setting.moarvm:start-internal)
+
+[19:33] <dogbert17>  from SETTING::src/core.c/Proc/Async.rakumod:315  (/home/dilbert/repos/rakudo/blib/CORE.c.setting.moarvm:actually-start)
+
+[19:33] <dogbert17>  from SETTING::src/core.c/Proc/Async.rakumod:325  (/home/dilbert/repos/rakudo/blib/CORE.c.setting.moarvm:start)
+
+[19:33] <dogbert17>  from SETTING::src/core.c/Proc.rakumod:185  (/home/dilbert/repos/rakudo/blib/CORE.c.setting.moarvm:spawn-internal)
+
+[19:33] <dogbert17>  from SETTING::src/core.c/Proc.rakumod:178  (/home/dilbert/repos/rakudo/blib/CORE.c.setting.moarvm:shell)
+
+[19:33] <dogbert17>  from SETTING::src/core.c/Proc.rakumod:251  (/home/dilbert/repos/rakudo/blib/CORE.c.setting.moarvm:QX)
+
+[19:34] <timo> can you also MVM_dump_bytecode(tc)?
+
+[19:34] <timo> that line points at a relatively bug nqp::stmts tree
+
+[19:36] <timo> relatively big*
+
+[19:36] <dogbert17> will do ...
+
+[19:40] <dogbert17> it's a bit longer so I put it here: https://gist.github.com/dogbert17/23618069d8e506e1ca7255cdd011d570
+
+[19:52] <timo> hm, are you able to rr record?
+
+[19:54] <timo> it looks like this is asploding inside a handler for return or similar
+
+[19:55] <timo> it could be that's the return from `nqp::unless( $cand.working, (return $queue), )` but impossible to say without reverse-stepping
+
+[19:57] <timo> setting RAKUDO_SCHEDULER_DEBUG might be interesting to see if it happens immediately after it spits out something
+
+[20:02] <dogbert17> dilbert@dilbert-VirtualBox:~/repos/rakudo$ MVM_JIT_DISABLE=1 RAKUDO_SCHEDULER_DEBUG=1 ./rakudo-m -e 'await (^5).map({start { print qqx{echo $_} } })'
+
+[20:02] <dogbert17> [SCHEDULER 50657] Created initial general worker thread
+
+[20:02] <dogbert17> [SCHEDULER 50657] Supervisor started
+
+[20:02] <dogbert17> [SCHEDULER 50657] Supervisor thinks there are 7 CPU cores
+
+[20:02] <dogbert17> [SCHEDULER 50657] Added a general worker thread
+
+[20:02] <dogbert17> [SCHEDULER 50657] Added a general worker thread
+
+[20:02] <dogbert17> [SCHEDULER 50657] Added a general worker thread
+
+[20:02] <dogbert17> [SCHEDULER 50657] Added a general worker thread
+
+[20:02] <dogbert17> [SCHEDULER 50657] Created initial affinity worker thread
+
+[20:03] <dogbert17> [SCHEDULER 50657] Added a general worker thread
+
+[20:03] <dogbert17> after this the numbers 0..4 are printed out in random order. When it fails it's always after the line 'Created initial affinity worker thread'
+
+[20:04] <dogbert17> i.e. the last 'Added a general worker thread' line is not printed
+
+[20:08] <timo> can you turn spesh off entirely and see if it still asplodes?
+
+[20:08] <dogbert17> sure
+
+[20:10] <dogbert17> will have to run the code a few times ...
+
+[20:10] <dogbert17> it does fail with MVM_SPESH_DISABLE=1 as well
+
+[20:26] <timo> did you say something about rr?
+
+[20:27] <timo> what kind of system is this emulating?
+
+[20:34] <timo> putting a note or scheduler-debug in the !affinity-queue method when entering the method, and when hitting the returns (probably actually want one for each of the protected blocks), as well as the "method queue" which is the only caller to self!affinity-queue, could be helpful
+
+[20:36] <timo> messing around with LEAVE phasers is probably risky in terms of making the code / control flow change enough for the bug to go into hiding
+
+[20:49] <timo> how small exactly is your nursery?
+
+[20:52] <timo> ... i was installing to a prefix i wasn't running from ... 
+
+[20:53] <dogbert17> #define MVM_NURSERY_SIZE 28000
+
+[20:54] <dogbert17> #define MVM_GC_DEBUG 2
+
+[20:54] <dogbert17> those are the changes that I've made
+
+[20:54] <timo> because i can't reproduce the crash at all
+
+[20:55] <dogbert17> I believe that the gc debug flag needs to be on
+
+[20:56] <timo> i do have it turned on
+
+[20:56] <timo> to 2 as well
+
+[20:56] <dogbert17> cool, and the nursery?
+
+[20:57] <timo> #define MVM_NURSERY_THREAD_START (131072 / 64)
+
+[20:57] <timo> #define MVM_NURSERY_SIZE MVM_NURSERY_THREAD_START
+
+[20:58] <dogbert17> I haven't touched those
+
+[20:58] <timo> now i'm dividing by 512 instead
+
+[20:58] <timo> m: say 131072 / 512
+
+[20:58] <camelia> rakudo-moar b5f114467: OUTPUT: «256␤»
+
+[20:58] <dogbert17> --- a/src/gc/collect.h
+
+[20:58] <timo> oops that's rather a bit too small huh
+
+[20:58] <dogbert17> +++ b/src/gc/collect.h
+
+[20:58] <dogbert17> @@ -1,6 +1,6 @@
+
+[20:58] <dogbert17>  /* The maximum size of the nursery area. Note that since it's semi-space
+
+[20:58] <dogbert17>   * copying, we could actually have double this amount allocated per thread. */
+
+[20:58] <dogbert17> -#define MVM_NURSERY_SIZE 4194304
+
+[20:58] <dogbert17> +#define MVM_NURSERY_SIZE 28000
+
+[21:00] <dogbert17> On my primary computer I'm running Linuz under vurtual box and I'm pretty certain that rr doesn't work under that configuration
+
+[21:00] <timo> you could run a linux under qemu-system i think that allows you to rr record LOL
+
+[21:01] <dogbert17> perhaps my second machine, RPi 5, can handle it 
+
+[21:01] <timo> not sure rr works under arm
+
+[21:01] <dogbert17> I can at least install it, version 5.6.0
+
+[21:02] <timo> cool
+
+[21:04] <dogbert17> let me see if I can repro the problem on that machine
+
+[21:07] <dogbert17> yes I could
+
+[21:09] <dogbert17> rr needs /proc/sys/kernel/perf_event_paranoid <= 1, but it is 2   # what is this I wonder
+
+[21:10] <timo> i think it's about being able to do side channel attacks more easily if you get sufficiently high-resolution timer values
+
+[21:11] <timo> timers / performance counters
+
+[21:11] <dogbert17> ok, I changed the value but now rr complains about other things
+
+[21:12] <dogbert17> rr: Saving execution to trace directory `/home/dilbert/.local/share/rr/rakudo-m-0'.
+
+[21:12] <dogbert17> [FATAL ./src/PerfCounters.cc:779:read_ticks()] 3 (speculatively) executed strex instructions detected. 
+
+[21:12] <dogbert17> On aarch64, rr only supports applications making use of LSE
+
+[21:12] <dogbert17> atomics rather than legacy LL/SC-based atomics.
+
+[21:24] <timo> ;(
+
+[21:27] <dogbert17> perhaps I need to set some mysterious gcc flag while building MoarVM
+
+[21:29] <timo> time for a compile time flag that replaces all our usages of atomics with explicit locks ... one global lock for all atomic stuff
+
+[22:48] *** sena_kun left
+[23:37] <timo> hm, i wonder. is it enough to just run the program forced-single-threaded and make all atomic operations non-atomic?
+
