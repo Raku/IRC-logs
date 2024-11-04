@@ -1,0 +1,132 @@
+[03:38] *** lizmat_ joined
+[03:38] *** [Coke]_ joined
+[03:39] *** vrurg left
+[03:39] *** vrurg joined
+[03:40] *** Geth left
+[03:41] *** [Coke] left
+[03:41] *** Nicholas left
+[03:41] *** lizmat left
+[03:42] *** gfldex left
+[03:43] *** gfldex joined
+[03:47] *** Nicholas joined
+[08:44] *** sena_kun joined
+[08:59] *** lizmat_ left
+[09:00] *** Geth joined
+[09:00] *** lizmat joined
+[13:11] *** TheAthlete joined
+[17:05] *** TheAthlete left
+[20:24] <lizmat> A MoarVM crash with one of my modules: https://gist.github.com/lizmat/24bddc13083500d45cd382c52079761b
+
+[20:24] <lizmat> suggestions?
+
+[20:39] <timo> i know barely anything about lldb
+
+[20:40] <ugexe> fwiw on an older rakudo i also can reproduce the segfault but the lldb output seems more useful
+
+[20:40] <ugexe> https://gist.github.com/ugexe/f33d9ec6910bf5296e2dc3d6b5356520
+
+[20:41] <timo> yeah a million times more useful for sure
+
+[20:42] <timo> could you print the values of test (probably *test) and *test->st?
+
+[20:42] <timo> or maybe test->st before *test->st
+
+[20:43] <ugexe> yeah if you can tell me how to do that
+
+[20:43] <timo> i guess just print test and print *test, but i'd have to look through the docs as well
+
+[20:44] <ugexe> what seems odd to me is there are only 2 threads
+
+[20:45] <ugexe> i guess i figured more threads would have been started by the time things get around to actually running rakudo code
+
+[20:46] <timo> if we exec processes, i assume the async io thread would be started. if we create a ThreadPoolScheduler in order to run "start" blocks we would create the supervisor thread
+
+[20:46] <timo> execing processes i would expect to happen when we do precompilation using subprocesses
+
+[20:47] <ugexe> (lldb) print *test
+
+[20:47] <ugexe> error: Couldn't apply expression side effects : Couldn't dematerialize a result variable: couldn't read its memory
+
+[20:47] <timo> ok, please try "frame variable"
+
+[20:48] <ugexe> https://gist.github.com/ugexe/68d6f1605b04d3362d32b8d0352cd53c
+
+[20:48] <ugexe> fwiw im on the latest commit rakudo now
+
+[20:48] <ugexe> (still seeing the same error and lldb output from before)
+
+[20:48] <timo> ok, i don't think test is supposed to be null so that's definitely funny
+
+[20:49] <timo> i should try reproducing it on my linux box so i have the chance to use rr so i can debug in reverse
+
+[20:50] <timo> hey, can you try setting spesh blocking to 1?
+
+[20:53] <timo> we do have a MVM_spesh_dump_arg_guard(tc, sf, ag) where we would get a textual representation of the arg guard tree and its nodes, we just gotta find the SF that goes with it, that would be in the caller frame or the one above that
+
+[20:53] <ugexe> doesn't seem to have changed anything
+
+[20:54] <timo> indeed, the MVM_spesh_poll_for_result has a local variable sf 
+
+[20:56] <timo> "frame select 1" should give you the frame for poll_for_result
+
+[20:57] <ugexe> https://gist.github.com/ugexe/4a92e11bf66d3ccfe62d4e700e8e240e
+
+[20:59] <timo> yep, in there you can "frame variable" to get the value of sf that we need
+
+[21:00] <ugexe> https://gist.github.com/ugexe/44f4ae0766a237e373caa461456a0902
+
+[21:00] <ugexe> :)
+
+[21:00] <timo> then we should be able to "print MVM_spesh_dump_arg_guard(tc, sf, spesh->body.spesh_arg_guard)"
+
+[21:01] <timo> haha, thanks optimization
+
+[21:01] <ugexe> (lldb) print MVM_spesh_dump_arg_guard(tc, sf, spesh->body.spesh_arg_guard)
+
+[21:01] <timo> ok instead of sf we can just use tc->cur_frame->static_info i think
+
+[21:01] <ugexe> error: Couldn't materialize: couldn't get the value of variable sf: variable not available
+
+[21:01] <ugexe> error: errored out in DoExecute, couldn't PrepareToExecuteJITExpression
+
+[21:01] <timo> maybe it's cur_frame->body.static_info
+
+[21:02] <ugexe> (lldb) print MVM_spesh_dump_arg_guard(tc, tc->cur_frame->static_info, spesh->body.spesh_arg_guard)
+
+[21:02] <ugexe> (char *) 0x00000350936ae000 "Latest guard tree for 'insert-also' (cuid: 24, file: site#sources/1CA230DD87FD1ED08E9604B09C828C9D9EA80971 (Array::Sorted::Util):153)\n\n0: CALLSITE 0x100c50060 | Y: 1, N: 0\n1: LOAD ARG 0 | Y: 2\n2: STABLE CONC Int | Y: 3, N: 0\n3: LOAD ARG 1 | Y: 4\n4: STABLE CONC Array | Y: 5, N: 0\n5: RESULT 0\n\n"
+
+[21:04] <timo> anyway, it's likely that MVM_SPESH_OSR_DISABLE=1 will make the crash go away, but we do want to figure out why the crash happens of course
+
+[21:04] <ugexe> https://github.com/lizmat/Array-Sorted-Util/blob/75304a369f6c9cd86e7f967a4c4f2b80bdf5667c/lib/Array/Sorted/Util.rakumod#L153
+
+[21:04] <ugexe> i think that is the line referenced
+
+[21:05] <timo> ok cool so, the node we're crashing on is current_node=2, so the check if what we have is a concrete Int in argument 0
+
+[21:06] <timo> does "print MVM_dump_backtrace(tc)" work?
+
+[21:06] <ugexe> https://gist.github.com/ugexe/a58660d6333209064d236f26a6065f75
+
+[21:08] <timo> ok i'm not sure we can realistically expect to find what exactly goes wrong without some kind of record&replay / time-traveling debugger like rr
+
+[21:08] <timo> let me try to reproduce this locally
+
+[21:12] <timo> perfect, it also crashes here
+
+[21:22] <timo> unlucky: when i "rr record" i get a different kind of crash, and i'm not 100% sure why
+
+[21:36] <timo> here's my hypothesis without solid evidence so far: we might be trying to osr-check inside the body of a dispatcher and we're getting very confused™ about it
+
+[21:55] <timo> no, maybe the output of dump_bytecode was putting the arrow in the wrong spot
+
+[22:20] <timo> i really want something for rr that lets me have some kind of timeline to see where i am, and where i was recently
+
+[22:25] <timo> there's an uninline that happens nearby, i sure hope this isn't a case where uninline messes up, that's no fun to debug :ed
+
+[22:25] <timo> :D
+
+[22:47] *** sena_kun left
+[22:52] *** [Coke]_ is now known as [Coke]
+
+[23:52] <timo> you know, we should really try building a mode or tool that randomly fails guards so we can torture-test our deoptimization code
+
