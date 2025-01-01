@@ -1,0 +1,200 @@
+[00:23] *** vrurg_ joined
+[00:23] *** vrurg left
+[01:09] *** MasterDuke joined
+[02:41] <timo> m: my @*ARGS = ":"; sub MAIN(*@, *%) { };
+
+[02:41] <camelia> rakudo-moar 7d29c62a9: OUTPUT: «MVMArray: Can't shift from an empty array␤  in block <unit> at <tmp> line 1␤␤»
+
+[02:42] <timo>             my $split  := nqp::split("=",$optstring);
+
+[02:42] <timo>             $optstring = nqp::shift($split);
+
+[02:42] <timo> explodes here
+
+[02:43] <timo> m: my @*ARGS = "-"; sub MAIN(*@, *%) { };
+
+[02:43] <camelia> rakudo-moar 7d29c62a9: ( no output )
+
+[02:43] <timo> m: my @*ARGS = "/"; sub MAIN(*@, *%) { };
+
+[02:44] <camelia> rakudo-moar 7d29c62a9: ( no output )
+
+[02:48] <timo> ah, right. neither of these hit that code path, because just - is explicitly filtered out, and the / has to go after a - or :, not in the same position
+
+[02:48] <timo> m: use nqp; say nqp::split("=", "")
+
+[02:48] <camelia> rakudo-moar 7d29c62a9: OUTPUT: «()␤»
+
+[02:49] <timo> m: use nqp; say nqp::split("=", "a")
+
+[02:49] <camelia> rakudo-moar 7d29c62a9: OUTPUT: «(a)␤»
+
+[02:49] <timo> m: use nqp; dd nqp::split("=", "a"); dd nqp::split("=", "")
+
+[02:49] <camelia> rakudo-moar 7d29c62a9: OUTPUT: «("a",)␤()␤»
+
+[02:49] <timo> literally an empty array that we're trying to shift from
+
+[02:50] <timo> m: say "".split("=").raku; say "a".split("=").raku
+
+[02:50] <camelia> rakudo-moar 7d29c62a9: OUTPUT: «("",).Seq␤("a",).Seq␤»
+
+[02:50] <timo> different behaviour in the raku split from the nqp split
+
+[03:54] *** MasterDuke left
+[06:46] <bartolin> because we spoke about null checks yesterday. It looks like MoarVM has its own problems in that area. The first evaluation I ran this morning resulted in a segmentation fault. 'use nqp; say nqp::atkey({}, "foo")'
+
+[06:52] <bartolin> I'm sceptical that it is a good approach to try to make the JVM backend behave the same regarding to null handling. It feels cleaner to check before and just not doing the action on null objects.
+
+[06:53] <bartolin> one example that's still fresh in my mind would be https://github.com/rakudo/rakudo/pull/5379#issuecomment-2493004275
+
+[06:53] <bartolin> luckily there is no segmentation fault, but it's still nqp::atkey on a null object. (Unless I miss something.)
+
+[07:00] <bartolin> sorry for the rambling. maybe I should open an issue in the problem solving repo?
+
+[07:05] <bartolin> btw, my example with the segmentation fault wasn't a good one. 'use nqp; nqp::existskey({}, "foo")' also results in a segfault on MoarVM. And it gives a NullPointerException on the JVMbackend.
+
+[07:44] <bartolin> I've created https://github.com/rakudo/rakudo/issues/5697 for the problem with nqp::existskey.
+
+[09:32] *** sena_kun joined
+[10:13] *** sena_kun left
+[13:06] <timo> ok, that comes from the object at the associative delegation slot being null
+
+[13:08] <timo> how should we behave here, i wonder. maybe get_object_at_offset that pulls stuff out of a P6opaque's body should give VMNull instead of real null when there's a null at that offset
+
+[13:50] <nine> Wouldn't the correct thing be to auto-vivify if absent?
+
+[13:53] <lizmat> m: use nqp; say nqp::existskey(%(), "foo")
+
+[13:53] <camelia> rakudo-moar 7d29c62a9: OUTPUT: «0␤»
+
+[13:53] <lizmat> looks like Hash.new is taken a shortcut
+
+[13:55] <lizmat>     multi method new(Map:        --> Map:D) {
+
+[13:55] <lizmat>         nqp::create(self)
+
+[13:55] <lizmat>     }
+
+[13:55] <lizmat> yup
+
+[14:00] <timo> do we use getattr + atkey/bindkey/existskey everywhere we have a Map?
+
+[14:00] <timo> or do we directly point the atkey/bindkey/existskey at the Map object?
+
+[14:00] <lizmat> the former afaik
+
+[14:05] <Geth> ¦ rakudo/main: ba3b24cff2 | (Elizabeth Mattijsen)++ | src/core.c/Map.rakumod
+
+[14:05] <Geth> ¦ rakudo/main: Make sure Map.new has an NQP hash always
+
+[14:05] <Geth> ¦ rakudo/main: 
+
+[14:05] <Geth> ¦ rakudo/main: Fixes #5697
+
+[14:05] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/ba3b24cff2
+
+[14:05] <timo> that doesn't feel like the right fix
+
+[14:07] <lizmat> why?   how many times do you call Hash.new without arguments?
+
+[14:07] <lizmat> without making further changes to that hash later on ?
+
+[14:07] <lizmat> afk for a few hours&
+
+[14:15] <timo> i imagine there's a few situations where you have a datastructure where "named" stuff is optional, but it has a Hash in it anyway because of a "has %.foo"? or does that also delay initialisation with autoviv?
+
+[14:16] <timo> if there's no way to get rakudo to try to atkey/bindkey/existskey on the hash object directly, then trying to make nqp::blahkey work correctly is not crucial, because if you "use nqp", you get what you get (but not segfaults. ideally, never segfaults)
+
+[14:30] <nine> Because the underlying bug is still not fixed:
+
+[14:30] <nine> m: use nqp; my \A := Metamodel::ClassHOW.new_type(:name<A>); A.^add_attribute(Attribute.new(:name<$!a>, :type(Mu), :package(A), :auto_viv_primitive(nqp::hash), :associative_delegate)); A.^compose; nqp::existskey(A.new, "a")'
+
+[14:30] <camelia> rakudo-moar ba3b24cff: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Two terms in a row␤at <tmp>:1␤------> ; A.^compose; nqp::existskey(A.new, "a")<HERE>'␤    expecting any of:␤        infix␤        infix stopper␤        statement end␤        statement modifier…»
+
+[14:30] <nine> m: use nqp; my \A := Metamodel::ClassHOW.new_type(:name<A>); A.^add_attribute(Attribute.new(:name<$!a>, :type(Mu), :package(A), :auto_viv_primitive(nqp::hash), :associative_delegate)); A.^compose; nqp::existskey(A.new, "a")
+
+[14:30] <camelia> rakudo-moar ba3b24cff: OUTPUT: «(signal SEGV)»
+
+[14:55] <timo> m: use nqp; my \A := Metamodel::ClassHOW.new_type(:name<A>); A.^add_attribute(Attribute.new(:name<$!a>, :type(Mu), :package(A), :associative_delegate)); A.^compose; nqp::existskey(A.new, "a")
+
+[14:55] <camelia> rakudo-moar ba3b24cff: OUTPUT: «(signal SEGV)»
+
+[14:56] <timo> ^- unless we also error during composition when there's no auto viv on the associative delegate slot, just doing autoviv when accessing things through the associative delegate won't help unless we also grab VMNull instead of real-null with get_obj_at_offset
+
+[15:11] <timo> same kind of error presumably happens for pos delegate and atpos/existspos/bindpos
+
+[15:11] <timo> does existspos exist?
+
+[15:13] <ugexe> I use Hash.new without arguments and without potentially changing the hash later on
+
+[15:13] <ugexe> since {} is often ambiguous 
+
+[15:17] <ugexe> that being said i'm not sure i use it anywhere that i need it to be highly optimized
+
+[15:41] <timo> i would suggest counting the number of objects created during a spec test run with some tracing tool and comparing a run or three with and without that change
+
+[16:11] <nine> I think that's missing the point. MoarVM must not segfault because of simply running some HLL code. We put much effort into preventing segfaults even when users do really wrong things like sharing totally unprotected hashes between threads. This case here is way more straight forward than that.
+
+[16:55] *** donaldh_ is now known as donaldh
+
+[18:36] *** sena_kun joined
+[18:46] <[Coke]> jdv: let's plan something mid December to go through a fake release so I'm up to speed?
+
+[18:46] <[Coke]> (and have all the privs I might need, etc.)
+
+[19:02] *** sena_kun left
+[21:06] <ab5tract> #TeamNoSegfault
+
+[21:09] <[Coke]> (I can go through the motions on the release myself and just yell if I get stuck on something)
+
+[21:34] <patrickb> I currently try to get the long paths PR working on Windows. Looking good so far. Unrelated to those changes, I did notice though that the nativecall tests randomly fail when run with via the rest harness. It' always entire files that fail. About a third of t/04-nativecall fails, different files every time.
+
+[21:34] <patrickb> I can't get it to fail when I run a file manually.
+
+[21:34] <patrickb> Did anyone observe the same effect in the past? Is this a known issue?
+
+[21:37] <ugexe> from what i can recall the issue was with masterdukes complimenting PR that uses libuv for some other file operations. specifically something with mkdir was off i think
+
+[21:37] <[Coke]> patrickb: that sounds right on nativecall.
+
+[21:40] <[Coke]> thought I hd a ticket on that but cannot find it.
+
+[21:45] <patrickb> ugexe: So it might actually be related to the path changes!
+
+[21:46] * patrickb tries with a vanilla rakudo
+
+[22:23] <ugexe> https://gist.github.com/ugexe/0b48f8ebd7d08fdf54235e03729071ab
+
+[22:23] <ugexe> that generates a raku program with 10k deep for loops
+
+[22:23] <ugexe> it seems to never finish running
+
+[22:24] <ugexe> (the generated program)
+
+[22:24] <ugexe> with 1000 instead of 10,000 the generated program finished almost instantly
+
+[22:28] <patrickb> Nope, it's unrelated to the long path PR.
+
+[22:29] <patrickb> It sucks that the problem only surfaces when running through TAP::Harness...
+
+[22:30] <ugexe> is it running tests in parallel?
+
+[22:30] <patrickb> I don't think so.
+
+[22:31] <patrickb> ow, actually it does
+
+[22:32] <patrickb> succeeds with --jobs=1
+
+[23:08] <patrickb> Found and fixed. Only happens when having compiled moar with debugging enabled.
+
+[23:15] <patrickb> ugexe: Do you remember which test was failing? I can't repro right away locally.
+
+[23:16] <ugexe> no, and it might have only been for mingw
+
+[23:17] <patrickb> Ok. I'll skim through the issues again.
+
+[23:18] <patrickb> ISTR MinGW was a build error, and the test failure was some mkdir test issue.
+
+[23:44] <[Coke]> patrickb++
+

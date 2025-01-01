@@ -1,0 +1,140 @@
+[03:47] <guifa> is it just me or is nqp::closefh only defined for JS?
+
+[06:13] <bartolin> for MoarVM it should be https://github.com/MoarVM/MoarVM/blob/f4680765ff/src/io/syncfile.c#L259 and for the JVM https://github.com/Raku/nqp/blob/fda688110f/src/vm/jvm/runtime/org/raku/nqp/runtime/Ops.java#L803 (and the different methods in src/vm/jvm/runtime/org/raku/nqp/io/).
+
+[09:09] <timo> well, the closefh you linked to on moarvm is only for syncfile, a handle will have a few structs with "ops", in other words function pointers
+
+[09:10] <timo> https://github.com/MoarVM/MoarVM/blob/f4680765ff33c5815a8a9ae183ed08cce6cc6943/src/io/io.c#L28 this is one step closer to nqp::closefh
+
+[09:11] <timo> https://github.com/MoarVM/MoarVM/blob/f4680765ff33c5815a8a9ae183ed08cce6cc6943/src/core/interp.c#L3398 this is where the close_fh opcode turns into a call to that function
+
+[09:12] <timo> https://github.com/Raku/nqp/blob/main/src/vm/moar/QAST/QASTOperationsMAST.nqp#L3353 this is where closefh turns into close_fh
+
+[09:50] *** [Coke] left
+[10:19] *** sena_kun joined
+[11:45] *** [Tux] left
+[11:48] *** [Tux] joined
+[11:49] *** [Coke] joined
+[12:40] <guifa> Ah okay.  I was trying to track down why close_socket and close_perform didn't seem to be called in MoarVM, so went walking back from Rakudo and it just called the nqp::closefh, and couldn't see where that was defined
+
+[12:51] <guifa> What's the best error type to throw if something is called with incompatible options?  I feel like there's some other examples out there, but the only one I can find is Timezone clash but it throws a very specific error
+
+[12:55] * guifa is modifying bind-udp to include a :multicast option, which is incompatible with :broadcast (can use one or the other, but both doesn't make sense)
+
+[12:57] <timo> hm, there's something for adverbs at least, but broadcast and multicast are not obviously adverbs right?
+
+[12:57] <timo> m: CATCH { dd $_; dd $! }; my @a; @a[5]:exists:kv:p
+
+[12:57] <camelia> rakudo-moar 26fbd4c36: ( no output )
+
+[12:57] <timo> hm, not like that apparently
+
+[12:58] <timo> m: CATCH { dd $_; dd $! }; my @a; say @a[5]:exists:kv:p
+
+[12:58] <camelia> rakudo-moar 26fbd4c36: OUTPUT: «X::Adverb.new(what => "element access", source => "\@a", unexpected => [], nogo => ["exists", "kv", "p"])␤$! = Nil␤Unsupported combination of adverbs ('exists', 'kv', 'p') passed to␤element access on '@a'.␤  in block <unit> at <tmp> line 1␤␤»
+
+[13:01] <guifa> Eh sort of?  [insert named args v adverb discusssion]
+
+[13:02] <timo> it kind of fits with "no candidate matched"
+
+[13:03] <timo> but there's the "methods always take any named argument" thing to consider as well
+
+[13:03] <timo> i guess it'd be an ambiguous dispatch then though
+
+[13:04] <timo> maybe it really wants to be a cast => "uni" | "broad" | "multi" :D
+
+[13:05] <guifa> Right.  At the moment, the combination of :multicast and :broadcast will generate a flag with a value of 3, which in my MoarVM modifications will ultimately throw an invalid args UV_EINVAL.  But I'd rather catch that higher up in Raku to provide an better error message
+
+[13:05] <timo> yes
+
+[13:06] <guifa> timo: honestly, :type<unicast> as default and allowing :type<broadcast>and :type<multicast> wouldn't be a bad thing
+
+[13:07] <guifa> except it would break current code that uses :broadcast (if anyone actually is?)
+
+[13:08] <timo> we do have revision gating now, so it could be a change for the next language version if we want
+
+[13:18] * guifa just tosses it on problem solving :) 
+
+[13:20] <timo> yeah, good idea
+
+[13:23] <guifa> also just thought about it -- I'll probably need to go figure out multicasting in Java and Javascript now too lol
+
+[13:24] <guifa> Interesting, in the docs we do call :broadcast an adverb
+
+[13:31] <guifa> what's the bot that lets us search for usages of things across the ecosystem?
+
+[13:34] <timo> i think it's called greppable
+
+[13:34] <timo> with a 6
+
+[13:35] <guifa> ah seems to be offline
+
+[13:38] <guifa> https://github.com/Raku/problem-solving/issues/457 if anyone wants to comment :) 
+
+[14:32] <timo> i don't think we have anything in the language for easily working with already-established file descriptors that can be sockets, files, pipes, whatever
+
+[14:33] <timo> like, we can't get a IO::Socket::Async by just opening fd 5 or such
+
+[14:34] <timo> we can supply a path, which could in theory be /proc/self/fd/5 but i don't think attempting to open that path as a unix domain socket actually works if it's actually a AF_INET socket for example
+
+[14:34] <timo> you can open that exact path as a regular file and then you get the same semantics as you would when you get a socket's fd and open() it in, say, C
+
+[14:35] <timo> that's probably okay often enough for TCP, but i don't know how much you get out of it when using UDP, and i have zero clue of SCTP
+
+[14:36] <timo> you can of course always nativecall into your libc but i'm looking for stuff available from raku directly
+
+[14:37] <timo> also i want Proc::Async and related to allow you to pass established FDs to your child at specified numbers, too
+
+[14:42] <timo> there should also be an easy path from "i'm on linux and i'd like to use AF_VSOCK" to "i have a Socket::Async i can use to communicate over that"
+
+[14:42] <timo> not 100% sure putting vsock support directly into moar is right? it's slightly niche
+
+[14:45] <lizmat> yeah, MacOS doesn't support it out of the box
+
+[15:17] *** vrurg_ joined
+[15:20] *** vrurg left
+[16:46] <Geth> ¦ rakudo/main: 77c4c64e37 | (Elizabeth Mattijsen)++ | src/core.c/Str.rakumod
+
+[16:46] <Geth> ¦ rakudo/main: Add proper support for regexes to multi-needle .split
+
+[16:46] <Geth> ¦ rakudo/main: 
+
+[16:46] <Geth> ¦ rakudo/main: Before this commit, having a regex as one of the needles in a
+
+[16:46] <Geth> ¦ rakudo/main: multi-needle split would just take all the needles and interpolate
+
+[16:46] <Geth> ¦ rakudo/main: them into a single regex.  This was fine as long as you didn't
+
+[16:46] <Geth> ¦ rakudo/main: specify any :k, :kv or :p adverb as well.  If you did, then the
+
+[16:46] <Geth> ¦ rakudo/main: key value would always be 0.
+
+[16:47] <Geth> ¦ rakudo/main: <…commit message has 15 more lines…>
+
+[16:47] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/77c4c64e37
+
+[17:00] <lizmat> bisectable6: old=2024.12 say "twone".split((/<?after o>ne/, "two"), :kv)
+
+[17:01] <bisectable6> lizmat, Bisecting by output (old=2024.12 new=77c4c64) because on both starting points the exit code is 0
+
+[17:01] <bisectable6> lizmat, bisect log: https://gist.github.com/2726091bfba95a5f7e5b483f34eb4762
+
+[17:01] <bisectable6> lizmat, (2024-12-19) https://github.com/rakudo/rakudo/commit/77c4c64e371bfd7792fb98a89ecdd4b917c53560
+
+[17:02] <lizmat> m: say "twone".split((/<?after o>ne/, "two"), :kv)
+
+[17:02] <camelia> rakudo-moar 77c4c64e3: OUTPUT: «( 1 two n 0 e )␤»
+
+[17:24] <Geth> ¦ rakudo/main: bea1f0991e | (Elizabeth Mattijsen)++ | src/core.c/Str.rakumod
+
+[17:24] <Geth> ¦ rakudo/main: Fix stupid thinko in handling regex in multi-needle split
+
+[17:24] <Geth> ¦ rakudo/main: 
+
+[17:24] <Geth> ¦ rakudo/main: The cursor tells us where the match begins, duh!
+
+[17:24] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/bea1f0991e
+
+[23:08] *** sena_kun left
+[23:41] <guifa> timo: interesting.  What I was really trying to do is ultimately catch the closing of the socket. The way multicast works is you sign up to receive messages from a particular source.  In theory, you should ALSO unregister.  I'm not sure if the way things work if that's needed if the socket is closed, or if that's just an option for repurposing an existing socket
+

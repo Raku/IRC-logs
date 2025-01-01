@@ -1,0 +1,95 @@
+[06:51] *** gfldex left
+[10:15] *** sena_kun joined
+[13:00] <Geth> ¦ MoarVM/spesh_arg_guard_run_oops_instead_of_busyloop: 38a8bc54cb | (Timo Paulssen)++ | src/spesh/arg_guard.c
+
+[13:00] <Geth> ¦ MoarVM/spesh_arg_guard_run_oops_instead_of_busyloop: Guard against out-of-bounds jumps in spesh arg guard program.
+
+[13:00] <Geth> ¦ MoarVM/spesh_arg_guard_run_oops_instead_of_busyloop: 
+
+[13:00] <Geth> ¦ MoarVM/spesh_arg_guard_run_oops_instead_of_busyloop: This seems to be what sometimes happens on arm builds for our debian
+
+[13:00] <Geth> ¦ MoarVM/spesh_arg_guard_run_oops_instead_of_busyloop: package, and hitting this oops should be better than running into an
+
+[13:00] <Geth> ¦ MoarVM/spesh_arg_guard_run_oops_instead_of_busyloop: endless do-nothing loop.
+
+[13:00] <Geth> ¦ MoarVM/spesh_arg_guard_run_oops_instead_of_busyloop: review: https://github.com/MoarVM/MoarVM/commit/38a8bc54cb
+
+[13:01] <Geth> ¦ MoarVM: timo++ created pull request #1880: Guard against out-of-bounds jumps in spesh arg guard program.
+
+[13:01] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1880
+
+[13:46] <Geth> ¦ MoarVM/main: 52d3452e4c | (Timo Paulssen)++ (committed by timo) | src/spesh/arg_guard.c
+
+[13:46] <Geth> ¦ MoarVM/main: Guard against out-of-bounds jumps in spesh arg guard program.
+
+[13:46] <Geth> ¦ MoarVM/main: 
+
+[13:46] <Geth> ¦ MoarVM/main: This seems to be what sometimes happens on arm builds for our debian
+
+[13:46] <Geth> ¦ MoarVM/main: package, and hitting this oops should be better than running into an
+
+[13:46] <Geth> ¦ MoarVM/main: endless do-nothing loop.
+
+[13:46] <Geth> ¦ MoarVM/main: review: https://github.com/MoarVM/MoarVM/commit/52d3452e4c
+
+[13:46] <timo> lizmat: i'm not sure if we should already bump for this
+
+[13:47] <lizmat> I'd say we should
+
+[13:47] <lizmat> bisectability is a good thing
+
+[13:47] <lizmat> I will
+
+[13:47] <timo> i hope it doesn't break anyone's code, but on the other hand using "blead" already comes with some risk and less guarantees already
+
+[13:47] <lizmat> yes, and we want to see breakage rather sooner than later
+
+[14:16] *** sena_kun left
+[14:18] *** sena_kun joined
+[17:03] <timo> hm. using a 16 bit integer for frame indices may not be a limitation that's terribly difficult to hit, huh.
+
+[17:07] <timo> CORE.c.setting is up to Frame_25401, so i guess you have to work hard if you want to reach 65535 frames without doing something like `for ^65536 { say "sub foo_" ~ $_ ~ "(){}"; }`
+
+[17:12] <timo> looks like i don't really have to put in a check if the number of frames is out of bounds since we also generate one local variable in <unit> for every frame :S
+
+[17:18] <timo> the code we generate here is weird. we do getcode + capturelex starting at Frame_2 into loc_65473_obj and the frame number goes up by one and the register number stays the same, so we just overwrite it over and over
+
+[17:19] <timo> but i think capturelex here modifies the code object to get it to capture all the necessary lexicals, so that's fine?
+
+[17:20] <timo> and then we do one getcode for every frame into a local variable of its own, so loc_0_obj, Frame_2 then loc_1_obj, Frame_3 and so on and so forth
+
+[17:27] <timo> i'm not sure if these local variables are even used at all?
+
+[17:42] <lizmat> you tell me!
+
+[17:44] <timo> there's also a part in the QAST called post_deserialize or so that assigns the $!do of a bunch of Code objects (likely a subclass, presumably Routine?) but I don't see any reflection of that in the moar bytecode that comes out
+
+[17:46] <timo> ===SORRY!===
+
+[17:46] <timo> Cannot have more than 65534 MAST::Frame in a CompUnit. This CU has 65540
+
+[17:50] <timo> ok, string indices into our string heap are 32bit integers, so it'll be a bit more tricky to hit that limit
+
+[17:56] <timo> strings in the string heap are "deduplicated", so you would really need 2**32 different strings, and every string in the string heap is represented as utf8 or latin1 if possible with two bytes of size in front and padded to the next 4 full bytes. this gets you to a pretty hefty file size if you want to reach this limit "legitimately" ... either 16 or 32 gigabytes is a too-conservative lower limit
+
+[17:56] <timo> i'm thinking?
+
+[17:57] <timo> four bytes of size in front*
+
+[17:59] <timo> ah, ok, so if you just make \x00\x00\x00\x00 your first string and then go up by 1 each time, and ignore invalid utf8 for the moment, you can exhaust 32 strings total with just four bytes of string, i.e. the last string in the string heap would be \xff\xff\xff\xff
+
+[17:59] <timo> then you'll just have 8 bytes per string, 8 bytes * (2 ** 32)
+
+[18:00] <timo> m: my $b = 8 * (2 ** 32); dd bytes => $b, kbytes => $b / 1024, mbytes => $b / (1024 * 1024), gbytes => $b / (1024 * 1024 * 1024)
+
+[18:00] <camelia> rakudo-moar 79fb513a1: OUTPUT: «:bytes(34359738368)␤:gbytes(32.0)␤:kbytes(33554432.0)␤:mbytes(32768.0)␤»
+
+[18:00] <timo> ah, hit the nail on the head with the 32 gigabytes
+
+[18:01] <timo> plus whatever code you have to actually use these strings. assuming just a single frame that puts const_s into a single register for every string we have would  get us i think 2 + 2 + 4 bytes for each op, so another 32 gigabytes
+
+[18:34] <timo> ok, it's not important if you make your string heap 0xffffffff bytes large, since we also store offsets to sections as 32bit unsigned ints in the .moar file and these offsets are essentially the prefix sum of the sizes
+
+[18:35] <timo> the only thing that is allowed to be larger is the annotations segment since it comes at the very end. as long as it starts inside of 0xffffffff it should be able to also be up to 0xffffffff bytes large?
+
+[22:37] *** sena_kun left

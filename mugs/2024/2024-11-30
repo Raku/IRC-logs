@@ -1,0 +1,98 @@
+[05:05] *** japhb left
+[05:09] *** japhb joined
+[09:41] <timo> patrickb: struct termios has a sizeof of 72 on mac, and 60 on linux, so that causes memory corruption on mac when Terminal::MakeRaw is used by Repl
+
+[09:41] <timo> via Terminal::LineEditor
+
+[09:44] <timo> 0x38 is the offsetof c_ospeed on linux, 0x40 on mac, offsetof c_cc has 0x11 on linux and 0x20 on mac
+
+[09:47] <timo> iflag, oflag, cflag, and lflag are at hex 0, 8, 10, 18 on mac, but on linux they are 0, 4, 8, and c
+
+[09:49] <timo> typedef unsigned long   tcflag_t on mac, but on linux i get sizeof(tcflag_t) giving 4
+
+[09:49] <timo> yeah, unsigned int on linux
+
+[11:09] <lizmat> *phew*  nice!
+
+[11:44] <timo> if all we do is call cfmakeraw on the termios we get, we don't have to get the fields right, all we need to do is ensure the struct is big enough in total so the native functions that act on the termios struct don't write past what we have allocated
+
+[11:52] <timo> otherwise we can determine the size of the struct by looking at which interpretation gives reasonable values when we just try both :D
+
+[11:52] <timo> maybe by initialising the struct with nonsense values, calling tcgetattr, and then seeing how much of the values have been overwritten with anything
+
+[11:57] <timo> lizmat: could you try a locally changed version of Terminal::MakeRaw that uses the struct definition that's on macos? here's how it's defined on go for example: https://cs.opensource.google/go/x/sys/+/master:unix/ztypes_darwin_arm64.go;l=613 compared to the linux amd64 version https://cs.opensource.google/go/x/sys/+/master:unix/ztypes_linux_amd64.go;l=285 which also has that Line field that the other
+
+[11:57] <timo> doesn't have, but 19 instead of 20 flag byte fields
+
+[11:57] <timo> or i guess in order to make it not crash, just add like ten dummy 64 bit integer fields at the end of the struct just so the allocation we do gets biggered
+
+[11:58] * lizmat will ry
+
+[11:58] <lizmat> try
+
+[12:00] <timo> i'm a bit frustrated that it wasn't the first thing i checked, just by intuition, when i started diagnosing this
+
+[12:00] <timo> lot of time wasted :(
+
+[12:01] <lizmat> meh, sorry, I didn't realize it could be something that obvious 
+
+[12:01] <timo> haha
+
+[12:01] <timo> no problem
+
+[12:01] <timo> i do not understand why asan didn't catch the obvious issue though
+
+[12:01] <timo> i'll try later today with a struct that is completely too small and see if that changes things
+
+[12:02] <lizmat> so how did you get to 72 ?
+
+[12:02] <timo> i was in lldb and did `print sizeof(struct termios)`
+
+[12:02] <lizmat> I see 4 * 8 + 20 + 2 * 8 ?
+
+[12:02] <timo> check your local xcode sdk for a sys/termios.h, too
+
+[12:02] <timo> there's probably padding too
+
+[12:03] <lizmat> ah
+
+[12:03] <timo> see the offsetof results for c_ospeed
+
+[12:03] <timo> 0x38 on linux, 0x40 on mac, that would be 4 * upgrade from 4 to 8 byte and then some more i guess?
+
+[12:03] <lizmat> yeah, so ispeed and ospeed are int32 on Linux and int64 on MacOS
+
+[12:04] <timo> and the four flag members at the start
+
+[12:06] <lizmat> perhaps an approach such as here: https://github.com/lizmat/P5getpwnam/blob/main/lib/P5getpwnam.rakumod
+
+[12:06] <lizmat> would be more appropriate ?
+
+[12:06] <lizmat> aka, different classes for different OSes
+
+[12:06] <timo> sure
+
+[12:07] <lizmat> with a selection at compile time: https://github.com/lizmat/P5getpwnam/blob/main/lib/P5getpwnam.rakumod#L66
+
+[12:08] <timo> AFK
+
+[12:33] <lizmat> yeah, adding:
+
+[12:33] <lizmat> +  has int64 $.filler1;
+
+[12:33] <lizmat> +  has int32 $.filler2;
+
+[12:33] <lizmat> to the struct fixes the issue
+
+[12:36] <patrickb> Can we just hard code the different struct layouts?
+
+[12:36] <patrickb> We'll probably want to access other parts of the structure in the future.
+
+[12:37] <patrickb> That's what go is doing, right?
+
+[12:37] <patrickb> Ah, lizmat proposed the same.
+
+[12:38] <lizmat> yeah, yup  :-)
+
+[17:07] <japhb> timo++, lizmat++
+

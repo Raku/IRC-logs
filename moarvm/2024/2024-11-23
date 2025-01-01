@@ -1,0 +1,166 @@
+[09:44] *** sena_kun joined
+[10:49] <timo> lizmat: can you be a bit more specific what you mean by "libuv's tick functionality"?
+
+[10:50] <lizmat> this comment: "Instead of libuv's own repeating timer functionality, we take care of restarting the timer on every tick, so that we can correct for drift"
+
+[10:51] <timo> ah, so you mean "what's wrong with libuv's repeating timer functionality"?
+
+[10:51] <lizmat> I guess?
+
+[10:51] <lizmat> :-)
+
+[10:51] <lizmat> and if there's something wrong there, why don't we fix it there ?
+
+[10:51] <timo> essentially what the dev said in this comment on stackoverflow: https://stackoverflow.com/a/42361851
+
+[10:52] <lizmat> ok, understood
+
+[10:52] <timo> "every tick" is perhaps the wrong expression to use in my comment there
+
+[10:52] <timo> i mean every time the timer fires
+
+[10:53] <timo> the default implementation when you use the "repeating" field is just to start the timer again before its callback is run, and supply the "repeat" argument as the timeout
+
+[10:53] <timo> almost by definition, the callback runs some amount of time after the timeout has happened
+
+[10:54] <lizmat> yeah, got that now  :-)
+
+[11:07] <timo> i wonder what this will do to user code, though. people already shouldn't be relying upon exact number of invocations over a very specific timeframe, right?
+
+[11:09] <lizmat> indeed, it's best effort and always has been afaik
+
+[11:09] <timo> on linux, there is a variant of sleep where you can specify an absolute time that your thread should be woken up at instead of a relative time, but that is not fully relevant to this feature since it will actually require a thread to actually be fully blocked in the sleep call, so there would have to be a dedicated timer thread and some management for when you want to add another timer that will
+
+[11:09] <timo> tick earlier than the earliest timer in the queue
+
+[11:10] <lizmat> yeah, although it *could* be handy to have such a feature
+
+[11:10] <timo> yes, for Promise.at for example
+
+[11:10] <lizmat> but not the default I'd say
+
+[11:10] <timo> but of course that is also best-effort, nothing we can do if the machine is overloaded at that time, etc
+
+[11:11] <lizmat> right, the "at" is now inferred from current time
+
+[11:11] <timo> yeah
+
+[11:11] <timo> something else i've been wondering about, but that's more for the raku side than the moar side, is how to behave when timer ticks are missed
+
+[11:12] <timo> but perhaps this would be better in an ecosystem module
+
+[11:12] <timo> a supply that gets values emitted for every relevant time point from a given start point until whatever the current time is, and the values show up no earlier than the clock actually hitting that time
+
+[11:13] <timo> that's relatively clear semantics and promises for what exactly will happen if the machine is suspended for example
+
+[11:13] <lizmat> a countdown as it were ?
+
+[11:13] <timo> not sure if countdown is the right word for what i'm thinking of
+
+[11:14] <timo> i suppose this isn't hard to compose for yourself with just a supply block right now
+
+[11:15] <timo> in goes a supplier that emits Instants to emit at, then this part that i'm describing would either immediately emit the value if it's in the past, or it would wait for that time to come around and then emit
+
+[11:16] <timo> say, how do we generally implement stuff with feedback when it comes to supplies?
+
+[11:16] <lizmat> .throttle?
+
+[11:16] <timo> because i would imagine it'd be helpful for the supplier at the beginning of the pipeline to get feedback for when the tick actually happened, i.e. if it was late ... is that just calling "now" after the emit, perhaps?
+
+[11:17] <timo> well, i would expect a supply that emits 1 per second for example to emit a few thousand values right away if the machine wakes up from suspend after some amount of hours
+
+[11:17] <timo> that sounds a bit anti-throttle
+
+[11:17] <timo> full-throttle you might even say
+
+[11:18] <timo> but also, what exactly is the use cases for this, i'm not sure
+
+[11:19] <lizmat> indeed
+
+[11:19] <timo> but having clear semantics for what happens when timer ticks are missed makes me feel a bit safer :D
+
+[11:19] <timo> the current behaviour, and i think we should probably document this also, is that whenever the tick callback runs, we start another interval
+
+[11:20] <timo> so comparing a machine that is overloaded or asleep with a machine that's mostly idle for the same time period can result in very different behaviour
+
+[11:20] <timo> but we're also not promising that, as far as i can tell
+
+[11:21] <timo> on the other hand
+
+[11:21] <timo> at least to me, the name interval slightly implies a kind of regularity
+
+[11:21] <timo> and with the change i proposed in that pull request we trade one kind of irregularity for another
+
+[11:23] <lizmat> but less irregularity, right ?
+
+[11:23] <timo> oh, and also, the code run in the taps of such an interval supply doesn't influence the placement of the timer ticks, those are handled by the event loop thread which aims to go through stuff as fast as possible and just sends a notification through a ConcBlockingQueue
+
+[11:23] <timo> well
+
+[11:23] <timo> when you look at the plots, you can see that the new behaviour is more spiky
+
+[11:23] <timo> so the interval from one wake-up to the next is more irregular
+
+[11:24] <timo> but it comes closer to what you would expect from "wake up every n milliseconds"
+
+[11:24] <timo> on the other hand, with the behaviour before, the differences in times from one to the next are more regular
+
+[11:25] <timo> i still need to do some testing of behaviour on main vs "improved" when it comes to a loaded system
+
+[11:25] <lizmat> what behaviour would you prefer for a video refresh logic ?
+
+[11:26] <timo> for video refresh i would say "do not use timers based on a clock" and instead use what the display device offers so you can actually synchronise with the hardware
+
+[11:27] <lizmat> ok
+
+[11:27] <lizmat> so that's not something to take into consideration
+
+[11:28] <timo> for audio, there's generally two methods i know of: the application has to reqularly fill buffers and send them into a kind of queue, or the application is called by the audio library whenever X amount more data is needed in Y timeframe from now so that there is not a skip
+
+[11:30] <timo> for video games, at least in the simplest case, usually you have a "main loop" where you 1) get and process input, 2) update the state of the game world, 3) paint everything to a buffer, 4) register the new buffer to be swapped to the display on next refresh, 5) optionally block/sleep until the swap has happened or if you're done barely ahead of schedule or even too late, just work on calculating
+
+[11:30] <timo> the next frame?
+
+[11:31] <timo> that's generally how you would work if you want to target 60fps like older video games, or 120 or 144 fps for video games on modern high refresh rate displays
+
+[11:32] <timo> but if you want to display a spinner, an animated loading bar, or something of that nature, that's a situation where usually you want to stress the user's hardware as little as possible, to conserve battery, to prevent fan noise, etc
+
+[11:32] <timo> even then, you'd generally have something like a declarative animation system offered to you by whatever GUI library you're using
+
+[11:33] <timo> in the browser you have CSS animations which is fairly powerful, and you have requestAnimationFrame in javascript where you register a callback to happen the next time a frame should be painted 
+
+[11:34] <timo> for Qt there's the whole QtQuick thing which is kind of a domain specific language to describing UIs and that also has lots of stuff for making complex animations happen, and that is handled by Qt to be smooth
+
+[11:35] <timo> Gtk has something as well where you can tell it that you want some set of properties on some objects to be animated over some timeline and it also handles the concerns of making things be smooth
+
+[11:35] <timo> on the other hand, we shouldn't make Supply.interval unnecessarily useless for making something resembling an animation
+
+[11:36] <timo> and for example if you're in a terminal and you're working with ansi escape codes to place stuff at locations on the screen, well you don't really have something there that resmebles vsync, though you can tell the terminal "pause drawing for a moment while i send a bunch of stuff" and then "ok you can refresh the screen now" if i remember correctly
+
+[11:37] <timo> and the kitty graphics protocol allows you to place not only static images somewhere with pixel coordinates, but it also allows things you display to have frames that are animated
+
+[11:37] <timo> kitty graphics also uses ansi escape sequences 
+
+[11:37] <timo> that was a very long-winded way to say "*shrug*"
+
+[11:37] <lizmat> tldr;  :-)
+
+[11:38] <timo> haha
+
+[11:39] <timo> if you really need timing precision, wake up your code sligthly earlier than it needs to actually do the work, but not too early that it'd be descheduled before the time comes, and then busy loop until the highest-precision clock you can get runs out
+
+[11:40] <timo> but if you're at that level, you may already be at the point where you're counting assembly instructions, or more likely memory accesses, or something like that???
+
+[11:41] <timo> what kind of system could you be working with that actually has a meaningful difference in behaviour from hitting a clock dead-on vs off by a fraction of a millisecond? apart from video hardware as i mentioned above
+
+[11:41] <timo> if you're communicating with another device over sockets or a serial interface, there's buffers involved that you may or may not have control over
+
+[11:42] <timo> if you're bit-banging some protocol over some GPIOs, you would definitely be using something that can't interrupt your code with silly things like garbage collection pauses
+
+[11:55] *** finanalyst joined
+[12:23] *** finanalyst left
+[12:58] *** finanalyst joined
+[13:08] *** finanalyst left
+[13:32] *** finanalyst joined
+[14:46] *** finanalyst left
+[22:30] *** sena_kun left

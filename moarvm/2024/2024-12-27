@@ -1,0 +1,160 @@
+[10:31] *** sena_kun joined
+[13:17] <Geth> ¦ MoarVM/main: 1c2ea87e7b | timo++ (committed using GitHub Web editor) | 3 files
+
+[13:17] <Geth> ¦ MoarVM/main: Install gdb extension (#1848)
+
+[13:17] <Geth> ¦ MoarVM/main: 
+
+[13:17] <Geth> ¦ MoarVM/main: Install GDB extension to the system where gdb looks for it
+
+[13:17] <Geth> ¦ MoarVM/main: review: https://github.com/MoarVM/MoarVM/commit/1c2ea87e7b
+
+[14:50] <guifa> So I'm trying to add another argument to a moarvm call in NQP.  AFAICT I've updated everything in Moar world, but I must be missing something
+
+[14:51] <guifa> When generating NQP, I get
+
+[14:51] <guifa> Stage mast       : Arg count 7 doesn't equal required operand count 6 for op 'asyncudp'
+
+[14:51] <guifa>    at NQP::src/vm/moar/QAST/QASTOperationsMAST.nqp:153  (/Applications/rakudo/share/nqp/lib/QAST.moarvm:compile_mastop)
+
+[15:24] <guifa> ah it looks like I need to update ops.c also, somehow missed that that one had a reference too
+
+[15:32] <guifa> oh and oplist (which I guess generates ops.c it seems like)
+
+[15:35] <guifa> But fixing those still seems to register somewhere along the chain an operand count of 6
+
+[15:41] <lizmat> timo may be able to help
+
+[15:51] *** MasterDuke joined
+[15:53] <MasterDuke> guifa: tools/update_ops.raku
+
+[15:54] <guifa> Missing or wrong version of dependency 'gen/moar/stage2/NQPHLL.nqp' (from 'gen/moar/Pod.nqp')
+
+[15:54] <MasterDuke> After updating sec/core/oplist
+
+[15:54] <guifa> although maybe at this point I've b0rked my installs and I need to do some fresh builds and installs
+
+[15:54] <MasterDuke> Well, you have to have a working raku…
+
+[15:55] <guifa> yeah, I'll go build an older version somewhere else and then run from that one
+
+[15:56] *** MasterDuke left
+[20:46] <timo> guifa: i recommend using the syscall mechanism for this instead of the ops
+
+[21:01] <timo> just leave the asyncbindudp op as it was and add a new syscall to do the same thing but with one more parameter
+
+[21:21] <guifa> timo: noted.  Actually then, I might see if I can have it be adding membership to multicast with or without source specificity
+
+[21:21] <guifa> And then let Raku land code handle making the two separate calls
+
+[21:21] <guifa> certainly would make the MoarVM code a bit lighter, I think, and most people aren't going to be opening and closing multicast sockets in tight loops 
+
+[21:34] <timo> syscalls can take any amount of arguments dynamically
+
+[21:34] <timo> ops must be compiled with a fixed number of arguments
+
+[22:00] <guifa> hmm, okay.  What I was thinking was more along the lines of leave asyncbindudp exactly as is 
+
+[22:00] <guifa> and then the next op would be "make multicast".  For other languages like NodeJS and Julia, those are indeed two separate calls in the language, but I think it makes more sense for Raku to be one line.  But if anyone else wants to support MoarVM for their language, leaves them the option 
+
+[22:04] <guifa> but if you think the syscall route is better suited, happy to go that way.  I don't really know any pros/cons of them
+
+[22:07] <Geth> ¦ MoarVM: AntonOks++ created pull request #1881: beautify release_guide.md
+
+[22:07] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1881
+
+[22:22] <timo> yeah syscalls are actually pretty good
+
+[22:24] <timo> i would maybe even go so far as to say that we could turn more ops into syscalls over time
+
+[22:24] <lizmat> I wonder whether it would be an idea to get rid of a lot of nqp::ops at the VM level
+
+[22:24] <lizmat> ^^ I was just typing that  :-)
+
+[22:25] <lizmat> also: I wonder if we could have a syscall to see whether there is a syscall for "foo" ?
+
+[22:26] <timo> you can just try to call the syscall and catch the exception if it doesn't exist :D
+
+[22:26] <timo> what kinds of nqp ops would you think should go away?
+
+[22:27] <lizmat> I guess the ones that aren't very performance sensitive ?
+
+[22:30] <guifa> okay, I think I can see pretty easily how to set up a syscall
+
+[22:30] <timo> yeah it's pleasantly simple
+
+[22:30] <guifa> looks like they all have a foo-impl where you write the underlying code, and then a foo which sets it up for use
+
+[22:31] <timo> yeah the foo struct that has the properties and at the very end of the file it's "registered"
+
+[22:33] <guifa> Any restrictions on what I can call in the syscall ? 
+
+[22:34] <guifa> My naîve thinking is I could remake it as a syscall that calls the extant asyncsocketudp call, and then in asyncsocketudp.c add one more call for making stuff multicast
+
+[22:34] <guifa> (assuming I can access the right underlying bits)
+
+[22:34] <timo> i don't think there's any special limitations
+
+[22:35] <guifa> alright, that might make it fairly painless to do
+
+[22:38] <guifa> aaaah actually
+
+[22:38] <timo> oh no?
+
+[22:39] <guifa> wait no, nm.
+
+[22:39] <guifa> I was concerned I needed to get a queue, but that's actually passed in from Raku/nqp land
+
+[22:45] <guifa> what is the expected_kinds in the struct?
+
+[22:46] <guifa> { INVOCANT , RESULT } ? 
+
+[22:47] <timo> for kinds, usually mostly obj or int, maybe str sometimes?
+
+[22:52] <guifa> I didn't know if it's refering to the expected invocant or the expected result
+
+[22:53] <timo> ah, no, the result is not part of these arrays
+
+[22:54] <guifa> ah okay, they're args then?
+
+[22:54] <timo> syscalls are slightly like an invocation, so they get arguments passed and there's a spot where they can store their result, which may be a register of any kind, and they may set any kind of result, and the moarvm bits make sure it gets put properly
+
+[22:56] <guifa> do syscalls have separate syntax in NQP land?
+
+[22:56] <timo> yes, nqp::syscall("blabla", arg1, arg2, arg3)
+
+[22:57] <timo> well, it's not so much "separate syntax"
+
+[22:57] <guifa> alrighty
+
+[22:57] <guifa> goal is going to be just make  syscall take the current UDP setup args and pass them to the c function
+
+[22:57] <guifa> if I can get that work I think we'll be golden
+
+[22:58] <timo> i don't foresee any trouble with that
+
+[23:07] <guifa> do you get NULL if an argument isn't present?
+
+[23:09] <timo> you need to check by looking at what callsite the syscall was invoked with
+
+[23:10] <timo> trying to access the index of an argument that wasn't passed will be invalid memory access, though unlikely to crash immediately, only confusing and unpredictable results
+
+[23:10] <guifa> alright noted, I'll go see how some of the varg ones works
+
+[23:11] <timo> look at the MVMArgs argument, it has a callsite member with num_flags telling you how many arguments there are, which is a good starting point
+
+[23:12] *** sena_kun left
+[23:13] <guifa> yeah looks like it's
+
+[23:13] <guifa> arg_info.callsite->num_pos
+
+[23:33] <guifa> will I need to do anything else set up wise besides the add_to_hash(tc, &async_socket_udp) or should everything just compile? 
+
+[23:34] <timo> everything should just compile i think
+
+[23:34] <guifa> I guess we'll find out here in a bit :) hopefully I get the representations correct for the args
+
+[23:36] <timo> did you give the right repr for the io handle argument?
+
+[23:36] <timo> MVMOSHandle i assume?
+

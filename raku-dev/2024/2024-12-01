@@ -1,0 +1,310 @@
+[00:12] *** lizmat joined
+[00:12] *** Geth joined
+[01:03] *** vrurg_ left
+[08:32] <Geth> ¦ rakudo: usev6++ created pull request #5708: [JVM] Decont Routine object when looking for attribute
+
+[08:32] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/5708
+
+[09:04] *** sena_kun joined
+[09:45] <bartolin> bisectable6: multi sub foo(Mu $a) is default { say "no named" }; multi sub foo(Mu $a, *%_) { say "with named" }; foo(42); foo(42, :foo)
+
+[09:45] <bisectable6> bartolin, Will bisect the whole range automagically because no endpoints were provided, hang tight
+
+[09:46] <bisectable6> bartolin, Output on all releases: https://gist.github.com/e3da7bf0cd63bc48ef4f5ad7777ee2fc
+
+[09:46] <bisectable6> bartolin, Bisecting by exit code (old=2021.09 new=2021.10). Old exit code: 1
+
+[09:48] *** sena_kun left
+[09:50] <bisectable6> bartolin, bisect log: https://gist.github.com/39064be6b6685b4507cd3269e63c55f1
+
+[09:50] <bisectable6> bartolin, Bisecting by output (old=2016.08.1 new=2016.09) because on both starting points the exit code is 1
+
+[09:50] <bisectable6> bartolin, bisect log: https://gist.github.com/4efa5ab770655dcee64081c53ecf83dd
+
+[09:50] <bisectable6> bartolin, Output on all releases and bisected commits: https://gist.github.com/902373a4744c6e52514ced24bb082422
+
+[12:56] *** lizmat_ joined
+[12:58] *** lizmat left
+[12:58] *** lizmat_ left
+[12:59] *** lizmat joined
+[16:25] <ugexe> one millions conditionals has been precompiling for 40 hours now. i think i'm bout to cut it short
+
+[16:28] <ugexe> https://gist.github.com/ugexe/2435aacd70164a252c48e9b9b7936617
+
+[16:30] <timo> would you like to try again to figure out where in the parsing process we are on your machine right now?
+
+[16:31] <ugexe> yeah sure
+
+[16:32] <timo> ok, you would "lldb --attach-name rakudo" or if more likely you would have the pid and --attach-pid 12345blah
+
+[16:33] <ugexe> yeah im attached
+
+[16:34] <timo> now we set a breakpoint to the nqp_nfa_run function, hold on
+
+[16:34] <timo> breakpoint set --name nqp_nfa_run
+
+[16:34] <timo> and "c" in order to run until we hit the breakpoint
+
+[16:35] <ugexe> (lldb) breakpoint set --name nqp_nfa_run
+
+[16:35] <ugexe> Breakpoint 1: where = libmoar.dylib`nqp_nfa_run + 40 [inlined] MVM_string_check_arg at ops.h:38:12, address = 0x0000000100a587e8
+
+[16:35] <ugexe> (lldb) c
+
+[16:35] <ugexe> Process 14888 resuming
+
+[16:35] <timo> print offset # gives you the position the nfa was run at
+
+[16:36] <timo> print target->body # lets you see the size of the string in question, in case it's just parsing something inside a shorter string
+
+[16:36] <timo> ah interesting, it might be past the parsing stage already
+
+[16:36] <timo> in that case, do "process interrupt" and we'll look at where the code currently is at
+
+[16:36] <ugexe> (lldb) print target->body
+
+[16:37] <ugexe> error: Process is running.  Use 'process interrupt' to pause execution.
+
+[16:37] <ugexe> https://gist.github.com/ugexe/de94e0fcfba7e01fbb0f3f4bc8c0add3
+
+[16:37] <timo> yes, those commands only make sense after we have hit the breakpoint, but we might not be seeing any nfa any more if we're not doing parsing at the moment
+
+[16:38] <timo> ok, please see if "up" once or twice gives you a valid value for "tc" in the function's signature, one that is not "<unavailable>"
+
+[16:39] <ugexe> https://gist.github.com/ugexe/b5253885a0384c8363e5f6d4c2eeee7a
+
+[16:39] <timo> we can `call MVM_dump_backtrace(tc)` which will cause moar to spit out a backtrace on its stderr, i.e. not visible in the lldb terminal
+
+[16:39] <timo> there are other ways to find out where we are, but this is the easiest
+
+[16:39] <timo> we might be in a very deep stack though
+
+[16:40] <ugexe> how do i capture `call MVM_dump_backtrace(tc)` if it doesn't go to the lldb terminal?
+
+[16:40] <ugexe> oh it would be in the process ive had running wouldnt it
+
+[16:40] <timo> yes
+
+[16:41] <ugexe> nothing happened
+
+[16:41] <timo> i'm not exactly sure how lldb behaves when you "call" something yourself and want to step in it
+
+[16:41] <timo> interesting. ok, let's keep looking
+
+[16:42] <timo> there's also MVM_dump_bytecode(tc) which also goes to the stderr of your process
+
+[16:42] <ugexe> im not sure if stderr from a precompiling process would make it to stderr of the parent process
+
+[16:42] <timo> oh!
+
+[16:42] <timo> yes you're right
+
+[16:42] <ugexe> if it did output anything it probably messed up something since presumably it is doing something with that stderr it captures
+
+[16:43] <timo> oh
+
+[16:43] <timo> would it think there has been an error of some kind?
+
+[16:44] <ugexe> im not sure honestly. i think it is used to emit precompilation dependency related information
+
+[16:44] <ugexe> which in this case might not be relevant since it is just a single module with no dependencies
+
+[16:45] <timo> we can just do this: print MVM_exception_backtrace_line(tc, tc->cur_frame, 0, *(tc->interp_cur_op))
+
+[16:45] <timo> and then: print MVM_exception_backtrace_line(tc, tc->cur_frame->caller, 1, *(tc->interp_cur_op))
+
+[16:45] <timo> and then: print MVM_exception_backtrace_line(tc, tc->cur_frame->caller->caller, 1, *(tc->interp_cur_op))
+
+[16:45] <timo> and then: print MVM_exception_backtrace_line(tc, tc->cur_frame->caller->caller->caller, 1, *(tc->interp_cur_op))
+
+[16:46] <timo> etc. pp.
+
+[16:46] <timo> that's what MVM_dump_backtrace does, but it also printf's it to stderr and frees the string
+
+[16:46] <timo> which is fine for us to not do
+
+[16:47] <timo> the output of that will appear inside lldb
+
+[16:48] <ugexe> https://gist.github.com/ugexe/1b6364d720895e0cdab066ef42d4ec45
+
+[16:48] <timo> after we know where we're at we can look at the rakudo/nqp source and see what variables we can look at to tell us something about our progress
+
+[16:50] <timo> ok, how about we "resume" then "process interrupt" again and see if we're still in that frame or somewhere completely different
+
+[16:52] <timo> i have no idea if STMTSTEMPS can ever become too big or something
+
+[16:53] <ugexe> https://gist.github.com/ugexe/b8a98eb299105e1de1e7a4629d25566d
+
+[16:53] <timo> but what we can do is set a breakpoint in MVMHash_at_key which will let us look at a few hashes that get accessed, and with what key (with a little extra effort)
+
+[16:54] <timo> OK, that's inside garbage collection
+
+[16:54] <timo> i'd say we jump ahead a bit further again
+
+[16:55] <ugexe> https://gist.github.com/ugexe/74ed4a7f17532bc161324745f4a9c54f
+
+[16:57] <ugexe> still gc i guess
+
+[16:57] <timo> yeah, let's look at how big this hash is
+
+[16:58] <timo> i believe "finish" will tell us the return vlue
+
+[16:58] <ugexe> https://gist.github.com/ugexe/2a1dd7bbdb81cb2101d1e920f61565f5
+
+[16:59] <timo> no it doesn't seem to tell us that, but we should be able to print the "elems" variable, which should become available and have the correct contents after a few "step" commands
+
+[16:59] <timo> or immediately
+
+[16:59] <timo> so `print elems`
+
+[17:00] <ugexe> (lldb) print elems
+
+[17:00] <ugexe> (MVMuint64) 2
+
+[17:00] <timo> oh ok, that's not a very interesting one i suppose
+
+[17:00] <timo> we can "c" again
+
+[17:02] <ugexe> https://gist.github.com/ugexe/fab10763ba1163b2da0100c6a5d40f67 - i interrupted and continued a few times to get some more samples
+
+[17:02] <timo> BRB bathroom break
+
+[17:03] <timo> MVM_gc_collect_free_gen2_unmarked is a later phase in the garbage collection, so it'd be over in a moment
+
+[17:14] <ugexe> i guess i killed the process somehow
+
+[17:15] <timo> oh what does the log look like?
+
+[17:16] <ugexe> had opened a web tmate session i was going to pm you, and then went to continue the process in lldm and detach from the process, then lldb acted like it was froze for 2 minutes and then there is now there are no rakudo/moar processes running
+
+[17:16] <timo> huh, that's weird
+
+[17:17] <timo> not sure what might have happened there
+
+[17:17] <timo> did it save a core dump per chance?
+
+[17:17] <timo> you might find that in the "Terminal.app"
+
+[17:17] <ugexe> i dont have core dumps enabled
+
+[17:18] <timo> feels like i broke it >_<
+
+[17:19] <lizmat> perhaps try again with 100K instead of 1M?
+
+[17:21] <timo> Stage parse      :  66.119
+
+[17:23] <timo> that is one deep backtrace ... looks like we compile an if/elsif/else as a very deeply nested, very one-sided tree
+
+[17:29] <lizmat> is that the same with "with / orwith / else ?
+
+[17:30] <lizmat> my guess: it probably is
+
+[17:32] <ugexe> i see, so extremely nested things have non-ideal performance characteristics. i think an issue here though is that it is hard to reason about what is actually deeply nested, as in this case (unlike the for-loop one) the code itself isn't nested
+
+[17:38] <timo> well, here we are sorting the keys of a hash with 10k entries
+
+[17:44] <lizmat> because of reproducible build?
+
+[17:51] <timo> it's taking an awfully long time sorting huh
+
+[17:52] <lizmat> this is an NQP sort ?
+
+[17:52] <lizmat> or a sort at MoarVM level ?
+
+[17:52] <timo> https://github.com/raku/nqp/blob/c4b44e979a8e4a326d20b584810373791b28622b/src/vm/moar/QAST/QASTCompilerMAST.nqp#L1409
+
+[17:53] <timo> it's the sorted_keys function from nqp/Hash.nqp
+
+[17:53] <timo> nqp/core/Hash.nqp
+
+[17:53] <timo> nqp src/core/Hash.nqp
+
+[17:53] <ugexe> "Make building Perl 6 code reproducible"
+
+[17:55] <lizmat> making %*STMTTEMPS a hash may not have been such a good idea in the end ?
+
+[17:56] <lizmat> if that weren't a hash, it wouldn't need to be sorted
+
+[18:01] <timo> https://gist.github.com/timo/dc80f576574a3c05bac69f734429e231 the keys in the hash
+
+[18:05] <timo> --target=ast takes a long-ass time to dump the structure
+
+[18:06] <timo> Dec 01 19:06:09 pebbsi systemd-oomd[1852]: Killed /user.slice/user-1000.slice/user@1000.service/user.slice/libpod-75c648286b3a991c39e08ee4cb160bbf7e4af6c7dcd8abf5c4107325a434a2d1.scope/container due to memory used (32280829952) / total (33363832832) and swap used (17430986752) / total (19327344640) being more than 90.00%
+
+[18:08] <ugexe> yeah it feels like using a different data structure could potentially be helpful. i wonder if there is one that wouldnt tradeoff against the more common scenario much
+
+[18:10] <timo> i'm not sure why there's so many lowered lexicals in the first place
+
+[18:10] <timo> is it the $_ of every one of these blocks perhaps?
+
+[18:10] <lizmat> if we would have a MoarVM op that would search a string array for a string and return its index
+
+[18:11] <lizmat> then we wouldn't have to that in NQP and there's a good chance that it would actually beat hashes for N entries where N would be between 5 and 10 I'd say
+
+[18:11] <lizmat> *to do that
+
+[18:12] <timo> 5600 stack frames, asking moar-remote to "all lex" that :D
+
+[18:13] <timo> cpu usage is suspiciously low, there's probably some optimization possible here ...
+
+[18:30] <timo> - QAST::Var(local __lowered_lex_503) <wanted> $num
+
+[18:30] <timo> every one of these is an instance of "$num"?
+
+[18:47] <timo> worklist with items = 1725274, yeowch
+
+[19:00] <timo> looking at the "insert_bytecode" byetcode, it looks like we might be doing a lot of unnecessary boxing and unboxing of integers, i wonder why we are missing these
+
+[19:45] *** librasteve_ joined
+[19:56] *** gfldex left
+[20:24] <Geth> ¦ rakudo/azure_improvements_squashed: e1e348c75b | (Patrick Böker)++ | azure-pipelines.yml
+
+[20:24] <Geth> ¦ rakudo/azure_improvements_squashed: Run tests irrespective of prev failure
+
+[20:24] <Geth> ¦ rakudo/azure_improvements_squashed: review: https://github.com/rakudo/rakudo/commit/e1e348c75b
+
+[20:35] *** sena_kun joined
+[20:55] *** gfldex joined
+[22:09] <Geth> ¦ rakudo/azure_improvements_squashed: 2cf6928091 | (Patrick Böker)++ | azure-pipelines.yml
+
+[22:09] <Geth> ¦ rakudo/azure_improvements_squashed: more ext tests
+
+[22:09] <Geth> ¦ rakudo/azure_improvements_squashed: review: https://github.com/rakudo/rakudo/commit/2cf6928091
+
+[22:31] *** sena_kun left
+[22:33] <timo> the amount of time spent in GC seems to be rather large for this stage
+
+[22:46] <Geth> ¦ rakudo/azure_improvements_squashed: f835704ff3 | (Timo Paulssen)++ (committed by Patrick Böker) | 2 files
+
+[22:46] <Geth> ¦ rakudo/azure_improvements_squashed: Reimagine Azure CI
+
+[22:46] <Geth> ¦ rakudo/azure_improvements_squashed: 
+
+[22:46] <Geth> ¦ rakudo/azure_improvements_squashed: - Prettier output (using the JUnit test result formatter)
+
+[22:46] <Geth> ¦ rakudo/azure_improvements_squashed: - Restructure making better use of parameters
+
+[22:46] <Geth> ¦ rakudo/azure_improvements_squashed: - Disable OOMing Win_JMV
+
+[22:46] <Geth> ¦ rakudo/azure_improvements_squashed: - Speed up CI on Windows by working around the compiler search
+
+[22:46] <Geth> ¦ rakudo/azure_improvements_squashed: - More granular output using `echo` commands
+
+[22:46] <Geth> ¦ rakudo/azure_improvements_squashed: - add a nodelay & blocking spec test run
+
+[22:46] <Geth> ¦ rakudo/azure_improvements_squashed: - persist build artifacts
+
+[22:46] <Geth> ¦ rakudo/azure_improvements_squashed: - Speed up testing by running tests in parallel
+
+[22:46] <Geth> ¦ rakudo/azure_improvements_squashed: - Bump the OS versions to latest as of now
+
+[22:46] <Geth> ¦ rakudo/azure_improvements_squashed: review: https://github.com/rakudo/rakudo/commit/f835704ff3
+
+[22:52] <[Coke]> ls
+
+[23:50] <timo> i'm not sure i'm going to let this finish tbh
+
+[23:50] <timo> but i think using --optimize=0 on odd-or-even.rakumod can make it a lot faster
+
+[23:50] <timo> to clarify, i mean "on the order of 10 hours" rather than "on the order of 50 hours"
+

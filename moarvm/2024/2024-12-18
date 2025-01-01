@@ -1,0 +1,121 @@
+[00:36] <Geth> ¦ MoarVM/main: c1d1f60e71 | (Daniel Green)++ | 3 files
+
+[00:36] <Geth> ¦ MoarVM/main: Fix format specifiers clang on OSX complains about
+
+[00:36] <Geth> ¦ MoarVM/main: review: https://github.com/MoarVM/MoarVM/commit/c1d1f60e71
+
+[00:36] <Geth> ¦ MoarVM/main: f4680765ff | MasterDuke17++ (committed using GitHub Web editor) | 3 files
+
+[00:36] <Geth> ¦ MoarVM/main: Merge pull request #1876 from MasterDuke17/fix_printf_format_specifiers_clang_on_osx_complains_about
+
+[00:36] <Geth> ¦ MoarVM/main: 
+
+[00:36] <Geth> ¦ MoarVM/main: Fix format specifiers clang on OSX complains about
+
+[00:36] <Geth> ¦ MoarVM/main: review: https://github.com/MoarVM/MoarVM/commit/f4680765ff
+
+[02:08] *** guifa joined
+[02:10] <guifa> so my journey on multicast has brought me to the innards of MoarVM.  I'm going to try to cobble together something that works -- seems to be *fairly* straightforward
+
+[04:39] <guifa> whoa I think I got it
+
+[04:39] <guifa> it's kind of cludged together and ugly, but it works
+
+[04:57] <guifa> Would it be best for me to submit a PR as is, get feedback, and adjust the code per feedback or ?
+
+[05:04] <ab5tract> guifa: seems like a reasonable approach to me
+
+[05:05] <guifa> ab5tract typing it up now and will submit as a draft pull request (forgot that those were a thing)
+
+[05:14] <Geth> ¦ MoarVM: alabamenhu++ created pull request #1878: Preliminary multicast support
+
+[05:14] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1878
+
+[09:14] *** sena_kun joined
+[09:32] *** sena_kun left
+[18:49] *** sena_kun joined
+[22:33] *** sena_kun left
+[22:52] <guifa> What is the best way to convert an MVMString to a char*?
+
+[22:53] <timo> you have to encode it
+
+[22:54] <timo> there's one function that gives you a null byte terminated utf8 string, and there's utf8-c8 which can be useful
+
+[22:54] <timo> it depends very much on your use case?
+
+[22:54] <guifa> So bind-udp(...) takes a string value for the hostname (IP address or e.g. 'localhost' etc)
+
+[22:55] <timo> we have other places where we handle addresses right?
+
+[22:56] <guifa> Yeah, it's probably done somewhere else.  I'm doing lots of digging around ha.  This was more of a "here's hoping someone knows how offhand to avoid an 30-60min of digging" type question :) 
+
+[22:58] <guifa> aha
+
+[22:58] <guifa>  MVM_string_utf8_encode_C_string
+
+[22:59] <timo> the API you offer via syscall or nqp:: op could also just take a buf8 and then the decision how to encode it is done in nqp or raku code
+
+[22:59] <timo> for the possibly unusual case where you need to have a hostname or ip address that is for some reason invalid utf8?
+
+[22:59] <timo> what if on windows you have to pass a wide string? i have no idea ...
+
+[23:01] <guifa> so basically there's a function A that handles resolving the hostname/port into an special struct, and then calls function B.  It makes more sense for me to do my edits in function B, but I need access to the hostname/port there
+
+[23:03] <guifa> there's some lib_uv functions that are not as pretty that I can use but it makes more sense to pass the MVMString to function B, do resolution there, and just do the quick MVMStr to C string conversion there
+
+[23:03] <guifa> but this is my first time working with MoarVM code so major n00b alert
+
+[23:10] <timo> it should be fine to just cook up a prototype with the utf8_encode_c_string function and when it's working change the API if it's needed
+
+[23:15] <guifa> Yeah -- maybe I'm being a bit too perfectionist.  the "easy" way out will be to add two members to the SSI struct (current a a bind_addr and flags, would become bind_addr, host, port, flags, and I could combine port and flags no problem in the same space as the flag since port is 16 bit and flags are 2 bit, but flag is 64bit in the struct).  it's definitely not the hottest bit of code out there
+
+[23:16] * guifa also can't see an easy way to copy a MVMString so doing that with a char* is also easier ha
+
+[23:20] <timo> you don't copy MVMString, they are immutable
+
+[23:20] <guifa> is it safe to pass them around?
+
+[23:21] <timo> yes, with the usual caveat that being a GC-managed object, any place where you call something that allocates, even indirectly, the variable with the pointer has to be MVMROOTed if you want to use it again after
+
+[23:22] <guifa> okay so I've seen the MVMROOT2/MVMROOT3 stuff
+
+[23:25] <guifa> So for instance here https://github.com/MoarVM/MoarVM/blob/f4680765ff33c5815a8a9ae183ed08cce6cc6943/src/io/asyncsocketudp.c#L581
+
+[23:27] <guifa> The MVM_io_resolve_host_name() handles allocation, but because the allocation happens within that MVMROOT3 thing, it's safe to use ?
+
+[23:31] <timo> the MVMROOT macros protect the variables that you pass in
+
+[23:32] <guifa> what's the difference between MVMROOT2 and MVMROOT3 (and assuming there's a 1 also)
+
+[23:32] <timo> it also indicates, though it's not a guarantee, that the functions called inside the body can allocate (and therefore do a GC run) and that also means that the function you're in needs to be called with rooting itself
+
+[23:32] <timo> only the number of arguments it takes
+
+[23:32] <timo> variadic macros are apparently not entirely a thing?
+
+[23:37] <timo> MVMROOT1 is simply MVMROOT
+
+[23:38] <guifa> ah ok.  i'll mirror the level that i see in the block I'm editing
+
+[23:39] <timo> the precise explanation is that when the GC runs, it needs to know every pointer to GC-managed objects both for finding objects that have to be considered alive and also for updating the pointers because the objects move around
+
+[23:40] <timo> and that's what MVMROOT does, it adds a "temporary root" that acts like a stack, so at the open curly it pushes and at the closing curly it pops
+
+[23:40] <timo> and if the GC run happens while a local variable in a C function on the C stack is in a temporary root, it will be updated while the GC does its thing
+
+[23:41] <timo> and if you forget it, you'll be working with a copy of the object that used to be there, but it's conceptually been freed, so you have essentially a "use after free" bug if you forget to do that
+
+[23:43] <timo> i've got to head to bed soon, so if you have some more questions you can ask them quickly and i'll still be able to explain some stuff
+
+[23:46] <guifa> I think that's more than enough for me to handle improving my PR
+
+[23:46] <guifa> at least to make it good enough for someone to do a review of it
+
+[23:46] * guifa has added in multicast support, all because I wanted to do add in Zeroconf support in Raku lol
+
+[23:47] <timo> well, implementing things to scratch an itch you have is a time-honoured tradition
+
+[23:49] <guifa> yeah. I just didn't think how far down the rabbit hole I'd have to go :-)
+
+[23:58] <timo> yup, rabbit holes all the way down until you finally reach elephants and, eventually, turtles
+
