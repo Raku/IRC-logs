@@ -1,0 +1,174 @@
+[00:11] *** finanalyst left
+[00:22] * ab5tract wonders if it is time to toss some Kotlin into the JVM salad :)
+
+[02:00] <guifa> timo: aaaaaah it's called something else (I was searching for "syscall") lol
+
+[02:00] <timo> right, java and js ports of nqp and rakudo don't have "syscall" at all
+
+[02:02] <guifa> hmm so anything with a syscall would need a pragma?  or does it just catch those calls during compile and transform them?
+
+[02:09] <timo> we would need need to pretend that nqp::syscall is just a normal nqp op
+
+[02:10] <timo> there's already some nqp ops with rather complex compilation, for example the loop ops and nqp::handle as well i think
+
+[02:11] <timo> one of the stages of qastcomp is literally your callback is called with the QAST::Op node and you can do whatever the heck you like with what's inside it
+
+[02:21] <ugexe> ab5tract: having thought about it a bit more, it should return a Falsey value which maintains the existing behavior for linux and macos while bringing windows behavior inline with those two
+
+[02:21] <ugexe> if we die there it changes the behavior for linux and os
+
+[02:21] <ugexe> macos
+
+[02:22] <ab5tract> The tests didn’t surface any changes in behavior
+
+[02:24] <ab5tract> ie, IO::Path.chown returns a failure for missing files on macOS and Linux
+
+[02:26] <ab5tract> Either way, I’m feeling a bit burned out on it so please feel free to make any changes you think are appropriate
+
+[03:20] <guifa> timo: thanks.  still trying to grok it all but really appreciate you taking the time to ELI5 it for me
+
+[09:30] *** finanalyst joined
+[10:47] *** finanalyst left
+[11:53] *** finanalyst joined
+[13:34] <Geth> ¦ nqp/main: c54ee5581e | (Elizabeth Mattijsen)++ | tools/templates/MOAR_REVISION
+
+[13:34] <Geth> ¦ nqp/main: Bump MoarVM for some minor tweaks
+
+[13:34] <Geth> ¦ nqp/main: review: https://github.com/Raku/nqp/commit/c54ee5581e
+
+[13:47] <Geth> ¦ rakudo/main: c3d9b3d5dc | (Elizabeth Mattijsen)++ | tools/templates/NQP_REVISION
+
+[13:47] <Geth> ¦ rakudo/main: Bump NQP for some minor NQP fixes
+
+[13:47] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/c3d9b3d5dc
+
+[15:38] <Geth> ¦ nqp/main: 703b1a6e42 | (Elizabeth Mattijsen)++ | tools/templates/MOAR_REVISION
+
+[15:38] <Geth> ¦ nqp/main: Bump MoarVM to get getattr micro-opt MasterDuke++
+
+[15:38] <Geth> ¦ nqp/main: review: https://github.com/Raku/nqp/commit/703b1a6e42
+
+[15:47] <Geth> ¦ rakudo/main: dc02fbf4de | (Elizabeth Mattijsen)++ | tools/templates/NQP_REVISION
+
+[15:47] <Geth> ¦ rakudo/main: Bump NQP to get getattr micro-opt MasterDuke++
+
+[15:47] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/dc02fbf4de
+
+[16:08] *** MasterDuke joined
+[16:10] <MasterDuke> timo: this seems odd, but in my spesh log of compiling CORE.c i see the after of 'MARKED' has both `sp_getvt_o        r6(3),   r0(2), liti16(72), sslot(5)  # [001] getattr_o of '$!shared' in NQPMatch of a Perl6::Grammar` in BB 1 and `getattr_o        r27(2),   r0(2),  r26(2), lits($!shared), liti16(-1)` in BB 12
+
+[16:10] <MasterDuke> they're both getting '$!shared'
+
+[16:12] <MasterDuke> https://github.com/Raku/nqp/blob/9a843dc6edfea13316b2894fe46ff3c7f32566fa/src/HLL/Grammar.nqp#L637-L646 is 'MARKED'
+
+[16:12] <timo> ok that looks like an interesting find, let me take a look locally
+
+[16:13] <timo> what do the facts of r26(2) look like?
+
+[16:13] <lizmat> $!shared is used a *lot* in regexes
+
+[16:13] <timo> that has to be known type so that it works
+
+[16:13] <MasterDuke> r26(2): usages=1, flags=0
+
+[16:14] <timo> ok, that means we know nothing about it
+
+[16:18] <timo> mine only has NQP::src/QRegex/Cursor.nqp:1349 in it
+
+[16:18] <MasterDuke> hm. 'MARKER' is very similar, but it doesn't have the getattr_o, just the sp_getvt_o
+
+[16:19] <timo> oh
+
+[16:19] <timo> i was looking at MATCH haha
+
+[16:25] <timo> the result of getlexperinvtype_o for '$?CLASS' is the type we are looking for and don't know about
+
+[16:26] <timo> comes from the inline of !cursor_start_fail
+
+[16:27] <timo> not sure why we don't find that tbh, from the stats it looks like we should be relatively certain that it's always NQPMatch
+
+[16:28] <lizmat> couldn't it also be a HLL Match ?
+
+[16:29] <timo> doesn't seem like it from the stats in the spesh log
+
+[16:30] <timo> and i think relevant here is where the attribute is defined, not what the type of the object is
+
+[16:31] <lizmat> I was just wondering because those methods are called at some places in the setting
+
+[16:31] <timo> the tricky bit is that it's a role, so the code in question doesn't know at the time it's being compiled what type it will be inside of, and therefore what type the attribute belongs to
+
+[16:33] <lizmat> so maybe it would help if we would generate the source without needing roles ?
+
+[16:34] <lizmat> hmmm I guess that would be attacking the symptoms rather than the cause  :-)
+
+[16:34] <timo> right. well ...
+
+[16:36] <timo> so the optimization of getlexperinvtype_o depends on the existence of a plan and knowing that the specialization is specialized on the invocant type
+
+[16:38] <timo> huh i'm not sure if this is - but shouldn't be - running on instructions from inlined code
+
+[16:40] <MasterDuke> why shouldn't it?
+
+[16:43] <timo> it looks like it's just looking at the to-be-optimized function's stats to find one that has the right bytecode offset, and then if the other checks are okay it just takes that
+
+[16:44] <timo> so i'm thinking if there's a getlexperinvtype_o in an inlined function at bytecode offset 80, and there's some random instruction that logs a type at bytecode offset 80 in the function that we inlined the thing into ...
+
+[16:45] <timo> i think it could accidentally use the type from that as the result of the getlexperinvtype_o from inside the inlined code
+
+[16:47] <MasterDuke> that sounds not good
+
+[16:47] <timo> if someone were so inclined, they could probably craft a POC
+
+[16:49] <timo> it's really getting time to put zstd spesh logs out there as a feature
+
+[16:50] <MasterDuke> is https://github.com/MoarVM/MoarVM/blob/main/src/spesh/optimize.c#L1134-L1171 the suspect optimization?
+
+[16:50] <MasterDuke> or a way to selectively log
+
+[16:52] <MasterDuke> afk for a bit to go snowboarding in 14 F weather. the lifts are going to be cold...
+
+[16:53] <timo> that's the one i'm talking about, yeah
+
+[16:55] <timo> i'm not sure why, but even though the specialization of MARKED was built for a specific type, and there is a plan, it doesn't have a plan at the time it encounters the getlexperinvtype_o after the inline is done
+
+[16:57] <timo> maybe we just don't run optimize_bb over the BBs that got inlined a second time. we only run the post_inline_pass over those again. then everything i've explained above would be wrong
+
+[17:01] <MasterDuke> wouldn't that sort of defeat one of the main points of inlining?
+
+[17:02] <timo> well, that's what the second pass is for, where lots of the things that rely on inlining being done already, and we also run optimize over the to-be-inlined code before inlining with some "facts" set based on how the code is called
+
+[17:03] <MasterDuke> ah
+
+[17:08] <timo> so in theory, we could probably synthesize a plan again when we inline some bytecode based on what checks we used to select the candidate?
+
+[17:09] <timo> for some reason the core c setting compilation spesh log ended up at 8 gigabytes instead of ... i'm not sure what it was before, but not that :D
+
+[17:09] <timo> but zstd -19 makes it only be 2% as big ... at the cost of rather a bit of CPU time
+
+[17:27] *** MasterDuke left
+[18:18] *** finanalyst left
+[18:54] *** sena_kun joined
+[20:21] *** MasterDuke joined
+[20:23] <MasterDuke> this is a little silly. a jit doesn't even exit for this cpu architecture, yet `instance->jit_enabled` == 1
+
+[20:32] <MasterDuke> and it still is even if i build with `--no-jit`
+
+[20:32] <timo> i'm guessing it's just a flag we turn to 0 when you MVM_JIT_DISABLE=1 
+
+[20:33] <MasterDuke> yeah. but it should also be set to 0 if i build with `--no-jit` or there is no jit available
+
+[20:33] <timo> yeah, probably
+
+[20:37] <MasterDuke> the message about jit compilation failing in the spesh log isn't that big of a deal, but there's no reason to even call MVM_jit_try_make_graph() at all
+
+[20:49] <timo> right
+
+[20:54] <MasterDuke> my spesh log was ~4mb smaller without those messages
+
+[20:55] <MasterDuke> afk for more snowboarding
+
+[21:00] *** MasterDuke left
+[22:14] *** finanalyst joined
+[22:27] *** sena_kun left
+[23:06] *** sena_kun joined
+[23:23] *** sena_kun left

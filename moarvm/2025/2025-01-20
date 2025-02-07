@@ -1,0 +1,184 @@
+[00:12] <Geth> ¦ MoarVM: ugexe++ created pull request #1894: Configure dyncall for arm64 on Windows
+
+[00:12] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1894
+
+[00:32] <timo> i think we should look into something one step up from C preprocessor macros but not as far as C++ to make something like "specialized string ops funcs per storage type". maybe a .c.in that we expand with a perl or even raku script (as long as we put the generated code into source control that would be fine)
+
+[00:33] <timo> C preprocessor macros are pretty annoying in that you have to put \ at the end of every line, and of course when debugging it all counts as just a single line, so you can't properly single-step through it
+
+[00:35] <Geth> ¦ MoarVM: ugexe++ created pull request #1895: Enable experimental c11 atomics on MSVC
+
+[00:35] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1895
+
+[00:50] <ugexe> https://gist.github.com/ugexe/a4aedf6bfc8f0177e8616ababf9360a9 - this is what i have so far to spin up an arm windows 11 vm using an arm toolchain on an apple silicon host and why i've been creating those prs
+
+[00:53] <ugexe> i like that i can just use winget to install all the microsoft msvc and git stuff. it is unfortunate winget installs an x86 perl so i had to use like 4 commands to install a precompiled arm64 perl from some randos github
+
+[01:05] *** guifa left
+[01:44] *** guifa joined
+[03:45] *** guifa left
+[09:12] *** sena_kun joined
+[10:03] *** sena_kun left
+[12:59] <lizmat> and yet another Rakudo Weekly News hits the Net: https://rakudoweekly.blog/2025/01/20/2025-03-cro-released/
+
+[13:58] *** guifa joined
+[19:32] *** bisectable6 left
+[19:33] *** MasterDuke joined
+[19:35] <MasterDuke> hm. the moarvm changes to use a different hash function for our string hash code were pretty trivial. but the nqp build dies almost instantly:
+
+[19:35] <MasterDuke> Unhandled exception: No dispatcher registered with ID 'boot-code'
+
+[19:35] <MasterDuke>    at <unknown>:1  (src/vm/moar/stage0/ModuleLoader.moarvm:<dependencies+deserialize>)
+
+[19:35] <MasterDuke>  from <unknown>:1  (src/vm/moar/stage0/nqp.moarvm:<dependencies+deserialize>)
+
+[19:36] <MasterDuke> assuming i didn't do anything incorrectly in moarvm, is this still going to be a bootstrapping annoyance?
+
+[19:37] <lizmat> boot-code is one of the dispatchers supplied by MoarVM, is it not?
+
+[19:38] <lizmat> according to the doc in https://github.com/rakudo/rakudo/blob/main/docs/dispatchers.md#boot-code it is
+
+[19:42] <MasterDuke> debug print i added: `hash for 'boot-code' == 7465411439051489383`
+
+[19:42] <MasterDuke> so it is calculating hashes (i.e., they're not all 0 or the same value)
+
+[19:43] <MasterDuke> but it's not going to be the same value as it was with the original hash function
+
+[19:43] <lizmat> ah, you mean: hash the dispatch name
+
+[19:44] <lizmat> ah, yes, that would be a bootstrapping annoyance
+
+[19:44] <MasterDuke> the print i added was in MVM_string_compute_hash_code()
+
+[19:45] <lizmat> feels like you're going to need some temporary scaffolding there, trying the old hashing if the new one failed
+
+[19:45] <lizmat> until NQP got bootstrapped, then remove scaffolding again, only using the new hash algorithm?
+
+[19:46] <MasterDuke> would this change break all precomps?
+
+[19:46] <MasterDuke> if it just invalidated them that'd be ok, but i wouldn't want errors
+
+[19:47] <lizmat> sheap c "boot-code"
+
+[19:47] <lizmat>   229 boot-code
+
+[19:47] *** bisectable6 joined
+[19:47] <MasterDuke> i'm not even sure where the scaffolding needs to go, nqp i guess?
+
+[19:47] <lizmat> looks like at least the core setting keeps the dispatcher names as strings
+
+[19:48] <lizmat> feels to me the scaffolding should be in MoarVM, as that does the hashing?  does it not ?
+
+[19:50] <timo> i believe these dispatchers are all completely internal to moar and should not rely on nqp at all?
+
+[19:51] <lizmat> yeah, and externally dispatched by name, not hashes ID
+
+[19:51] <timo> MVM_disp_syscall_setup should run on instance startup
+
+[19:51] <timo> it uses string_ascii_decode_nt, maybe that didn't get changed for your hash changes?
+
+[19:52] <timo> or you're missing changes for fixkey hashes?
+
+[19:53] <MasterDuke> i get a different error if i disable the hash code check in MVM_string_equals
+
+[19:54] <MasterDuke> Unhandled exception: chars requires a concrete string, but got null
+
+[19:54] <MasterDuke>    at <unknown>:1  (src/vm/moar/stage0/ModuleLoader.moarvm:<dependencies+deserialize>)
+
+[19:54] <timo> is there a branch i could look at?
+
+[19:55] <MasterDuke> but MVM_args_perform_flattening also sorts via hash code
+
+[19:56] <MasterDuke> https://github.com/MasterDuke17/MoarVM/tree/use_rapidhash_instead_of_siphash
+
+[20:09] *** sena_kun joined
+[20:18] <MasterDuke> MVM_args_perform_flattening looks like maybe it shouldn't matter, since the sorting is just to not pollute a cache
+
+[20:19] <timo> the error "requires a concrete string but got null" happens because MVM_find_sc_by_handle with the handle "__6MODEL_CORE__" is returning null
+
+[20:20] <MasterDuke> `hash for '__6MODEL_CORE__' == 5285849711074998674`
+
+[20:21] <MasterDuke> oh, i'm getting a bunch of different values for that!?
+
+[20:22] <timo>   3   1 3dce8bce6b8d516d (15) 0x20000592550 __6MODEL_CORE__
+
+[20:22] <timo> it's definitely in there
+
+[20:23] <timo> different values in the same execution?
+
+[20:23] <MasterDuke> oh wait, of course i am, i'm seeding with random
+
+[20:24] <MasterDuke> let me double check it's not different in the same execution
+
+[20:27] <MasterDuke> hm, added tc to the print and definitely getting different values with the same tc pointer
+
+[20:27] <MasterDuke> tc = 0x3a384020000, hash for 'boot-code' == 6762424055001201415
+
+[20:27] <MasterDuke> tc = 0x3a384020000, hash for 'boot-code' == 4838451069062238869
+
+[20:29] <MasterDuke> tc = 0x5609c020000, storage_type = 2, hash for 'boot-code' == 15145260379189473548
+
+[20:29] <MasterDuke> tc = 0x5609c020000, storage_type = 0, hash for 'boot-code' == 2991972996574593375
+
+[20:30] <MasterDuke> MVM_STRING_GRAPHEME_8 vs MVM_STRING_GRAPHEME_32
+
+[20:31] <timo> are you sure rapidhash_withSeed does the same thing when feeding piecewise as when feeding in one go?
+
+[20:31] <timo> oh, right
+
+[20:31] <timo> yeah that won't work, of course. i could have thought of that
+
+[20:32] <timo> the graphemes all have to be upgraded to 32bit
+
+[20:32] <MasterDuke> ugh
+
+[20:32] <timo> i think we have a special version for feeding a buffer of 8bit values that are supposed to pretend to be 32bit
+
+[20:33] <MasterDuke> ?
+
+[20:33] <timo> check what IN_SITU_8 did before your commit
+
+[20:34] <timo> it had this grapheme view struct where it took two 8bit graphemes at a time from the in_situ blob, stored them into the two slots of a 64bit big 32bit-per-slot array
+
+[20:34] <timo> and then it uses "add64bits" on the stuff it just created
+
+[20:35] <MasterDuke> yeah. i thought we'd be able to hash everything all at once in addition to using a faster hash function, but i guess that's not possible
+
+[20:37] <timo> but alas ...
+
+[20:52] <MasterDuke> hm, what should we do when s_len == 0?
+
+[20:54] <timo> doesn't matter as long as it doesn't easily collide with something you can have as a string?
+
+[20:54] <timo> could be just the secret seed?
+
+[20:54] <timo> hum. that sounds like a bad idea?
+
+[20:57] <MasterDuke> rakudo just built. updated my branch
+
+[21:02] <MasterDuke> all tests pass
+
+[21:03] <MasterDuke> and crazy, m-test takes 28s and m-spectest is only 10s slower
+
+[21:03] <MasterDuke> oh wait, nm, mixing time on desktop and laptop
+
+[21:04] <MasterDuke> m-test is 28s on laptop (on battery), 38s on desktop
+
+[21:07] <MasterDuke> m-spectest is 221s on laptop (on battery), 199s on desktop
+
+[21:48] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #1896: Use rapidhash instead of siphash for string hashes
+
+[21:48] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1896
+
+[21:49] <ugexe> oh, the arm windows dyncall commits aren't in an official release yet either
+
+[21:49] <ugexe> official dyncall release
+
+[21:52] <timo> oh!
+
+[22:04] *** MasterDuke left
+[22:56] *** kjp left
+[22:57] *** kjp joined
+[23:02] *** kjp left
+[23:02] *** kjp joined
+[23:20] *** sena_kun left

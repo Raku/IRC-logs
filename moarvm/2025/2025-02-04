@@ -1,0 +1,153 @@
+[00:42] *** MasterDuke joined
+[00:43] <MasterDuke> timo: i had `-march=native` set for my desktop (x86-64), but not the laptop (aarch64). setting on the laptop *slightly* improved times
+
+[00:45] <MasterDuke> adding `&& !writing_32bit` to the loop condition (to break out early) meant clang couldn't vectorize it (didn't try gcc)
+
+[00:49] <timo> OK, presumably there's a way to get it to not have trouble with that. do you think putting the definition of the loop variable inside the for (***; ;) could help? it shouldn't keep the variable alive after, so it wouldn't matter if it's the number of the spot it stopped exactly
+
+[00:51] <MasterDuke> nope, clang still says it can't vectorize
+
+[00:52] <MasterDuke> also, i have a version that checks for crlf in that same loop, and that speeds things up even more (but makes an early exit even harder to do)
+
+[00:54] <MasterDuke> let me push that so you can see
+
+[00:57] <MasterDuke> done
+
+[00:59] <MasterDuke> my test corpus is perhaps not very good though
+
+[01:00] <MasterDuke>     172 10
+
+[01:00] <MasterDuke>     255 65
+
+[01:00] <MasterDuke>     588 57
+
+[01:00] <MasterDuke>    1243 49
+
+[01:00] <MasterDuke>    2389 41
+
+[01:00] <MasterDuke>    4821 33
+
+[01:00] <MasterDuke>    8560 25
+
+[01:00] <MasterDuke>   17693 17
+
+[01:00] <MasterDuke>   45023 9
+
+[01:00] <MasterDuke>  205321 1
+
+[01:00] <MasterDuke> count of lengths
+
+[01:01] <MasterDuke> i really should just stick a print in and capture what's decoded during a rakudo build...
+
+[01:12] *** MasterDuke left
+[01:25] <timo> do you think a special case for a single character could be worth it?
+
+[01:26] <timo> i wonder what percentage come from the string heap in .moarvm files
+
+[02:47] *** MasterDuke joined
+[02:48] <MasterDuke> timo: i got a print of what's decoded during a rakudo build, characteristics are a bit different:
+
+[02:48] <MasterDuke>  121992 11
+
+[02:48] <MasterDuke>  135586 12
+
+[02:48] <MasterDuke>  142789 9
+
+[02:48] <MasterDuke>  150224 10
+
+[02:48] <MasterDuke>  158566 8
+
+[02:48] <MasterDuke>  179682 7
+
+[02:48] <MasterDuke>  183802 3
+
+[02:48] <MasterDuke>  534090 4
+
+[02:48] <MasterDuke>  561218 5
+
+[02:48] <MasterDuke>  612082 6
+
+[02:49] <MasterDuke> so based on this, no, i don't think special casing a single character is a good idea
+
+[02:49] <MasterDuke> that's the problem with benchmarks...
+
+[02:52] <MasterDuke> btw, this is my benchmark, very open to suggestions. `MVM_SPESH_BLOCKING=1 raku -e 'use nqp; my str $f; for ^10 { for "latin1".IO.slurp.lines -> str $s { my $a := nqp::list_i; nqp::encode($s, "iso-8859-1", $a); $f = nqp::decode($a, "iso-8859-1") }; }; say now - INIT now; say $f'`
+
+[02:53] <MasterDuke> don't like how i'm also encoding everything, but i don't really grok encoding/decoding, so not sure if there's a way to avoid it in this case
+
+[03:02] <timo> you can slurp the file as binary, then you get a buf out. haven't tried how .lines works with binary handles. with just \n as the line end byte i imagine it would work fine?
+
+[03:05] <MasterDuke> hm. so `.slurp(:bin).lines -> $a { ...` ?
+
+[03:06] <MasterDuke> `No such method 'lines' for invocant of type 'Buf[uint8]'`
+
+[03:10] <MasterDuke> my branch doesn't seem to be as faster with this corpus as the input to the benchmark
+
+[03:14] <timo> ah sorry it would ahve to be .IO.lines or so
+
+[03:14] <timo> slurp gives the buffer, you want to use the lines iterator on the IO::Handle or IO::Path
+
+[03:15] <timo> maybe make the array of bufs eagerly up front so it doesn't mix between the decoding work
+
+[03:15] <MasterDuke> ? in the past i've seen IO.lines as quite a bit slower than slurping and then .lines
+
+[03:17] <timo> may want to put the "read file into array of bufs" outside the "for ^10" for the measurement then?
+
+[03:18] <MasterDuke> well, given this file is quite a bit bigger than the previous one i've just ditched the `for ^10` part
+
+[03:18] <MasterDuke> but i don't know how to not do the encode each time
+
+[03:20] <timo> encode is what you do to go from Str to Buf
+
+[03:21] <MasterDuke> yeah. it would be nice to directly slurp/lines directly into a Buf
+
+[03:23] <timo> check what IO::Handle.get does when the handle is opened without an encoding
+
+[03:24] <timo> depending on whether you set chomp on or off you'll either have strings where it's got a newline at the end every time, or not a single time
+
+[03:25] <MasterDuke> but then i'll still need to turn the string into a buf
+
+[03:27] <timo> i was hoping IO::Handle without encoding (or i guess with :bin?) gives you buf instead of Str
+
+[03:28] <MasterDuke> `Cannot do 'get' on a handle in binary mode`
+
+[03:29] <timo> >:(
+
+[03:29] <timo> you know, i think we should just put support in for that for people who really know that it's really what they want and what can go wrong %)
+
+[03:30] <timo> i need to go to bed i have a headache :(
+
+[03:31] <MasterDuke> good luck with that. about to go to bed here too
+
+[03:42] *** MasterDuke left
+[09:01] *** sena_kun joined
+[09:56] *** sugarbee1 left
+[09:57] *** sugarbeet joined
+[10:39] *** El_Che left
+[18:42] *** japhb left
+[18:49] *** japhb joined
+[18:56] <[Coke]> looks like we have a mix of 3rdparty https:// and git@ submodules. Any interest in standardizing?
+
+[19:33] <ugexe> as we don't update those repositories we should use https
+
+[19:34] <ugexe> https is generally recommended as well 
+
+[19:36] <ugexe> at $work we've explicitly gone through everything and changed them to https. we use github and github enterprise
+
+[19:47] *** [Coke] left
+[19:47] *** [Coke]_ joined
+[21:34] *** [Coke]_ is now known as [Coke]
+
+[21:34] <[Coke]> what is 3rdparty/sha1 ? has a remote of moarvm itself?
+
+[21:34] <[Coke]> ah, it's not a 3rdparty. why are are storing it there?
+
+[21:38] <timo> probably because it's so small? and unlikely to need to change?
+
+[21:48] <[Coke]> why not keep it with the other source?
+
+[21:48] <[Coke]> ah, to keep licensing more smooth, probably
+
+[21:50] <timo> that at least sounds like a good reason to me
+
+[22:29] *** sena_kun left

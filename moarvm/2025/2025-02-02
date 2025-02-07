@@ -1,0 +1,155 @@
+[00:01] <timo> limit of stack size is also a possible problem in some situations
+
+[00:02] <timo> i seem to recall there was a possibility to crash hard when you access quite far from the stack pointer, because it's interpreted as dangerous misbehavior, so if the stack frame is like something + 512 bytes big and we don't use any entries in the middle right away, but something else after those entries, that could trigger it?
+
+[00:03] <timo> it's quite possible to keep the allocation for this particular function somewhere further up the call stack, for example in the worker itself
+
+[00:03] <timo> do you want to give that a try?
+
+[00:46] <timo> https://gist.github.com/timo/da2f6862121dc7f5eec269387ffaeda4 looks very "overwriting the stack"
+
+[00:49] <timo> yep, it crashes in a situation where the by_cs->num_by_type is 777, a bit higher than the 512 we statically allocate there
+
+[00:52] <timo> maybe an outlier, but definitely something we must not crash on
+
+[01:26] <timo> i have a patch that keeps the buffer alive as long as the MVMSpeshPlan is alive, that should already cut down the number of temporary allocations by a good factor
+
+[01:33] <timo> that seems stable, good.
+
+[01:39] *** lizmat_ joined
+[01:41] *** lizmat left
+[02:08] *** guifa left
+[02:08] *** guifa joined
+[02:09] <timo> i'm not seeing that many allocations in MVM_spesh_plan in total that the pull request is supposed to save
+
+[02:09] <timo> i wonder if heaptrack still running prevented the main version of moar from being installed
+
+[02:11] <timo> hm no that wasn't it. huh.
+
+[02:15] <timo> i only see like 17k allocations in anything under anything called *plan*
+
+[02:16] <timo> "temporary allocations:  3888404" that's the total i get for core.c setting compilation
+
+[02:22] <timo> looks like the re-use factor when hanging it off the spesh plan is only roughly 8 on average
+
+[03:01] <timo> bit annoying to shuttle it through to the spot where i want it
+
+[04:05] <timo> # error: MoarVM oops in spesh thread: by_cs->cs->flag_count was more than 32 wtf? 401
+
+[04:09] <timo> is_run from the test helpers seems to by default ignore non-zero return status, so we might be missing moar oopses and panics happening in tests that use is_run
+
+[04:12] *** MasterDukeMobile joined
+[04:14] <MasterDukeMobile> timo: I bet the big difference in numbers is because my stats were from my laptop, which doesn’t have the jit
+
+[04:15] <MasterDukeMobile> Because my temp allocations were approx 5m
+
+[04:15] <MasterDukeMobile> I think, don’t have it open right now
+
+[04:16] <MasterDukeMobile> Is your patch in a branch I can test?
+
+[04:21] <MasterDukeMobile> Oh, and that is a little unfortunate about is_run. Wonder how much would break if it failed because of oopses and panics
+
+[04:25] <timo> you can put status => 0 in any use of is_run
+
+[04:25] *** MasterDukeMobile left
+[04:25] <timo> this time the problem was actually in code using get_out directly, that's one of the advent tests
+
+[04:29] <timo> it looks like i missed you by like 11 seconds huh
+
+[04:34] *** MasterDukeMobile joined
+[04:35] <timo> the reuse factor of chosen_position when using alloc and realloc inside plan_for_cs is miserably small
+
+[04:35] <MasterDukeMobile> I have another patch that reduces allocations in dispatch programs, but it crashes locally
+
+[04:35] <timo> oh there you are
+
+[04:36] <MasterDukeMobile> Another case of 95% of the time some value is pretty small, but with the occasional much higher value that kinds of rules out stack allocation
+
+[04:38] <MasterDukeMobile> Mimalloc is fast, but it’d be nice to remove some allocations completely
+
+[04:39] <MasterDukeMobile> Maybe my patches would be better as conditional uses of alloca, we already do that a couple other places
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: 5322c62d1d | (Daniel Green)++ | src/spesh/plan.c
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: Statically allocate `tuples_used`
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: 
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: Max seen during a build of Rakudo's CORE.c was 308.
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: review: https://github.com/MoarVM/MoarVM/commit/5322c62d1d
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: f01e8c0c53 | (Daniel Green)++ | src/spesh/plan.c
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: Statically allocate `chosen_position`
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: 
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: Max seen during a build of Rakudo's CORE.c was 13.
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: review: https://github.com/MoarVM/MoarVM/commit/f01e8c0c53
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: 9aaeb7a8b0 | (Timo Paulssen)++ | 3 files
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: increase reuse of allocated buffers in spesh plan code
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: 
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: static allocation isn't enough since the numbers sometimes go very high.
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: 
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: The reuse of chosen_position is very poor with this approach, it
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: would probably also have to move into MVMSpeshPlan for
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: re-use over multiple invocations.
+
+[04:40] <timo> here's your branch, includes your commit but i think it completely "overwrites" your changes
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: As it is here, it mostly uses it twice before freeing.
+
+[04:40] <Geth> ¦ MoarVM/spesh_plan_allocation_reuse: review: https://github.com/MoarVM/MoarVM/commit/9aaeb7a8b0
+
+[04:43] <MasterDukeMobile> Cool, I’ll check it out when next I’m on the laptop
+
+[04:45] <MasterDukeMobile> I had some sort of silly idea earlier, trying to remember what it was
+
+[04:47] <MasterDukeMobile> Something like figure out a bunch of common strings in/from rakudo and bake them into the moar binary
+
+[04:48] <timo> string interning is certainly a thing that's out there
+
+[04:48] <timo> long ago i experimented with code that hunted through the nursery for duplicate strings
+
+[04:50] *** MasterDukeMobile left
+[05:58] *** guifa left
+[09:40] *** sena_kun joined
+[10:39] *** lizmat_ left
+[10:39] *** lizmat joined
+[10:41] *** leedo left
+[10:57] *** leedo joined
+[14:56] *** guifa joined
+[16:06] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #1907: Maybe optimize MVM_string_latin1_decode()
+
+[16:06] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1907
+
+[17:17] *** Techcable left
+[17:20] *** Techcable joined
+[19:20] *** guifa left
+[20:38] <[Coke]> is the HLL registered for 'raku' still called 'perl6' internally?
+
+[20:38] <[Coke]> (trying to update a bunch of old refs to perl6 but not too much
+
+[20:40] <Geth> ¦ MoarVM/coke/cleanup: d3e13a6cbe | (Will Coleda)++ | 18 files
+
+[20:40] <Geth> ¦ MoarVM/coke/cleanup: Convert old perl6 refs to Raku
+
+[20:40] <Geth> ¦ MoarVM/coke/cleanup: review: https://github.com/MoarVM/MoarVM/commit/d3e13a6cbe
+
+[20:46] <Geth> ¦ MoarVM: coke++ created pull request #1908: Convert old perl6 refs to Raku
+
+[20:46] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1908
+
+[21:35] *** japhb left
+[22:26] *** japhb joined
+[23:23] *** sena_kun left
