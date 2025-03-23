@@ -1,0 +1,101 @@
+[03:07] *** MasterDuke joined
+[03:09] <MasterDuke> hm. in interp.c, changing `#define NEXT_OP (op = *(MVMuint16 *)(cur_op), cur_op += 2, op)` to `#define NEXT_OP (op = ((((MVMuint8 *)(cur_op))[1]*256)+(((MVMuint8 *)(cur_op))[0])), cur_op += 2, op)` gets rid of all the `runtime error: load of misaligned address 0xffff9162016d for type 'MVMuint16', which requires 2 byte alignment` reported by ubsan
+
+[03:09] <tellable6> 2025-02-22T18:59:50Z #moarvm <jdv> MasterDuke  looks like your forgot to add rapidhash to the release bit of the makefile
+
+[03:10] <MasterDuke> jdv: my bad, thanks for fixing that
+
+[03:26] <timo> that's odd. how do we end up with not-2-byte-aligned bytecode?
+
+[03:27] <MasterDuke> dunno. but i get the same warnings on my arm laptop and my x86 desktop
+
+[03:29] <MasterDuke> one other ubsan error is `runtime error: member access within misaligned address 0x03b69738694c for type 'struct MVMP6intBody', which requires 8 byte alignment`, we get that in `MVMP6int_get_int src/6model/reprs/P6int.c:93`, also lines 83, 73, and 63
+
+[03:30] <MasterDuke> and the last is `runtime error: shift exponent 64 is too large for 64-bit type 'long int'`, which is caused by rakudo/src/vm/moar/dispatchers.nqp:3708
+
+[03:31] <timo> the mk_storage_spec in P6int.c uses a version of ALIGNOF that might not work with newer C language versions
+
+[03:32] <timo> #define ALIGNOF(t) ((char *)(&((struct { char c; t _h; } *)0)->_h) - (char *)0)
+
+[03:32] <timo> this is only used if HAVE_ALIGNOF and _MSV_VER are not set
+
+[03:36] <timo> i see misaligned bytecode addresses now, i'll look where they come from
+
+[03:36] <MasterDuke> cool
+
+[03:39] <timo> looks like the bytecode actually lives at an odd position in the file we've mapped
+
+[03:41] <timo> the bytecode segment of this file seems to live at an odd address, too
+
+[03:42] <MasterDuke> are we getting some padding wrong when we write the file?
+
+[03:44] <timo> ah, yes.
+
+[03:45] <timo> we prepend some stuff before the "MOARVM" of precompiled files, and that stuff sometimes isn't multiple-of-two-bytes long
+
+[03:46] <MasterDuke> ah. how hard would it be to ensure it's two-byte aligned?
+
+[03:46] <timo> that's all in raku code i think
+
+[03:47] <MasterDuke> `src/vm/moar/QAST/QASTCompilerMAST.nqp:2510:        $!mbc.write_s("MOARVM\r\n");`
+
+[03:49] <MasterDuke> it looks like it's writing that at the very beginning of the file
+
+[03:49] <timo> could actually be in nqp
+
+[03:49] <timo> ah there you are
+
+[03:50] <timo> for precomped files we take what the qast compiler spits out and put it after the extra stuff
+
+[03:52] <timo> https://github.com/rakudo/rakudo/blob/72e2dcd13daea1e308c08e21ad749f303a6c2497/src/core.c/CompUnit/PrecompilationUnit/File.rakumod#L93-L94 it's this i think
+
+[03:53] <timo> and the "read_dependencies" private method may want to check the file pointer location at the end to see if it should read one padding byte
+
+[03:55] <MasterDuke> that doesn't sound terrible
+
+[03:56] <timo> actually, the align_section sub we use in writing mast files aligns to a multiple of 8, therefore we should put up to 7 alignment bytes before the MOARVM header
+
+[04:03] <MasterDuke> well i'm off to bed, this has been productive
+
+[04:03] <timo> sleep well!
+
+[04:03] <MasterDuke> later...
+
+[04:05] *** guifa left
+[04:11] <timo> xxd /home/timo/.raku/precomp/D8E29C62D407226E4D826B543608A121635D9884/F1/F13CDD097310A0775131666979B65ADF692574DD | head
+
+[04:11] <timo> 00000000: 3630 3035 3338 3437 4342 4338 3339 3934  60053847CBC83994
+
+[04:11] <timo> 00000010: 3343 4430 4136 3732 3443 3733 4432 3233  3CD0A6724C73D223
+
+[04:11] <timo> 00000020: 3230 3230 4537 3645 0a41 3439 3845 3937  2020E76E.A498E97
+
+[04:11] <timo> 00000030: 4544 4143 3544 3232 4535 3333 3836 3137  EDAC5D22E5338617
+
+[04:11] <timo> 00000040: 3243 3941 3345 4135 3637 3034 3131 4243  2C9A3EA5670411BC
+
+[04:11] <timo> 00000050: 440a 0a5f 5f5f 4d4f 4152 564d 0d0a 0700  D..___MOARVM....
+
+[04:19] *** MasterDuke left
+[04:28] <timo> changed the code to put the padding before the last \n so that there's a "less than 8 bytes" line which the current code would `.get` from the handle anyway, and then it checks if the dependency is longer than 7 or not
+
+[09:10] *** sena_kun joined
+[10:04] *** sena_kun left
+[12:37] *** guifa joined
+[12:41] *** guifa left
+[13:44] <Geth> ¦ MoarVM/main: 49b013ed8d | (Jimmy Zhuo)++ | src/platform/win32/time.c
+
+[13:44] <Geth> ¦ MoarVM/main: use GetSystemTimePreciseAsFileTime instead of GetSystemTimeAsFileTime, fixes the problem of call nqp::now twice with 10ms delay may return the same value, found by debugging raku REPL mode code
+
+[13:44] <Geth> ¦ MoarVM/main: review: https://github.com/MoarVM/MoarVM/commit/49b013ed8d
+
+[14:57] <ugexe> hmmm, GetSystemTimePreciseAsFileTime has open issues with windows on arm
+
+[14:57] <ugexe> https://github.com/MoarVM/MoarVM/issues/1789 is one of them
+
+[14:59] <lizmat> pinged Jimmy on that issue
+
+[20:50] *** sena_kun joined
+[20:55] *** guifa joined
+[21:16] *** guifa left
+[23:25] *** sena_kun left

@@ -1,0 +1,172 @@
+[00:14] *** sena_kun left
+[00:21] <timo> cool, glad to hear it
+
+[00:30] *** MasterDuke left
+[10:15] *** sena_kun joined
+[10:55] *** JimmyZhuo joined
+[13:18] *** vrurg joined
+[13:18] *** vrurg_ left
+[13:49] <lizmat> looking at https://github.com/rakudo/rakudo/issues/5776
+
+[13:51] <lizmat> found: https://github.com/MoarVM/MoarVM/blob/main/src/io/io.c#L144-L153
+
+[13:53] <lizmat> I may be mistaken, but it looks like there would only need to be two else if clauses that would need to be added there to support in32 and int64 writes ?
+
+[13:54] *** JimmyZhuo left
+[13:56] <lizmat> basically: https://gist.github.com/lizmat/9aeef6bb5148fff79f64a9cf5da1752c
+
+[13:56] <lizmat> or am I missing something ?
+
+[13:59] <nine> Oh, a reproducible MoarVM segfault
+
+[13:59] <nine> 773                         if (REPR(obj)->gc_free)
+
+[13:59] <nine> $2 = {header = {sc_forward_u = {forwarder = 0x0, sc = {sc_idx = 0, idx = 0}, st = 0x0}, owner = 0, flags1 = 0 '\000', flags2 = 2 '\002', size = 0}, st = 0x0}
+
+[14:01] <nine> in gen2 overflows
+
+[14:02] <lizmat> how to reproduce that ?
+
+[14:10] <nine> Try to build the setting with RAKUAST and my enormeous local patch
+
+[14:13] <nine> How on earth could this have stayed hidden for so long?? The change that triggered it is nqp::note("leave-scope " ~ $s.HOW.name($s) ~ ' ' ~ nqp::objectid($s))
+
+[14:14] <nine> For objectid we allocate some space in gen2 and use the pointer to that space as a stable unique identifier.
+
+[14:14] <nine> id = (uintptr_t)MVM_gc_gen2_allocate_zeroed(tc->gen2, obj->header.size)
+
+[14:15] <ugexe> are you sure other parts of the io system can even write 32 or 64 bytes? my guess is that it is the way it is because logic higher up writes in smaller sized chunks
+
+[14:16] <ugexe> although my guess is based on giving the original implementor the benefit of the doubt that they knew what they were doing, and not that they were just trying to get something that works
+
+[14:16] <nine> All we're interested in though is that pointer. So we never write anything to that allocated space. However it is getting treated as an MVMCollectable and we stumble over trying to dereference its REPR pointer in gc_finish
+
+[14:19] <nine> ugexe: would make sense. Usually at this level you're dealing with encoded strings, i.e. UTF-8 or if you're on crazy platforms UTF-16 or friends
+
+[14:20] <ugexe> yeah now that you mention UTF it would make sense that we allow utf-8 or utf-16
+
+[14:20] <ugexe> and obviously there is no utf-64
+
+[14:21] <ugexe> https://github.com/MoarVM/MoarVM/commit/51f2db579827dd6cbc796413bf3fdedfd27bf74d confirms it is related to utf as well
+
+[14:22] <lizmat> fwiw, my patch to MoarVM appears to allow writes with 64bit ints in nqp
+
+[14:22] <lizmat> nqp -e 'my $a := nqp::list_i(1,2,3,4); my $h := nqp::open("blob.bin", "w"); nqp::writefh($h,$a)
+
+[14:23] <ugexe> yeah but that working doesn't mean it is the correct solution
+
+[14:24] <ugexe> i'm not saying it isn't either, but after finding the commit i just linked i would expect the conditionals to match against the uints that we have matching utf types
+
+[14:24] <ugexe> m: my utf64 $a;
+
+[14:24] <camelia> rakudo-moar c6e0a6486: OUTPUT: «===SORRY!===␤Type 'utf64' is not declared␤at <tmp>:1␤------> my utf64<HERE> $a;␤Malformed my␤at <tmp>:1␤------> my<HERE> utf64 $a;␤␤»
+
+[14:24] <ugexe> m: my utf32 $a;
+
+[14:24] <camelia> rakudo-moar c6e0a6486: ( no output )
+
+[14:24] <lizmat> we're talking about writing native int arrays
+
+[14:25] <lizmat> this has nothing to do with UTFx, encoding or anything ?
+
+[14:25] <lizmat> it *could* have something to do with endianness, but not encoding afaics ?
+
+[14:25] <nine> And endianness is the reason why that original patch already looks fishy
+
+[14:25] <lizmat> well, there's that
+
+[14:26] <ugexe> Add support in write_fhb op for writing 16 bit VM arrays
+
+[14:26] <ugexe> This allows us to now output utf16 type objects from Rakudo, since these
+
+[14:26] <ugexe> are 16 bit arrays.
+
+[14:26] <ugexe> that is the commit message from what i linked
+
+[14:26] <lizmat> but if we decide that "native" endianness is the only thing we support at this level
+
+[14:27] <lizmat> we could add support specific endianness support at the Rakudo level?
+
+[14:28] <nine> What's the advantage of having this in the VM?
+
+[14:29] <lizmat> you mean: why don't we get rid of the int16 support, and do the rearranging in Rakudo?
+
+[14:30] <nine> yep
+
+[14:30] <Geth> ¦ MoarVM/lizmat-32-64-bit-write: ccacb66b0d | (Elizabeth Mattijsen)++ | src/io/io.c
+
+[14:30] <Geth> ¦ MoarVM/lizmat-32-64-bit-write: Add 32bit/64bit native in write support
+
+[14:30] <Geth> ¦ MoarVM/lizmat-32-64-bit-write: 
+
+[14:30] <Geth> ¦ MoarVM/lizmat-32-64-bit-write: Following up on https://github.com/rakudo/rakudo/issues/5776
+
+[14:30] <Geth> ¦ MoarVM/lizmat-32-64-bit-write: review: https://github.com/MoarVM/MoarVM/commit/ccacb66b0d
+
+[14:31] <Geth> ¦ MoarVM: lizmat++ created pull request #1923: Add 32bit/64bit native in write support
+
+[14:31] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1923
+
+[14:33] <lizmat> because we currently don't have an easy way to turn a Blob[int64] into a Blob[int8] ?
+
+[14:34] <lizmat> apart from looping with nqp::readint / nqp::writeint ?
+
+[14:48] <lizmat> which would also mean that you'd need 2x as much memory for any non-int8 buf ?
+
+[14:48] <lizmat> I guess there is no way to create a "8bit view" on a 64bit native array ?
+
+[14:49] <lizmat> aka, change the slot_type in the REPR data ?
+
+[14:50] <lizmat> and the number of elems  :-)
+
+[14:52] <lizmat> actually, looking at what https://github.com/MoarVM/MoarVM/blob/main/src/io/io.c#L144-L153 does, that's *exactly* what that does, as far as my rusty C knowledge allows me to grasp
+
+[14:52] <nine> Now I even question what the point of a buf[int32] is. Either you work with logical things, i.e. strings or arrays, or you want to deal with memory. The latter is an inherently byte-oriented thing.
+
+[14:53] <lizmat> any non-text application of integer values ?
+
+[14:53] <lizmat> expanded RGB bitmaps ?
+
+[14:53] <lizmat> each int32 being a pixel ?
+
+[14:54] <lizmat> you're saying you would use an int32 array for it?
+
+[15:00] <nine> yes
+
+[15:00] <lizmat> still, you can't currently write that to a file
+
+[15:01] <lizmat> my patch would allow that
+
+[15:01] <Geth> ¦ MoarVM/lizmat-32-64-bit-write: 99f67843a7 | (Elizabeth Mattijsen)++ | src/io/io.c
+
+[15:01] <Geth> ¦ MoarVM/lizmat-32-64-bit-write: Update error message
+
+[15:01] <Geth> ¦ MoarVM/lizmat-32-64-bit-write: review: https://github.com/MoarVM/MoarVM/commit/99f67843a7
+
+[15:01] <nine> I get the feeling that this is again a case of Raku having more than one thing with the same purpose for no good reason. After all, what do we need blob/buf for when we have natively typed arrays? They even use the very same underlying representation in the VM
+
+[15:02] <lizmat> good question  :-)
+
+[22:59] *** sena_kun left
+[23:01] <japhb> nine: Because buf allows you to have something that is a semantic stream of bytes into which you can write larger data types.  It's not sensical for an int64 to magically be written to four consecutive slots in an int16 array for example.  Also, there's no semantic guarantee in a buf that the data is aligned with the native memory granularity.  But a buf is literally there for I/O-oriented thinking, so 
+
+[23:01] <japhb> semantically neither of these issues applies.
+
+[23:01] <japhb> But really, all I really want is for CBOR::Simple to keep working.  :-)
+
+[23:02] <japhb> Well, and to remain fast.  I spent a lot of time on crazy NQP optimizations to make it so.
+
+[23:25] <lizmat> thinking a bit more about this, I think what we need is a blob at the VM level, that you can view in different ways: as int8/uint8, but also as int16/uint16 big or little endian
+
+[23:26] <lizmat> so that the access determines how we interpret the data, *not* any slot in a struct that is associated with the blob
+
+[23:32] <japhb> Essentially a form of pointer casting ... and yeah, I begged for that feature a LONG time ago, but never had the tuits to do it myself.  :-P
+
+[23:33] <lizmat> well, me neither, but I just reailized that such a view function could also be used to create bit/nibble/ native int types: it would just be another view
+
+[23:34] <kjp> What I'd really like is the ability to access parts of a CArray as a Blob. Seems to be a similar problem.
+
+[23:35] <kjp> I often mmap a file into a CArray which could be hundreds of megabytes. Having to copy sections into a Blob to be able to use Blob methods is rather inefficient.
+
+[23:38] <japhb> Very with you on that.  Extra copying is just adding performance insult to injury
+
