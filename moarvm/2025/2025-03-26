@@ -1,0 +1,194 @@
+[01:16] *** MasterDuke joined
+[01:47] *** MasterDuke left
+[02:27] *** MasterDuke joined
+[03:05] *** MasterDuke left
+[09:22] *** sena_kun joined
+[09:37] *** sena_kun left
+[10:36] *** harrow left
+[10:49] *** JimmyZhuo joined
+[11:19] *** JimmyZhuo left
+[11:24] *** harrow joined
+[17:38] <lizmat> https://gist.github.com/zaucker/5800adb925e3836259387a00f5a717bc describes a repeatable segfault 
+
+[17:39] <lizmat> that has been bisected to the 2025.02 release
+
+[17:39] <[Coke]> uhoh
+
+[17:49] <lizmat> I wonder if timo's 6f19ada9cb30a2477a9 has something to do with it
+
+[17:51] <lizmat> fwiw: Fritz Zaucker's project is Raku in production!
+
+[17:58] <lizmat> reproduced the segfault on MacOS
+
+[17:58] <lizmat> so it's not something JIT related
+
+[18:02] <lizmat> this is where I hope that timo nine MasterDuke might have some ideas
+
+[18:03] <lizmat> it appears easily reproducible (most of the time needed was to install Inline::Perl5 and Excel::Writer::XLSX in perl
+
+[18:03] <timo> oh, inline-perl5, i haven't worked with that ever
+
+[18:04] <lizmat> fwiw, I think it's NativeCall related, not specifically Inline::Perl5
+
+[18:05] <timo> does it work if you remove the `exit;` by chance?
+
+[18:05] <lizmat> yes
+
+[18:05] <lizmat> it's not in the teardown
+
+[18:06] <lizmat> you basically only need:
+
+[18:07] <lizmat> use Excel::Writer::XLSX:from<Perl5>;
+
+[18:07] <lizmat> Excel::Writer::XLSX.new('testseg.xlsx').add_format;
+
+[18:07] <lizmat> that's it
+
+[18:07] <timo> right, i installed it in my container now, now i need to install Inline::Perl5 as well
+
+[18:09] <timo> test failures >_>
+
+[18:10] <lizmat> interesting... installed clean for me on HEAD just now
+
+[18:11] <timo> probably some "fedora doesn't give you all of perl5" related issue
+
+[18:11] <lizmat> ah
+
+[18:11] <timo> [Inline::Perl5] Files=42, Tests=349,  12 wallclock secs
+
+[18:12] <timo> how do i get "zef test --verbose" to also give me the output from the tests instead of just the output of the harness?
+
+[18:12] <timo> Can't locate Test/More.pm in @INC (you may need to install the Test::More module) (@INC entries checked: /usr/local/lib64/perl5/5.40 /usr/local/share/perl5/5.40 /usr/lib64/perl5/vendor_perl /usr/share/perl5/vendor_perl /usr/lib64/perl5 /usr/share/perl5) at (eval 7) line 2.
+
+[18:12] <timo> BEGIN failed--compilation aborted at (eval 7) line 2.
+
+[18:12] <lizmat> cpan install Test::More ?
+
+[18:13] <timo> i've installed all the other perl modules with dnf, but there is not perl-Test-More; does perl-Test-Most maybe give me what i need as well?
+
+[18:13] <lizmat> I have no active memory of that
+
+[18:16] <timo> Test-Simple has it
+
+[18:17] <timo> and i needed perl-Devel-Peek too
+
+[18:18] <timo> then it succeeds
+
+[18:25] <lizmat> Xliff looked at it: https://gist.github.com/zaucker/5800adb925e3836259387a00f5a717bc?permalink_comment_id=5513939#gistcomment-5513939
+
+[18:34] *** Xliff_ joined
+[18:34] <Xliff_> <lizmat> that's why I suspect 6f19ada9cb30a2477a9 in MoarVM
+
+[18:34] <Xliff_> Checking the commit, but can you explain why for us slow ppl?
+
+[18:35] <timo> it would be surprising to me if spesh kicked in so fast for that frame
+
+[18:44] <timo> turning off spesh should tell us if it could even be that commit, right?
+
+[18:45] <lizmat> segfaults with spesh turned off, so I guess that's not the one then
+
+[18:46] <lizmat> hmmm...  maybe Rakudo's ea1831c79fc21ea3e5820 is to blame
+
+[18:46] <linkable6> (2025-01-25) https://github.com/rakudo/rakudo/commit/ea1831c79f Lose Positional argument to BUILDALL
+
+[18:48] <lizmat> maybe Inline::Perl5 is assuming a BUILDALL is always available inside each class ?
+
+[18:52] *** sena_kun joined
+[18:57] <timo> i changed unwrap-perl5-object slightly and that got me from segfault to eating one cpu core and growing slowly in memory usage, apparently forever
+
+[18:59] <lizmat> ok, I moved back to one commit before the POPULATE change, and that does not segfault
+
+[18:59] <lizmat> now moving one commit ahead
+
+[19:02] <lizmat> segfault
+
+[19:02] <lizmat> so its https://github.com/rakudo/rakudo/commit/ea1831c79f
+
+[19:02] <lizmat> :-(
+
+[19:03] <timo> well, i'm glad to hear it's not my fault. but this isn't optimal
+
+[19:03] <lizmat> indeed, it isn't
+
+[19:03] <timo> we will want to add a test to Inline::Perl5 that provokes this situation so that it's at least regression-tested in a blin run
+
+[19:04] <timo> maybe nine can come up with some more tests for other outlandish-ish situations? i don't know what exactly it is that provokes this, though
+
+[19:04] * lizmat tries an Inline::Perl5 patch
+
+[19:10] <[Coke]> I'm working on making sure we are actually *testing* Inline::Perl5 for releases.
+
+[19:10] <timo> that's good
+
+[19:10] <[Coke]> Not sure how long it's been, but I noticed in 2025.01 that we *try* to install it for testing, but then the stresstest that is supposed to include it complains it's not installed where it expects.
+
+[19:10] <jdv> iirc is hasn't been an issue for a very long time
+
+[19:10] <timo> so putting "install a working perl5 before running spec tests" in the instructions, and a little bit more than that i imagine
+
+[19:11] <jdv> but i guess good to check
+
+[19:12] <jdv> raku and perl arent good friends anymore in case you missed it
+
+[19:12] <timo> and maybe some kind of flag that makes a missing or nonfunctional Inline::Perl5 abort the release rather than just putting a message in the log that "if you want to test inline::perl5 please install it"
+
+[19:17] *** rakkable left
+[19:17] *** rakkable joined
+[19:48] <lizmat> ok, this is getting weird: now getting Can't locate Excel/Writer/XLSX.pm
+
+[19:51] <lizmat> with an unchanged Inline::Perl5 and with perl -MExcel::Writer::XLSX -e '' not producing an error
+
+[19:51] * lizmat nukes install
+
+[19:59] <lizmat> ok, back to segfault
+
+[20:05] <nine> Too bad it's too late for the release. In hindsight it would have been better to turn BUILDALL into a multi rather than renaming it
+
+[20:06] <lizmat> I think I haz a patch
+
+[20:06] <lizmat> for Inline::Perl5
+
+[20:07] <lizmat> -            for <BUILDALL bless can defined isa sink WHICH WHERE WHY ACCEPTS> {
+
+[20:07] <lizmat> +            for <BUILDPLAN bless can defined isa sink WHICH WHERE WHY ACCEPTS POPULATE> {
+
+[20:07] <lizmat> in lib/Inline/Perl5/ClassHOW.pm6
+
+[20:14] <lizmat> nine: want me to make a PR for that ?
+
+[20:26] <nine> That won't be correct on versions of Rakudo that *do* generate a BUILDALL, will it?
+
+[20:27] <lizmat> I will double check that, working on a PR right now
+
+[20:46] <lizmat> ok, the fix doesn't backport, will look at it tomorrow, too tired now
+
+[20:48] <lizmat> afk&
+
+[20:48] <nine> I'd think that simply checking whether the method actually exists before putting it into the cache would do the trick
+
+[20:48] <lizmat> that's what I tried, and it doesn't cut it :-(
+
+[20:48] <lizmat> +            for <BUILDPLAN bless can defined isa sink WHICH WHERE WHY ACCEPTS> -> $method {
+
+[20:48] <lizmat> +                %!cache{$method} := Mu.^method_table{$method}
+
+[20:48] <lizmat> +                  if nqp::existskey(Mu.^method_table,$method);
+
+[20:48] <lizmat>              }
+
+[20:51] <lizmat> a night's sleep will probably bring clarity
+
+[20:51] <lizmat> afk&
+
+[21:12] <Xliff_> <layman>Maybe using <BUILDALL BUILDPLAN bless can defined isa sink WHICH WHERE WHY ACCEPTS> and maybe "die unless %!cache<BUILDALL> || %!cache<BUILDPLAN>" might work?</layman>
+
+[21:47] *** Xliff_ left
+[21:55] <ugexe> timo: use --debug instead of --verbose
+
+[22:32] <timo> thanks i'll remember it for the future
+
+[23:05] *** sena_kun left
+[23:19] *** sena_kun joined
+[23:23] *** sena_kun left
+[23:38] *** MasterDuke joined
+[23:47] *** MasterDuke left

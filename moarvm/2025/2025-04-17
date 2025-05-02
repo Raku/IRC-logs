@@ -1,0 +1,183 @@
+[01:06] *** MasterDuke joined
+[01:55] *** MasterDuke left
+[07:54] *** nine left
+[07:54] *** nine joined
+[10:19] <lizmat> m: my @a; @a[99999999999999]=42
+
+[10:19] <camelia> rakudo-moar 7741548f5: OUTPUT: «MoarVM panic: Memory allocation failed; could not allocate 800000000000000 bytes␤»
+
+[10:20] <lizmat> I wonder whether this could be made into a catchable error ?
+
+[10:20] <lizmat> m: my @a; CATCH { dd $_ }; @a[99999999999999]=42
+
+[10:20] <camelia> rakudo-moar 7741548f5: OUTPUT: «MoarVM panic: Memory allocation failed; could not allocate 800000000000000 bytes␤»
+
+[10:20] <lizmat> it currently isn't
+
+[10:21] <lizmat> research instigated by https://github.com/rakudo/rakudo/issues/5835
+
+[10:25] <lizmat> or maybe even better: make all panics somehow catchable?
+
+[10:25] <lizmat> I realize that's probably not possible
+
+[10:26] <lizmat> but it feels to me that the memory allocation failed would not necessarily need to be a panic?
+
+[10:37] <nine> Only because in this case it's just a stupid request. In any kind of sensible code a failure to allocate memory will most likely be thrown because the system really is out of memory. That means that any allocations will fail including those done for throwing and handling the exception.
+
+[10:38] <nine> Now because our allocations are done in the nursery and don't actually involve an OS allocation, you might think that we can still succeed and yes, there's a non-zero chance. But the nursery might also be full in which case we would start the GC which would then have to allocate its internal structures and a new nursery.
+
+[10:39] <nine> Handling OOM is something you can realistically only do when you have very tight control over allocations. That's not something we have, as we're dealing with arbitrary user code.
+
+[10:39] <nine> Panics in general are thrown in cases where something is broken in a major way and it's highly unlikely that we can continue in any sensible way.
+
+[10:41] <lizmat> so essentially, you're saying that this is an unsolvable issue
+
+[10:41] <nine> Yes.
+
+[10:42] <nine> The array allocation case is a bit of a corner case. We could set a limit for what we consider a sensible array size above which we don't even try to allocate. But then every single array allocation pays the cost of this check. And what would you set the limit to?
+
+[10:42] <lizmat> ok, then I suggest we resort to not allowing bigints as indices in the core's AT-POS and ASSIGN-POS implementations
+
+[10:44] <nine> You mean the Int:D $pos candidates?
+
+[10:48] <lizmat> I think so, yes
+
+[10:50] <nine> I think those exist more for convenience of not having to convert types explicitly
+
+[11:08] <jnthn1> My hazy recollection is that if you try to use a truly big int there (something that won't fit into 64 bits), you will get a catchable error that you can't unbox something that big into the 64-bit integer that we need for the memory access.
+
+[11:08] <nine> Yes, we've seen that
+
+[11:09] <lizmat> m: my @a; @a[999999999999999999999999999999999]=42
+
+[11:09] <camelia> rakudo-moar 7741548f5: OUTPUT: «Cannot unbox 110 bit wide bigint into native integer. Did you mix int and Int or literals?␤  in block <unit> at <tmp> line 1␤␤»
+
+[11:09] <lizmat> but that's *way* bigger  :-)
+
+[11:10] <lizmat> m: my @a; @a[4294967295]=42
+
+[11:10] <camelia> rakudo-moar 7741548f5: OUTPUT: «MoarVM panic: Memory allocation failed; could not allocate 34359738368 bytes␤»
+
+[11:10] <lizmat> that's be the max for uint32
+
+[11:14] <nine> Which may be too limiting
+
+[11:16] <nine> ~> rakudo -e 'my int8 @a; @a[2 ** 34] = 1; say "survived"'
+
+[11:16] <nine> survived
+
+[11:16] <lizmat> yeah, it survived for me as well
+
+[11:20] <lizmat> m: my @a = <a b c d>; my uint $i = -2; say $i; say @a[$i]    #hmmm that feels wrong  :-)
+
+[11:20] <camelia> rakudo-moar 7741548f5: OUTPUT: «18446744073709551614␤c␤»
+
+[11:35] <lizmat> meh, it looks like nqp::atpos is interpreting large uints as negatives:
+
+[11:35] <lizmat> m: my @a = <a b c d>; use nqp; my uint $i = -2; say $i; say nqp::atpos(nqp::getattr(@a,List,q/$!reified/),$i)
+
+[11:35] <camelia> rakudo-moar 7741548f5: OUTPUT: «18446744073709551614␤c␤»
+
+[11:36] <lizmat> same for native arrays:
+
+[11:36] <lizmat> m: my str @a = <a b c d>; use nqp; my uint $i = -2; say nqp::atpos_s(@a,$i)
+
+[11:36] <camelia> rakudo-moar 7741548f5: OUTPUT: «c␤»
+
+[11:37] <lizmat> which implies that uint candidates in the setting still need to check for < 0  :-(
+
+[11:41] <lizmat> and thus it doesn't make sense to have uint candidates, the int candidates will already DTRT
+
+[11:42] <nine> Isn't that the inverse conclusion? To me it'd make more sense to fix the places where we treat a uint pos as a signed one
+
+[11:45] <lizmat> well, that would mean introducing mmd on nqp::atpos  ?
+
+[11:46] <nine> why?
+
+[11:47] <lizmat> because nqp::atpos cannot see whether the index values comes from a int or a uint ?
+
+[11:47] <nine> So declare that it *must* always be an uint and fix the places that rely on the wraparound
+
+[11:50] <lizmat> thing is, at several places in core, and probably in the ecosystem, there's code that depends on -1 being interpreted as "from the end"
+
+[11:51] <lizmat> so we can't change the behaviour of nqp::atpos, as it is expected to always succeed, also for negative values
+
+[11:51] <lizmat> and a sufficiently large uint value is interpreted as negative
+
+[11:58] <nine> core can be fixed, can't it? And nqp has never been a guaranteed interface.
+
+[12:05] <lizmat> so you're saying the -1 check should be moved to nqp::atpos ?
+
+[12:05] <lizmat> s/-1/< 0/
+
+[12:13] <nine> No, to the code that uses nqp::atpos
+
+[12:14] <lizmat> which is what I proposed: remove the uint candidates, replace them by int candidates
+
+[12:15] <lizmat> with a < 0 check
+
+[12:17] <nine> Why would you remove the uint candidates?
+
+[12:17] <nine> uint is by definition positive. There's no need for a check. That's quite optimal. It's what we want
+
+[12:39] <lizmat> that's what I also thought, but it's not true for uint values with the MSB set being passed on to nqp::atpos and friends
+
+[12:39] <lizmat> which will interpret them as negative values, and thus index from end
+
+[12:40] <nine> But if we fix nqp::atpos to not do that, it's exactly as it shoud be
+
+[12:40] <lizmat> right, but I thought we wouldn't fix nqp::atpos and friends ?
+
+[12:42] <nine> My proposal is to remove the auto-wrapping from nqp::atpos and fix all callers in core to either prevent negative values from being passed or do wrapping manually where needed.
+
+[12:45] <lizmat> that would also need quite a few fixes in NQP, I'm afraod
+
+[12:45] <lizmat> *afraid
+
+[12:50] <nine> sure
+
+[12:50] <nine> to me that's just part of core
+
+[12:53] <lizmat> i guess that would just be an nqp::die, which X::AdHoc should then make into a nicer error message
+
+[13:05] <lizmat> hmmm... the more I look at this, it feels we would need a Great List Index refactor  :(
+
+[13:21] <nine> While there are a great many callers of nqp::atpos, I'm quite sure that only a comparatively few of them rely on the wrapping behavior
+
+[13:22] <nine> E.g. more than 10 % of the atpos calls in core.c are in the BUILDPLAN executor and those are really just static indices
+
+[13:23] <nine> like nqp::atpos($task,1)
+
+[13:23] <nine> All of them work just fine and unchanged if we remove the auto-wrapping
+
+[13:28] <lizmat> yeah, and all of that BUILDPLAN will go sooner or later
+
+[13:28] <lizmat> meanwhile, nqp::atpos just wraps to nqp::atpos_o
+
+[13:29] <lizmat> so I guess it would need to make it a more complcated mapping  in the MAST process ?
+
+[13:29] <lizmat> afk&
+
+[13:40] <nine> I don't see the need for that. I'd just remove the index += body->elems in places like https://github.com/MoarVM/MoarVM/blob/main/src/6model/reprs/VMArray.c#L247 try to build NQP, see where it blows up, fix that place, rince and repeat
+
+[13:41] <nine> The vast majority of users is just supplying fixed, positive indexes or is in a loop iterating over the known indexes.
+
+[13:41] <nine> There's obvious cases like nqp::getattr_s(nqp::atpos($cstack,-1), $?CLASS, '$!name')
+
+[13:42] <nine> in Cursor which needs to be nqp::getattr_s(nqp::atpos($cstack, nqp::elems($cstack) - 1), $?CLASS, '$!name')
+
+[13:43] <nine> IIRC there are a few places where we need to adjust codegen in QASTRegexCompilerMAST
+
+[16:27] <lizmat> fair enough, I'll give that a stab after the 2025.04 release
+
+[16:37] <nine> ++lizmat
+
+[17:24] <timo> i've got a bit of WIP towards making set_size_internal from VMArray not panic for stuff that's too large
+
+[17:25] <timo> in the process i found a small area where we can actually get mimalloc to fail an internal assertion and take the whole process down, that's always fun
+
+[17:28] <timo> https://github.com/microsoft/mimalloc/issues/1068
+
+[18:16] *** lizmat left
+[18:22] *** lizmat joined
+[23:20] *** guifa joined

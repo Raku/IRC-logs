@@ -1,0 +1,323 @@
+[00:08] *** JimmyZhuo joined
+[00:12] <JimmyZhuo> timo: https://6guts.wordpress.com/2023/06/18/recollections-from-the-raku-core-summit/ (started with There was a long-standing problem that looked like the regex engine massively leaked memory in certain cases)
+
+[00:12] <JimmyZhuo> timo: and https://6guts.wordpress.com/2019/01/02/my-perl-6-wishes-for-2019/ (Improving compilation times)
+
+[00:24] <JimmyZhuo>  timo: consider CORE.c.setting is only 3.2MB, compiling it takes about 2GB memory and long time, it could be a lot of improvement here. but it's also a headache job.
+
+[00:49] *** JimmyZhuo left
+[07:13] <nine> I profile CORE.c.setting compilation and uploaded the SQL to https://niner.name/files/profile.sql.zst
+
+[07:19] *** lizmat joined
+[07:26] <nine> The trouble with profiling CORE.c.setting is that when the profiler finds nqp::gethllsym('Raku', '@END_PHASERS') it attaches a new one with the self.dump_profile_data call, but those END phasers are never executed.
+
+[07:27] <nine> I simply removed that check: https://gist.github.com/niner/b5c6fa2ab415fb0bac9d0831c669a0be
+
+[07:34] *** lizmat left
+[07:48] <nine> One thing that occured to me recently: since RakuAST nodes are supposed to be usable from Raku user space code, we use IMPL-WRAP-LIST everywhere where we return some NQP array to turn it into a proper List. All internal callers then use IMPL-UNWRAP-LIST to get at the NQP array.
+
+[07:50] <nine> But, but, BUT! Every method call is already wrapped in an nqp::hllize op precisely because it could be a call to a foreign language (such as NQP). hllize already turns NQP arrays into Lists. Thus I'm pretty sure all those IMPL-WRAP-LIST calls and the creation of List objects that goes with them are unnecessary.
+
+[07:51] <nine> IMPL-UNWRAP-LIST on the other hand may have to stay as its allowed to e.g. subclass RakuAST nodes in Raku.
+
+[08:26] <nine> We spend 10 % of the time in GC
+
+[08:32] *** lizmat joined
+[08:47] *** lizmat left
+[12:51] *** MasterDuke joined
+[12:54] <MasterDuke> heh. i can't even use moarperf to open nine++'s profile on this laptop (only 24gb of ram). it's opening on my desktop (32gb of ram), but it's slow
+
+[12:54] <MasterDuke> currently taking multiple minutes and hasn't loaded the overview page yet
+
+[12:56] <MasterDuke> timo: got any suggestions to make it about 100x faster?
+
+[13:00] <MasterDuke> could it be multi-threaded at all? it's pegging a core, but just one
+
+[13:04] <MasterDuke> well, i can see the routines page. interesting, compile_var (NQP::src/vm/moar/QAST/QASTCompilerMAST.nqp:1596) is 0% jitted, even though it's called 523k times
+
+[13:05] <MasterDuke> will have to make a spesh log on my desktop to see why...
+
+[13:31] <MasterDuke> in jnthn's blog that JimmyZhuo linked he mentioned adjusting the nursery for large arrays. that still hasn't been done, but would probably be pretty simple. would it also make sense for hashes?
+
+[13:31] <MasterDuke> https://6guts.wordpress.com/2023/06/18/recollections-from-the-raku-core-summit/
+
+[13:39] *** MasterDuke left
+[14:05] <timo> i can't get the sql file into sqlite3 because it says "out of memory", but there's probably a setting or command or something i can use to get sqlite3 to allow more
+
+[14:12] <timo> ... when we output sql data, do we correctly escape stuff or do we open up the possibility of SQL injection through crafted sub names or type names? :D
+
+[14:16] <timo> ah we weren't splitting the "insert into allocations" line when spitting out the sql i guess?
+
+[14:41] <timo> also got an idea for getting the sql file ever so slightly smaller ...
+
+[14:51] *** MasterDuke joined
+[14:52] <MasterDuke> timo: yeah, looks like calls is the only one split. the rest (except for allocations) are all pretty small, i guess allocations must have also been so when originally testing. should probably split it also
+
+[14:52] <timo> yeah, i'm writing one sub that handles it generically
+
+[14:52] <MasterDuke> nice
+
+[14:53] <timo> routines may also become relatively big, though nowhere near as big as calls of course
+
+[15:05] <MasterDuke> hm, so far most of the JIT mentions in the after of `compile_var` are a couple 'not devirtualized (type unknown)'
+
+[15:05] <MasterDuke> but i get `JIT was successful and compilation took 11211us`. wonder why nine's profile showed 0% jit?
+
+[15:06] <MasterDuke> it is quite large. 'Frame size: 26904 bytes (2176 from inlined frames)' and 'Bytecode size: 88715 byte'
+
+[15:08] <MasterDuke> it's not the biggest though
+
+[15:08] <timo> is it mostly inlined?
+
+[15:08] <timo> if it's inlined into a frame that's speshed but not jitted, that could be the explanation
+
+[15:09] <MasterDuke> i don't think it could be inlined, it's way too big, right?
+
+[15:11] <timo> i haven't looked yet
+
+[15:11] <MasterDuke> `inline of 'compile_var'` doesn't show up in the spesh log
+
+[15:11] <timo> still up to my elbows in the sql profile output code
+
+[15:13] <MasterDuke> no worries. probably going to be afk for a while soon
+
+[15:36] *** MasterDuke left
+[16:41] *** MasterDuke joined
+[16:56] <MasterDuke> so far it's looking like most IMPL-WRAP-LISTs can be removed
+
+[17:09] <timo> is there known trouble with state variables and rakudo's -n flag?
+
+[17:10] <timo> probably a "don't fix it, rakuast will be able to do it better" kind of thing
+
+[17:14] <MasterDuke> i think so
+
+[17:17] <timo> it was much much shorter to write with something starting with lines() instead of using -n and state
+
+[17:18] <MasterDuke> ha
+
+[17:18] <timo> anyway I made a thing that splits the much-too-long lines and now sqlite3 can ingest the file just fine
+
+[17:18] <MasterDuke> nice
+
+[17:20] <timo> rakudo -p -e 'if .chars > 20000 { my $tblnm = .substr(0, 100).comb(/:s INSERT INTO <( \S+ )> VALUES /); my @bits; for .split("), (").rotor(5000, :partial) -> $values { @bits.push($values.join("), (")); }; $_ = @bits.join(");\nINSERT INTO $tblnm VALUES ("); }' profile.sql > splitted_profile.sql
+
+[17:21] <MasterDuke> would it make sense to add that to the profile writing code in nqp?
+
+[17:21] <timo> no
+
+[17:21] <timo> only useful for files that were already written and couldn't be loaded
+
+[17:21] <timo> we have 1 (one) of those
+
+[17:21] <timo> BBIAB
+
+[17:22] <MasterDuke> well i mean we split up calls when writing the profile, should we generically split up anything too long?
+
+[17:23] <timo> yes, that's a patch I have locally also
+
+[17:24] <MasterDuke> ah
+
+[17:32] <timo> but i didn't want to have to re-profile core setting compilation
+
+[17:33] <MasterDuke> well, if you push you patch somewhere i'm going to have to try to re-profile all these IMPL-WRAP-LIST removals...
+
+[17:33] <timo> yes, i will very soon
+
+[17:35] <MasterDuke> cool
+
+[17:36] <MasterDuke> btw, did you see https://github.com/timo/moarperf/issues/18 ?
+
+[17:40] <timo> yes, I've got WIP on updating all the dependencies including many code changes
+
+[17:40] <nine> MasterDuke: have you tested using RakuAST nodes in Raku code after IMPL-WRAP-LIST removal?
+
+[17:42] <Geth> ¦ nqp/profile_sql_output_split_more_stuff: 320f5ad0ad | (Timo Paulssen)++ | src/vm/moar/HLL/Backend.nqp
+
+[17:42] <Geth> ¦ nqp/profile_sql_output_split_more_stuff: Refactor sql output, split more of the statements we can output
+
+[17:42] <Geth> ¦ nqp/profile_sql_output_split_more_stuff: 
+
+[17:42] <Geth> ¦ nqp/profile_sql_output_split_more_stuff: nine++ tested sql profiler output with core setting compilation using
+
+[17:42] <Geth> ¦ nqp/profile_sql_output_split_more_stuff: RakuAST, and the resulting profile had an "allocations" insert
+
+[17:42] <Geth> ¦ nqp/profile_sql_output_split_more_stuff: statement that was 221 million characters long, which sqlite3 didn't
+
+[17:42] <Geth> ¦ nqp/profile_sql_output_split_more_stuff: like parsing as a single statement.
+
+[17:42] <Geth> ¦ nqp/profile_sql_output_split_more_stuff: 
+
+[17:42] <Geth> ¦ nqp/profile_sql_output_split_more_stuff: This patch also has some attempts for re-using lists more.
+
+[17:42] <Geth> ¦ nqp/profile_sql_output_split_more_stuff: review: https://github.com/Raku/nqp/commit/320f5ad0ad
+
+[17:42] <MasterDuke> nine: not sure exactly what you mean. i'm testing by branching off the bootstrap-rakuast branch and building rakudo and running spectests
+
+[17:44] <timo> oops, my splitting must have b0rked the profile maybe
+
+[17:54] <timo> the allocations data may not only have been a bit too much to go into sqlite as one line, but may also take a little long to create stats over for moarperf to use, which is one of the things it does during startup, and the rest of the stuff is not usable before that is finished
+
+[17:55] <MasterDuke> it might be faster to create some indices first
+
+[17:58] <nine> MasterDuke: the point of those IMPL-WRAP-LIST calls has never been to benefit the code in src/Raku/ast. It's so that user level Raku code can use RakuAST nodes just fine.
+
+[17:59] <nine> > RAKUDO_RAKUAST=1 ./rakudo-m -e 'say RakuAST::ArgList.new.args.^name'
+
+[17:59] <nine> List
+
+[17:59] <MasterDuke> don't we have some tests that use rakuast nodes? or are those in m-test, not m-spectest?
+
+[17:59] <nine> There are not spectests for RakuAST.
+
+[17:59] <nine> Would be weird as it's still in development
+
+[18:00] <timo> only the stuff in t/ that's not in t/spec
+
+[18:00] <timo> i assume
+
+[18:02] <MasterDuke> `dan@athena:~/r/rakudo$ RAKUDO_RAKUAST=1 ./rakudo-m -e 'say RakuAST::Routine.new.attach-target-names.^name'
+
+[18:02] <MasterDuke> List`
+
+[18:02] <MasterDuke> that was `self.IMPL-WRAP-LIST(['routine', 'block'])` and is now `['routine', 'block']`
+
+[18:03] <nine> excellent!
+
+[18:07] <nine> Without the IMPL-WRAP-LIST we'll probably be able to spesh away the IMPL-UNWRAP-LIST calls completely
+
+[18:10] <MasterDuke> fwiw, building rakudo doesn't really seem faster
+
+[18:10] <timo> actually, difficult to say what exactly is keeping the moarperf from starting up, as it's doing sqlite3 code on three of its threads
+
+[18:26] <MasterDuke> hm. the all-allocs query (minus some of the generated columns) runs pretty fast when i'm in sqlite command line
+
+[18:27] <timo> hm, can i tell sqlite3 "hey this db is readonly now, so no need to lock out other threads" or so?
+
+[18:29] <MasterDuke> pretty sure there's a way to do that, but i've only ever programmatically used sqlite directly from c
+
+[18:30] <MasterDuke> even what i believe is the full query is pretty fast. it might just be the json handling in raku that's slow?
+
+[18:32] <timo> right, you can put ?mode=readonly on the path you connect to. not sure if DBIish wants me to give that parameter differently
+
+[18:32] <timo> no, it was working inside sqlite_step or what it's called, that should be the SQL engine
+
+[18:33] <MasterDuke> does DBIish use sqlite3_open_v2? apparently that's what you need to use to be able to pass the readonly flag
+
+[18:34] <MasterDuke> doesn't look like it does
+
+[18:34] <timo>   overview-data in 676.446943261
+
+[18:35] <timo> There were 223,843,653 object allocations. The dynamic optimizer was able to eliminate the need to allocate 11,760 additional objects (that's 0.01%) 
+
+[18:35] <timo> d'oh :D
+
+[18:35] <MasterDuke> `all-allocs in 1690.779572046`
+
+[18:36] <timo> woof.
+
+[18:38] <timo> ok so flame graphs really don't get a lot of worth out of very many entries under the same node, since they would be completely just absolutely tiny
+
+[18:41] <timo> it also looks like moarperf can accidentally work on the same kind of thing multiple times in parallel. the "only do it once" logic doesn't lock a new attempt out from starting
+
+[18:44] <MasterDuke> oops
+
+[18:47] <timo> no i misread the code, actually that is just done inside load_file, not called every time by the Routes i think
+
+[18:49] <timo> no i double misread
+
+[18:50] <timo> routine overview in 13.110527253
+
+[18:51] <MasterDuke> that was interesting. i just restarted it and now `all-allocs in 9.995467819`
+
+[18:53] <timo> i think it matters a lot if the flamegraph data is requested at the same time or not
+
+[18:57] <MasterDuke> maybe the flamegraph should have to be explicitly requested?
+
+[18:58] <timo> also a possibility
+
+[18:59] <timo> whew, the performance of the flame graph function seems to suck
+
+[18:59] <MasterDuke> the js or the raku?
+
+[19:01] <MasterDuke> ha. i nearly had a heart attack when i saw `Stage parse      :  60.037` and then i remembered i was ssh'ed into my desktop
+
+[19:01] <timo> i put a "$totals++" inside sub children-of and it's reached 59 after 30 seconds and 119 at 60 seconds
+
+[19:03] <timo> hrmpf. is there a `.blabla` i can put as a query to my sqlite dbiish handle or something to get it readonly? if i put ?mode=readonly it just creates a file that has that name :D
+
+[19:03] <timo> ah it may only work if it's a file:// url actually
+
+[19:04] <timo> DBDish::SQLite: Can't connect: unable to open database file (14)
+
+[19:04] <timo> is that about the connect function you mentioned before?
+
+[19:04] <MasterDuke> i don't think it'll work, i think DBIish has to use *open_v2 instead of just *_open
+
+[19:05] <MasterDuke> the non-v2 doesn't take flags
+
+[19:08] <timo> SQLITE_OPEN_NOMUTEX
+
+[19:08] <timo>     The new database connection will use the "multi-thread" threading mode. This means that separate threads are allowed to use SQLite at the same time, as long as each thread is using a different database connection.
+
+[19:08] <timo> i want this :3
+
+[19:09] <MasterDuke> just a yak shave away
+
+[19:09] <timo> and sqlite3_config can also be used to set up multi threaded mode before any connections are made
+
+[19:32] *** finanalyst left
+[19:32] *** finanalyst joined
+[19:35] <timo> i don't dare invent the API for this, but I'm giving multithreaded a try
+
+[19:37] *** finanalyst left
+[19:38] <MasterDuke> nice
+
+[19:40] <timo> oh i might not even have had to change anything inside DBIish as long as i just use multiple db handles
+
+[19:48] *** finanalyst joined
+[19:54] *** finanalyst left
+[19:55] <timo> okay getting some amount of multi-core utilisation
+
+[20:00] <timo> anyway, i bet everybody's waiting with bated breath for the top routines by exclusive time?
+
+[20:01] <nine> Well...
+
+[20:01] *** MasterDuke left
+[20:02] *** finanalyst joined
+[20:02] <nine> ...to be honest, actually not terribly much. I think there's another list that's more useful, albeit more difficult to interpret.
+
+[20:02] <nine> While common wisdom is that you look at the top routine by exclusive time and optimize that, this is only useful for finding place where micro optimizations pay off.
+
+[20:04] <timo> that's true, yeah
+
+[20:04] <timo> you can't see in there when it'd be worth chopping off entire branches of the call graph tree
+
+[20:05] <timo> searching for stuff that's got "ms per entry" finds stuff that has fewer entries and still high-ish time
+
+[20:06] <nine> At this point I suspect that most gains can be found algorithmically. Those are more visible in the inclusive tab, but of course the top one there will just be the entry point of your program.
+
+[20:06] <timo> yes indeed
+
+[20:06] <nine> So it takes a lot of filtering to find the good stuff
+
+[20:07] <timo> method-def from Grammar for example has 25.9s inclusive total, 7.9k entries, so 3.28ms per entry. but i have to assume that also includes the body of the method, and probably more than two thirds of the code in the setting would be inside methods?
+
+[20:08] *** lizmat joined
+[20:09] <timo> statement-control:sym<if> is similar to that; 1.4k entries, 5.7s total inclusive, so 4ms per entry
+
+[20:10] <timo> same reasoning makes this not be a surprise: block has 2k entries 32s total, 15.46ms per second
+
+[20:16] <timo> looking at exclusive time again, MATCH is first place, run_alt is second place. 2s and 1.4s respectively
+
+[20:19] <timo> mark-whitespace in Grammar has 1s exclusive, 2.34s inclusive. the time in callees is a good chunk horizontal-whitespace with 475ms, !alt with 441ms, MARKER with 107ms and the rest is less
+
+[20:22] <timo> attach from Actions has 1.14m entries, 12.3s total inclusive, almost all of which is under to-begin-time. i don't actually know what attach is for? maybe it's completely unsurprising
+
+[20:27] <timo> hum. i'm not sure this is correct? the callees of as_mast (QASTCompilerMAST:651) has many different compile_node subs, and they all have inclusive times that add up to a multiple of the inclusive time of as_mast, but none of them are more than as_mast. now i have to wonder if that's a problem in the frontend, in the sql queries, or in the profiler itself
+
+[20:50] *** lizmat left
+[21:53] *** finanalyst left
+[22:04] <nine> IIRC as_mast can also be called somewhere down from the original as_mast call
+
+[22:04] <nine> attach = set node origin, bring node to begin time and attach it to the tree, so expected
+

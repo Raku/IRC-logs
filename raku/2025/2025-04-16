@@ -1,0 +1,543 @@
+[00:11] <grondilu> it's stuck line 381, waiting for a byte.  And frankly I don't get why that hangs as it's in a thread.  I thought threads cannot hang the main process. 
+
+[00:11] *** stanrifkin_ left
+[00:14] <timo> did you have a link to the code yet?
+
+[00:14] <timo> or was it literally the code you had roughly an hour ago here in irc?
+
+[00:15] <timo> + a use in front
+
+[00:17] <timo> now that's interesting
+
+[00:17] <timo> native-descriptor is blocking, waiting for the lock on the file handle to be released
+
+[00:19] <timo> if you just move the `say @dim` before the `leave-raw-mode` you get the output immediately and then you have to press any key to stop the program
+
+[00:21] <japhb> Gah, that's annoying.  I've already had to work around the native-descriptor blocking problem in T::W, I didn't realize it would be a problem here too.
+
+[00:21] <grondilu> or put leave-raw-mode in a LEAVE phaser
+
+[00:22] <grondilu> so it's not me being dumb?  it's a bug alright?
+
+[00:24] <grondilu> (btw the line is 379, not 381.  I added some debug lines.)
+
+[00:24] <grondilu> https://github.com/japhb/Terminal-LineEditor/blob/d8f272a2cc7791b0f259ad0cbea6397e6762f25b/lib/Terminal/LineEditor/RawTerminalInput.rakumod#L379
+
+[00:24] <timo> i am not entirely certain that MVM_io_fileno should be forced to acquire a lock on the file handle
+
+[00:25] *** lichtkind left
+[00:27] <timo> for sockets it does something a little more complex, but for syncfile and syncsocket it literally just does a member access on the struct
+
+[00:28] <timo> alternatively, T::LE could just remember the fd number after enter-raw-mode is used
+
+[00:28] <timo> not sure it makes sense for the number to change between enter and leave
+
+[00:31] <grondilu> interestingly I think this is the kind of issue that made me look for a library in the first place.  I had tried parsing csi myself but I always ended up blocking sometimes for some reason. 
+
+[00:33] <timo> oh, that leave-raw-mode might actually have come from my local changes to T::LE?
+
+[00:33] <timo> ok, it looks like it doesn't matter
+
+[00:35] <timo> but the issue of the reader thread not being cancellable "from outside" while it's in the read call is something i stumbled upon literally a day ago
+
+[00:35] <timo> you can query the terminal to respond with something random though, that will get the read call to finish
+
+[00:36] <grondilu> hum
+
+[00:36] <timo> or just exit()
+
+[00:37] <grondilu> I've tried exit.  didn't work well
+
+[00:37] <timo> ah, i guess it didn't exit raw mode?
+
+[00:37] <grondilu> yes
+
+[00:37] <timo> right, that makes sense
+
+[00:39] <grondilu> shouldn't it be possble to send a byte from the main thread?
+
+[00:39] <timo> no, stuff you output aren't echoed back into the stuff you read i don't think
+
+[00:40] <grondilu> I've tried $*IN.print(' ')
+
+[00:40] <grondilu> didn't work
+
+[00:40] <timo> https://gist.github.com/timo/3be2887bbece1c7032d4578496257683 try this patch
+
+[00:41] <timo> are you on linux?
+
+[00:42] <grondilu> yes
+
+[00:43] <grondilu> your patch adds a $! twigil to a my variable
+
+[00:43] <timo> rakudo -e '"/proc/self/fd/0".IO.resolve.say; "/proc/self/fd/0".IO.resolve.say;; "/proc/self/fd/0".IO.resolve.say;'
+
+[00:44] <timo> oops, just remove the "my " from there
+
+[00:44] <grondilu> you're right that works.
+
+[00:44] <timo> that rakudo command gives "/dev/pts/0" three times
+
+[00:44] <timo> that explains why when you $*IN.print(" ") you won't be able to $*IN.read() and get the space out
+
+[00:45] <timo> $*IN and $*OUT are literally the same file. which means you can also $*OUT.read if you like
+
+[00:45] <timo> but that only works if your rakudo was invoked by a shell that has a TTY
+
+[00:45] <timo> if you use any kind of input/output redirection, that's no longer guaranteed
+
+[00:46] <grondilu> I see.  This explains why in Term::termios the author was using 1 as the fd for stdin.  This was confusing.
+
+[00:48] <grondilu> is your patch a work-around or a real fix?
+
+[00:49] <timo> i'd want japhb to chime in, but i think it's reasonable
+
+[00:49] <grondilu> doesn't look outlandish to save a file descriptor
+
+[00:51] <timo> yeah and $.output and $.input are also not "is rw" so you wouldn't expect them to change either
+
+[00:53] <grondilu> you don't have to make it an attribute of the class though, but I suppose why not.
+
+[00:53] <timo> how would you keep it around?
+
+[00:53] <timo> oh it might also make sense to zero it out when $!saved-termios is Nilled
+
+[00:54] <japhb> That looks like a reasonable patch to me (delta the 'my' thinko and zeroing it when Nil'ing as timo said).  PR it?
+
+[00:54] <timo> nope! bedtime! :) maybe grondilu could PR it?
+
+[00:55] <grondilu> huh
+
+[00:55] <grondilu> I'll try
+
+[00:56] <timo> you don't have to. good luck bye!
+
+[00:59] <grondilu> https://github.com/japhb/Terminal-LineEditor/pull/12
+
+[00:59] <grondilu> thanks timo++
+
+[01:12] <japhb> grondilu: Looks like the PR missed the bit about clearing the saved-fd when the saved-termios is Nil'ed?
+
+[01:12] *** grondilu left
+[01:19] *** grondilu joined
+[01:19] *** kylese left
+[01:20] *** hulk joined
+[01:26] *** derpydoo joined
+[01:36] *** Aedil joined
+[02:15] *** toddr left
+[02:15] *** hulk left
+[02:15] *** kylese joined
+[02:18] *** toddr joined
+[04:30] *** kylese left
+[04:32] *** kylese joined
+[04:40] *** human-blip joined
+[04:46] *** stanrifkin joined
+[05:12] *** human-blip left
+[05:13] *** human-blip joined
+[05:30] *** kylese left
+[05:32] *** kylese joined
+[06:00] *** Xliff joined
+[06:00] <Xliff> \o
+
+[06:00] <tellable6> 2025-04-14T04:12:00Z #raku <SmokeMachine> Xliff in theory, CommonSQL driver should handle most of (if not all) of them...
+
+[06:36] *** human-blip left
+[07:40] *** Sgeo left
+[07:43] *** human-blip joined
+[08:11] *** dakkar joined
+[10:26] *** lichtkind joined
+[10:32] *** grondilu left
+[10:32] *** derpydoo left
+[10:33] *** jpn joined
+[10:34] *** grondilu joined
+[11:16] *** grondilu left
+[11:18] *** grondilu joined
+[11:40] <grondilu> If I have `unit module Foo; our $bar = rand`, can I expect $Foo::bar to be different after every load of Foo? 
+
+[11:41] <grondilu> I mean I sure can if Foo is not a compunit:
+
+[11:41] <grondilu> m: package Foo { our $bar = rand }; $Foo::bar
+
+[11:41] <camelia> rakudo-moar e494d4d80: ( no output )
+
+[11:42] <grondilu> m: package Foo { our $bar = rand }; print $Foo::bar
+
+[11:42] <camelia> rakudo-moar e494d4d80: OUTPUT: «0.8950838548422354»
+
+[11:42] <grondilu> m: package Foo { our $bar = rand }; print $Foo::bar
+
+[11:42] <camelia> rakudo-moar e494d4d80: OUTPUT: «0.12659758324193893»
+
+[11:44] <grondilu> hum... it seems that it works for compunits too.  Not sure what's wrong then.
+
+[11:52] <grondilu> well that is weird.
+
+[11:58] <grondilu> it seems that I'll be able to golf it
+
+[12:02] <grondilu> so, in Foo.rakumod :  `unit Foo; our %h = 'a'..'e' Z=> ^1_000 .pick..*;`
+
+[12:02] <grondilu> in Bar.rakumod:  `unit Bar; use Foo;`
+
+[12:02] <grondilu> and now : `raku -I. -M{Foo,Bar} -e 'say %Foo::h'` always display the same values
+
+[12:03] <grondilu> but not `raku -I. -MFoo -e 'say %Foo::h'`
+
+[12:04] <grondilu> it has to be a hash, also.  I couln't replicate it if I use just a range.
+
+[12:06] <lizmat> what if you lose the "unit Bar" in Bar.rakumod ?
+
+[12:06] <grondilu> same result, apparently
+
+[12:06] <grondilu> that is always the same values show up
+
+[12:07] <grondilu> if I use `require` instead of `use` though, then I get different values.
+
+[12:08] <grondilu> with `need` on the other hand, again always the same values.
+
+[12:09] <grondilu> btw by `unit Bar` above I meant `unit module Bar`, but we now know that is not the cause of the problem
+
+[12:09] <lizmat> ack
+
+[12:09] <lizmat> I was just about to ask  :-)
+
+[12:10] <grondilu> (also `unit Foo` meant `unit module Foo`)
+
+[12:11] <grondilu> and as expected, if I remove .precomp between two run, then I get different values.
+
+[12:12] <grondilu> and that seems very wrong, as %h is not defined as a constant.
+
+[12:13] <grondilu> FYI this was preventing me to generate new image ids each time I was displaying a chessboard with my chess module.
+
+[12:21] *** human-blip left
+[12:23] *** human-blip joined
+[12:28] *** jpn left
+[12:34] *** jpn joined
+[12:36] *** JimmyZhuo joined
+[12:40] *** jpn left
+[12:51] *** Aedil left
+[13:25] *** sftp joined
+[13:30] *** jpn joined
+[13:42] *** Aedil joined
+[13:43] *** JimmyZhuo left
+[14:50] <grondilu> timo: japhb: It's still not ideal, though. The thread is still learking if the main process is not done.  It's reading STDIN which can be unexpected..
+
+[14:50] <grondilu> yesterday I posted this:
+
+[14:50] <timo> did you try asking the terminal emulator for a random report so that it writes something into the process's stdin to break the lock?
+
+[14:51] <grondilu> no
+
+[14:51] <grondilu> ah can't find the line in history
+
+[14:51] <grondilu> got it
+
+[14:52] <grondilu> so : my Terminal::LineEditor::CLIInput $term .= new; $term.enter-raw-mode; my $dim = await $term.detect-window-size; LEAVE $term.leave-raw-mode; say $dim;
+
+[14:52] <grondilu> ^this works with the patch
+
+[14:52] <grondilu> but now consider this:
+
+[14:52] <grondilu> so : for ^2 { my Terminal::LineEditor::CLIInput $term .= new; $term.enter-raw-mode; my $dim = await $term.detect-window-size; LEAVE $term.leave-raw-mode; say $dim; }
+
+[14:52] <grondilu> this does not work.  the first iteration is still hanging aftewards.
+
+[14:53] <grondilu> but yeah I have to look for a random report to print
+
+[14:53] <timo> right, without having something write to stdin, the little reader worker doesn't have the opportunity to exit its loop
+
+[14:55] <grondilu> why can't I just do LEAVE print q{*} ?
+
+[14:55] <grondilu> sorry I meant:
+
+[14:55] <grondilu> why can't I just do LEAVE $*IN.print: q{*} ?
+
+[14:57] <grondilu> I mean if it doesn't get the char I send it, I'm not sure sending a random report request would change anything
+
+[14:57] <grondilu> oh
+
+[14:58] <grondilu> I forgot you meant having the terminal write something
+
+[14:58] <timo> yes
+
+[14:58] <timo> you just don't get a handle that you can write to that will result immediately in your PTY receiving what you wrote
+
+[14:58] <timo> you need the terminal to help out
+
+[14:59] <timo> do you know how SIGTTIN works?
+
+[14:59] <grondilu> I've just tried with "\e14t".  Didn't help.  Still hanging.
+
+[14:59] <grondilu> Do I know how SIGTTIN works?  No.
+
+[15:00] <grondilu> notice that with "\e14t", I see the terminal responding.  But apparently the zombie thread does not catch it.
+
+[15:02] <timo> oh
+
+[15:03] <timo> i wonder if we have to 1) tell the background thread that it should stop, 2) send the request, 3) only then make the terminal no longer be raw
+
+[15:05] <grondilu> there is $!done for this but it's no use if the thread hangs before it has a change to notice it has changed its value.
+
+[15:06] <grondilu> basically the start-parser method will always end up hanging without input, no?
+
+[15:07] <timo> ok i think SIGTTIN and SIGTTOU are not interesting here
+
+[15:08] <timo> yeah, you can set done so that it stops looping, but you can not just make the read call exit on its own
+
+[15:09] <grondilu> is there no way to kill a read operation?
+
+[15:11] <timo> it sounds like if you handle a signal that your process gets, then the read call we do on the inside will return with EINTR. currently moarvm then just calls read again 
+
+[15:14] <tbrowder> ugexe: shouldn't there be something in the docs about the dies-ok weird behavior if using "$p = run(|c)"
+
+[15:16] <timo> i suspect it will be annoying to try to make syncfile compatible with cancellable operations somehow. might be better to instead actually introduce a file handle that's backed by libuv
+
+[15:18] <timo> especially since that'll give us crossplatform support without us having to jump through whatever amount fo hoops
+
+[15:19] <grondilu> I suppose I should only ever use one Terminal::LineEditor::CLIInput by application, as it seems this class does not destroy gracefully.
+
+[15:19] <grondilu> which is ok I guess.
+
+[15:23] <timo> one per TTY ... you might have multiple TTYs to work with :D
+
+[15:24] <grondilu> or I could make a specific app to catch terminal events, and run it with `run`.
+
+[15:25] <grondilu> so that it has its own process.
+
+[15:25] * grondilu wonders what happened to `fork`
+
+[15:25] <timo> hmm ... you can get a regular file descriptor from a socket, but you can't turn a TTY into a socket and use send and receive on it right?
+
+[15:26] <grondilu> I don't know much about sockets.
+
+[15:26] <grondilu> I'm still considering using fork.
+
+[15:26] <grondilu> after all it should be incredibly easy to call with NativeCall.
+
+[15:27] <timo> m: say fork;
+
+[15:27] <camelia> rakudo-moar e494d4d80: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Undeclared routine:␤    fork used at line 1␤␤»
+
+[15:27] <grondilu> m: use NativeCall; sub int fork is native {*}
+
+[15:27] <camelia> rakudo-moar e494d4d80: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Did you mean to write "my int sub fork" or put "returns int" before the block?␤at <tmp>:1␤------> use NativeCall; sub int fork<HERE> is native {*}␤»
+
+[15:27] <grondilu> m: use NativeCall; sub fork returns int is native {*}
+
+[15:27] <camelia> rakudo-moar e494d4d80: OUTPUT: «Potential difficulties:␤    The returning type of 'fork' --> int is erroneous.  You should not␤    return a non NativeCall supported type (like Int inplace of int32),␤    truncating errors can appear with different architectures␤    at <tmp>:1…»
+
+[15:28] <timo> m: use nqp; say nqp::fork()
+
+[15:28] <grondilu> m: use NativeCall; sub fork returns Int is native {*}
+
+[15:28] <camelia> rakudo-moar e494d4d80: OUTPUT: «16520␤0␤»
+
+[15:28] <camelia> rakudo-moar e494d4d80: OUTPUT: «Potential difficulties:␤    The returning type of 'fork' --> Int is erroneous.  You should not␤    return a non NativeCall supported type (like Int inplace of int32),␤    truncating errors can appear with different architectures␤    at <tmp>:1…»
+
+[15:28] <grondilu> m: use NativeCall; sub fork returns int32 is native {*}
+
+[15:28] <camelia> rakudo-moar e494d4d80: ( no output )
+
+[15:28] <timo> fork is 1) incredibly easy to call and 2) extremely pointy
+
+[15:28] <grondilu> m: use NativeCall; sub fork returns int32 is native {*}() ; print "1"
+
+[15:28] <camelia> rakudo-moar e494d4d80: OUTPUT: «11»
+
+[15:28] <grondilu> ^see, that workded.
+
+[15:29] <grondilu> kind of amazing
+
+[15:29] <timo> please see nqp::fork
+
+[15:29] <grondilu> ok ok
+
+[15:29] <grondilu> I'm not sure why I shouldn't just use native fork, though.
+
+[15:29] <timo> long ago a very brave brrt made moarvm not explode violently when you fork
+
+[15:30] <timo> https://github.com/MoarVM/MoarVM/blob/b405e940ebda9b09ec2d2409b902134f8bad246e/src/io/procops.c#L1251-L1252
+
+[15:30] <timo> this is what nqp::fork does that nativecalled fork probably doesn't
+
+[15:31] <grondilu> though now that I think about it, I would then need IPC to retrieve data from the child process.
+
+[15:31] <grondilu> so it may be complicated too.
+
+[15:34] <timo> > Unlike network I/O, there are no platform-specific file I/O primitives libuv could rely on, so the current approach is to run blocking file I/O operations in a thread pool.
+
+[15:34] <timo> that is just ...
+
+[16:01] <ugexe> i don't think it is safe to use fork in user code
+
+[16:02] <timo> with nqp::fork, it will at least take care of moarvm's different internal threads
+
+[16:02] <ugexe> from what i remember that has to be done as like an initialization type thing, i.e. it was being used in a way that was ok but that regular user code can not emulate
+
+[16:03] <ugexe> it was being used internally rather
+
+[16:04] <ugexe> ah i see the code you linked to has a bunch of information about that type of stuff, so ignore me in favor of whatever those comments say
+
+[16:05] *** jpn left
+[16:11] *** jpn joined
+[16:15] *** jpn left
+[16:51] *** jpn joined
+[16:57] *** dakkar left
+[18:04] <grondilu> timo: japhb: the parser reads STDIN in a loop that is essentially controlled by the variable $!done.  It's nice that this variable is atomic, but that won't change the issue that the variable can't be read while the thread is waiting for a character to come from stdin.
+
+[18:06] <timo> i spent an amount of time today trying to make TTYs async-readable inside moarvm. i couldn't get it working yet, and i'm not sure exactly if it's the right way forward
+
+[18:06] <grondilu> IMHO, the parser should be given a closure to assess whether the loop should continue or not.  Could be optional of course, but I think that's how it should be done.  like method start-parser(&until) 
+
+[18:08] <timo> do you have a specific case that that can do that the done variable can't? though the &until can of course just check the variable
+
+[18:09] <grondilu> the point is that the &until entails the logic behind the application, so it should know whether to keep reading input or not.
+
+[18:10] <grondilu> instead of being told to do so from the outside.
+
+[18:10] <grondilu> which can't work
+
+[18:13] <grondilu> as for the use case, let me tell you what I'm trying to do right now.  I'm trying to make some routine or method that would allow me to input a chess move graphically.  The problem I have is that I can't quit make it quit cleanly, after the move has been inputed.
+
+[18:13] <timo> the only way i know to set done is to leave-raw-mode, is that not the right semantics?
+
+[18:13] <grondilu> I've tried that, I couln't make it work.
+
+[18:14] <timo> by asking the terminal to send you a reply, right?
+
+[18:15] <grondilu> no.  the command leave-raw-mode just doesn't get executed IIRC
+
+[18:16] <grondilu> and there's always that read operation that hangs, unless I either type a character or end the process.
+
+[18:17] <timo> with the fix we did to not have to ask for the native fd again, that should just get stuck because the reader is waiting for input
+
+[18:17] <grondilu> honestly I don't quite understand how you fix worked.
+
+[18:18] <grondilu> but it did, so there is that.
+
+[18:18] <timo> hm. why doesn't the code that i took from irc backlog work
+
+[18:20] <timo> it's detect-terminal-size not detect-window-size, now it works 
+
+[18:21] <grondilu> the thing is : once a move has been inputed, I can do self.set-done; but I'm pretty sure that won't be enough to stop the read operation.  Your fix just allowed the main process to quit, but I don't want the main process to end after just one move has been inputed.
+
+[18:21] <timo> right
+
+[18:22] <timo> your code is currently reusing the same Terminal::LineEditor::CLIInput object?
+
+[18:22] <grondilu> it's inheriting from it, yes.
+
+[18:22] <grondilu> but I haven't pushed anything yet so it's not public.
+
+[18:22] <grondilu> what has been pushed uses Term::termios and a custom CSI parsing routine.
+
+[18:23] <grondilu> I suppose I should create a new branch 
+
+[18:24] <grondilu> oh I misunderstood your question about CLIInput.  Yes, I'm trying to use a single instance now.
+
+[18:27] <timo> ok i have something that seems to work how i want it to
+
+[18:27] <grondilu> Now that I think about it, I can override start-parser since I'm using inheritance.
+
+[18:27] <grondilu> and let it use a &until closur.
+
+[18:27] <timo> can always mixin, too
+
+[18:27] <grondilu> I can't mixin a class, can I?
+
+[18:28] <timo> no, but you can put the bits you want into a role and mix that in
+
+[18:28] <grondilu> true
+
+[18:28] <grondilu> though I think CLIInput has a few methods I want already.
+
+[18:29] * grondilu checks
+
+[18:30] <grondilu> well, actually not, apart from TWEAK which is not a method anyway.
+
+[18:31] <grondilu> so yes, mixins it is
+
+[18:33] <timo> https://github.com/timo/Terminal-LineEditor/commit/d7bfa1dcf841ae4ab5f1b21331c89065ba624f40
+
+[18:33] <timo> my test code for that is this:
+
+[18:33] <timo> use Terminal::LineEditor::RawTerminalInput; for ^5 { my Terminal::LineEditor::CLIInput $term .= new; $term.enter-raw-mode; my $dim = await $term.detect-terminal-size; LEAVE { $term.leave-raw-mode; }; say $dim }
+
+[18:34] <timo> this now just spits out the size of the terminal five times and quits immediately
+
+[18:34] <timo> ... /cc japhb 
+
+[18:37] <grondilu> shouldn't you put that code in set-done instead?
+
+[18:38] <grondilu> I mean one might want to leave the terminal in raw mode for some reason.
+
+[18:43] <timo> yeah i think that makes sense
+
+[18:50] <timo> if we want an "undefined" value for the saved fd, maybe it should be an Int attribute and not an int one
+
+[18:55] <japhb> BAK.  Addressing some backlog - yes, in the patch the saved fd should *not* be a native int, so that we can clear it to an undefined value properly.
+
+[18:58] <japhb> grondilu: If you're doing individual keypresses to control things, rather than input lines, you shouldn't be going in and out of raw mode all the time and having the app in control of time ... you should be having your app react to async arriving key presses as part of its overall control loop, and staying raw until you actually *need* cooked mode.
+
+[19:00] <japhb> https://github.com/japhb/Terminal-Widgets/blob/main/lib/Terminal/Widgets/Terminal.rakumod does this in Terminal-Widgets, dispatching tasks from its start react as needed.
+
+[19:00] *** mtj left
+[19:12] *** mtj joined
+[19:26] *** jpn left
+[19:28] <discord-raku-bot> <melezhik.> Copy pasting from cro irc channel just in case - If someone would take a look at https://github.com/croservices/cro/issues/168 I would appreciate it, helping rocky linux team adapt some Raku tools , thanks 🙏
+
+[19:32] *** Aedil left
+[19:49] *** jpn joined
+[19:52] <discord-raku-bot> <librasteve> in my experience about hakf of bugs are caused by security permissions
+
+[19:52] <discord-raku-bot> <librasteve> this one say [cro] # Check service up attempt 1: connection refused
+
+[19:54] <[Coke]> out of curiosity, why 2025.02 and not 2025.03?
+
+[19:56] <[Coke]> (I don't expect that to fix your problem)
+
+[19:57] <discord-raku-bot> <librasteve> what is the hardware?
+
+[19:58] <discord-raku-bot> <librasteve> the prior line #62 says my $got-body = test-request("http://localhost:$port/");
+
+[19:59] <discord-raku-bot> <librasteve> my first stab is that the local firewall rules deny http on localhost - please can you check
+
+[20:06] <discord-raku-bot> <librasteve> i have requested more info / fw permissions check in the issue
+
+[20:07] *** jpn left
+[20:14] *** jpn joined
+[20:19] <discord-raku-bot> <melezhik.> librasteve: thanks for swift reply
+
+[20:31] *** jpn left
+[20:33] <discord-raku-bot> <librasteve> yw ... do you have a clean rocky linux instance ... maybe you can check the default fw settings (is the endpoint reachable in the --/test case??)
+
+[20:36] <discord-raku-bot> <librasteve> crag '₃₆123.45'   #3F.G77777
+
+[20:37] *** jpn joined
+[20:37] *** swaggboi left
+[20:41] *** swaggboi joined
+[20:41] <discord-raku-bot> <librasteve> ^^ big improvement to App::Crag ... no longer have to say say
+
+[20:47] <discord-raku-bot> <antononcube> I assume that is a number system representation.
+
+[20:48] <discord-raku-bot> <librasteve> base 36
+
+[20:49] <discord-raku-bot> <librasteve> crag 'molecular-mass("SO2")'   #64.058
+
+[20:53] <discord-raku-bot> <antononcube> Just tried it.
+
+[20:54] <discord-raku-bot> <librasteve> https://github.com/librasteve/raku-App-Crag/blob/main/crag-of-the-day.md
+
+[20:54] <discord-raku-bot> <librasteve> ^^ some examples
+
+[21:21] *** jpn left
+[21:59] *** MasterDuke joined
+[22:51] *** stanrifkin left
+[23:24] *** lichtkind left
+[23:31] <grondilu> timo: it seems that calling self.set-done at the right place in the code is actually enough to stop the loop.  My bad.
+
+[23:33] <grondilu> https://gist.github.com/grondilu/5e3192b23a6ef1d1c2424daff0d33280
+
+[23:46] <japhb> I'm not completely incompetent!  \o/   ;-)
+
+[23:48] *** MasterDuke left
+[23:49] *** Sgeo joined
