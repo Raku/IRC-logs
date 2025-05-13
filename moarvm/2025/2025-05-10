@@ -1,0 +1,102 @@
+[00:41] <timo> anyway, a non-deduplicated coverage log file of core.c setting compilation is just over 80 gigabytes big
+
+[00:47] <timo> made QASTNode's "set" method use sorted_keys and now it's taking a long while to find the first difference in the logs
+
+[00:53] <timo> line 185900790 had the first difference
+
+[00:54] <linkable6> (2022-01-05) https://github.com/danaisi6/folder1743428030/commit/2794c6356e commit 185900790
+
+[00:54] <timo> ... uhhhh?
+
+[01:57] <[Coke]> Weird
+
+[07:46] *** [Coke] left
+[07:48] *** [Coke] joined
+[15:49] *** Nicholas left
+[16:04] *** Nicholas joined
+[16:46] *** lizmat joined
+[18:15] *** lizmat left
+[18:48] *** lizmat joined
+[18:49] *** lizmat left
+[18:49] *** lizmat joined
+[19:59] *** lizmat_ joined
+[19:59] *** lizmat left
+[20:31] *** lizmat_ left
+[20:31] *** lizmat joined
+[20:54] *** lizmat left
+[20:54] *** MasterDuke joined
+[20:55] <MasterDuke> does anyone have any thoughts on how to do normalization (NFG) faster?
+
+[20:55] *** lizmat joined
+[20:58] <MasterDuke> i've been experimenting with using simdutf (https://github.com/simdutf/simdutf) in `MVM_string_utf8_decode()`, but i believe it's the normalizing that's taking the time
+
+[21:01] <MasterDuke> i added an `if (<is valid utf8 according to simdutf>) { <decode with simdutf>; <normalize with our code>; } else { <the existing code> }`
+
+[21:02] <MasterDuke> but it isn't any faster. i guess there's a chance i wouldn't get as much of a speedup on this arm laptop, but i do believe there is at least some neon code in simdutf
+
+[21:07] <MasterDuke> i think part of the problem is that simdutf writes into a char buffer, but our normalization works on/creates an int buffer
+
+[21:09] <japhb> How is it writing into a char buffer if it is decoding a UTF8 bytestream?  Is it only doing that if it can guarantee ASCII or Latin-* codepoint sets or something?
+
+[21:11] <MasterDuke> yeah, that's for latin1_to_utf8. if you do utf8_to_utf16 it writes into a char16_t buffer
+
+[21:13] <MasterDuke> i'm not tied to that library, any and all suggestions are welcome
+
+[21:16] <MasterDuke> so right now i have the code malloc two buffer, a char and an int. but that seems non-optimal. i then tried just casting the last quarter of the int buffer into a char buffer, decoding into that, and then normalizing from there into the start of the int buffer
+
+[21:16] <MasterDuke> but that didn't work
+
+[21:16] <japhb> Part of the annoying problem is that as of a couple years ago, there wasn't much software that could *correctly* normalize.  As language support goes, only Raku and Swift had it right.  And a lot of libraries could validate a UTF-8 stream, and that it was properly *de*normalized (which IIRC is the first step to renormalizing as NFG), but that's not the hardest part.
+
+[21:19] <MasterDuke> you know, i've known that swift support was good, but i've never looked at how they implement it
+
+[21:19] <japhb> Might be worth a look I suppose.  Curious if they do everything bespoke or if they've found (or created) an independent library that accelerates all or part of it.
+
+[21:22] <patrickb> Can I in new-disp prevent dispatch programs from being recorded? I.e. force to always cal
+
+[21:22] <patrickb> do the record phase and never create or run a dispatch program?
+
+[21:24] <patrickb> Or phrased differently, can I misuse the dispatch mechanism to hook into some function calls to run some custom code before reaching the caller?
+
+[21:24] <patrickb> I suspect it's a probably a stupid idea and I shouldn't try...
+
+[21:24] <japhb> I suspect that something that can absurdly fast go from (proposed UTF8 bytestream) --> valid? + (max codepoint width) + NFD would be quite welcome though
+
+[21:27] <MasterDuke> hm. looks like https://github.com/swiftlang/swift/blob/main/stdlib/public/core/StringNormalization.swift is implemented in swift. that's not immediately useful for us
+
+[21:28] <MasterDuke> patrickb: that sounds like a 'hold my beer' challenge
+
+[21:41] <MasterDuke> https://zhaskell.github.io/utf8rewind/html/group__public.html#gadfa0210609054db368b6af9837ca69db looks like it does normalization
+
+[21:41] <MasterDuke> no idea if it's any faster than what moarvm has implemented
+
+[21:42] <MasterDuke> and doesn't do NFG (which is just a rakudo/moarvm thing, right?)
+
+[21:44] <MasterDuke> hm, i don't really know the difference between NFD and NFG. would it be fast to convert from NFD to NFG?
+
+[21:56] <japhb> NFD means "Normalization Form: canonically Decomposed"
+
+[21:56] <japhb> Similarly, NFKD is "NF: C[K]ompatibility Decomposed" -- this is less common 
+
+[21:57] <japhb> NFC is "NF: canonically Composed" (and there's NFKC for the compatibility form)
+
+[21:58] <japhb> These all work at the level of available codepoints; if there is a pre-composed codepoint already defined in Unicode for some sequence of base character and modifiers, great, you can replace the modified sequence with a single replacement codepoint.  But if there isn't, it needs to remain decomposed, because there's no defined thing to compose it to.
+
+[22:00] <japhb> NFG is "NF: Grapheme composed" meaning that *all* possible sequences of base character and accents/modifiers (together creating a grapheme, which is what a user would tend to think of a "character" as) are composed into a single unit, even if that unit isn't already in the Unicode list.  (But preferring to use the Unicode composed codepoints if they exist.)
+
+[22:02] <japhb> One of the key things about the decomposition phase is that it gives a strict ordering to all the accents/modifiers, so that two strings that have the same graphemes also have the same codepoint sequence in normalized decomposed form.
+
+[22:03] <japhb> That's used when composing, to make sure normalized composition does the same thing (produces the same sequence of codepoints or NFG units) no matter the exact mess that got fed in as input.
+
+[22:05] <japhb> So typically the sequence is (input --> UTF-8 decode --> NFD --> NFG --> str/Str), at least semantically (even if the real code smashes some of those conversions together)
+
+[22:06] *** lizmat left
+[22:07] <japhb> One other key thing that some other languages/engines/VMs don't have to deal with is that MoarVM allows a single string to be made of lots of individual pieces that are strung together -- and normalization has to do the right thing across the boundaries between them.
+
+[22:08] <japhb> And you can't do it "in place" because strings are supposed to be immutable.
+
+[22:09] *** MasterDuke left
+[22:09] <japhb> samcv, timo, and of course jnthn have all spent a fair amount of time on these sections of the code and can probably give you a more official rundown than I just did.
+
+[22:11] <japhb> MCP: EOL.
+

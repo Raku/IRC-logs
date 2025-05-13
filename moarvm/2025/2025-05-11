@@ -1,0 +1,101 @@
+[08:21] <nine> patrickb: maybe we should lock ourselves in a room for a couple hours at the RCS and talk this through?
+
+[08:53] *** lizmat joined
+[09:10] *** lizmat left
+[14:16] <patrickb> nine: Gladly!
+
+[14:21] <patrickb> I do hope it doesn't take a couple of hours though. I still think this should be straight forward (once the approach is fully ironed out).
+
+[16:22] *** mandrilllone joined
+[16:23] <mandrilllone> maybe an approach could be to make an Unicode disabled version of Moarvm, just by silently breaking most Unicode functions
+
+[16:24] <nine> mandrilllone: that's still assuming that normalization is the actual problem
+
+[16:24] <mandrilllone> My bet is on the 32bit character taking space
+
+[16:26] *** mandrilllone left
+[19:48] *** MasterDuke joined
+[19:50] <MasterDuke> i just timed slurping 'rakudo/gen/moar/CORE.c.setting' 100 times and summing the chars. both normally and also with `:enc("latin1")`
+
+[19:51] <MasterDuke> normally was ~1.2s and latin1 was ~0.2s
+
+[19:53] <MasterDuke> so utf8 decoding+normalization definitely takes time
+
+[19:58] <MasterDuke> and currently, if i'm understanding MVM_string_utf8_decode correctly, both pretty much happen somewhat simultaneously. i.e., it walks through the incoming bytes, decoding each one to utf8 and normalizing it (which may delay writing several bytes to the output until a sequence of bytes is fully normalized)
+
+[19:59] <MasterDuke> i think my experiment changed that so the utf8 decoding happens first, and then the output of that is walked to do normalization
+
+[20:02] <MasterDuke> but it wasn't any faster. so assuming that simdutf is in fact faster at decoding utf8 than our code (and maybe it isn't, but i know lemire's stuff is usually pretty fast), that would mean that the normalizing is in fast dominating the time
+
+[20:05] <MasterDuke> jnthn: istr you had a series of blog posts a couple years ago about how you made file IO faster, which i believe included speeding up utf8 decoding and normalization. do you have any suggestions for further improvements? anything concrete as todos?
+
+[20:48] <ab5tract> MasterDuke: simdutf sounds like a necessary experiment, if nothing else. Are you already planning to poke at it?
+
+[20:51] <MasterDuke> ab5tract: not sure what you mean. something other than what i've already done?
+
+[20:53] <ab5tract> sorry, it looks like I missed some context. I'm caught up on the scrollback now
+
+[20:53] <MasterDuke> ah, no worries
+
+[20:54] <ab5tract> I'm happy you are taking stabs at this MasterDuke, it's not exactly low hanging fruit from an implementation standpoint, but in terms of speedup gains it looks like a bit of a gold mine
+
+[20:55] <ab5tract> Did you already come across https://github.com/uni-algo/uni-algo?
+
+[20:57] <ab5tract> Ah, just saw that normalization does not include NFG :(
+
+[20:59] <MasterDuke> i hadn't seen that, thanks. maybe there will some inspiration there at least
+
+[21:00] <ab5tract> their README really emphasizes adherence to the Unicode standard, but then it's missing NFG :(
+
+[21:00] <MasterDuke> aiui NFG isn't a Unicode standard, it's our own thing
+
+[21:02] * ab5tract recalls some beer-hazy conversation from years ago where someone confidently expressed that Raku was far from unique in it's handling of graphemes / NFG is no big deal
+
+[21:02] <ab5tract> should we perhapsn submit our work to the standards body?
+
+[21:04] <MasterDuke> hm, i thought raku was pretty unique, with swift being the only other language doing graphemes
+
+[21:05] <ab5tract> I've always thought we did it the best
+
+[21:06] <ab5tract> Swift's approach means that the same input always produces the same output, byte for byte, though
+
+[21:06] *** mandrillone joined
+[21:06] <MasterDuke> i thought our does too?
+
+[21:07] <mandrillone> suckless provides some algos to manage graphemes, maybe interesting to give it a look https://libs.suckless.org/libgrapheme/
+
+[21:08] <ab5tract> MasterDuke: nope, that's the sacrifice we make for being able to match two semantically-equal-but-composed-differently characters with each other
+
+[21:09] <ab5tract> it's such a simple fix though, you can just write a class that stores the original content as a Buf, with the corresponding hooks to spit the Buf back out (Str/gist)
+
+[21:09] <ab5tract> (or even spurt)
+
+[21:10] <ab5tract> IIRC Swift does the above internally. 
+
+[21:10] <ab5tract> All these memores are from before 6.c though, so throw some salt on those miles that may be varying up ahead
+
+[21:11] <MasterDuke> mandrillone: thanks, that also looks interesting
+
+[21:11] <ab5tract> Both languages have changed quite a bit
+
+[21:16] *** mandrillone left
+[21:16] <MasterDuke> afk, but thanks for the suggestions. will check logs for any more
+
+[21:21] *** MasterDuke left
+[21:29] *** lizmat joined
+[21:31] <japhb> We follow the Unicode standards for how to cluster codepoints into a grapheme and suchlike, but NFG in particular (where we assign new "codepoints" to grapheme clusters as needed) is our own thing because it can theoretically be overwhelmed.  (Every possible legal composition of combining characters, accents, etc. with every possible base character is *a lot of characters*.)
+
+[21:34] <japhb> However I can imagine that having all through NFC be done at some absurd speed, and then layering NFG on top of that in a way that takes advantage of being able to expect NFC compliance, *might* make for a faster algorithm.  Still have to deal with the multi-piece string problem though; I'm guessing most high-speed Unicode libraries aren't expecting a string to be chunked.
+
+[22:01] <ab5tract> Just curious, but why are they able to get away with non-chunked strings while we are stuck supporting chunked strings?
+
+[22:04] <ab5tract> japhb: I hope the above question doesn't come off as too pointed. Thank you for the details!
+
+[23:05] <japhb> Because C doesn't have an 'x' operator.  ;-)
+
+[23:05] <japhb> But seriously, the idea is to be able to efficiently do joins, substrings, and repetitions.
+
+[23:06] <japhb> ab5tract: ^^
+
+[23:06] <japhb> Imagine `substr($a, 3, 4) ~ substr($q, 10, 1) x 25`
+
