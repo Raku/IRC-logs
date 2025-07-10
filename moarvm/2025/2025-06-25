@@ -1,0 +1,174 @@
+[01:24] <[Coke]> looks like our fork is 7+ years old
+
+[01:25] <[Coke]> and even the main repo hasn't seen a release in over a year. (despite commits from the past 2 weeks)
+
+[01:30] <[Coke]> https://github.com/MoarVM/MoarVM/issues/1949
+
+[01:35] <[Coke]> Would be great if we had a small README on how to deal with updating submodules.
+
+[02:05] *** mef left
+[02:09] *** mef joined
+[02:56] *** mef left
+[03:00] *** mef joined
+[03:05] *** mef left
+[03:09] *** mef joined
+[10:23] <lizmat> hmmm.  I just did an makeOPS.raku run on the MoarVM::Bytecode module
+
+[10:23] <lizmat> and it produced this diff: https://gist.github.com/lizmat/1cc8d4d0590b3764544a09df7c5f4029
+
+[10:25] <lizmat> looks like the ":invokish :throwish :deoptallpoint" traits on getlex_ni/nn/ns/no, getdynlex , getlexouter, getlexperinvtype_o and sp_getlex_no have been removed
+
+[10:26] <lizmat> this *feels* incorrect, unless this was intentional of course
+
+[10:30] <lizmat> this was part of b405e940eb
+
+[10:30] <linkable6> (2025-04-10) https://github.com/MoarVM/MoarVM/commit/b405e940eb Revert fallback resolver, this is not used anymore.
+
+[10:31] <lizmat> nine timo MasterDuke17 is this ok, or an unwanted side effect of that rather large commit ?
+
+[10:36] <lizmat> while going through the work done at the RCS, I realized that the $?FILE change may cause issues with reproducible builds
+
+[10:36] <lizmat> or some other build / packaging service
+
+[10:37] <lizmat> wasn't so that bytecode should *not* contain any absolute path references?    in RakuAST with $?FILE it now does
+
+[10:38] <lizmat> (whereas before it would only occur if the code actually mentioned $?FILE, as it would be stored as a WVal then)
+
+[10:38] <lizmat> but now it is in the string heap
+
+[11:25] <patrickb> re reproducibility and $?FILE: timo already hinted ath this at the RCS and noted that we should ensure the path is a relative and not an absolute one. I instantly forgot though...
+
+[11:26] <patrickb> 🤦🏻‍♂️
+
+[11:42] <lizmat> but wouldn't a relative path be semi useless ?
+
+[11:54] <patrickb> I (with my debugger goggles on) am interested in the filenames only to find the files locally and to match them to break statements. For both purposes I'm pretty fine with relative paths.
+
+[11:55] <patrickb> Finding the files is a teeny bit more interesting, as I have to either search for respective files or persuade Timo to extend the debugger interface with an op to return the active lib search paths.
+
+[11:58] <patrickb> All in all, I fully agree, the path should be relative to the lib path that the file was originally found in. (Does that make sense?)
+
+[12:00] <patrickb> Given we do value both, reproducibility *and* backcompat, are we ok to favor reproducibility  over back compat with $*FILE here, and just change it?
+
+[12:00] <lizmat> heh... turns out I was looking wrong: in RakUAST, $?FILE *is* already relative
+
+[12:00] <lizmat> it isn't in the legacy grammar
+
+[12:01] <lizmat> so that'll be something to add to the list of language level changes
+
+[12:01] <lizmat> sorry for the noise
+
+[12:02] <lizmat> ah, but not if it is precomped
+
+[12:02] <lizmat> wtf
+
+[12:14] <lizmat> hmm... making $?FILE relative causes massive test breakage
+
+[12:14] <lizmat> m: dd $?FILE.^name
+
+[12:14] <camelia> rakudo-moar 036a88870: OUTPUT: «"Str"␤»
+
+[12:15] <lizmat> ah, not interned...
+
+[13:35] <nine> lizmat: removing those adverbs was correct. Those ops are no longer invokish as the invocation in question was us calling the fallback resolver which no longer exists
+
+[13:53] <lizmat> ok, *phew*  :-)
+
+[15:19] <lizmat> a thought: now that we include the source in the bytecode as $?SOURCE, I wonder whether we could make $=finish be a substring of $?SOURCE
+
+[15:45] <SmokeMachine> m: say $?SOURCE$
+
+[15:45] <camelia> rakudo-moar b9765b477: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Variable '$?SOURCE' is not declared. Perhaps you forgot a 'sub' if this␤was intended to be part of a signature?␤at <tmp>:1␤------> say <HERE>$?SOURCE$␤»
+
+[15:46] <lizmat> SmokeMachine: only in RakuAST
+
+[16:01] <ugexe> the spectests have a bunch of stuff like `use lib $?FILE.IO.child("baz")`, where $?FILE is expected to be absolute
+
+[16:02] <ugexe> so that a test can be run without having to be in a specific directory 
+
+[16:02] <ugexe> they can probably be updated to $*PROGRAM or something though if that is the case
+
+[16:05] <lizmat> $*PROGRAM isn't set until runtime ?
+
+[16:08] <ugexe> only modules are precompiled, not e.g. test files
+
+[16:15] <lizmat> ah, $*PROGRAM *is* set at compile time
+
+[16:15] <lizmat> m: BEGIN dd $PROGRAM
+
+[16:15] <camelia> rakudo-moar b9765b477: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Variable '$PROGRAM' is not declared. Perhaps you forgot a 'sub' if this␤was intended to be part of a signature?␤at <tmp>:1␤------> BEGIN dd <HERE>$PROGRAM␤»
+
+[16:15] <lizmat> m: BEGIN dd $*PROGRAM
+
+[16:15] <camelia> rakudo-moar b9765b477: OUTPUT: «IO::Path.new("<tmp>", :SPEC(IO::Spec::Unix), :CWD("/home/camelia"))␤»
+
+[16:25] <ugexe> m: use lib $*PROGRAM.parent.child("Bar"); say $*REPO.repo-chain.head;
+
+[16:25] <camelia> rakudo-moar b9765b477: OUTPUT: «file#/tmp/Bar␤»
+
+[16:25] <lizmat> yeah, that should work
+
+[16:25] <lizmat> however, apparently using $*PROGRAM at BEGIN time freezes
+
+[16:26] <lizmat> m: $PROCESS::PROGRAM-NAME = "foo"
+
+[16:26] <camelia> rakudo-moar b9765b477: ( no output )
+
+[16:26] <lizmat> m: $PROCESS::PROGRAM-NAME = "foo"; say $*PROGRAM-NAME
+
+[16:26] <camelia> rakudo-moar b9765b477: OUTPUT: «foo␤»
+
+[16:26] <lizmat> m: BEGIN say $*PROGRAM; $PROCESS::PROGRAM-NAME = "foo"; say $*PROGRAM-NAME
+
+[16:26] <camelia> rakudo-moar b9765b477: OUTPUT: «"<tmp>".IO␤Cannot modify an immutable Str (/tmp/evalbot-file-Hw...)␤  in block <unit> at <tmp> line 1␤␤»
+
+[16:26] <lizmat> this trips up about 5 spectest files after a file s/$?FILE.IO/$*PROGRAM replacement
+
+[16:41] <SmokeMachine> m: use experimental :rakuast; say $?SOURCE # ?
+
+[16:41] <camelia> rakudo-moar 62915529b: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Variable '$?SOURCE' is not declared. Perhaps you forgot a 'sub' if this␤was intended to be part of a signature?␤at <tmp>:1␤------> use experimental :rakuast; say <HERE>$?SOURCE # ?␤»
+
+[17:12] <lizmat> m: Q|say $?SOURCE|.AST.EVAL
+
+[17:12] <camelia> rakudo-moar 62915529b: OUTPUT: «Nil␤»
+
+[17:12] <lizmat> which is...  correct as there is no source file
+
+[17:14] <lizmat> SmokeMachine: use experimental :rakuast only activates the RakuAST classes
+
+[17:14] <lizmat> *not* the Raku grammar
+
+[17:16] <SmokeMachine> Does $?SOURCE contains the path or the content?
+
+[17:22] <lizmat> content
+
+[17:22] <lizmat> $?FILE contains the relative path
+
+[17:22] <lizmat> $?CHECKSUM contains the checksum of the source
+
+[17:23] <lizmat> well, with RAKUDO_RAKUAST=1
+
+[17:46] <SmokeMachine> If that’s the case, can we have the code of blocks as substring of $?SOURCE?
+
+[17:50] <lizmat> that's an interesting thought
+
+[17:50] <lizmat> afk for a bit&
+
+[18:01] *** vrurg left
+[18:02] *** vrurg joined
+[18:28] *** bisectable6 left
+[18:28] *** greppable6 left
+[18:28] *** bisectable6 joined
+[18:28] *** greppable6 joined
+[19:17] <japhb> ugexe: .parent.child() can be switched to .sibling().  I find it a little more clear in intent, and for some reason appears to be significantly simpler in the setting code.
+
+[19:31] <ugexe> true, but when you're doing it across tens of files its easier to follow a template. in this case sometimes its .parent(2) etc
+
+[19:31] <ugexe> also im not sure if sibling existed when i did that PR :)
+
+[21:05] <japhb> Oh quite possible.  :notes: Time keeps on slippin', slippin', slippin ... into the future!
+
+[23:30] <lizmat> https://github.com/rakudo/rakudo/commit/8bacad8f84fa741e  appears to introduce IO::Path.sibling   (17 April 2017)
+
+[23:30] <lizmat> so it's definitely a 6.d thing
+
