@@ -1,0 +1,721 @@
+[00:07] *** arkiuat left
+[00:13] *** librasteve joined
+[00:17] *** arkiuat joined
+[00:18] *** librasteve left
+[00:27] *** sftp left
+[00:30] *** librasteve joined
+[00:34] *** librasteve left
+[00:39] *** euandreh left
+[00:46] *** librasteve joined
+[00:50] *** sftp joined
+[00:51] *** librasteve left
+[00:55] <guifa> if I'm trying to convert a set of args to JSON
+
+[00:57] <guifa> I"m thinking to check if something is Positional then make array, if associative, make associative, and numerify if numeric, and then lastly stringify as a last resort
+
+[01:01] *** librasteve joined
+[01:10] *** librasteve left
+[01:20] *** gabiruh joined
+[01:22] *** librasteve joined
+[01:31] *** librasteve left
+[01:44] *** librasteve joined
+[01:46] *** hulk joined
+[01:47] *** kylese left
+[01:49] *** librasteve left
+[01:51] *** librasteve joined
+[01:51] *** sftp left
+[01:54] *** sftp joined
+[02:03] *** arkiuat left
+[02:12] *** arkiuat joined
+[02:15] *** hulk left
+[02:15] *** kylese joined
+[02:32] *** Aedil joined
+[02:50] *** dustinm`_ left
+[02:51] *** apogee_ntv left
+[02:52] <japhb> guifa: Calling to-json on the Capture doesn't work?
+
+[02:52] *** apogee_ntv joined
+[02:53] <japhb> (I know it works in CBOR, but that's because I literally pushed through a CBOR spec extension to make it possible. Nothing like having a Raku module be the reference implementation for a spec!  ;-) )
+
+[02:56] <japhb> Don't know how to jsonify Capture  <--- Well that's annoying
+
+[02:56] <guifa> japhb I'm thinking more in the case of custom classes 
+
+[02:56] *** librasteve left
+[02:56] <guifa> a Capture is simultaneously positional and associative, coequals
+
+[02:57] <guifa> so what would the JSON representation of \(1, 2, :a, :b) look like?
+
+[03:01] <japhb> guifa: Yeah, seems like a workaround is necessary in JSON
+
+[03:01] <guifa> in my case, I can cheat a teeeeny bit
+
+[03:01] <guifa> for a capture, I ignore named args because JavaScript doesn't have them :)
+
+[03:02] <guifa> but if someone passed a Match, for instance...
+
+[03:04] *** dustinm` joined
+[03:05] <japhb> guifa: Maybe something like: `sub capture-as-json(Capture $c (*@pos, *%ass)) { to-json (@pos ?? (%ass ?? [@pos, %ass] !! @pos) !! %ass || []) }`  Except what you'd really want is to make that a to-json multi or somesuch
+
+[03:07] *** librasteve joined
+[03:08] <guifa> hmm actually I guess the current one already handles it by associative / positional so maybe I'm overthinking
+
+[03:09] <guifa> I'll just want to expose a neat way for someone to pass in more custom structures
+
+[03:09] <japhb> Here's what it looks like in CBOR (using the diagnostic output):
+
+[03:09] <japhb> raku -e 'use CBOR::Simple; my $c = \(1, "foo", 3e0, :a-bool, :a-str("the string")); my $cbor = cbor-encode($c); say cbor-diagnostic($cbor)'
+
+[03:09] <japhb> 25441([[1, "foo", 3.0_2], {"a-bool": true, "a-str": "the string"}])
+
+[03:13] <guifa> ah so it basically splits it into a two element array
+
+[03:14] <Voldenet> m: sub j(|c(*@p, *%h)) { %h ?? @p.kv.Hash (+) %h !! @p }; say j(1, 2, :a, :b);
+
+[03:14] <camelia> rakudo-moar f52cc9284: OUTPUT: «Bag(0 1(2) a b)␤»
+
+[03:14] <Voldenet> perhaps
+
+[03:14] <Voldenet> dotnet uses this for json config arrays
+
+[03:15] <Voldenet> because "0" and "1" are valid keys, but not very frequent
+
+[03:16] <guifa> To be fair I'm also trying to go with the most intuitive thing
+
+[03:16] <japhb> guifa: It's officially a tagged "Array containing at most one array followed by at most one map": https://github.com/japhb/cbor-specs/blob/main/capture.md
+
+[03:17] <japhb> It's the tag that allows the codec to realize that the array should be decoded as a Capture rather than as a plain Array with 0-2 elements
+
+[03:17] <Voldenet> I noticed the output of my example
+
+[03:17] <Voldenet> m: sub j(|c(*@p, *%h)) { %h ?? %(@p.pairs (+) %h) !! @p }; say j(1, 2, :a, :b);
+
+[03:17] <camelia> rakudo-moar f52cc9284: OUTPUT: «{0 => 1, 1 => 2, a => 1, b => 1}␤»
+
+[03:18] <Voldenet> more self-explanatory
+
+[03:18] <guifa> And for a Raku <-> JS bridge, it might be best to limit things to just Str/Numeric/Positional/Assocaitive/Bool, and allow pople to create a .JSON method as a last resort on a custom type
+
+[03:18] <guifa> because the reality is calling back from JSON you'd lose the type info
+
+[03:18] <japhb> Voldenet: in CBOR, *any* type can be a key.  But I encode the names of the named arguments as strings, so it *looks* like I just built a standard string hash.
+
+[03:19] <Voldenet> so in CBOR effectively it's possible to encode index as key even
+
+[03:19] <japhb> In reality it autodetects whether to use a string-keyed hash or an object-keyed hash
+
+[03:19] <japhb> yup
+
+[03:19] <Voldenet> though to be honest arrays are so cheap in json that I'm surprised they're not used more frequently
+
+[03:19] <japhb> And CBOR by default orders hashes (though you can turn that off)
+
+[03:20] <Voldenet> in json it's even weirder because some implementations do order hashes (and require them ordered to work properly) and some don't
+
+[03:20] <japhb> guifa: That problem (losing the type info) is one of the problems I have with plain JSON.  It's great if you only want its native types.  Not so much if you have a richer type model ....
+
+[03:20] <Voldenet> so {"type":"foo","x":1} will deserialize properly only if type is first property… so it might not survive the round trip through hashtable
+
+[03:21] <guifa> I did successfully get Raku methods to export into JavaScript.  so if you have, say, `method foo is js-outbound ($x) { ...}`, you can right a webpage that has an object Raku preconfigured
+
+[03:21] <guifa> you just say
+
+[03:21] <guifa> Raku.foo(42)
+
+[03:22] <japhb> guifa: Doesn't the javascript backend have mappings already written that you could reuse?
+
+[03:22] <guifa> yes :) 
+
+[03:23] <guifa> const Raku { foo : function (...args) { window.webkit.messageHandlers.Raku.postMessage( JSON.stringify( {src:"js", msg:"call", method:"foo", args:args} ) ) } }; Object.freeze(Raku) 
+
+[03:23] <guifa> is what I use
+
+[03:24] <guifa> the Raku object parses the JSON, and seeing it's a method call, calls self.foo(|args)
+
+[03:24] <japhb> FWIW, when I was writing the core of MUGS, I had a two-pass protocol for object serialization -- a .to-struct()/.from-struct() method pair that you could define in your class to override how it converted to/from a plain primitive-typed structure, and then .to-json/.to-cbor/.to-bson/etc. that would convert the primitive struct into the actual serialized data format.
+
+[03:26] <guifa> (also, that }))}} there at the end made my eyes want to bleed.  That's how you realize how nice the colon and fat colon among others can be for minimizing parens hell
+
+[03:26] <japhb> NOD
+
+[03:28] <Voldenet> btw, you don't need that `function ()`
+
+[03:29] <Voldenet> `const Raku { foo(…args) { … } }` should work
+
+[03:29] <Voldenet> `const Raku = ` even
+
+[03:31] <guifa> err I do have = in the code -- I just hastily typed the prefix (created in ObjC code so a bit nasty looking)
+
+[03:31] <Voldenet> dropping function is not much bytes saved, but it's something
+
+[03:32] <Voldenet> re capture, I think it's valid to represent it as array with contents - it's even possible to represent mixins that way
+
+[03:33] *** vasko4 left
+[03:34] <guifa> also there is something to be said for being less permissive initally
+
+[03:34] <guifa> and then later expanding it
+
+[03:34] <Voldenet> so `\(1, :a)` -> `[[1], {"a":1}]`, `"one" but 1` -> `["one", 1]`, `\(1, :a) but 2` -> `[[1], {"a":1}, 2]` etc.
+
+[03:35] <Voldenet> so basically `\(1, :a)` would turn into the same output as `[1] but {:a}`
+
+[03:36] *** vasko4 joined
+[03:39] <guifa> I also hate that I have all of the pieces of this project ready
+
+[03:40] <guifa> I just have to actually cogently put them all together so it makes sense for anyone =/
+
+[03:45] *** kylese left
+[03:48] *** kylese joined
+[03:52] <japhb> cogently is a high bar
+
+[03:59] <guifa> i need to test it
+
+[03:59] <guifa> but I'd love if you can do
+
+[04:03] <guifa> add an event listener to a button to call `rakuFunction`
+
+[04:03] <guifa> and then Raku gets a nice neat JSON-y version of the event data
+
+[05:54] *** guifa left
+[06:03] *** oodani left
+[06:06] *** oodani joined
+[07:06] *** jjido joined
+[07:20] *** librasteve left
+[07:32] *** librasteve joined
+[07:35] *** jjido left
+[07:37] *** Sgeo left
+[07:39] *** librasteve left
+[07:52] *** arkiuat left
+[07:59] *** librasteve joined
+[08:04] *** librasteve left
+[08:06] *** arkiuat joined
+[08:07] *** dg left
+[08:08] *** dakkar joined
+[08:09] *** lichtkind joined
+[08:11] *** arkiuat left
+[08:13] *** dg joined
+[08:22] *** arkiuat joined
+[08:26] *** arkiuat left
+[08:31] *** librasteve joined
+[08:32] *** dg left
+[08:39] *** dg joined
+[08:44] *** librasteve left
+[08:53] *** dg left
+[08:55] *** arkiuat joined
+[09:00] *** arkiuat left
+[09:00] *** dg joined
+[09:03] *** librasteve joined
+[09:08] *** librasteve left
+[09:10] *** wayland joined
+[09:22] *** euandreh joined
+[09:30] *** arkiuat joined
+[09:36] *** librasteve joined
+[09:38] *** arkiuat left
+[09:41] *** librasteve left
+[09:59] <disbot3> <jubilatious1_98524> @apogee [0] > my regex X { :i foo$ }; say "HELLO FOO" ~~ rx/ <X> /; ｢FOO｣  X => ｢FOO｣
+
+[10:01] *** librasteve joined
+[10:02] <disbot3> <jubilatious1_98524> @apogee I can't get the :i into/out-of a variable, otherwise this seems to work correctly.
+
+[10:08] *** arkiuat joined
+[10:12] *** arkiuat left
+[10:34] *** arkiuat joined
+[10:39] *** arkiuat left
+[11:04] *** librasteve left
+[11:07] *** arkiuat joined
+[11:12] *** arkiuat left
+[11:12] *** librasteve joined
+[11:17] *** librasteve left
+[11:35] *** arkiuat joined
+[11:37] *** librasteve joined
+[11:40] *** arkiuat left
+[11:42] *** librasteve left
+[11:52] *** librasteve joined
+[12:01] <SmokeMachine> m: use JSON::Fast; my Capture $c = \(1, :a); say to-json %( list => .list, hash => .hash ) given $c # when I need to serialize a Capture to json, I usually do something like this
+
+[12:01] <camelia> rakudo-moar f52cc9284: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Could not find JSON::Fast in:␤    /home/camelia/.raku␤    /home/camelia/rakudo-m-inst-1/share/perl6/site␤    /home/camelia/rakudo-m-inst-1/share/perl6/vendor␤    /home/camelia/rakudo-m-inst-1/share/pe…»
+
+[12:02] <SmokeMachine> m: my Capture $c = \(1, :a); say to-json %( list => .list, hash => .hash ) given $c # when I need to serialize a Capture to json, I usually do something like this
+
+[12:02] <camelia> rakudo-moar f52cc9284: OUTPUT: «{"list":[1],"hash":{"a":true}}␤»
+
+[12:04] <SmokeMachine> m: my Capture $c = \(1, :a); say my $json = to-json %( list => .list, hash => .hash ) given $c; say Capture.bless: |from-json $json'
+
+[12:04] <camelia> rakudo-moar f52cc9284: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Two terms in a row␤at <tmp>:1␤------>  $c; say Capture.bless: |from-json $json<HERE>'␤    expecting any of:␤        infix␤        infix stopper␤        postfix␤        statement end␤        st…»
+
+[12:04] <SmokeMachine> m: my Capture $c = \(1, :a); say my $json = to-json %( list => .list, hash => .hash ) given $c; say Capture.bless: |from-json $json
+
+[12:04] <camelia> rakudo-moar f52cc9284: OUTPUT: «{"hash":{"a":true},"list":[1]}␤\(1, :a(Bool::True))␤»
+
+[12:05] <SmokeMachine> new works as well...
+
+[12:05] <SmokeMachine> m: my Capture $c = \(1, :a); say my $json = to-json %( list => .list, hash => .hash ) given $c; say Capture.new: |from-json $json
+
+[12:05] <camelia> rakudo-moar f52cc9284: OUTPUT: «{"list":[1],"hash":{"a":true}}␤\(1, :a(Bool::True))␤»
+
+[12:10] *** arkiuat joined
+[12:14] *** arkiuat left
+[12:22] <SmokeMachine> m: multi to-json(Capture $c) is default {to-json %( :list($c.list), :hash($c.hash) )}; say my $json = to-json \(1, :a); say Capture.new: |from-json $json # should this work? It does work with JSON::Tiny...
+
+[12:22] <camelia> rakudo-moar f52cc9284: OUTPUT: «Cannot resolve caller to-json(Hash:D); none of these signatures matches:␤    (Capture $c)␤  in sub to-json at <tmp> line 1␤  in block <unit> at <tmp> line 1␤␤»
+
+[12:30] *** guifa joined
+[12:33] <SmokeMachine> I have a question...
+
+[12:33] <SmokeMachine> this, using attributes with methods work:
+
+[12:33] <SmokeMachine> m: sub bla((:%hash, :@list, |)) { %( :%hash, :@list ) }; say bla class C1 { has @.list = 1, 2; has %.hash = :a, :42b }.new
+
+[12:33] <camelia> rakudo-moar f52cc9284: OUTPUT: «{hash => {a => True, b => 42}, list => [1 2]}␤»
+
+[12:34] <SmokeMachine> this, using attributes with no methods doesn't work, what makes me think the signature binding is using the methods:
+
+[12:34] <SmokeMachine> m: sub bla((:%hash, :@list, |)) { %( :%hash, :@list ) }; say bla class C1 { has @!list = 1, 2; has %!hash = :a, :42b }.new
+
+[12:34] <camelia> rakudo-moar f52cc9284: OUTPUT: «{hash => {}, list => []}␤»
+
+[12:35] <SmokeMachine> but this with only methods, doesn't work... why?
+
+[12:36] <SmokeMachine> m: sub bla((:%hash, :@list, |)) { %( :%hash, :@list ) }; say bla class C1 { method list { [1, 2] }; method hash { %(:a, :42b) } }.new
+
+[12:36] <camelia> rakudo-moar f52cc9284: OUTPUT: «{hash => {}, list => []}␤»
+
+[12:37] <SmokeMachine> I'm asking that because I was trying to do this and that wasn't working:
+
+[12:37] <SmokeMachine> m: sub bla(Capture (:%hash, :@list, |)) { %( :%hash, :@list ) }; say bla \(1, 2, :a, :42b)
+
+[12:37] <camelia> rakudo-moar f52cc9284: OUTPUT: «{hash => {}, list => []}␤»
+
+[12:38] <SmokeMachine> shouldn't that work with methods?
+
+[12:40] <SmokeMachine> another thing I tried was this... (I kinda knew it wouldn't work, but why that shouldn't work? why cant we accept `:.method`? I think that would make sense, be consistent and make us write less):
+
+[12:40] <SmokeMachine> m: sub bla(Capture $_) { %( :.hash, :.list ) }; say bla \(1, 2, :a, :42b)
+
+[12:40] <camelia> rakudo-moar f52cc9284: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Bogus statement␤at <tmp>:1␤------> sub bla(Capture $_) { %( :<HERE>.hash, :.list ) }; say bla \(1, 2, :a, :␤    expecting any of:␤        colon pair␤»
+
+[12:44] <SmokeMachine> m: class C { method a {42}}; say C ~~ :a; (-> C (:$a) { say $a }).(C) # in my view, those 2 things (the smartmatch work and the signature do not work) are not consistent... make sense?
+
+[12:44] <camelia> rakudo-moar f52cc9284: OUTPUT: «True␤(Mu)␤»
+
+[12:54] *** arkiuat joined
+[12:57] <[Coke]> guifa++ btw
+
+[12:58] *** librasteve left
+[12:58] *** arkiuat left
+[13:12] *** librasteve joined
+[13:24] *** librasteve left
+[13:28] <apogee_ntv> Is there a reliable way to resolve system libs that's cross-platform? When I manually test from console, just passing the lib works because it's on DYLD_LIBRARY_PATH but mi6 test wont resolve it.
+
+[13:28] <apogee_ntv> (short of vendoring & compiling glib on install lol)
+
+[13:29] *** arkiuat joined
+[13:33] *** arkiuat left
+[13:34] <[Coke]> what does "manually testing from console" look like? are you setting env vars?
+
+[13:36] <apogee_ntv> raku t/02-lowlevel.rakutest
+
+[13:37] <apogee_ntv> I've set DYLD_LIBRARY_PATH in .zshrc to include homebrew dirs but mi6 probably doesnt get that because of SIP
+
+[13:38] *** librasteve joined
+[13:42] <[Coke]> ah, SIP. "get wrecked", says mac.
+
+[13:43] <apogee_ntv> https://pastebin.com/mUwWK3KU Clearly 2nd is using system glib, not homebrew glib
+
+[13:55] *** arkiuat joined
+[14:00] *** arkiuat left
+[14:08] *** arkiuat joined
+[14:14] *** arkiuat left
+[14:15] <[Coke]> I'm not sure this is a cross platform issue, though, only mac.
+
+[14:18] <apogee_ntv> lizmat is a genius. Just found MacOS::NativeLib.
+
+[14:18] <apogee_ntv> ± % mi6 test                                                                                                                                                                                         !4050
+
+[14:18] <apogee_ntv> t/01-basic.rakutest ....... ok
+
+[14:18] <apogee_ntv> t/02-low_level.rakutest ... ok 
+
+[14:18] <apogee_ntv> t/03-high_level.rakutest .. ok
+
+[14:18] <apogee_ntv> :D
+
+[14:19] <lizmat> :-)
+
+[14:25] <SmokeMachine> any opinion about :method-instead-of-attribute on signatures and :.topic-method as pair?
+
+[14:26] <SmokeMachine> opinion/suggestion?
+
+[14:28] *** tejr left
+[14:32] *** librasteve left
+[14:34] *** tejr joined
+[14:34] *** arkiuat joined
+[14:42] *** Sgeo joined
+[14:43] *** arkiuat left
+[14:44] *** librasteve joined
+[14:48] *** Guest36 joined
+[14:59] *** Guest36 left
+[15:02] <apogee_ntv> https://github.com/m-doughty/Vips-Native/actions/runs/16198549636/job/45731373664 Still fails on actions. I don't even lol.
+
+[15:07] <apogee_ntv> I don't have time to fix actions atm but if anyone wants to make thumbnails from images in Raku, you can now. Auto-crops to most interesting area & resizes to specified dimensions.
+
+[15:09] *** arkiuat joined
+[15:11] <apogee_ntv> Runs at C speed and uses the same lib under the hood as sharp.
+
+[15:14] *** arkiuat left
+[15:17] *** rindolf joined
+[15:19] <jdv> "The most expressive language I know is Raku. Sadly, it’s too slow"
+
+[15:19] <jdv> that hits hard:(
+
+[15:22] <apogee_ntv> 99% of the time its irrelevant though. Build your hot path in C and NativeCall to it.
+
+[15:22] <apogee_ntv> Actual hot path code in most applications is maybe 10% of the codebase.
+
+[15:23] *** arkiuat joined
+[15:24] <apogee_ntv> In 90+% of cases a codebase that's 10% C and 90% Raku will outperform a codebase that's 100% some other HLL. The major gap is that those other libs already have FFI bindings for hot path stuff.
+
+[15:25] <apogee_ntv> other langs*
+
+[15:25] *** euandreh left
+[15:26] <apogee_ntv> https://github.com/m-doughty/Vips-Native/blob/master/lib/Vips/Native/FFI.rakumod Stuff like this, if you try to implement in pure HLL, will be painfully slow because you're iterating over potentially millions of objects multiple times. C works in raw pointers, buffers & primitives; it doesn't have to track references. This is how you beat performance issues.
+
+[15:27] <apogee_ntv> And it's how python & other HLLs do it. None of their math/image libs are 'pure' Python, they're high level interfaces to opencv, vips, libpng etc.
+
+[15:28] *** librasteve left
+[15:30] <jdv> apogee_ntv: its not as irrelevant as you think
+
+[15:30] <jdv> if i want something with decent perf why would i go with raku if i have to dip into C a lot when i can just go with go?
+
+[15:30] <jdv> you see the overall point?
+
+[15:31] *** rir joined
+[15:31] <apogee_ntv> jdv: It's a fair point, and I think the answer there is that Raku needs those C FFI libraries to be available for people. The reason I keep having to dip into C (not a bother for me, I write C for a living) is that the libs just don't exist.
+
+[15:31] <jdv> that's actually a negative selling point for a new lang.  cause you're already staring up at established giants that you have to somehow overcome.
+
+[15:32] <apogee_ntv> And I admit coming from a C background maybe I came across as a bit dismissive because most people don't want to deal with C at all.
+
+[15:32] <apogee_ntv> But my broader point is if we build those libs, next person who comes along won't have to deal with the pain.
+
+[15:32] <apogee_ntv> For me, HF tokenizers meant dealing with C. For the next person it's just zef install Tokenizers & use the high level Raku interface I made for them.
+
+[15:33] <jdv> for me personally, the main reasons i don't use raku more is basically compile/grammar times which are the same thing
+
+[15:33] <jdv> i wrote a rather small project for $work once and the edit/run cycle was painful.  iirc it was maybe 5-10s depending on where the edit was in the dep graph
+
+[15:34] <jdv> yeah, you're talking about a special case where it makes sense to drop to C.
+
+[15:34] <apogee_ntv> That case is most hot paths. The diff is if you're using Python someone else already did it and you can just pip install.
+
+[15:34] <jdv> i tried to do some nifty stuff with regexes/grammars a few years ago and it was quite slow.  much slower than perl or go.
+
+[15:35] <apogee_ntv> Hm, fair. I haven't played enough with grammars.
+
+[15:35] <apogee_ntv> I tried to implement jinja2 once and gave up lol.
+
+[15:35] <jdv> anyway, my position isn't a secret.  i was just commentin on that rando comment from the interwebs...
+
+[15:37] <apogee_ntv> I haven't experienced 10s compile times yet but I'm mostly building smaller things.
+
+[15:38] <apogee_ntv> Image::PNG::Portable is very slow even though it's mostly using native types at this point. A standard 4K image takes a good 8s to load, on libpng it'd be 0.2s.
+
+[15:38] <apogee_ntv> (this is on M4 Max)
+
+[15:41] <rir> If Comma, RakuNavigator and other IDEish tools are viable they should be in https://raku.org/resources/.  Perhaps in a "Tools" section.
+
+[15:41] <tellable6> 2025-03-06T12:33:41Z #raku <tbrowder> rir: yep, but i can't for now see any practical use for :U in my world
+
+[15:41] <apogee_ntv> RakuNavigator is unholy slow in neovim, anything more than a 50 line file gets hard freezes on M4 Max.
+
+[15:42] <rir> Good to know, apogee-ntv/
+
+[15:42] <apogee_ntv> And it's not that useful because it wont resolve anything from lib (could be my config) so every fail files on the first local use.
+
+[15:42] <apogee_ntv> every file fails*
+
+[15:43] *** librasteve joined
+[15:44] <apogee_ntv> Its on my long list of things to write :D
+
+[15:44] <apogee_ntv> Pure C LSP
+
+[15:45] <jdv> i haven't tried any raku lsp or ide
+
+[15:45] <jdv> maybe some day
+
+[15:46] <jdv> idk how a pure C LSP for raku would make sense.  unless you want to write a new parser.  that might be near impossible.
+
+[15:47] <jdv> although iirc comma used a different parser for some reasons i can't remember
+
+[15:48] <apogee_ntv> It'll be a nightmare, it's low on my list.
+
+[15:48] <apogee_ntv> Gets a little higher every time I have to :qa because Navigator becomes unusable lol
+
+[15:53] <rir> Comma works, I'm going back to "as distributed by Edument". Cannot speak to the OS code dumps.
+
+[15:54] <jdv> rir: huh?
+
+[15:55] <jdv> you mean the last version edument put out of the full IDE and not the more recent plugin releases by abstract?
+
+[16:02] <rir> jdv, yes.
+
+[16:03] <disbot3> <librasteve> my (vapid) understanding of RakuAST is that we can use that to drive MOARVM optimisations (?)
+
+[16:03] <disbot3> <librasteve> if so I would vote twice for faster object instantiation and grammars
+
+[16:03] *** rir left
+[16:03] *** rir joined
+[16:08] <jdv> librasteve: that's the idea
+
+[16:09] <jdv> iirc a large part of the slowness i'm talking about is the grammar engine itself
+
+[16:09] <jdv> which was one of the last things Larry was looking into but didn't get to
+
+[16:12] <disbot3> <librasteve> is the regex engine already in C?
+
+[16:13] <disbot3> <librasteve> so optimizing Gramars in general will make compile speed up ... not sure if that's high enough on the summit list of things?
+
+[16:13] <lizmat> regex engine is in nqp
+
+[16:13] <lizmat> with some parts in the VM
+
+[16:14] <disbot3> <librasteve> well hopefully that's the hot stuff in VM (ie in C)
+
+[16:18] <lizmat>  nqp::nfafromstatelist, nqp::nfarunproto, nqp::nfarunalt
+
+[16:18] <disbot3> <librasteve> Speeding up NFAs / Grammars is item 5 \o/
+
+[16:20] <disbot3> <librasteve> seen: [Coke]
+
+[16:20] <disbot3> <librasteve> .seen [Coke]
+
+[16:20] *** librasteve_ joined
+[16:21] <[Coke]> pong
+
+[16:21] <[Coke]> .seen Coke
+
+[16:21] <tellable6> [Coke], I saw Coke 2025-07-10T16:21:14Z in #raku: <[Coke]> pong
+
+[16:21] <[Coke]> not sure why it doesn't like the []'s
+
+[16:21] <[Coke]> que tal?
+
+[16:21] <disbot3> <librasteve> ha - what's you tag on github pls?
+
+[16:24] <[Coke]> me? @coke
+
+[16:24] <[Coke]> I got in early
+
+[16:24] <disbot3> <librasteve> tx!
+
+[16:30] *** dakkar left
+[16:30] <SmokeMachine> https://github.com/rakudo/rakudo/issues/5929
+
+[16:33] *** apac joined
+[16:38] <tonyo> .
+
+[16:43] <[Coke]> ..
+
+[16:51] <tonyo> .
+
+[16:51] *** apac left
+[16:56] <[Coke]> 🫥
+
+[16:57] <SmokeMachine> Does anyone agree that’s confusing?
+
+[17:15] <jdv> what is confusing
+
+[17:21] *** rindolf left
+[17:26] *** librasteve left
+[17:37] * [Coke] assumes https://github.com/rakudo/rakudo/issues/5929
+
+[17:39] *** librasteve joined
+[17:44] <SmokeMachine> Yes, that
+
+[17:45] <SmokeMachine> Sub signature with named param receiving obj…
+
+[17:46] *** stanrifkin joined
+[17:48] *** arkiuat left
+[17:51] *** melezhik joined
+[17:51] <melezhik> .
+
+[17:54] *** kuzdra joined
+[18:02] *** arkiuat joined
+[18:07] *** arkiuat left
+[18:13] *** Aedil left
+[18:16] *** apac joined
+[18:18] *** arkiuat joined
+[18:22] *** librasteve left
+[18:23] *** arkiuat left
+[18:25] *** Aedil joined
+[18:43] *** librasteve joined
+[18:53] *** arkiuat joined
+[18:58] *** arkiuat left
+[19:13] *** librasteve left
+[19:15] *** jjido joined
+[19:17] *** librasteve joined
+[19:25] *** arkiuat joined
+[19:27] *** apac left
+[19:46] *** apac joined
+[19:50] *** librasteve left
+[19:59] *** jjido left
+[20:01] *** melezhik left
+[20:18] *** arkiuat left
+[20:18] <tbrowder> "can you hear me now?"
+
+[20:19] <tbrowder> looks like my irc client is working on Debian...
+
+[20:21] <lizmat> roger
+
+[20:27] *** arkiuat joined
+[20:28] <tbrowder> hi
+
+[20:28] *** librasteve joined
+[20:30] <tbrowder> duh, all my iPad needed was a reboot, who knew?
+
+[20:33] *** librasteve left
+[20:38] *** stanrifkin left
+[20:40] <arkiuat> In https://docs.raku.org/type/Instant, what does the sentence "It is not tied to or aware of any epoch." mean?
+
+[20:41] <arkiuat> It certainly looks like the epoch of Instant is 1969-12-31T23:59:50Z, which makes sense because it reflects the 10 s offset between UT and TAI that was established before before leap seconds came into use.
+
+[20:42] <arkiuat> m: DateTime.new("1969-12-31T23:59:50Z").Instant
+
+[20:42] <camelia> rakudo-moar f52cc9284: ( no output )
+
+[20:42] <arkiuat> m: DateTime.new("1969-12-31T23:59:50Z").Instant.say
+
+[20:42] <camelia> rakudo-moar f52cc9284: OUTPUT: «Instant:0␤»
+
+[20:43] <arkiuat> m: say (48..52).map: { DateTime.new("1969-12-31T23:59:{$_}Z").Instant.Int }
+
+[20:43] <camelia> rakudo-moar f52cc9284: OUTPUT: «(-2 -1 0 1 2)␤»
+
+[20:45] <arkiuat> I ask because I'm considering filing a doco issue, and I wanted to check to see if I'm missing something. Spent way too much time wondering what the heck that sentence was supposed to mean.
+
+[20:46] *** librasteve joined
+[20:50] <guifa> arkiuat: what that means is that there is no guarantee as to what instant 0 is
+
+[20:50] <guifa> only that it is 1 second prior to instant 1
+
+[20:51] <arkiuat> okay, under what circumstances would instant 0 ever be other than 1969-12-31T23:59:50Z ?
+
+[20:51] <guifa> Rakudo's implementation *happens* to align with the unix epoch as you've found, but that's not a requirement and people should not treat Instant as if it is tied to it
+
+[20:52] <arkiuat> oh, I see! It's implementation-dependent.
+
+[20:52] <guifa> In any implementation that chooses a different epoch.  For instance, an argument could be made instant 0 should be when the program starts :-)
+
+[20:53] <arkiuat> gotcha. Thanks!  I'll file an issue, but now I know what I'm complaining about: it would be a lot clearer just to say that the epoch of Instant is implementation-dependent and not tested in roast.
+
+[20:54] <arkiuat> Just the implementation-dependent part. Don't need to mention roast in doco there, but that's what is implied.
+
+[20:54] <guifa> yeah, it could maybe say
+
+[20:54] *** librasteve left
+[20:55] <guifa> An Instant is a particular moment in time measured in atomic seconds, with fractions. It is not tied to any epoch (though at present Rakudo aligns it to the Unix epoch, this behavior should not be relied upon)
+
+[20:55] *** Aedil left
+[20:58] *** apac left
+[21:04] <arkiuat> wow, I could just do a pull request for that if I were less clueless. I'd better look over the docs Coke++ sent to me about it last time.
+
+[21:04] <arkiuat> Again.
+
+[21:05] *** librasteve joined
+[21:26] <jdv> you can get the tai value explicitly i think
+
+[21:26] *** jjido joined
+[21:27] <jdv> can you explicitly get unix epoch?
+
+[21:28] <arkiuat> m: DateTime.new(0).say
+
+[21:28] <camelia> rakudo-moar f52cc9284: OUTPUT: «1970-01-01T00:00:00Z␤»
+
+[21:29] <disbot3> <librasteve> what's the reason for epoch indepence?
+
+[21:33] <arkiuat> librasteve, I'm not sure, but in the current rakudo, the difference between time and now is always the same as the difference between UT and TAI: 10 s before the first leap second, and then after that, 10 s plus the number of leap seconds there have been so far. But apparently we're not to rely on this when using Instant!
+
+[21:33] <arkiuat> m: (time - now).Int
+
+[21:33] <camelia> rakudo-moar f52cc9284: ( no output )
+
+[21:34] <arkiuat> m: (time - now).Int.say
+
+[21:34] <camelia> rakudo-moar f52cc9284: OUTPUT: «-37␤»
+
+[21:34] <arkiuat> I have to stop treating camelia like an REPL
+
+[21:37] <disbot3> <librasteve> m: DateTime.new(0).tai.say
+
+[21:37] <disbot3> <Raku eval>  Exit code: 1 No such method 'tai' for invocant of type 'DateTime'.  Did you mean 'tail'?   in block <unit> at main.raku line 1  
+
+[21:37] <disbot3> <librasteve> m: DateTime.new(0).Instant.tai.say
+
+[21:37] <disbot3> <Raku eval>  10 
+
+[21:38] <arkiuat> Oh, an undocumented method?
+
+[21:39] <disbot3> <librasteve> true - docs PR needed
+
+[21:39] <disbot3> <librasteve> m: say Instant.^methods
+
+[21:39] <disbot3> <Raku eval>  (new tai from-posix-nanos to-nanos from-posix to-posix Bridge Num Rat Int narrow Date DateTime Instant abs sign conj rand sin asin cos acos tan atan atan2 sec asec cosec acosec cotan acotan sinh asinh cosh acosh tanh atanh sech asech cosech acosech cotanh acotanh floor ceiling round unpolar cis Complex log exp truncate isNaN polymod base log2 log10 roots FatRat succ pred Str raku sqrt Real Numeric ACCEPTS Bool gist DUMP
+
+[21:39] <disbot3> BUILDALL) 
+
+[21:42] <arkiuat> That's not actually TAI, though. Historically TAI has used an epoch of 1958-01-01T00:00:00Z but that was way before they corrected for gravity and aligned the atomic clocks with Ephemeris Time (now called Terrestrial Time) so nobody pays much attention to it.
+
+[21:44] <arkiuat> sorry, that was pedantic
+
+[21:44] *** vrurg_ joined
+[21:44] *** vrurg left
+[21:46] <arkiuat> I guess they specified that the epoch of Instant is undefined because people haven't come to agreement about an epoch for TAI. Like I said, everyone seems to ignore the 1958 one. The only thing everyone agrees about on TAI is what the offset from UT is at any given moment.
+
+[21:52] <disbot3> <librasteve> https://github.com/Raku/problem-solving/issues/484
+
+[21:54] <disbot3> <librasteve> ^^ I made a new feature problem-solving issue ... please go there and tell me that my proposal for TAI should instead go for Terrestrial Time (or watever) - would be good to pick one that is easily and widely avaibale so if you know that stati of that would also be much appreciated
+
+[21:59] <disbot3> <librasteve> arkiuat: ^^ sorry took me a couple of mins to write and now I must go &afk
+
+[22:08] *** librasteve left
+[22:09] <arkiuat> librasteve++
+
+[22:09] *** librasteve joined
+[22:11] <arkiuat> yeah, well, if we can't rely on the epoch, it would be nice to have spelled out somewhere that the behavior of the difference between time and now continuing to behave the same way it does now, and similarly for other relationships between Instant and DateTime
+
+[22:12] <arkiuat> you know, 37 s offset now, 36 s offset before the most recent leap second, 10 s offset before the first leap second, etc.
+
+[22:15] *** librasteve left
+[22:20] <arkiuat> apparently Instant's .tai method is just a synonym for .Num with a slightly different default precision
+
+[22:20] <arkiuat> m: my $n = now; $n.tai.say; $n.Num.say
+
+[22:20] <camelia> rakudo-moar f52cc9284: OUTPUT: «1752186064.497796845␤1752186064.4977968␤»
+
+[22:28] <arkiuat> .Num, .Rat, same result from either one in this case
+
+[22:32] *** librasteve joined
+[22:36] *** librasteve left
+[22:43] <tbrowder> I can't add anything to the time discussion, but I love the move to ensure Larry's 100 year language stays the course.
+
+[22:50] *** lichtkind left
+[22:50] *** librasteve joined
+[22:54] *** librasteve left
+[23:05] *** wayland left
+[23:06] *** jjido left
+[23:07] *** librasteve joined
+[23:12] *** librasteve left
+[23:23] *** librasteve joined
+[23:27] *** librasteve left
+[23:30] *** jjido joined
+[23:38] *** jjido left
+[23:40] *** librasteve joined
+[23:44] *** librasteve left
+[23:49] <apogee_ntv> https://raku.land/zef:apogee/Term::Size Another one people might like that I needed.
+
+[23:49] <apogee_ntv> Will add windows support later but if you're not on wezterm it'll only be cell dimensions because win32 terminal API sucks -_-
+
+[23:51] <apogee_ntv> It's C-heavy under the hood but the Raku interface is OOP and friendly to use
+
+[23:58] <apogee_ntv> And yes I saw existing Terminal::Size lib but it doesn't check Kitty escape seqs and hardcodes the wrong const for macos so only works on Linux
+

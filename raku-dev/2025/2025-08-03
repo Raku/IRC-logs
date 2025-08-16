@@ -1,0 +1,125 @@
+[07:50] *** lizmat left
+[07:50] *** lizmat joined
+[09:05] *** finanalyst left
+[11:29] *** librasteve_ left
+[12:34] <nine> Building with RAKUDO_RAKUAST=1 still requires this patch: https://github.com/rakudo/rakudo/commit/617906054237bf1fe891f963a08d044c51e4c956
+
+[17:48] <timo> should we put in a "hack" to make this patch work fine with the legacy grammar?
+
+[17:49] <nine> Might avoid this unfortunate kind of confusion
+
+[17:50] *** librasteve_ joined
+[18:15] <lizmat> looks that Slang::Roman also got broken on RakuAST sometime in the past months  :-(
+
+[18:23] <lizmat> looks like Slang::Roman needs a fix
+
+[20:00] *** MasterDuke joined
+[20:04] <MasterDuke> i had forgot that patch was needed for main to build with `RAKUDO_RAKUAST=1`. but unfortunately now my multi-part-name-fix branch gets in an infinite loop when building rakudo...
+
+[20:11] <MasterDuke> huh, why is it reading /proc/self/stat in a loop?
+
+[20:15] <MasterDuke> memory use is slowly increasing
+
+[20:28] <MasterDuke> https://gist.github.com/MasterDuke17/f882a11942e477397120a19e947a3655 has a snipped of an MVM_dump_backtrace
+
+[20:28] <timo> that would be the supervisor thread
+
+[20:30] <MasterDuke> gist updated with the start of the backtrace
+
+[20:33] <timo> well, "build-exception" sounds suspicious
+
+[20:33] <timo> it's trying to create an exception and first it has to compile something?
+
+[20:34] <timo> maybe it's trying to use a exception and it first has to instantiate the role by compiling and running the role body and that's actually where the problem is occuring?
+
+[20:34] <MasterDuke> it looks like it trying to compile something first, then tries to build the exception
+
+[20:35] <timo> oh, what's the call to "gist" in the middle for?
+
+[20:35] <timo> `<unknown>:1  (/home/dan/Source/raku/rakudo/blib/Perl6/BOOTSTRAP/v6c.moarvm:)` i would assume is one of our dispatchers
+
+[20:36] <timo> they all don't have names assigned to them
+
+[20:39] <MasterDuke> if i'm reading it correctly, it's trying to compile a constant, which causes BEGIN-time interpretation, then compilation of some new class created dynamically. that throws, and then somehow we're in an infinite loop?
+
+[20:44] <timo> i'm not yet familiar with all the IMPL-* methods that exist in rakuast
+
+[20:45] <timo> but yeah, from "scoped" -> "constant" i assume it's a "my constant" somewhere
+
+[20:45] <timo> and that constant looks to be located inside of a class block
+
+[20:46] <MasterDuke> i wonder if it's the new wrappers
+
+[20:47] <timo> from the implementation of .assuming?
+
+[20:51] <MasterDuke> eh, not sure
+
+[21:07] <MasterDuke> ugh, the merge doesn't simply revert
+
+[21:13] <MasterDuke> i believe it's `src/core.c/Rakudo/Iterator.rakumod:1760:    my constant EmptyIterator = Empty.new;`
+
+[21:15] <MasterDuke> but the code near there hasn't been touched in 4 years
+
+[21:24] <MasterDuke> but that's the last call to `type-declarator:sym<constant>` in src/Raku/Actions.nqp before infinite loop
+
+[21:30] <MasterDuke> yeah, and then it's IMPL-INTERPRETing `new`
+
+[21:46] <MasterDuke> i don't see anything in the recent commits that's obviously related
+
+[22:09] <MasterDuke> huh. when we're looping, in IMPL-FIXUP-DYNAMICALLY-COMPILED-BLOCK right before trying to build-exception, `$visit.name` is `&infix:<==>`. the first time it's `&infix:<->`
+
+[22:09] <timo> have you been able to find why it's running into an exception, or what the exception is or is supposed to be?
+
+[22:09] <MasterDuke> wasn't expecting those
+
+[22:10] <MasterDuke> well, it's this block https://github.com/rakudo/rakudo/blob/main/src/Raku/ast/code.rakumod#L342-L349
+
+[22:10] <timo> could just be it's got trouble looking up any infixes at all and the first code it's trying to interpret has a == as the first infix mentioned and in the process of creating the exception the first infix mentioned in the code it tries to interpret is -
+
+[22:11] <timo> or maybe we're so early in the code that these infixes truly aren't defined yet?
+
+[22:11] <timo> i'm not sure where Iterator.rakumod lives in the grand map of things
+
+[22:15] <timo> line 19628 has proto sub infix:<==> but EmptyIterator = Empty.new seems to be line 7644
+
+[22:15] <MasterDuke> well, https://github.com/rakudo/rakudo/blob/main/src/core.c/Rakudo/Iterator.rakumod#L1748-L1761 doesn't obviously have either of those
+
+[22:16] <timo> that's why i think the problem happens when trying to build an exception while trying to run `Empty.new` there
+
+[22:17] <MasterDuke> right
+
+[22:20] <MasterDuke> that's not the most complicated `new()` i've ever seen
+
+[22:21] <timo> if you run again with spesh inlining turned off via env var, the backtrace may look different and may have slightly more helpful information
+
+[22:28] <timo> i also wonder if this is just the first mention of a constructor being compile-time evaluated that's blowing up and if just making it runtime instead will just go to the next BEGIN or constant
+
+[22:29] <MasterDuke> backtrace looks the same
+
+[22:32] <timo> hm, ok. maybe it doesn't work the way i thought
+
+[22:32] <MasterDuke> changing it to `my \EmptyIterator = Empty.new;` gets farther
+
+[22:33] <MasterDuke> but it still dies when it didn't before
+
+[22:34] <MasterDuke> https://gist.github.com/MasterDuke17/d9e7ffcd7c3d5f183c91201e73428c39
+
+[22:37] <timo> trying to compile a signature of a method in a role and not finding a type name?
+
+[22:37] <MasterDuke> doesn't like `Iterate-int:D`
+
+[22:38] <MasterDuke> that's from `typo-typename`
+
+[22:42] <timo> welp, gotta run
+
+[22:43] <MasterDuke> later...
+
+[22:50] <MasterDuke> oh. looks like https://github.com/rakudo/rakudo/blob/main/src/Raku/Grammar.nqp#L4965-L4992 is missing https://github.com/rakudo/rakudo/blob/main/src/Perl6/Grammar.nqp#L3419-L3424
+
+[23:02] <MasterDuke> how did rakudo build without that before?
+
+[23:16] <MasterDuke> hm, what has `.O()` become in rakuast?
+
+[23:20] <MasterDuke> well, will have to look into this more later
+
+[23:24] *** MasterDuke left

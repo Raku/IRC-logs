@@ -1,0 +1,375 @@
+[00:05] *** arkiuat left
+[00:18] *** arkiuat joined
+[00:23] *** arkiuat left
+[00:36] *** arkiuat joined
+[00:40] *** arkiuat left
+[00:53] *** arkiuat joined
+[00:58] <disbot4> <.landyacht.> Is there a way to wait and see whether an IO::Socket::Async::ListenSocket opened successfully or not? An error comes in through the Supply which I see logged in the quit routine provided to .tap, but I'm having trouble figuring out what becomes of the socket object itself and how to "test" it synchronously...
+
+[00:59] <disbot4> <.landyacht.> e.g. my $socket = IO::Socket::Async.listen($host, $port).tap(...); if $socket.??? { ... }
+
+[01:00] *** arkiuat left
+[01:15] *** arkiuat joined
+[01:19] *** arkiuat left
+[01:24] *** kylese left
+[01:24] *** hulk joined
+[01:32] <Voldenet> "synchronously"?
+
+[01:34] <Voldenet> don't think it'd work, because in the `.???` place socket's state is not yet known
+
+[01:35] <Voldenet> because async listen is enqueued to be handled later, that's async socket for yoU
+
+[01:36] <Voldenet> maybe IO::Socket::INET would work better in your case
+
+[01:38] *** deoac joined
+[01:42] *** arkiuat joined
+[01:44] <Voldenet> m: my $s = IO::Socket::Async.listen("127.1", 80).tap( -> { .say }, done => { .say }, quit => { .say }); say $s.socket-host.cause
+
+[01:44] <camelia> rakudo-moar 5e8d7f656: OUTPUT: «Failed to resolve host name '127.1' with family 0.␤Error: Address family for hostname not supported␤  in block <unit> at <tmp> line 1␤␤Can only call cause on a broken promise (status: Planned)␤  in block <unit> at <tmp> line 1␤␤»
+
+[01:45] <Voldenet> m: my $s = IO::Socket::Async.listen("127.0.0.1", 80).tap( -> { .say }, done => { .say }, quit => { .say }); say $s.socket-host.cause
+
+[01:45] <camelia> rakudo-moar 5e8d7f656: OUTPUT: «Failed to resolve host name '127.0.0.1' with family 0.␤Error: Address family for hostname not supported␤  in block <unit> at <tmp> line 1␤␤Can only call cause on a broken promise (status: Planned)␤  in block <unit> at <tmp> line 1␤␤»
+
+[01:45] <Voldenet> meh, either way, you can see that the promise is not broken yet
+
+[01:45] <Voldenet> m: my $s = IO::Socket::Async.listen("127.0.0.1", 80).tap( -> { .say }, done => { .say }, quit => { .say }); sleep 1; say $s.socket-host.cause
+
+[01:45] <camelia> rakudo-moar 5e8d7f656: OUTPUT: «Failed to resolve host name '127.0.0.1' with family 0.␤Error: Address family for hostname not supported␤  in block <unit> at <tmp> line 1␤␤Can only call cause on a broken promise (status: Planned)␤  in block <unit> at <tmp> line 1␤␤»
+
+[01:47] <Voldenet> m: my $s = IO::Socket::Async.listen("127.0.0.1", 80).tap( -> { .say }, done => { .say }, quit => { .say }); say await $s.socket-host # you can also do await on the socket, or use .then
+
+[01:47] <camelia> rakudo-moar 5e8d7f656: OUTPUT: «(timeout)Failed to resolve host name '127.0.0.1' with family 0.␤Error: Address family for hostname not supported␤  in block <unit> at <tmp> line 1␤␤»
+
+[01:47] <Voldenet> …yep, it's deadlocking
+
+[01:48] *** arkiuat left
+[01:54] *** arkiuat joined
+[02:15] *** hulk left
+[02:15] *** kylese joined
+[03:23] *** stanrifkin_ joined
+[03:26] *** stanrifkin left
+[03:32] <disbot4> <.landyacht.> so basically I try to open a number of listeners, and this might fail because the host and port are user-configurable
+
+[03:32] <disbot4> <.landyacht.> and, later on, I want to close them all, but this locks up indefinitely if any of them died/quit
+
+[03:33] <disbot4> <.landyacht.> so I'm looking for a way to filter out (ideally early on) any that failed, but the failure e.g. to bind to a low port number doesn't actually happen on .listen but comes through as the Supply dying
+
+[03:35] <disbot4> <.landyacht.> I do still want the other asynchronous aspects here, namely being able to react to connections being made without blocking waiting for a connection, especially since I do have potentially more than one listener
+
+[03:36] <disbot4> <.landyacht.> I see a way to make a janky workaround but I was hoping there was something a little better :^)
+
+[04:04] <Voldenet> eh, close indefinitely awaits because it has no native-descriptor ever
+
+[04:08] <Voldenet> to be honest, I think that's a bug
+
+[04:09] <Voldenet> > https://github.com/rakudo/rakudo/blob/5e8d7f6567dd49ce7145002eae72cfec8e87bfff/src/core.c/IO/Socket/Async.rakumod#L275
+
+[04:09] <Voldenet> this happens on error
+
+[04:09] <Voldenet> but VMIO-tobe is not ever broken by exception, leading to this hang on close: > https://github.com/rakudo/rakudo/blob/5e8d7f6567dd49ce7145002eae72cfec8e87bfff/src/core.c/IO/Socket/Async.rakumod#L290
+
+[04:11] <Voldenet> $VMIO-vow should be handled in the same way $host-vow is handled
+
+[04:11] <Voldenet> this would make close error instead of hanging
+
+[04:14] <Voldenet> instead of `$s.close` you can workaround this by doing `{ CATCH { default { warn $_ }}; await $s.socket-host; $s.close };`
+
+[04:17] <Voldenet> ofc, double close still would hang
+
+[04:17] <Voldenet> because .socket-host returns proper result after closing the listener
+
+[04:46] *** dg left
+[04:50] *** kylese left
+[04:50] *** kylese joined
+[04:53] *** dg joined
+[06:02] *** deoac left
+[06:07] *** arkiuat left
+[06:21] *** arkiuat joined
+[06:25] *** arkiuat left
+[06:38] *** japhb left
+[06:40] *** japhb joined
+[06:53] *** arkiuat joined
+[06:58] *** arkiuat left
+[07:02] *** deoac joined
+[07:14] *** Sgeo left
+[07:27] *** arkiuat joined
+[07:29] *** kylese left
+[07:31] *** kylese joined
+[07:32] *** arkiuat left
+[07:49] *** arkiuat joined
+[07:53] *** arkiuat left
+[07:56] *** dakkar joined
+[08:03] *** wayland joined
+[08:06] *** arkiuat joined
+[08:18] *** arkiuat left
+[08:18] *** wayland left
+[08:19] *** wayland joined
+[08:19] *** deoac left
+[08:26] *** melezhik joined
+[08:29] *** wayland left
+[08:29] *** wayland joined
+[08:31] *** arkiuat joined
+[08:35] *** arkiuat left
+[08:39] *** wayland left
+[08:39] *** wayland joined
+[08:49] *** wayland left
+[08:50] *** wayland joined
+[08:50] *** arkiuat joined
+[08:54] *** lichtkind joined
+[08:54] *** arkiuat left
+[09:00] *** wayland left
+[09:00] *** wayland joined
+[09:20] *** wayland left
+[09:20] *** wayland joined
+[09:22] *** arkiuat joined
+[09:27] *** arkiuat left
+[09:45] *** wayland left
+[09:46] *** wayland joined
+[09:49] *** wayland left
+[09:51] *** arkiuat joined
+[09:55] *** arkiuat left
+[09:58] *** wayland76 joined
+[10:18] *** wayland76 left
+[10:18] *** wayland76 joined
+[10:24] *** arkiuat joined
+[10:28] *** arkiuat left
+[10:28] *** wayland76 left
+[10:29] *** wayland76 joined
+[10:39] *** wayland76 left
+[10:39] *** wayland76 joined
+[10:45] *** apac joined
+[10:52] *** arkiuat joined
+[10:56] *** arkiuat left
+[11:04] *** wayland76 left
+[11:04] *** wayland76 joined
+[11:09] *** wayland76 left
+[11:10] *** wayland76 joined
+[11:20] *** arkiuat joined
+[11:25] *** arkiuat left
+[11:30] *** wayland76 left
+[11:30] *** wayland76 joined
+[11:45] *** wayland76 left
+[11:46] *** wayland76 joined
+[11:53] *** arkiuat joined
+[11:57] *** arkiuat left
+[12:20] *** arkiuat joined
+[12:24] *** arkiuat left
+[12:26] *** wayland76 left
+[12:26] *** wayland76 joined
+[12:31] *** wayland76 left
+[12:31] *** wayland76 joined
+[12:41] *** wayland76 left
+[12:42] *** wayland76 joined
+[12:54] *** arkiuat joined
+[13:24] <tbrowder> m: use Test; my $sa = Set("a"); my $sb = Set("b"); say ($sa (&) $b)
+
+[13:24] <camelia> rakudo-moar 5e8d7f656: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Variable '$b' is not declared. Perhaps you forgot a 'sub' if this was␤intended to be part of a signature?␤at <tmp>:1␤------> t("a"); my $sb = Set("b"); say ($sa (&) <HERE>$b)␤»
+
+[13:26] <tbrowder> m: my $a = Set("a"): my $b = Set("b"); ($a (&) $b).say
+
+[13:26] <camelia> rakudo-moar 5e8d7f656: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Confused␤at <tmp>:1␤------> my $a = Set("a"):<HERE> my $b = Set("b"); ($a (&) $b).say␤    expecting any of:␤        colon pair␤»
+
+[13:27] *** wayland76 left
+[13:27] *** wayland76 joined
+[13:37] <tbrowder> m: my $a = Set("a"); my $b = Set("b"); ($a (&) $b).say
+
+[13:37] <camelia> rakudo-moar 5e8d7f656: OUTPUT: «Set()␤»
+
+[13:40] <tbrowder> m: use Test; my $a = Set("a"); my $b = Set("b"); ($a (&) $b).say; comp-ok $a (&) $b, 'cmp', Set();
+
+[13:40] <camelia> rakudo-moar 5e8d7f656: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Undeclared routine:␤    comp-ok used at line 1. Did you mean 'cmp-ok'?␤␤»
+
+[13:40] <tbrowder> m: use Test; my $a = Set("a"); my $b = Set("b"); ($a (&) $b).say; cmp-ok $a (&) $b, 'cmp', Set();
+
+[13:40] <camelia> rakudo-moar 5e8d7f656: OUTPUT: «Set()␤Use of uninitialized value of type Set(Any) in string context.␤Methods .^name, .raku, .gist, or .say can be used to stringify it to something meaningful.␤  in block  at /home/camelia/rakudo-m-inst-1/share/perl6/core/sources/F96324C50ED9AD7…»
+
+[13:43] <tbrowder> pardon errrs, but i'm trying to test that two sets don't overlap (i.e., no common members) and can't get the syntax right.
+
+[13:43] <tbrowder> m: use Test; my $a = Set("a"); my $b = Set("b"); ($a (&) $b).say; cmp-ok $a (&) $b, 'cmp', Set("");
+
+[13:43] <camelia> rakudo-moar 5e8d7f656: OUTPUT: «Set()␤not ok 1 - ␤# Failed test at <tmp> line 1␤# expected: Set.new("")␤#  matcher: 'infix:<cmp>'␤#      got: Set.new()␤»
+
+[13:44] <tbrowder> woe is me, chatgpt has failed me again!
+
+[13:47] *** wayland76 left
+[13:47] *** wayland76 joined
+[13:50] <dakkar> m: use Test; my $a=Set('a'); my $b=Set('b'); is-deeply ($a (&) $b), Set.new();
+
+[13:50] <camelia> rakudo-moar 5e8d7f656: OUTPUT: «ok 1 - ␤»
+
+[13:50] <dakkar> tbrowder: ☝
+
+[13:51] <dakkar> "is the intersection the same as an empty set"
+
+[13:51] <dakkar> m: use Test; my $a=Set('a'); my $b=Set('b'); is-deeply ($a (&) $b), ∅;
+
+[13:51] <camelia> rakudo-moar 5e8d7f656: OUTPUT: «ok 1 - ␤»
+
+[13:51] <dakkar> also that
+
+[13:52] <dakkar> m: use Test; my $a=Set('a'); my $b=Set('b'); is ($a (&) $b).elems, 0;
+
+[13:52] <camelia> rakudo-moar 5e8d7f656: OUTPUT: «ok 1 - ␤»
+
+[13:52] *** wayland76 left
+[13:53] *** wayland76 joined
+[13:58] *** wayland76 left
+[13:58] *** wayland76 joined
+[13:58] <tbrowder> dakkar: yes, the result should be the empty set. thanks!
+
+[14:00] <tbrowder> chatgpt said i could use is-deeply, but there should be a way to do the same with another Test method.
+
+[14:02] <dakkar> is-deeply is designed to compare structures, so it's what I wolud definitely use for anything more complicated than a number or string
+
+[14:05] <disbot4> <nahita3882> nok $a ∩ $b
+
+[14:17] <ab5tract> anyone using Linux with a HiDiPi screen? I was hoping things had gotten better since a few years ago but it's not immediately clear that they have...
+
+[14:18] *** wayland76 left
+[14:18] *** wayland76 joined
+[14:29] <tbrowder> you're probably right, but i have had probs using is-deeply in the past. thank you my raku friend!
+
+[14:33] *** wayland76 left
+[14:34] *** wayland76 joined
+[14:39] *** wayland76 left
+[14:39] *** wayland76 joined
+[14:53] <tbrowder> nahita: thnx
+
+[15:34] *** stanrifkin joined
+[15:51] <disbot4> <bscan> I've been thinking about making some updates to the Raku Navigator (Language Server for Raku). Anyone have general feedback about it, or interested in helping with improvements?
+
+[15:52] <[Coke]> is there a link to the project?
+
+[15:57] <ab5tract> bscan: I'd like to help. if I can
+
+[15:58] <disbot4> <bscan> Yep. It's here: https://github.com/bscan/RakuNavigator   And the vscode marketplace link: https://marketplace.visualstudio.com/items?itemName=bscan.raku-navigator  It's currently the only Raku extension in the vscode marketplace (which also means the only extension for forks like Cursor and Windsurf). As a language server, it also works for other editors like neovim and emacs
+
+[15:58] <ab5tract> bscan: I've often wondered whether using introspection on RakuAST would be helpful
+
+[15:59] <ab5tract> but I currently don't have an LSP set up because I'm always dogfooding the raku intellij plugin
+
+[15:59] *** librasteve_ left
+[15:59] *** wayland76 left
+[15:59] *** wayland76 joined
+[16:00] <[Coke]> More support for vs code would be nice to have, but will only be a quality improvement for a small # of users at my $dayjob maybe. (not a huge priority)
+
+[16:04] <ugexe> bscan: jump to definition and find references
+
+[16:05] <disbot4> <bscan> RakuAST could be helpful. It used to work by use QAST:from<NQP>; and then parsing and looping over statement lists with: for $parsed.hash.<statementlist>.hash.<statement>.list -> $k {  I ended up removing all of that code because it wasn't very error-tolerant and didn't really give the things needed by a language server.
+
+[16:13] <disbot4> <bscan> jump to definition currently works for functions within the same file, variables, and for jumping to modules (see gif). It does not currently jump to imported functions though since it doesn't know where the functions came from.   Find references would be a nice feature to add.
+
+[16:13] <disbot4> <bscan> https://cdn.discordapp.com/attachments/633753286209699870/1401961267886948518/Goto.gif?ex=68922dad&is=6890dc2d&hm=db99a9d2d478d4d932a7570f5f851a074b9766ea8b9f1e1f896a05d9d235156b&
+
+[16:20] <ugexe> need to be able to jump to namespaces and methods
+
+[16:21] <ugexe> jumping to a function in the same file isn't exactly useful (no offense)
+
+[16:22] <ugexe> fwiw i use raku navigator and vscode
+
+[16:22] <ugexe> i also use perl navigator with vscode at work :P
+
+[16:23] <ugexe> but the go language server and typescript language server vscode integration stuff i use at work is really on another level
+
+[16:25] <disbot4> <bscan> Ha. Agreed. Jumping to different files is far more important. Jump to definition currently works on packages and methods in the same file, so at least the core parsing logic is available.   Perl Navigator is much better at jumping to files. It compiles the current file and looks through the resulting symbol table to resolve the locations of imported functions and packages.
+
+[16:26] <disbot4> <bscan> Typescript is incredible from an LSP perspective. The language is really designed with LSP in mind.
+
+[16:30] *** Guest21 joined
+[16:39] *** dakkar left
+[16:40] *** Guest21 left
+[17:56] *** melezhik left
+[18:08] *** librasteve_ joined
+[18:09] <librasteve_> notable6: weekly
+
+[18:09] <notable6> librasteve_, 7 notes: https://gist.github.com/c8235b5cbbc16e7ad4864188854b6a7a
+
+[18:13] <tonyo> fez v100 is being uploaded.  new installs of fez will default to that version.  it has breaking changes in it.  if you run into issues and _just need it to work right now_, then you can reinstall the older version of fez and that will continue to work
+
+[18:13] <tonyo> for another few months while i work through any problems people encounter
+
+[18:14] <lizmat> tonyo: does this affect App::Mi6 integration ?
+
+[18:14] <tonyo> mi6 should likely pin to 55 until they update their upload call
+
+[18:15] <tonyo> the backwards incompatible bit is that you upload the file directly now 
+
+[18:15] <lizmat> skaji__  ^^
+
+[18:16] <tonyo> the API files include an updated caller so it could* be a one liner depending on how you're using it
+
+[18:18] <tonyo> already installed and working versions will continue to work unless you upgrade fez locally
+
+[18:18] <librasteve_> notable6: weekly reset
+
+[18:18] <notable6> librasteve_, Moved existing notes to “weekly_2025-08-04T18:18:53Z”
+
+[18:21] <ugexe> it is probably important to look at how mi6 invokes fez. having two versions of fez installed won't help if it is invoking the fez binary and not using the modules directly
+
+[18:28] <tonyo> if it's using the binary then its interface hasn't changed, just the underlying upload mechanism
+
+[18:29] <tonyo> but yes, need to know how mi6 uses fez to be sure.  i'd presume it's using the ::API 
+
+[18:29] <ugexe>     my @cmd = $*EXECUTABLE, "-e", "use Fez::CLI", "--file=$tarball", "upload";
+
+[18:30] <ugexe> should be fine then
+
+[18:30] <tonyo> it may affect an IDE, i don't recall the name - which was the reason for making the ::API stuff 
+
+[18:42] *** arkiuat left
+[18:43] *** arkiuat joined
+[18:44] *** melezhik joined
+[18:44] <melezhik> .
+
+[18:48] *** arkiuat left
+[18:49] <librasteve_> https://rakudoweekly.blog/2025/08/04/2025-31-snappy-turtles/
+
+[19:06] *** DavidSch joined
+[19:16] *** arkiuat joined
+[19:21] *** arkiuat left
+[19:36] *** arkiuat joined
+[19:54] *** arkiuat left
+[20:21] *** arkiuat joined
+[20:28] *** arkiuat left
+[20:31] *** silug4 joined
+[20:31] *** silug left
+[20:31] *** silug4 is now known as silug
+
+[20:45] *** arkiuat joined
+[20:51] *** arkiuat left
+[20:55] *** Aedil left
+[21:20] *** arkiuat joined
+[21:22] <disbot4> <librasteve> sooo... does App::Rak extract data from html tables?
+
+[21:29] *** arkiuat left
+[21:36] *** melezhik left
+[21:41] *** arkiuat joined
+[21:41] *** lichtkind left
+[21:45] *** arkiuat left
+[21:48] *** DavidSch left
+[21:49] *** DavidSch joined
+[22:05] <lizmat> librasteve you can specify html files with the --extensions=html       but that's it: it will just consider the HTML file as text
+
+[22:05] <lizmat> if you have a module that parses HTML into some kind of object, you could use that inside rak if you want
+
+[22:08] *** guifa joined
+[22:14] *** arkiuat joined
+[22:19] *** arkiuat left
+[22:19] <disbot4> <librasteve> okaay ... tx!
+
+[22:21] <disbot4> <librasteve> off to rtfm
+
+[22:27] *** Sgeo joined
+[22:30] *** deoac joined
+[22:42] *** arkiuat joined
+[22:51] *** apac left
+[23:07] *** wayland76 left
+[23:21] <disbot4> <antononcube> hm... this can / should be a functionality of  "Data::Translators".
+
+[23:22] <disbot4> <antononcube> Of course, LLMs extract that kind data too, if the HTML code is small enough.
+
+[23:25] *** guifa left
+[23:46] *** arkiuat left
+[23:52] *** arkiuat joined
+[23:59] *** arkiuat left
