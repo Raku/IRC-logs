@@ -1,0 +1,150 @@
+[00:38] <Geth> ¦ MoarVM: jakebman++ created pull request #1968: fix a minor typo
+
+[00:38] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1968
+
+[02:30] <Geth> ¦ MoarVM/main: 06c0bcbb7a | (Jake Boeckerman)++ (committed using GitHub Web editor) | src/6model/reprs/NFA.c
+
+[02:30] <Geth> ¦ MoarVM/main: fix a minor typo (#1968)
+
+[02:30] <Geth> ¦ MoarVM/main: review: https://github.com/MoarVM/MoarVM/commit/06c0bcbb7a
+
+[04:34] *** kjp joined
+[04:36] *** kjp left
+[04:36] *** kjp joined
+[07:52] <patrickb> It is unexpected, that a Native red has the is_unsigned flag set to 0 for a uint8, right?
+
+[08:14] <patrickb> *NativeRef
+
+[08:21] *** librasteve_ joined
+[10:45] <timo> how are you introspecting it? i've not done much with the unsigned stuff we have in moar
+
+[10:48] <patrickb> just solved it. Annoying off by one on my side
+
+[10:52] <patrickb> Which means I have pointers working with varargs now.
+
+[10:53] <patrickb> (Remaining bits: testing lots of stuff, Str, CArray, CStruct, ...)
+
+[11:05] <timo> is "pass a struct by value" on your list btw? i had a single library that i was interested in that needed that for a single function :D
+
+[11:13] <patrickb> It is not. but MasterDuke is working on switching the default ffi backend to libffi.
+
+[11:14] <patrickb> That will enable us to add struct by value support.
+
+[11:54] <timo> so i've had this weird idea recently, inspired by rakudo sometimes violently exploding when it's running and a "make install" is done: we mmap .moarvm files because we don't need to read their entire contents at once to start using them, and many of them we never fully deserialize thanks to lazy deserialization
+
+[11:55] <timo> by mmapping the files, we also get to take advantage of multiple processes sharing the memory for the mapped files
+
+[11:55] <timo> however, if the files get changed on disk, these changes will immediately be reflected in memory of the running processes
+
+[11:56] <timo> we have the runtime bits of rakudo and nqp loaded by name rather than by some kind of hash. that allows this situation to happen that the files are overwritten in place by an install process and the whole thing breaking
+
+[11:56] <timo> if we use a private mapping, we don't get to share the memory any more, except if there's some kind of memory deduplication thing running?
+
+[11:57] <timo> but some filesystems we have access to on linux have copy-on-write exposed to user space programs by way of "reflinks", aka ioctl FICLONE and FICLONERANGE
+
+[11:58] <timo> i haven't written the code yet to try this, but someone in #btrfs suggested I can open an fd with O_TMPFILE on the same filesystem the file i'm interested is on and then FICLONE the original file into this temp file
+
+[11:58] <timo> this will almost always do nothing much, except when some other process changes the file on disk. then we will keep the original contents in our processes, and it will still be shared with all the other processes that opened the "same version" of that file
+
+[12:00] <timo> and when the last program that was holding on to the data quits, the now unreferenced data should just dsiappear because the refcount will drop to 0; TMPFILE files are not held "alive" by the filesystem, so we can't accidentally leak these files either
+
+[12:10] <timo> might just be a big waste of time, tho
+
+[12:11] <timo> another way to make this work is to make the runtime moarvm files part of the rakudo-m binary, for which i also have a patch. though if we get the thing to work where we only load either Perl6::* or Raku::*, we'd be wasting file size there
+
+[12:11] <timo> on the other hand, all those segments of the file aren't loaded eagerly when mapping a binary to memory in order to execute it
+
+[12:17] <lizmat> I think this is definitely a case that I've run into
+
+[12:21] <timo> the ficlone ioctl wouldn't be available on macos; not sure if macos has a similar thing we could use
+
+[12:24] <lizmat> otoh, I'm not a typical Raku user
+
+[12:25] <lizmat> most production Raku production sites wouldn't be re-precompiling stuff on a regular bases
+
+[12:25] <lizmat> *basis
+
+[12:25] <lizmat> however, from a security point of view, I think it would be a good thing to be able to close a potential attack vector
+
+[12:26] <lizmat> (changing a file that could influence execution of running programs)
+
+[12:30] <timo> if you have access to those files, an attacker could just replace your precomp files wtih files that do something else though :)
+
+[12:31] <lizmat> yeah, but that would only affect new runs of a program, no?    the mmapping would affect already running programs, no ?
+
+[12:37] <timo> right, if we didn't mmap, a change to the file would only impact future runs
+
+[13:42] <ugexe> module loading can occur at runtime, so certainly it could affect a currently executing program
+
+[13:44] <lizmat> also true, but with a much smaller window of opportunity?
+
+[13:47] <ugexe> if you referring to time window, that doesn't really matter. exploits aren't usually done by a hacker hand typing stuff into a byte stream in real time
+
+[13:54] <lizmat> true, ok
+
+[13:54] <lizmat> so, we currently do not have a check on whether a bytecode file is actually produced by the associated source-file when we load it, is that correct ?
+
+[14:06] <timo> that's right
+
+[14:06] <timo> it's difficult to make something that actually robustly checks for that
+
+[14:07] <timo> given that we have lots of opportunities to do stuff at compile time, so what comes out of a source file isn't straight-forwardly identifiable
+
+[14:08] <timo> we can really only kind of rely on the precompiled file to tell us. otherwise we'd be in like, cryptographic signature territory
+
+[14:12] <lizmat> but we do have a check that the file is internally consistent, in the sense that no random bytes have been altered in the file since it was created ?
+
+[14:14] <timo> nothing like that
+
+[14:15] <timo> we do verify bytecode before we attempt to run it to make sure it's at least marginally sane
+
+[14:16] <lizmat> what type of verification is that ?
+
+[14:21] <timo> referenced lexicals and locals must exist, registers must have the correct type for any op they are used in, targets of goto-like instructions are correct, ops in the bytecode actually exist and their argument types and number are correct, some ops may only appear in a specific sequence, stuff like that
+
+[14:24] <lizmat> is the compiler ID embedded in the bytecode somehow ?
+
+[14:24] <timo> we only do it once when we first encounter a given Frame, but we do keep using the memory mapped area of the file where the bytecode lives without re-checking after the first time
+
+[18:33] *** kjp_ joined
+[18:37] *** kjp left
+[18:37] *** rakkable left
+[18:37] *** camelia left
+[19:13] *** rakkable joined
+[19:28] *** camelia joined
+[19:39] <librasteve_> https://rakudoweekly.blog/2025/10/27/2025-43-trick-or-treat/
+
+[19:43] <[Coke]> anything to get merged post release so we have some time to test it before 2025.11?
+
+[19:45] <timo> only the thing where i made something throw an exception in nqp_nfa_run, but that should never be hit by user code
+
+[19:55] <[Coke]> I meant more PRs that were waiting. I know we rolled one back because it landed close to release
+
+[20:16] <lizmat> I merged that one already again, I believe
+
+[20:16] <lizmat> and bumped Rakudo accordingly
+
+[20:16] <lizmat> yup 74bbe19029bee4befe23
+
+[20:16] <linkable6> (2025-10-19) https://github.com/rakudo/rakudo/commit/74bbe19029 Bump NQP to get rapidhash v3, MasterDuke++
+
+[20:51] <[Coke]> Any other PRs in the queue we should look at?
+
+[20:57] <lizmat> #1962 ?
+
+[20:57] <lizmat> #1965
+
+[20:58] <lizmat> #1946 #1947
+
+[21:05] <[Coke]> 1962 looks straightforward...
+
+[21:06] <[Coke]> 1965 is just for CI, looks fine...
+
+[21:07] <[Coke]> 1946 has a ci failure on mac, but I couldn't find the deets. rerunning..
+
+[21:08] <[Coke]> tried to rerun. looks like maybe it was queued but isn't running?
+
+[21:09] <[Coke]> same with '47
+
+[21:50] *** librasteve_ left
+[21:53] *** librasteve_ joined

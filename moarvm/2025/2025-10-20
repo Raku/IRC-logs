@@ -1,0 +1,129 @@
+[00:19] *** japhb left
+[00:35] *** japhb joined
+[00:37] *** MasterDuke joined
+[00:40] <MasterDuke> i have a branch where i added libffi as a 3rdparty submodule, build it, mostly removed dyncall, built moarvm using the 3rdparty libffi (i believe), and rakudo passes a `make m-test` and `make m-spectest`
+
+[00:41] <MasterDuke> but what i'm not particularly looking forward to is trying to get moarvm to build libffi, especially in CI (since that involves macos and windows)
+
+[00:57] *** japhb left
+[01:23] *** japhb joined
+[01:36] *** japhb left
+[01:41] *** japhb joined
+[01:42] *** MasterDuke left
+[01:47] *** japhb left
+[02:12] *** japhb joined
+[05:52] <patrickb> MasterDuke: That's impressive! I'm willing to help. Which are you less fond of? Windows or MacOS?
+
+[05:52] <tellable6> patrickb, I'll pass your message to MasterDuke
+
+[06:14] *** timo2 left
+[06:17] *** timo2 joined
+[09:47] *** woodi joined
+[09:48] *** woodi left
+[09:50] *** woodi joined
+[14:07] <patrickb> I'm still hunting why NativeCall callsites have one arg too many.
+
+[14:08] <patrickb> I observe this with a vanilla moar as well.
+
+[14:11] <patrickb> What's the easiest way to introspect the byte code? I'd like to see if the callsite in the byte code has the correct arg count.
+
+[14:35] <timo2> if you have a .moarvm file, you can moar --dump it, if you have a frame on the stack and you're in gdb or lldb or so, you can call MVM_dump_bytecode(tc) or one of the other similarly named functions
+
+[14:36] <timo2> if it gets speshed at any point, setting MVM_SPESH_LOG=blabla.speshlog.txt gives you a file with boatloads of information, including the bytecode in unspecialized and specialized forms, which also has a little bit of information for callsites
+
+[14:36] <timo2> patrickb: LMK if you need more
+
+[15:10] <lizmat> patrickb: there's also https://raku.land/zef:lizmat/MoarVM::Bytecode  which may be helpful?
+
+[17:42] <librasteve_> https://rakudoweekly.blog/2025/10/20/2025-42-release-186-2025-10/
+
+[18:17] <patrickb> Many thanks. Let's see if I can finally hunt this down.
+
+[20:09] <patrickb> It seems there is an expected additional argument at the front of the callsites that the nativecall impl sees.
+
+[20:10] <patrickb> https://github.com/MoarVM/MoarVM/blob/main/src/core/nativecall_dyncall.c#L914
+
+[20:10] <patrickb> Note the +1 in there.
+
+[20:13] <patrickb> no idea where that extra arg is slipped in.
+
+[20:13] <patrickb> Or what it is
+
+[20:30] <timo2> https://github.com/MoarVM/MoarVM/blob/main/src/disp/program.c#L3196 could be this
+
+[20:45] <patrickb> Ah, zero being the return type. that would make sense. Ignoring that first arg makes it actually work a bit.
+
+[20:45] <patrickb> Now I'm wondering how to introspect P6opaque objects.
+
+[20:46] <patrickb> I need to find out if it's int, num or string.
+
+[20:48] <patrickb> It seems the P6opaque things show up when I pass a variable (`my int16 $var = 5; nc-func($var)`).
+
+[20:50] <timo2> there's a dumper for P6Opaque called MVM_dump_p6opaque(tc, object)
+
+[20:50] <timo2> other than that, the STABLE(obj)->debug_name gives you the name of the type (if it was set by the runtime, which it almost always is)
+
+[20:51] <timo2> we have MVM_6model_get_{stable_,}debug_name for that usually, and we use it in many places for error messages and such
+
+[21:05] * patrickb investigates more
+
+[21:08] <patrickb> It seems I was being stupid. I had a typo in the var name I passed. No idea why it even compiled.
+
+[21:09] <timo2> could have been a different variable with the same name nearby?
+
+[21:09] <patrickb> $16 should have been $i16
+
+[21:29] <ugexe> ouch
+
+[21:29] <ugexe> m: say $420
+
+[21:29] <camelia> rakudo-moar 6a9e284f2: OUTPUT: «Nil␤»
+
+[21:30] <japhb> ugexe: That's equivalent to $/<420>, no?
+
+[21:30] <ugexe> its the 420th positional match i assume
+
+[21:32] <patrickb> ah. $/[16], right?
+
+[21:32] <ugexe> its ouch though for the very reason patrickb ran into though. obviously (to a reader of code) there is no regex matching going on and thus we probably expect such errors to get caught at compile time
+
+[21:34] <ugexe> arguably having a way to disable using $420 (and forcing the user to be explicit with the $/) would be good
+
+[21:35] <patrickb> I want to somehow signify that a variable I pass into a native call vararg function should be handled as a pointer. I'm unsure what options there are.
+
+[21:37] <patrickb> Idea 1: Putting a trait "is rw" on that variable reference. `nc-func(123, $some-var is rw)`
+
+[21:38] <patrickb> Idea 2: Allow creating Pointers to stuff. `nc-func(123, Pointer.to($some-var)`
+
+[21:39] <patrickb> With the first idea I don't even know what the trait should do to signify pointeryness without modifying the variable.
+
+[21:40] <patrickb> With the second idea I wonder if that can possibly work out given a GC that can merrily move stuff around.
+
+[21:45] <timo2> well, we can already create pointers as well as C arrays
+
+[21:45] <patrickb> On that note, how do I retrieve the C address of a native type? How could I initialize the Pointer in the to-be-written `to` method in this piece of code: `my int8 $i8; Pointer.to($i8);)`
+
+[21:45] <timo2> the pointer object can freely move around, as long as the value inside it remains valid
+
+[21:47] <patrickb> I'm not guaranteed that $i8 in the above example doesn't move, right?
+
+[21:47] <timo2> yeah, that sits on a stack frame
+
+[21:47] <patrickb> So this won't work out.
+
+[21:47] <timo2> you need something that will actually give you a memory location, for example creating a CArray to pointer at, or to call malloc
+
+[21:48] <timo2> that's a bit inconvenient for the purpose of just getting a value out of a call when you know you won't move the thing around
+
+[21:49] <timo2> we do already support "is rw" for native ints and everything when you define it on the "is native" sub 
+
+[21:49] <timo2> that's a lot more convenient of course
+
+[21:49] <patrickb> actually I only need a way to signify to moar that this thing should be passed as a pointer. I'm fine with creating the pointer down in Moar land.
+
+[21:50] <patrickb> yeah, with non-vararg args all is nice and sorted with the "is rw" trait.
+
+[21:50] <patrickb> But variadic args don't have a Parameter to put the trait on.
+
+[22:37] <timo2> right
+
