@@ -1,0 +1,190 @@
+[07:27] *** lizmat joined
+[07:49] *** lizmat left
+[09:13] *** librasteve_ joined
+[09:16] *** lizmat joined
+[09:21] *** lizmat left
+[11:23] *** librasteve_ left
+[12:26] *** lizmat joined
+[16:46] <timo> I can literally just™ longjmp in a signal handler? as long as the signal wasn't thrown during an async-signal-unsafe function?
+
+[17:18] <Voldenet> > https://pubs.opengroup.org/onlinepubs/9799919799/functions/longjmp.html
+
+[17:19] <Voldenet> if I understand correctly then any call to malloc or printf becomes UB afterwards
+
+[17:21] <timo> right, it has to be a async-signal-safe function that was running at the time the signal was thrown
+
+[17:21] <timo> otherwise you're just fully screwed
+
+[17:23] <timo> unfortunate for me, who is using `use NativeCall; sub printf(int64 $ptr) is native(Str) { * }; printf(100); say "lol"'` as a test program to get a segfault to react to
+
+[17:24] <timo> since printf is literally one of the examples in the signal-safety man page for unsafe functions
+
+[17:25] <timo> strlen would be safe, surely
+
+[17:25] <timo> yup.
+
+[17:27] <Voldenet> https://man7.org/linux/man-pages/man7/signal-safety.7.html
+
+[17:27] <timo> yes, that's the page i was referencing
+
+[17:27] <Voldenet> to me it's amazing that printf isn't safe but write is
+
+[17:27] <timo> well, printf goes through stdio's buffering implementation, write goes straight to the kernel i think
+
+[17:28] <timo> i haven't looked at the implementation of write, but i assume it just puts the arguments in the right order for the system call and invokes it with ... int 3 or whatever is what invokes system calls these days
+
+[17:29] <timo> printf and friends also involve locking, which is always a great thing to be interrupting :D
+
+[17:30] <Voldenet> ah, so that means that printf could be safe
+
+[17:30] <timo> elaborate?
+
+[17:31] <Voldenet> printf could, instead of operating on buffers, directly write
+
+[17:31] <Voldenet> which doesn't seem fast, but safe
+
+[17:31] <timo> wait what the hell glibc 2.1 introduced functions that let you get a stack trace? for real?
+
+[17:31] <timo> yeah, if you want that you can always snprintf + write i guess?
+
+[17:32] <Voldenet> except snprintf is not safe either :>
+
+[17:32] <timo> but yes, can be much much slower, especially for very short bits ... i think printf will actually call the write function for each directive in the format string, as well as the bits in between? i could be wrong
+
+[17:33] <timo> i wonder why snprintf isn't on the safe list
+
+[17:35] <timo> https://stackoverflow.com/questions/67839938/why-is-snprintf-not-considered-async-safe  -  The POSIX standard does not require snprintf to be async-signal safe–let's adopt the convention of the GNU C Library manual and call that "AS-Safe" for short. However, it is possible for a vendor to implement snprintf in such a way that it is AS-Safe, by ensuring it does not make any calls to non-AS-Safe
+
+[17:35] <timo> functions, such as malloc, or do anything else that might make it non-AS-Safe (e.g. attempt to take out locks or mutexes, or access global or thread-local state). And if a vendor does that, then their snprintf implementation will be AS-Safe in practice, and if they want to, they can then officially document it as AS-Safe, as an extension to the standard.
+
+[17:36] <timo> snprintf: Preliminary: | MT-Safe locale | AS-Unsafe heap | AC-Unsafe mem |
+
+[17:37] <Voldenet> I think setlocale can partially initialize locale for thread during snprintf somehow
+
+[17:37] <Voldenet> or reinitialize
+
+[17:38] <Voldenet> so if snprintf calls getlocale for something, locale could become partially initialized
+
+[17:41] <timo> that sounds like fun!
+
+[17:41] <Voldenet> https://docs.oracle.com/cd/E36784_01/html/E36874/snprintf-3c.html
+
+[17:41] <Voldenet> heh these docs even mention Async-Signal-Safe as long as you don't fiddle with locale
+
+[17:41] <timo> i'm not sure we target Solaris
+
+[17:42] <timo> backtrace() will dynamically load libgcc when first called (unless it's already there) which makes it not async signal safe unless you always pull in libgcc before the first time you want to use it ;(
+
+[17:48] <Voldenet> in practice, if I read it correctly, longjmp in signal handlers could only work in controlled environment
+
+[17:51] <Voldenet> since any use of unsafe, makes the whole blocks of code also unsafe
+
+[17:51] <timo> yeah, we definitely can't handle all situations
+
+[17:53] <timo> i'm not expecting that we could just turn a segfault into a raku exception and continue running
+
+[17:53] <timo> but it would be nice to give some information about what's going wrong beyond just "Segmentation Fault (core dumped)" for common cases
+
+[17:54] <Voldenet> hm, allocating a buffer and doing that write is actually not bad
+
+[17:55] <Voldenet> right, it'd have to be preallocated, because no malloc
+
+[17:55] <timo> what write do you mean?
+
+[17:55] <Voldenet> the unistd.h one
+
+[17:55] <Voldenet> since it's required to be async-signal-safe
+
+[17:57] <Voldenet> huh, `_Fork(3)` is async-signal-safe as well…
+
+[17:59] <timo> haha, so if i catch a segfault, the first thing i should do is fork and do the handling in the child process!
+
+[18:01] <Voldenet> but I wonder if it's then safe to operate on partially initialized locale
+
+[18:01] <Voldenet> that doesn't seem sane
+
+[18:02] <timo> surely not
+
+[18:02] <timo> "best effort" i would say
+
+[18:10] <Voldenet> hm, execve is safe as well and probably more useful
+
+[18:11] <timo> maybe with a "traceme" :D
+
+[18:13] <timo> i'm not sure why backtrace_symbols_fd doesn't give me function names :|
+
+[18:18] *** librasteve_ joined
+[18:19] <Voldenet> hm, maybe backtrace + write + addr2line would work
+
+[18:20] <timo> oh, dope, with libffi the stack actually just continues after the bit that nativecall sets up to do the call
+
+[18:21] <timo> it has one function name for libffi out of 3 frames on the stack, and zero names out of 4 frames in libc.so
+
+[18:25] <timo> how do you use addr2line when ASLR is involved?
+
+[18:27] <timo> ah it supposedly supports symbol + offset, i guess then i need to change the --exe= to the .so for the individual line
+
+[18:28] <timo> ⬢ [timo@toolbx raku]$ addr2line --exe=//var/home/timo/raku/prefix/lib/libmoar.so -a --pretty-print "MVM_nativecall_dispatch+0x1813"
+
+[18:28] <timo> 0x0000000000050423: /var/home/timo/raku/moarvm/src/core/nativecall_libffi.c:1287 (discriminator 7)
+
+[19:41] <timo> so, now on a segfault moarvm forks and raises SIGSTOP, and the child attaches with ptrace (which also stops the parent, but maybe the parent reaches raise(sigstop) quicker than the child reaches the attach attempt)
+
+[19:43] <timo> in the child process I should actually have the moarvm-related state of all threads readable by going via the instance and enumerating the threads, and with ptrace I can get the actual Instruction Pointer (all registers, really) for backtrace purposes and more
+
+[19:44] <timo> the backtrace convenience functions from glibc don't seem to allow using an arbitrary stack pointer + frame pointer + instruction pointer as a starting point, though, so I'd want to work with (a) libunwind directly
+
+[21:25] <timo> though not exactly sure if it's interesting to see the C stacks of all other threads when there was a segfault?
+
+[21:31] <timo> unless your program is heavily using nativecalls maybe? or to see which threads are waiting inside of like, pop or shift on a ConcBlockingQueue (i.e. worker threads waiting for a job to come through the job queue)
+
+[22:25] <lizmat> well, I guess any program using Inline::Perl5 might be interested in that ?
+
+[22:32] <timo> ah, presumably, yeah
+
+[22:35] <lizmat> the idea of forking after a segfault... and then inspecting the parent process...  brilliant!
+
+[22:37] <timo> well ... maybe
+
+[22:38] <timo> the man page for async-safety points out that fork may be removed from the list of async safe functions in the future
+
+[22:38] <timo> just forking without an exec is cool because the entire parent process memory is still there in your own memory space and your stack is still the stack that led up to the crash
+
+[22:40] <timo> but at the same time, just getting rid of the other threads by forking (or cloning, which may be safe still) off a new process doesn't cause global state, like locks on stdio buffers and such, to be reset to a sane state
+
+[22:42] <timo> you can clone and exec a binary that gets the pid and thread id of your crashed thread on the commandline and that can then ptrace your crashed process to get everything out of it
+
+[22:43] <timo> but tbh at that point you can perhaps just exec gdb with a commandline that has a few commands in it that give good information
+
+[22:45] <timo> gdb isn't always there of course, or lldb, or whatever
+
+[22:46] <lizmat> ah,...   ok  :-(
+
+[22:49] <timo> doing output with only safe functions is possible
+
+[22:50] <timo> but it's a bunch of re-implementation of stuff
+
+[22:50] <timo> like V mentioned earlier, snprintf and such rely on global state for locale stuff, so outputting anything formatted would be annoying
+
+[22:53] <lizmat> ack
+
+[22:55] <timo> it's not entirely clear under what circumstances we can do much better than a C stacktrace + a moar stack trace and also moar stack traces of all threads (those would be possible without ptrace), and if we fork + ptrace parent we can get C stack traces of the other threads
+
+[22:56] <lizmat> feels like a valuable thing to have
+
+[22:56] <lizmat> sooo much better than "Bus Error"
+
+[22:57] * lizmat gets some shuteye
+
+[22:57] <timo> it'd be dope to also have disassembly around the error location, but that's more libraries to pull in
+
+[22:57] <timo> good eye liz
+
+[22:57] <timo> good shut?
+
+[22:58] <timo> it'd be very valuable to have on CI jobs that otherwise don't let us get at a core dump easily
+
+[22:59] <timo> but these errors often happen on "not the default configuration", like on some variant of ARM or on windows or on macs
+
+[22:59] <timo> .o( pretending x86_64 linux is the default for my own sanity )
+

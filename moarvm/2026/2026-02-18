@@ -1,0 +1,167 @@
+[00:04] *** librasteve_ left
+[05:03] *** ingy left
+[05:04] *** ingy joined
+[06:08] *** xiaomiao left
+[06:08] *** xiaomiao joined
+[08:03] *** vrurg_ joined
+[08:03] *** vrurg left
+[12:58] *** ShimmerFairy left
+[13:07] *** ShimmerFairy joined
+[13:37] *** jnthn left
+[13:37] *** jnthn joined
+[13:44] <patrickb> Quick sanity check: It's valid to STEP_OVER a thread that got suspended by a breakpoint hit for a breakpoint that has suspend set, correct?
+
+[13:51] <timo> should be, yeah. please be aware that There Be Dragons with the stepping code ... it may randomly do not what you hope it would, because i'm a very bad programmer
+
+[13:52] <patrickb> https://paste.sr.ht/~patrickb/1c64aff5fa8fbd28fdf87dd3b31d1060d3eeb9ec
+
+[13:52] <patrickb> That's the log where I fail to make it happen.
+
+[13:53] <timo> can you also give the output of the target process with MDS_PROTOCOL=1?
+
+[13:53] <patrickb> The error moar (with protocol spam activated) spits out is: "Setting up step failed: thread has wrong status"
+
+[13:54] <timo> ah. possibly an oversight on my part
+
+[13:54] <patrickb> Is the full spam output in any way helpful?
+
+[13:55] <timo> eh, probably not
+
+[13:55] <timo> i can't go code diving right now, can you explore this problem on your own? i expect it to be a mistake in debugserver.c close to the error message you got
+
+[13:56] <timo> a bunch of atomic compare and swap on thread's state field
+
+[13:56] <patrickb> I can try, but I value help should I start to drown in the swamp
+
+[13:57] <timo> I'll look over if I have a moment, but I may be swamped with work for two more hours
+
+[13:59] <patrickb> If I may start a different difficult topic: Messages in the protocol have no inherent ordering (there is no incrementing id or some such that guarantees a unique order). Example: I fire a thread_list request, then receive a thread_list_response and a breakpoint_hit_response (in an undefined order). Both give me a thread list. They may disagree. I have no way to know in which order they belong.
+
+[14:01] <patrickb> Is there a trick to deal with this? Is this an oversight in the protocol? Is this even a solvable issue?
+
+[14:01] <timo> uhhh I thought there's an ID?
+
+[14:02] <timo> for breakpoint hit notifications it uses the ID of your breakpoint set request
+
+[14:03] <timo> StepCompleted behaves similarly
+
+[14:03] <timo> thread list response should also use the id from the thread list request
+
+[14:04] <patrickb> I can correlate the response to the request.
+
+[14:04] <timo> oh, you mean from one response to another things can change, and then after the response things can change further?
+
+[14:05] <timo> you never know when the results from some request get invalidated?
+
+[14:09] <patrickb> Yes. Specifically when I asynchronously receive two responses (e.g. a frame dump and a break point notification also containing a frame dump) and they disagree I can't know which one is fresh.
+
+[14:10] <patrickb> If they had an absolute ordering, I could discard any chunk of data for which I already received a state with a higher order no.
+
+[14:11] <patrickb> Or is there already an ordering guarantee simply by the order in which I receive the events over the wire?
+
+[14:13] <patrickb> (Not entirely sure, but I think I've seen that not be the case. Test scenario was: Suspend_all, set_breakpoint, resume_all, thread_list, breakpoint_hit_response, thread_list_response (this last thread_list_response has the broken thread still as running))
+
+[14:13] <timo> hm. a thread can only have its stack trace dumped when it's suspended, and access to sending on the socket is mutexed
+
+[14:13] <timo> by broken thread you mean suspended?
+
+[14:13] <patrickb> yes
+
+[14:13] <patrickb> gets suspendend by the breakpoint
+
+[14:14] <timo> here's where MDS_PROTOCOL may be actually insightful
+
+[14:17] <timo> btw do you keep all these tests you do around in a relatively easy-to-reproduce form? would be great to get more tests for the debugserver feature
+
+[14:17] <patrickb> Maybe. But I strongly suspect it's an undefinedness in the protocol itself.
+
+[14:18] <patrickb> I don't. This is on the go stuff happening while I click around in the UI :-P
+
+[14:19] <timo> aw
+
+[14:19] <timo> did you see the test cases in the MoarVM::Remote module?
+
+[14:20] <timo> I've built a little "interpreter" for test scenarios
+
+[14:20] <patrickb> I didn't yet. I'll have a look.
+
+[14:21] <patrickb> Are thread IDs immutable?
+
+[14:22] <timo> I believe we dole them out from a central counter when a thread is created and don't change them afterwards
+
+[14:22] <patrickb> cool
+
+[14:23] * patrickb learned a new word
+
+[14:23] <timo> >    child_tc->thread_id = 1 + MVM_incr(&tc->instance->next_user_thread_id);
+
+[14:47] <patrickb> probably unrelated, but https://github.com/MoarVM/MoarVM/blob/main/src/debug/debugserver.c#L711 this MVM_cas looks wrongly used (it doesn't compare to the old value)
+
+[15:41] <timo> oh, I think you're right
+
+[15:45] <patrickb> https://github.com/MoarVM/MoarVM/blob/main/src/gc/orchestrate.c#L260 <- Is this safe? (it doesn't validate if the swap worked)
+
+[15:46] <patrickb> The thread that refuses to step has a gc_status of 15, i.e. 00001111, i.e. SUSPENDED|SUSPEND_REQUEST|STOLEN
+
+[15:46] <timo> > 13 years ago
+
+[15:46] <timo> > full code audit of all atomics usage
+
+[15:46] <timo> stollen! but it's not anywhere near christmas!
+
+[15:48] <patrickb> wait, is stolen meant to be a superset of unable?
+
+[15:48] <timo> i'm thinking when a thread suspends it should be clearing its suspend request, but "stolen" is what happens when a thread is blocked when a GC run starts, so it wouldn't have done the state transition itself
+
+[15:49] <patrickb> I.e. can STOLEN be treated as UNABLE?
+
+[15:49] <timo> yeah, "mark thread blocked" sets "unable", when a GC run then starts the orchestrator thread will transition it to "stolen"
+
+[15:50] <timo> with just a very quick think, yes
+
+[15:55] <patrickb> Hm. Still fishy. How can it end up with SUSPENDED|SUSPEND_REQUEST? Also why doesn't the STOLEN turn back to UNABLE after the GC finishes?
+
+[15:55] <patrickb> It's pretty repeatable btw...
+
+[15:57] <patrickb> Ow. SUSPEND_REQUEST = 12, SUSPENDED = 4, so SUSPEND_REQUEST is actually a superset of SUSPENDED.
+
+[15:58] <timo> you have to mask it out
+
+[15:59] <timo> I think the two cas that don't check the result value could very well be the problem, they don't take suspend requesds into account at all
+
+[15:59] <timo> so if the stolen thread has the request bit set or is even marked suspended, it wouldn't go back to unable, then it can't resume itself properly when mark_thread_unblocked happens
+
+[15:59] <timo> does that sound about right?
+
+[16:05] <patrickb> Sounds about right. Is there some reason that code in question can safely assume it can change that field unchecked?
+
+[16:05] <timo> it's the orchestrator thread, all other threads are assumed to not be doing anything at that point
+
+[16:06] <patrickb> But the debugger thread still can?
+
+[16:06] <patrickb> So got the assumption broken by the introduction of the debugger thread?
+
+[16:07] <timo> ah, yeah
+
+[16:47] <patrickb> A first quick change seems to make it work.
+
+[16:51] <patrickb> https://github.com/MoarVM/MoarVM/pull/1990
+
+[16:51] <Geth> ¦ MoarVM: patrickbkr++ created pull request #1990: A gc vs debugserver fix
+
+[16:51] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1990
+
+[16:55] <Geth> ¦ MoarVM: patrickbkr++ created pull request #1991: Fix a harmless CAS misusage
+
+[16:55] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1991
+
+[17:21] <ugexe> nit pick, but i feel like it would be slightly less confusing if 1990 didn't use elsif / else
+
+[17:22] <ugexe> the conditionals don't seem to have any relation to each other
+
+[20:46] <patrickb> ugexe: Thank's for the review. That was not only a nit pick, but the conditional chain was plain wrong. If it fails every conditional once because of a cas mismatch it'd hit the panic.
+
+[20:46] <patrickb> That became pretty obvious when removing the if chain.
+
+[21:05] *** tbrowder left
+[21:05] *** tbrowder joined

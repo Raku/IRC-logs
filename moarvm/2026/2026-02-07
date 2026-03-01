@@ -1,0 +1,135 @@
+[10:09] *** librasteve_ joined
+[10:26] <timo> my first guess is it's a bug related to the machinery that coordinates thread status
+
+[10:26] <timo> you don't happen to have a gdb level backtrace of all the threads?
+
+[10:30] <Voldenet> btw, quick any easy answer for that `why is the nqp op basically 6x as slow as the HLL module calculation` is that div is a different op
+
+[10:30] <Voldenet> m: use nqp; my $a = 42; my $b = 7; my $c := nqp::div_I($a,$b,Int) for ^10000000; say now - ENTER now
+
+[10:30] <camelia> rakudo-moar b7a4e1a9e: OUTPUT: «P6opaque: get_boxed_ref could not unbox for the representation 'P6bigint' of type Scalar␤  in block <unit> at <tmp> line 1␤␤»
+
+[10:31] <Voldenet> m: use nqp; my $a := 42; my $b := 7; my $c := nqp::div_I($a,$b,Int) for ^10000000; say now - ENTER now
+
+[10:31] <camelia> rakudo-moar b7a4e1a9e: OUTPUT: «0.432548565␤»
+
+[10:32] <timo> you can use postfix <> to decont so you don't have to := on the other side
+
+[10:34] <Voldenet> yes, but decont is slower in the case of this microbenchmark :)
+
+[10:34] <Voldenet> m: use nqp; my $a = 42; my $b = 7; my $c := nqp::div_I($a<>,$b<>,Int) for ^10000000; say now - ENTER now
+
+[10:34] <camelia> rakudo-moar b7a4e1a9e: OUTPUT: «1.023976782␤»
+
+[10:34] <Voldenet> of course, it's measuring a lot of operations now
+
+[10:46] <timo> i wonder if spesh has a hard time because it's an "in-lined" for loop in the mainline
+
+[10:47] <Voldenet> I've checked, the answer is that mod_I always uses mp_mod
+
+[10:47] <Voldenet> https://github.com/MoarVM/MoarVM/blob/main/src/math/bigintops.c#L510
+
+[10:47] <timo> ah, right, that optimization
+
+[10:48] <timo> we store "big" integers that are actually less than 32bit long in place of the pointer with a sentinel value
+
+[10:57] <Voldenet> ah, so div_I just has optimized verison for small integers, I can see it's 
+
+[10:57] <Voldenet> a lot longer
+
+[11:27] <lizmat> aha!
+
+[11:28] <lizmat> anybody know what "the behavior of C's mod operator is not correct" points at ?
+
+[11:38] <lizmat>  seems to go back to aab5cdaca8ab979d2ff640132a by timo:  throw away our smallint mod calculation for now
+
+[11:47] <patrickb> I'll try to pull out a stack trace of moar in the evening.
+
+[14:00] <disbot13> <nemokosch> what is mp_mod?
+
+[14:02] <lizmat> a big int library that MoarVM uses, afaik
+
+[14:02] <lizmat> so the reason nqp::mod_I is so much slower, is that it *always* operators on big ints
+
+[14:03] <lizmat> whereas nqp::div_I is able to use the C div operator
+
+[14:03] <lizmat> if the ints are small enough
+
+[14:04] <disbot13> <nemokosch> 👍
+
+[14:50] *** librasteve_ left
+[15:20] <Voldenet> I'm guessing that % operator in C is remainder and in mp_mod is modulo in GMP
+
+[17:24] <Geth> ¦ MoarVM: MasterDuke17++ created pull request #1989: Restore smallint optimization for nqp::mod_I
+
+[17:24] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1989
+
+[21:24] <timo> we also want to test with negative numbers on each side and on both sides
+
+[21:29] <patrickb> https://paste.sr.ht/~patrickb/937fbb009cec188486b9475d7b259d084e81b8ea
+
+[21:30] <patrickb> That's a stacktrace of moar after setting and hitting a breakpoint and then requesting a thread list (which hangs).
+
+[21:33] <patrickb> I fear it's unhelpful, as the debugserver thread seems to just wait for a new request to come in...
+
+[21:40] <patrickb> looking at wireshark, it seems (wireshark doesn't understand protocolbuffers, so mostly handwaving here) the thread list is actually sent over the wire (interestingly in many small packets).
+
+[21:48] *** librasteve_ joined
+[21:56] <patrickb> https://git.sr.ht/~patrickb/app-moarvm-tuidebugger/blob/debug-pcap/moar-debug-breakpoint-and-thread-list.pcapng
+
+[21:57] <patrickb> That's a pcap of setting the breakpoint, hitting it, and then requesting a thread list
+
+[21:57] <patrickb> I've added a 4 second sleep before requesting the thread list, to more easily distinguish the requests.
+
+[21:59] <patrickb> It seems the data is actually sent over the wire. Can someone with a bit more protocol buffer fu can confirm that the thread list response looks sane?
+
+[22:00] <patrickb> Oh. It's not protocolbuffers, but MessagePack.
+
+[22:00] <patrickb> Any help appreciated.
+
+[22:01] <patrickb> What would be a good next step? Digging down into the message pack implementation and trace where the response is lost?
+
+[22:01] <patrickb> anyways, I'm off to bed for today.
+
+[22:01] <patrickb> o/
+
+[22:47] <Geth> ¦ MoarVM/main: c80b587ca4 | (Daniel Green)++ | 2 files
+
+[22:47] <Geth> ¦ MoarVM/main: Use GCD implementation from Daniel Lemire
+
+[22:47] <Geth> ¦ MoarVM/main: 
+
+[22:47] <Geth> ¦ MoarVM/main: The implementation in interp.c for `nqp::gcd_i` and the smallint branch
+
+[22:47] <Geth> ¦ MoarVM/main: of MVM_bigint_gcd for `nqp::gcd_I` are almost identical, but the
+
+[22:47] <Geth> ¦ MoarVM/main: MVM_bigint_gcd version can assume 32-bit values.
+
+[22:47] <Geth> ¦ MoarVM/main: review: https://github.com/MoarVM/MoarVM/commit/c80b587ca4
+
+[22:47] <Geth> ¦ MoarVM/main: b509f04660 | (Daniel Green)++ | 2 files
+
+[22:47] <Geth> ¦ MoarVM/main: MSVC doesn't have __builtin_ctz...
+
+[22:47] <Geth> ¦ MoarVM/main: 
+
+[22:47] <Geth> ¦ MoarVM/main: so use _tzcnt_u32 instead.
+
+[22:47] <Geth> ¦ MoarVM/main: review: https://github.com/MoarVM/MoarVM/commit/b509f04660
+
+[22:47] <Geth> ¦ MoarVM/main: 0742ba286a | MasterDuke17++ (committed using GitHub Web editor) | 2 files
+
+[22:47] <Geth> ¦ MoarVM/main: Merge pull request #1983 from MasterDuke17/use_faster_gcd_algorithm_and_implementation
+
+[22:47] <Geth> ¦ MoarVM/main: 
+
+[22:47] <Geth> ¦ MoarVM/main: Use GCD implementation from Daniel Lemire
+
+[22:47] <Geth> ¦ MoarVM/main: review: https://github.com/MoarVM/MoarVM/commit/0742ba286a
+
+[23:00] <timo> patrickb: you should give MDS_PROTOCOL=1 and maybe MDS_NETWORK=1 a try, it will output a bunch of debug messages from the debugserver, and the network one is a bit like a packet capture
+
+[23:03] <timo> it's very possible the debugserver itself isn't hanging, there just weren't responses for the things you've tried for whatever individual reasons
+
+[23:03] <timo> that's why it'd be sitting at the position where it's reading a new message
+

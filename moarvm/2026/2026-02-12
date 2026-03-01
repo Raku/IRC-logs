@@ -1,0 +1,274 @@
+[11:17] *** librasteve_ joined
+[12:03] *** timo1 is now known as timo
+
+[14:06] *** librasteve_ left
+[15:18] *** librasteve_ joined
+[16:16] *** arunvickram joined
+[16:17] <lizmat> I appear to have lost my QAST chops
+
+[16:18] <lizmat> I have:
+
+[16:18] <lizmat> - QAST::Op(create)
+
+[16:18] <lizmat>   - QAST::WVal(Int)  Int
+
+[16:18] <lizmat> and need to change that to:
+
+[16:18] <lizmat> - QAST::Op(create)
+
+[16:18] <lizmat>   - QAST::Op(decont)
+
+[16:18] <lizmat>     - QAST::WVal(Int)  Int
+
+[16:19] <lizmat> timo ?
+
+[16:21] *** arunvickram left
+[16:27] <timo> for a WVal we can check that it's not a container and skip the decont though right?
+
+[16:32] <timo> so you need something like $the-create-op[0] := QAST::Op.new(:op<decont>, $the-create-op[0]); or something?
+
+[16:46] <lizmat> well, I guess I could check for a WVal...  but it wouldn't need to be
+
+[16:47] <lizmat> this is about changing Foo.CREATE into nqp::create(Foo)
+
+[16:47] <lizmat> rather than:  nqp::callmethod(:name<CREATE>, Foo)
+
+[16:48] <lizmat> should make .CREATE about 2x as fast
+
+[16:49] <timo> well, decont on non-containers is pretty cheap post-spesh, it should completely disappear
+
+[16:49] <lizmat> m: Int.CREATE for ^10000000; say now - ENTER now
+
+[16:50] <camelia> rakudo-moar 7cbf36b50: OUTPUT: «0.248240845␤»
+
+[16:50] <lizmat> m: use nqp; nqp::create(Int) for ^10000000; say now - ENTER now
+
+[16:50] <camelia> rakudo-moar 7cbf36b50: OUTPUT: «0.043995743␤»
+
+[16:50] <lizmat> m: Int.CREATE for ^10000000; say now - ENTER now
+
+[16:50] <camelia> rakudo-moar 7cbf36b50: OUTPUT: «0.270838002␤»
+
+[16:50] <lizmat> wow, even more 
+
+[16:51] <lizmat> on my Apple Silicon it's .213 vs .137
+
+[16:52] <timo> eliminating the interpreter overhead by jit compiling could be worth a lot here
+
+[16:52] <timo> actually, who knows if spesh dead-code-eliminates that create
+
+[16:53] <timo> yeah
+
+[16:53] <timo> m: use nqp; my $a; $a := nqp::create(Int) for ^10000000; say now - ENTER now
+
+[16:53] <camelia> rakudo-moar 7cbf36b50: OUTPUT: «0.306393815␤»
+
+[16:54] <timo> m: use nqp; my $a; $a := Int.CREATE for ^10000000; say now - ENTER now
+
+[16:54] <camelia> rakudo-moar 7cbf36b50: OUTPUT: «0.276194725␤»
+
+[16:55] <timo> .CREATE and nqp::create are pretty much exactly the same speed on my machine with that change
+
+[16:55] <lizmat> 0.208767584 vs 0.248389138 for me
+
+[16:55] <lizmat> so it appears to make sense on non-JITted hardware
+
+[16:56] <lizmat> although less than I would have hoped
+
+[16:56] <lizmat> timo: so do you think it would make sense t do such an opt ?
+
+[17:04] *** arunvickram joined
+[17:05] <timo> I'm not sure if the benefit will show up with anything but a microbenchmark that does nothing but loop + the create
+
+[17:09] <timo> oops, my moarvm was compiled with -O0
+
+[17:10] <lizmat> I'll wait for new benchmarks  :-)
+
+[17:12] <timo> 1.57841 +- 0.00451 seconds time elapsed   vs   1.52244 +- 0.00477 seconds time elapsed
+
+[17:12] <timo> for 10x as many runs of the loop
+
+[17:13] <lizmat> so the .CREATE continues to be a bit slower?
+
+[17:14] <timo> 2.87263 +- 0.00660 seconds time elapsed   vs   2.5743 +- 0.0139 seconds time elapsed  when JIT turned off
+
+[17:15] <timo> m: say "that's $(2.87263 / 100000000) seconds per nqp::create call"
+
+[17:15] <camelia> rakudo-moar 7cbf36b50: OUTPUT: «that's 0.0000000287263 seconds per nqp::create call␤»
+
+[17:15] <timo> (not really per call, but per "go around the loop")
+
+[17:17] <lizmat> ok, but there's also the bytecode-size argument
+
+[17:17] <lizmat> m: dd sub a() { Int.CREATE }.bytecode-size
+
+[17:17] <camelia> rakudo-moar 7cbf36b50: OUTPUT: «74␤»
+
+[17:17] <timo> probably more sensible to count cycles rather than seconds
+
+[17:17] <lizmat> use nqp; dd sub a() { nqp::create(nqp::decont(Int)) }.bytecode-size
+
+[17:17] <evalable6> lizmat, rakudo-moar 7cbf36b50: OUTPUT: «44␤»
+
+[17:17] <timo> wow, i've never seen that
+
+[17:17] <lizmat> evalable6 kicking in ?
+
+[17:17] <lizmat> or .bytecode-size ?
+
+[17:18] <timo> .bytecode-size
+
+[17:18] <lizmat> you actually implemented it if I remember correctly, as a syscall
+
+[17:19] <timo> git blame seems to suggest you implemented it
+
+[17:22] <lizmat> I did?  in MoarVM ?    wow
+
+[17:22] <lizmat> I recall doing the Rakudo side
+
+[17:22] <lizmat> hmmm....
+
+[17:23] <lizmat> ok, so could that be an argument to change .CREATE to be a "macro"  rather than just a method call >?
+
+[17:23] <lizmat> better inlineability ?
+
+[17:25] <timo> a little surprising that it's that much smaller
+
+[17:26] <lizmat> I think the .CREATE version also throws in a nqp::hllize
+
+[17:26] <timo> ah, yeah
+
+[17:27] <timo> and it deconts the Int before it calls the method on it
+
+[17:27] <lizmat> yeah, but that would be inside the .CREATE method, no ?
+
+[17:27] <lizmat> or does the deconting happen at the callsite ?
+
+[17:27] <timo> in terms of inlinability i would expect those to not matter because inline size should be based on post-spesh size, not pre-spesh, right?
+
+[17:28] <timo> it really does decont before it does the lang-meth-call
+
+[17:28] <lizmat> so you're saying that spesh would have already removed the hllize ?
+
+[17:29] <timo> the "after" size of the looped-over block when speshed is just 70 bytes, 10 of which are from inside the inlined CREATE method
+
+[17:29] <timo> there's a guardconc there that i'm not sure why it survives
+
+[17:32] <timo> but that's only in the log where the frame by itself is optimized, when it gets inlined into the mainline the unnecessary guard then disappears
+
+[17:44] <lizmat> still I wonder what I'm missing in trying to adapt the QAST
+
+[18:09] <lizmat> https://gist.github.com/lizmat/7dfeaf0ac074e9a3b3c7fa0d6f95c9d4   # timo   work so far 
+
+[18:11] <timo> from just the code I don't see where you're grabbing the existing $past 
+
+[18:13] <timo> the other parts of the code work by just flipping the :op from callmethod to some other op, but what you want is to wrap the first child in a new Op node right?
+
+[18:15] <timo> but then i don't really understand how the output you posted in the comment can happen?
+
+[18:17] <lizmat> well, I'm as puzzled as you are
+
+[18:19] <lizmat>                 $past.op('decont');
+
+[18:19] <lizmat>                 $past := QAST::Op.new(:op<create>, $past );
+
+[18:19] <lizmat> oops, sorry
+
+[18:20] <lizmat> produces:
+
+[18:20] <lizmat>     │   │       - QAST::Op(create)  :statement_id<1>
+
+[18:20] <lizmat>     │   │         - QAST::WVal(Int) <wanted> Int
+
+[18:20] <lizmat>     │   │         - QAST::Op(decont)  CREATE2
+
+[18:21] <lizmat> I mean: $past.op("foo")    just changed the op name to be used, right ?
+
+[18:23] <lizmat> so that by itself should change it to:
+
+[18:23] <timo> an idea appears
+
+[18:23] <lizmat>     │   │       - QAST::Op(decont)  :statement_id<1> CREATE2
+
+[18:23] <lizmat>     │   │         - QAST::WVal(Int) <wanted> Int
+
+[18:23] <lizmat> which it does
+
+[18:24] <timo> we may be holding on to the $<args>.ast from code outside of this function
+
+[18:24] <timo> and the "make $past" may not actually have an effect
+
+[18:25] <timo> that could explain why making $past something else doesn't cause what we expect to see
+
+[18:25] <lizmat> well, it looks like the changes I make change someting
+
+[18:26] <lizmat> so given a $past, how do I remove the first arg ?
+
+[18:26] <timo> $past.shift should do it
+
+[18:27] <lizmat> so:
+
+[18:27] <lizmat>                 $past.op('create');
+
+[18:27] <lizmat>                 $past.push(QAST::Op.new(:op<decont>, $past.shift));
+
+[18:27] <timo> yeah
+
+[18:27] <lizmat> ===SORRY!===
+
+[18:27] <lizmat> MVMArray: Can't shift from an empty array
+
+[18:28] <timo> oh
+
+[18:28] <timo> i guess that means there was not actually a $<args>
+
+[18:28] <timo> makes sense, Int.CREATE doesn't have arguments
+
+[18:28] <timo> then it's even weirder though
+
+[18:28] <lizmat> well, the Int is the arg, no?
+
+[18:28] <timo> what does $past.dump look like?
+
+[18:29] <timo> oh
+
+[18:29] <timo> ok my guess is, the invocant gets unshifted into the Op node by the action that comes after the methodop one
+
+[18:29] <timo> so at the moment your code comes in, it isn't there yet
+
+[18:30] <timo> and if you just put a decont in there, it ends up as a sibling to the invocant
+
+[18:30] <lizmat> aaaah....  ok,. that would make sense
+
+[18:31] <timo> does it go via dottyop?
+
+[18:32] <lizmat> $past.dump says:
+
+[18:32] <lizmat> - QAST::Op(create)  CREATE2
+
+[18:33] <lizmat> after the $past.op('create');
+
+[18:33] <lizmat> methodop 
+
+[18:34] <lizmat> so where does the "CREATE2" value live?   is that a :name ?
+
+[18:35] <lizmat> but I guess you're right, the Int doesn't appear here yet, so that happens somewhere else
+
+[18:35] <timo> sounds like it's a little bit of magic that EXPR does to hook those things up
+
+[18:36] <lizmat> ok, I'm going to stop this exercise: the winnings are too small
+
+[18:36] <timo> the CREATE2 there in the output is probably the $/.Str?
+
+[18:36] <lizmat> and I guess in the end, that's the reason why .CREATE wasn't implemented as a macro to begin with
+
+[18:37] <lizmat> what felt like an easy fix wasn't
+
+[18:41] <lizmat> timo thanks for the listening ear and support
+
+[18:41] <timo> no problem
+
+[18:47] *** arunvickram left
+[19:17] *** arunvickram joined
+[19:21] *** arunvickram left
+[19:48] *** arunvickram joined

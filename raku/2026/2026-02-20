@@ -1,0 +1,894 @@
+[00:07] <disbot13> <oshaboy> Yknow I like Raku but I wish there was a way to say "actually I don't want the string to be Unicode normalized"
+
+[00:19] <disbot13> <nemokosch> out of curiosity, what is your use case?
+
+[02:28] *** hulk joined
+[02:29] *** kylese left
+[02:41] *** SmokeMachine left
+[02:41] *** SmokeMachine joined
+[02:42] <Voldenet> re > https://stackoverflow.com/questions/51644197/returning-values-from-exception-handlers-in-raku/79892319#79892319
+
+[02:43] <Voldenet> I don't overly hate idea, but it makes code really verbose
+
+[02:45] <Voldenet> I've tried that a few times and overall Result<T, Error> needs good syntax support
+
+[02:47] *** skaji__ left
+[02:47] *** skaji__ joined
+[02:47] <Voldenet> but I suppose something like this would be pretty neat:
+
+[02:48] <Voldenet> Hm, nevermind, I thought about using .resume with value but it ended up being really convoluted
+
+[02:55] <Voldenet> overall probably there's no need to complicate this
+
+[02:55] <Voldenet> m: sub some-fail { die "random" }; sub x { CATCH { default { return 42; } }; return some-fail() }; say x()
+
+[02:55] <camelia> rakudo-moar a3566826f: OUTPUT: «42␤»
+
+[02:56] <disbot13> <nemokosch> well I don't like this more but for sure it does less
+
+[02:57] <disbot13> <nemokosch> the truth is, I can entertain the task but in general I think it's massive code smell if you are ever going to need to do something like this
+
+[02:57] <disbot13> <nemokosch> providing separate defaults for separate unusual code paths
+
+[02:58] <Voldenet> it totally isn't – having default value if something is not responding right is sane
+
+[02:58] <disbot13> <nemokosch> that is sane - having different defaults on different kind of problems is insane
+
+[02:58] *** cpli left
+[02:59] *** cpli joined
+[02:59] <Voldenet> actually I've used that and it's not horrible
+
+[02:59] <disbot13> <nemokosch> I'm not sold for sure
+
+[03:01] <Voldenet> # sub do-request { CATCH { when DeserializationException { return http-error(400) }; when ConnectionError { return http-error(500); }}; return http-json(200, do-request()); }
+
+[03:01] <Voldenet> that might have some typos but you have the idea
+
+[03:01] <Voldenet> ofc it's also possible to do that…:
+
+[03:02] <Voldenet> # sub do-request { CATCH { when handle-error($_) { $_.http-format }; }; return http-json(200, do-request()); }
+
+[03:02] <disbot13> <nemokosch> it's almost like this is a good reason to not use exceptions but failures at the very least
+
+[03:03] <Voldenet> Failures don't have stack trace though
+
+[03:03] <Voldenet> it's hardly ever a good idea to not have stack
+
+[03:03] <Voldenet> or rather - error has to be very local
+
+[03:03] <disbot13> <nemokosch> well, you either want to use something as a value, or troubleshoot it, but not both at once
+
+[03:04] <disbot13> <nemokosch> here, it seems that you want to use it as a value and you don't need a stack trace - you don't even need custom control flow
+
+[03:04] <disbot13> <nemokosch> just a special value
+
+[03:04] <Voldenet> but then do-request doesn't have to bother with understanding all the errors
+
+[03:05] <Voldenet> it just does regular golden path with "die" when necessary
+
+[03:05] <disbot13> <nemokosch> I don't understand
+
+[03:06] <Voldenet> > my $db = db-connect; LEAVE $db.try-disconnect; return $db.get-item($request.int-from-post<id>)
+
+[03:07] <Voldenet> that'd be code of some method
+
+[03:07] <Voldenet> and all of these methods can throw 10 exceptions
+
+[03:07] <Voldenet> socket connection, dns resolution, timeouts, wrong request
+
+[03:08] <Voldenet> or rather, deserialization error
+
+[03:08] <Voldenet> when writing that you don't want to handle errors on-site because request would be failed anyway… but you don't want to hardwire the code to return HTTP codes
+
+[03:08] <disbot13> <nemokosch> none of those seem to be recoverable
+
+[03:09] <disbot13> <nemokosch> I still don't see this middle ground where by default you'd still want to propagate but cherry-pick some to return values
+
+[03:10] <Voldenet> Well, connection error and friends should be 500 - server error
+
+[03:10] <disbot13> <nemokosch> also, at this point I can't see the big win
+
+[03:10] <Voldenet> but deserialization error would be 400
+
+[03:10] <Voldenet> failure to find item would be 404
+
+[03:10] <disbot13> <nemokosch> in my solution, you still have the exceptions, it's just the "catching" is the default behavior
+
+[03:10] <Voldenet> however it's only responsibility of http, not the internal method that gets the item
+
+[03:10] <disbot13> <nemokosch> and the "rethrowing" is the manual part
+
+[03:11] <disbot13> <nemokosch> also, you avoid the sub wrapping and the phaser
+
+[03:13] <disbot13> <nemokosch> to my understanding, my version also doesn't need manual propagation on all levels of the call stack, only one rethrow - specifically needed because some exceptions were handled on that level
+
+[03:13] <disbot13> <nemokosch> not just handled but "recast" as values
+
+[03:15] *** hulk left
+[03:15] *** kylese joined
+[03:16] <Voldenet> well, you can't handle one specific error and not others
+
+[03:16] <disbot13> <nemokosch> how not?
+
+[03:16] <Voldenet> m: class X is Exception { }; my $result = do given try { die X.new }, $! { when *, X::AdHoc { "Some other exception thrown: $_[1]" }; default { "Proper value: $_[0]"; } }; say $result
+
+[03:16] <camelia> rakudo-moar a3566826f: OUTPUT: «Use of Nil in string context␤Proper value: ␤  in block  at <tmp> line 1␤»
+
+[03:17] <disbot13> <nemokosch> okay, this is hard to read
+
+[03:17] <disbot13> <nemokosch> but if I get the idea: this can be addressed by one line of code
+
+[03:17] <disbot13> <nemokosch> and it's a constant one line
+
+[03:19] <Voldenet> + you get to choose which errors are handled and which should be thrown further
+
+[03:20] <Voldenet> for completness
+
+[03:20] <Voldenet> m: class X is Exception { }; my $result = sub n() { CATCH { when X::AdHoc { return "bar" }; }; die "blah"; }(); say $result
+
+[03:20] <camelia> rakudo-moar a3566826f: OUTPUT: «bar␤»
+
+[03:20] <Voldenet> m: class X is Exception { }; my $result = sub n() { CATCH { when X::AdHoc { return "bar" }; }; X.new.throw }(); say $result
+
+[03:20] <camelia> rakudo-moar a3566826f: OUTPUT: «Died with X␤  in sub n at <tmp> line 1␤  in block <unit> at <tmp> line 1␤␤»
+
+[03:21] <disbot13> <nemokosch> well, you get to choose that either way, don't you
+
+[03:21] <disbot13> <nemokosch> this is not a difference
+
+[03:21] <Voldenet> No, because try will gobble up the exception
+
+[03:22] <Voldenet> so you can't say "ignore this error" because you've already chosen to handle everything :)
+
+[03:23] <Voldenet> you can do `*, Exception { $_[1].rethrow }` but it's what you get for free when using regular CATCH
+
+[03:24] <disbot13> <nemokosch> I mean, to recite a classic: "this is a sacrifice I'm willing to make"
+
+[03:24] <disbot13> <nemokosch> this is the constant one line "fix"
+
+[03:25] <Voldenet> well, probably depends on use case
+
+[03:25] <Voldenet> but it suspiciouly looks like golang error handling
+
+[03:25] <Voldenet> which is scary verbose
+
+[03:26] <Voldenet> 80% of any code is not actual code but the ritual of error handling
+
+[03:26] <disbot13> <nemokosch> 1. I don't agree it's scary verbose 2. it does auto-propagate 3. I think the whole idea is quite mad to begin with
+
+[03:27] <disbot13> <nemokosch> on a different note: I wonder if last statements in CATCH count as sink context, because they de facto are and could report a worry
+
+[03:28] <Voldenet> note, I've always used `return ""`
+
+[03:28] <Voldenet> It probably may not work well otherwise
+
+[03:29] <disbot13> <nemokosch> yes, it wouldn't work well (and to be able to use return, you needed a sub)
+
+[03:29] <Voldenet> or rather, not work at all
+
+[03:30] <disbot13> <nemokosch> but I wonder if there is a worry for just dropping something like CATCH { 42 }
+
+[03:31] <Voldenet> Ah, yes, that could be worry
+
+[03:32] <disbot13> <nemokosch> anyway, the trade-offs are vastly different
+
+[03:32] <disbot13> <nemokosch> what I appreciate in your version is that indeed, it does the right/safe thing by default, it's harder to mess up
+
+[03:34] <disbot13> <nemokosch> however, I really don't like the extraneous sub needed for the return(s), and the implication was "I might want to handle undefined values differently" so some sort of dispatch over the outcome of the call would be needed either way
+
+[03:34] <disbot13> <nemokosch> considering that, I'd say it was actually rather compact
+
+[03:36] <Voldenet> well yes, in the version with (result, error) tuple you can handle any sort of invalid result
+
+[03:36] <Voldenet> so I guess I was just looking at very specific use case
+
+[03:38] <disbot13> <nemokosch> this was meant to be my main complaint, by the way: separating into 3 (or more) categories, special-case for both undefined values and exceptions, and then Raku even has failures - trivial to add into this given-when tuple pattern
+
+[03:39] <disbot13> <nemokosch> "weird flex but okay"
+
+[03:39] <disbot13> <nemokosch> I like my flexes to be weird
+
+[03:39] <Voldenet> liking your weird flexes is a weird flex
+
+[03:39] <Voldenet> ;)
+
+[03:39] <disbot13> <nemokosch> is there a catch-23?
+
+[03:41] <Voldenet> I didn't get it, is there a catch?
+
+[03:42] <disbot13> <nemokosch> no, much more like a loophole
+
+[03:42] <Voldenet> btw, regarding that `sub + return`there was supposed to be something that would leave the block
+
+[03:43] <disbot13> <nemokosch> really?
+
+[03:45] <disbot13> <nemokosch> this makes me wanna recall how Self is structured
+
+[03:47] <Voldenet> it was in apocalypse 6: https://www.perl.com/pub/2003/03/07/apocalypse6.html/
+
+[03:47] <Voldenet> > There will be a leave function that can return from other scopes. By default it exits from the innermost block
+
+[03:49] <disbot13> <nemokosch> Self has this with exit
+
+[03:55] <disbot13> <nemokosch> but... if I understand it correctly, it requires a magic callback for the block
+
+[03:55] <disbot13> <nemokosch> so it's kinda like the Promise constructor in JS
+
+[03:57] <disbot13> <nemokosch> to be fair, you can emulate early termination in Raku, with control exceptions - that's how last and next work
+
+[04:00] <disbot13> <nemokosch> well, this is not such a smart observation as I hoped xD that's how return itself works, and the sub wrapping is probably the cleanest way to catch it
+
+[04:12] *** stanrifkin_ joined
+[04:14] *** stanrifkin left
+[05:12] *** jrjsmrtn left
+[05:13] *** jrjsmrtn joined
+[05:41] <Voldenet> yes, otoh you can return from block directly and it's a feature… sort of
+
+[05:42] <Voldenet> m: sub x { { return 42 } }; say x
+
+[05:42] <camelia> rakudo-moar a3566826f: OUTPUT: «42␤»
+
+[05:47] <Voldenet> the only thing I don't get is this
+
+[05:48] <Voldenet> m: sub x { Any.map({ return 42 }) }; say x() # Yes I know what I'm doing!
+
+[05:48] <camelia> rakudo-moar a3566826f: OUTPUT: «Attempt to return outside of immediately-enclosing Routine (i.e. `return` execution is outside the dynamic scope of the Routine where `return` was used)␤  in block <unit> at <tmp> line 1␤␤»
+
+[06:03] *** wayland76 joined
+[06:28] *** Aedil joined
+[07:46] *** ab5tract left
+[07:46] *** ab5tract joined
+[08:01] *** abraxxa joined
+[08:06] *** abraxxa left
+[08:07] *** abraxxa joined
+[08:13] *** perryprog left
+[08:13] *** perryprog joined
+[08:38] *** Sgeo left
+[08:59] *** tailgate left
+[08:59] *** tailgate joined
+[09:21] *** stanrifkin_ left
+[09:40] *** bobv joined
+[11:26] *** librasteve_ joined
+[11:41] <lizmat> weekly: https://dev.to/lizmat/store-proxy-fetch-a07
+
+[11:41] <notable6> lizmat, Noted! (weekly)
+
+[11:43] <lizmat> m: sub x { for 42 { return 42 } }; say x   # oddly enough, this is not an issue Voldenet 
+
+[11:43] <camelia> rakudo-moar a3566826f: OUTPUT: «42␤»
+
+[11:47] <Voldenet> lizmat: it would be scary if returning from `for` didn't work, it would make writing simple find difficult
+
+[11:48] <lizmat> yeah, but the .map is functionally equivalent
+
+[11:49] <Voldenet> ah, right
+
+[11:49] <Voldenet> m: sub x { do for ^5 { return 42 } }; x().say
+
+[11:49] <camelia> rakudo-moar a3566826f: OUTPUT: «42␤»
+
+[11:50] <Voldenet> m: sub x { (^5).map({ return 42 }) }; x().say
+
+[11:50] <camelia> rakudo-moar a3566826f: OUTPUT: «Attempt to return outside of immediately-enclosing Routine (i.e. `return` execution is outside the dynamic scope of the Routine where `return` was used)␤  in block <unit> at <tmp> line 1␤␤»
+
+[11:50] <lizmat> so I wonder what's going on there
+
+[11:52] <Voldenet> m: sub my-map(@x, &y) { do for @x { y($_) } }; (^5).&my-map({ $_ + 1 }).say
+
+[11:52] <camelia> rakudo-moar a3566826f: OUTPUT: «(1 2 3 4 5)␤»
+
+[11:52] <Voldenet> m: sub my-map(@x, &y) { do for @x { y($_) } }; (^5).&my-map({ return 42 }).say
+
+[11:52] <camelia> rakudo-moar a3566826f: OUTPUT: «Attempt to return outside of any Routine␤  in block <unit> at <tmp> line 1␤␤»
+
+[11:53] <Voldenet> however…
+
+[11:53] <Voldenet> sub my-map(@x, &y) { do for @x { y($_); return 42 } }; (^5).&my-map({ $_ + 1 }).say
+
+[11:53] <Voldenet> m: sub my-map(@x, &y) { do for @x { y($_); return 42 } }; (^5).&my-map({ $_ + 1 }).say
+
+[11:53] <camelia> rakudo-moar a3566826f: OUTPUT: «42␤»
+
+[11:53] <Voldenet> so it's not about for, but about how block is executed
+
+[11:54] <Voldenet> m: sub foo(&y) { y() }; foo({ return 42 }).say
+
+[11:54] <camelia> rakudo-moar a3566826f: OUTPUT: «Attempt to return outside of any Routine␤  in block <unit> at <tmp> line 1␤␤»
+
+[12:06] *** xelxebar left
+[12:06] *** xelxebar joined
+[12:08] <lizmat> yeah, the argument handling logic is not inside the scope of the sub yet, I don't think
+
+[12:20] *** abraxxa left
+[13:08] <lizmat> hmmmm...
+
+[13:13] <lizmat> the problem is that the { return 42 } is indeed outside the scope of any routine
+
+[13:14] <lizmat> timo might have an idea of what is going on here
+
+[13:27] <timo> i think return is specified to be lexotic, i.e. has to be not only lexically inside the routine it's meant to return from, and also inside its dynamic scope (which is required for return to even work at all)
+
+[13:27] <timo> m: return 99
+
+[13:27] <camelia> rakudo-moar a3566826f: OUTPUT: «Attempt to return outside of any Routine␤  in block <unit> at <tmp> line 1␤␤»
+
+[13:27] <timo> m: sub foo(&y) { y() }; sub bar { foo({ return 42 }).say }; bar();
+
+[13:27] <camelia> rakudo-moar a3566826f: ( no output )
+
+[13:27] <timo> m: sub foo(&y) { y() }; sub bar { foo({ return 42 }).say }; say bar();
+
+[13:27] <camelia> rakudo-moar a3566826f: OUTPUT: «42␤»
+
+[13:28] <timo> m: sub foo(&y) { LEAVE { say "returning from foo" }; y() }; sub bar { LEAVE { say "returning from bar"; }; foo({ return 42 }).say }; say bar();
+
+[13:28] <camelia> rakudo-moar a3566826f: OUTPUT: «returning from foo␤returning from bar␤42␤»
+
+[13:29] <timo> well, that's not accurate to say "returning from", it's just "leaving"
+
+[13:31] <timo> but that shows that the .say inside of bar isn't the one outputting the 42
+
+[13:32] <timo> m: sub foo(&y) { LEAVE { say "leaving foo" }; y() }; sub bar { LEAVE { say "leaving bar"; }; say "result of foo: " ~ foo({ return 42 }) }; say "result of bar: " ~ bar();
+
+[13:32] <camelia> rakudo-moar a3566826f: OUTPUT: «leaving foo␤leaving bar␤result of bar: 42␤»
+
+[13:32] <timo> that's what i meant
+
+[13:33] <lizmat> timo++
+
+[13:38] <Voldenet> ah, so in fact, it's a feature of map that prevents that
+
+[13:38] <Voldenet> m: sub x { (^5).-map({ return 42 }) }; x.say
+
+[13:38] <camelia> rakudo-moar a3566826f: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Malformed postfix call␤at <tmp>:1␤------> sub x { (^5).<HERE>-map({ return 42 }) }; x.say␤»
+
+[13:38] <Voldenet> m: sub x { (^5).map({ return 42 }) }; x.say
+
+[13:38] <camelia> rakudo-moar a3566826f: OUTPUT: «Attempt to return outside of immediately-enclosing Routine (i.e. `return` execution is outside the dynamic scope of the Routine where `return` was used)␤  in block <unit> at <tmp> line 1␤␤»
+
+[13:38] <Voldenet> m: m: sub my-map(@x, &y) { do for @x { y($_) } }; sub x { (^5).&my-map({ return 42 }) }; x.say # custom map implementation, same return
+
+[13:38] <camelia> rakudo-moar a3566826f: OUTPUT: «42␤»
+
+[13:47] <timo> very possible that map catches CONTROL exceptions and reacts to return
+
+[13:47] <lizmat> pretty sure it doesn't do  the return control message
+
+[13:48] <lizmat> redo / next / last   yes
+
+[13:49] <timo> then it could be that the "do for" doesn't do lazyness as expected
+
+[13:49] <timo> wait i think i got it in backwards
+
+[13:50] <lizmat> m: dd do for ^10 { }
+
+[13:50] <camelia> rakudo-moar a3566826f: OUTPUT: «(Nil, Nil, Nil, Nil, Nil, Nil, Nil, Nil, Nil, Nil)␤»
+
+[13:50] <lizmat> hmmm.,,.. I thought that generated a Seq?
+
+[13:50] <lizmat> m: my $a := do for ^10 { }; dd $a
+
+[13:50] <camelia> rakudo-moar a3566826f: OUTPUT: «(Nil, Nil, Nil, Nil, Nil, Nil, Nil, Nil, Nil, Nil)␤»
+
+[13:50] <lizmat> m: my $a := do for ^10 { }; dd $a.^name
+
+[13:50] <camelia> rakudo-moar a3566826f: OUTPUT: «"List"␤»
+
+[13:51] <lizmat> interesting
+
+[13:51] <lizmat> I guess it's a lazy list
+
+[13:51] <timo> m: my $a := do lazy for ^10 { }; dd $a.^name
+
+[13:51] <camelia> rakudo-moar a3566826f: OUTPUT: «"Seq"␤»
+
+[13:51] <timo> m: my $a := do lazy for ^10 { }; dd $a
+
+[13:51] <camelia> rakudo-moar a3566826f: OUTPUT: «(Any, Any, Any, Any, Any, Any, Any, Any, Any, Any).lazy.Seq␤»
+
+[13:51] <timo> m: sub my-map(@x, &y) { do lazy for @x { y($_) } }; sub x { (^5).&my-map({ return 42 }) };
+
+[13:51] <camelia> rakudo-moar a3566826f: ( no output )
+
+[13:51] <lizmat> m: my $a := do for ^10 { }; dd $a.iterator.^name
+
+[13:51] <camelia> rakudo-moar a3566826f: OUTPUT: «"Rakudo::Iterator::ReifiedListIterator"␤»
+
+[13:51] <timo> m: sub my-map(@x, &y) { do lazy for @x { y($_) } }; sub x { (^5).&my-map({ return 42 }) }; x.say
+
+[13:51] <camelia> rakudo-moar a3566826f: OUTPUT: «(...)␤»
+
+[13:52] <timo> still not the same thing, the builtin-map one tries to reify when stringifying, so it doesn't just turn into "(...)" without running the code?
+
+[13:52] <lizmat> that'd be .gist fr you
+
+[13:53] <timo> m: sub my-map(@x, &y) { do lazy for @x { y($_) } }; sub x { (^5).&my-map({ say "mapped block run"; return 42 }) }; say "first"; x.say; say "second"; .say for x
+
+[13:53] <camelia> rakudo-moar a3566826f: OUTPUT: «first␤Attempt to return outside of immediately-enclosing Routine (i.e. `return` execution is outside the dynamic scope of the Routine where `return` was used)␤  in block <unit> at <tmp> line 1␤␤(...)␤second␤mapped block run␤»
+
+[13:53] <timo> ah, and this is stdout and stderrr interleaving on camelia
+
+[13:53] <timo> m: sub my-map(@x, &y) { do lazy for @x { y($_) } }; sub x { (^5).&my-map({ note "mapped block run"; return 42 }) }; note "first"; x.say; note "second"; .&note for x
+
+[13:53] <camelia> rakudo-moar a3566826f: OUTPUT: «first␤(...)␤second␤mapped block run␤Attempt to return outside of immediately-enclosing Routine (i.e. `return` execution is outside the dynamic scope of the Routine where `return` was used)␤  in block <unit> at <tmp> line 1␤␤»
+
+[13:58] *** dmvrtx left
+[13:59] *** dmvrtx joined
+[14:04] <disbot13> <nemokosch> this is interesting indeed
+
+[14:05] <disbot13> <nemokosch> but why/how is it "outside the dynamic scope of the Routine"?
+
+[14:05] <timo> the x routine is already long gone when the block is run
+
+[14:06] <disbot13> <nemokosch> ahh, so this is an effect of the laziness?
+
+[14:06] <timo> i wonder if we can cheaply get a reference to the routine where "return" was actually put
+
+[14:07] <timo> that's right
+
+[14:07] <disbot13> <nemokosch> it's kind of a closure
+
+[14:08] <timo> the routine where return lexically lives is x, but x has returned the lazy sequence, so attempting to return something else when grabbing an element from the lazy sequence would have to jump back in time to cause the lazy sequence to not have been returned in the first place, causing a grandfather paradox
+
+[14:08] <disbot13> <nemokosch> xddd
+
+[14:09] <timo> under the interpretation that the return has to return from the lexically enclosing routine, rather than just "sending a return control exception upwards to return from the first routine that can be found on the stack"
+
+[14:10] <disbot13> <nemokosch> comparing it with Self:
+
+[14:10] <disbot13> <nemokosch> > It is an error to evaluate a block method after the activation record for its lexically enclosing scope has returned. Such a block is called a non-lifo block because returning from it would violate the last-in, first-out semantics of activation object invocation.
+
+[14:11] <disbot13> <nemokosch> the block outright cannot run like this
+
+[14:14] <disbot13> <nemokosch> I don't know, it could be that I opened an issue back then for next and last propagating through function boundaries
+
+[14:48] *** jgaz joined
+[14:48] *** eseyman left
+[14:49] *** eseyman joined
+[15:04] *** hvxgr_ joined
+[15:36] <disbot13> <aruniecrisps> I use .NFD.list.chrs to get the code points as a list
+
+[15:40] *** Sgeo joined
+[15:42] *** El_Che left
+[15:44] *** El_Che joined
+[15:47] <disbot13> <nemokosch> I'd really be curious about the use case because aggressive normalisation of strings (performance aside) is imo the best thing one can do
+
+[15:47] <disbot13> <nemokosch> one of the things that Raku got "the most right"
+
+[16:09] <timo> I would have liked a built-in that turns incoming bytes into "untreated" unicode codepoints so that parsing of JSON can be done fully round-trippable
+
+[16:15] *** human_blip left
+[16:17] *** human_blip joined
+[16:20] <ab5tract> timo: I've always been confused why this isn't just built in
+
+[16:21] *** stanrifkin joined
+[16:24] <ab5tract> I got into a debate about this with a Swift fan 10 years ago and wrote up a class that does this via bufs
+
+[16:28] <disbot13> <antononcube> I was wondering should I go back to Swift or not... Did a fair amount of programming with it 4 years ago. (The potential app "audience" is huge!)
+
+[16:31] <ab5tract> timo: I have to imagine that we could do some sort of pragma that costs more memory but allows round-tripping
+
+[16:31] <Voldenet> Ah, so it's actually possible to use return from map inside a sub…
+
+[16:31] <Voldenet> m: sub x { (^5).map({ return 42 }).eager }; x.say
+
+[16:31] <camelia> rakudo-moar a3566826f: OUTPUT: «42␤»
+
+[16:32] <Voldenet> It all makes sense now
+
+[16:32] <ab5tract> Voldenet: shouldn't that be 42 xx 5
+
+[16:32] <Voldenet> no, it's a very weird special case :P
+
+[16:32] <ab5tract> ok :)
+
+[16:32] <Voldenet> return 42 actually returns value from x, not from map
+
+[16:33] <ab5tract> right, that's what I expect, but I wasn't sure what you expect :)
+
+[16:34] <Voldenet> it was a continuation of overly long topic that started with how error handling interacts with with return
+
+[16:34] <Voldenet> s/with//
+
+[16:34] <Voldenet> erm, not that with
+
+[16:34] <Voldenet> s/with with/with/
+
+[16:36] <ab5tract> ah I didn't scroll back far enough to discover that it was about error handling
+
+[16:39] <timo> ab5tract: using utf8-c8 as encoding allows for round tripping
+
+[16:39] <disbot13> <aruniecrisps> @nemokosch one thing I did run into with the Unicode normalization that made it slightly harder was working with Indic alphasyllbaries, it was harder to delete diacritics and or modify diacritics when its completely normalized
+
+[16:39] <timo> i'm not sure if you can actually get the unicode codepoints out of a utf8-c8 encoded string easily
+
+[16:40] <ab5tract> timo: ah good to know. But I am thinking it would be nice to have the NFG for all the comparison operations but then be able to put the original bytes back as I found them
+
+[16:42] <timo> if you really just want the original bytes without changing stuff, it's probably best to store the original Blob in addition to the Str
+
+[16:52] *** human_blip left
+[16:54] *** human_blip joined
+[16:55] <disbot13> <nemokosch> Swift seemed like a rather clever language to me
+
+[16:56] <disbot13> <nemokosch> a good tradeoff between a large, rather unopinionated high-level language and performance and reliability concerns
+
+[16:57] <disbot13> <nemokosch> why is it needed to delete or modify the diacritics in that domain?
+
+[16:58] <timo> could have been for building something literally for working with these kinds of characters
+
+[17:03] <disbot13> <nemokosch> what I'm trying to figure out is whether strings are the logical level of abstraction
+
+[17:06] <korvo> Swift's got quite a lot of bad design decisions under the hood. I agree that its Unicode handling is inspiring, but be wary of copying it directly.
+
+[17:09] <disbot13> <nemokosch> ultimately I think this string topic depends a lot on the principle
+
+[17:10] <disbot13> <nemokosch> one has to ask the question: "what is a string?"
+
+[17:10] <disbot13> <antononcube> @korvo "Swift's got quite a lot of bad design decisions under the hood." I am glad I started programming with Swift 5.0 and not Swift 4.0. As for bad design decisions, I recall some frustration, but that was 4 years ago. Maybe with LLMs those design elements do not matter much.
+
+[17:11] <disbot13> <nemokosch> in general, "this feature can be abused" would be funny criticism on a Raku server
+
+[17:16] <korvo> https://danielchasehooper.com/posts/why-swift-is-slow/ is an example that is still outstanding.
+
+[17:21] <disbot13> <librasteve> maybe we need a concept where you can store the Str and the original Blob in the same object (and it ~~ Str when passed to a sub)?
+
+[17:22] <disbot13> <nemokosch> you posted this before, I remember
+
+[17:22] <lizmat> that sounds suspiciously like a BlobStr allomorph
+
+[17:22] <disbot13> <nemokosch> and this is rather a case of "can be abused deliberately"
+
+[17:23] <disbot13> <nemokosch> I didn't want to proactively say it but please no more allomorphs...
+
+[17:23] *** stanrifkin left
+[17:23] *** human_blip left
+[17:23] <disbot13> <nemokosch> the problem with allomorphs is that they simply try to guess when a diamond problem arises
+
+[17:24] <disbot13> <nemokosch> and given how fat Any is, the diamond problem will arise
+
+[17:24] *** human_blip joined
+[17:25] <lizmat> alternately, introduce a $*ENCODING dynvar (default to utf-8)   and make Blob.Str default to Blob.decode($*ENCODING)
+
+[17:25] <disbot13> <librasteve> probably this one could be done as a module, then you can decide if you like this approach or not
+
+[17:26] <disbot13> <nemokosch> a question like "what is a string" could still have different answers but I tend to prefer Raku's answer
+
+[17:26] <disbot13> <nemokosch> which is: a string is text
+
+[17:26] <disbot13> <nemokosch> it's not bytes, it's not codepoints
+
+[17:27] <disbot13> <nemokosch> bytes and codepoints have a place in the universe regardless
+
+[17:39] <ShimmerFairy> If you need to work with text on multiple levels, you're gonna have to keep copies in different forms no matter what you do (e.g. a Str and a Uni, or an NFC and a Blob). Whatever it is you're doing, you're probably wanting to keep operations in sync across the different forms, and that's gonna be impossible with a bundled-up premade allomorph class.
+
+[17:42] <disbot13> <nemokosch> I'd naively think it's almost always the right thing to make the lower-level representation the "master" in these cases
+
+[18:00] *** stanrifkin joined
+[18:03] <disbot13> <aruniecrisps> @nemokosch because I'm building a conjugations engine for South Asian languages, and much of that involves removing/replacing the diacritics which are used to represent vowels in these languages
+
+[18:04] <disbot13> <nemokosch> how to ask this in a way that makes sense, hm...
+
+[18:05] <disbot13> <nemokosch> is it just coincidentally useful to be able to remove the diacritics or is there some sort of invariant systemic rule about it?
+
+[18:06] <disbot13> <aruniecrisps> No you have to replace vowels, in languages like Tamil in order to combine words and endings, if the final vowel of the first word is u and the second word begins in a vowel, the first letter of the second word gets turned into a diacritic of the final consonant
+
+[18:07] <lizmat> m: use v6.e.PREVIEW; say "élève".nomark'    # aruniecrisps
+
+[18:07] <camelia> rakudo-moar a3566826f: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Two terms in a row␤at <tmp>:1␤------> use v6.e.PREVIEW; say "élève".nomark<HERE>'    # aruniecrisps␤    expecting any of:␤        infix␤        infix stopper␤        postfix␤        statement …»
+
+[18:07] <disbot13> <nemokosch> so this happens always then?
+
+[18:07] <disbot13> <aruniecrisps> Yes
+
+[18:07] <lizmat> m: use v6.e.PREVIEW; say "élève".nomark    # aruniecrisps
+
+[18:07] <camelia> rakudo-moar a3566826f: OUTPUT: «eleve␤»
+
+[18:07] <disbot13> <nemokosch> well, fair enough
+
+[18:08] <disbot13> <nemokosch> but is this blocked by normalization?
+
+[18:09] <disbot13> <aruniecrisps> @lizmat it's a bit more complicated than that, because in a lot of South Asian scripts you can actually combine consonants together graphically and the additional consonants themselves become either diacritics or they change the shape of the base consonant, the most appropriate function in a lot of these cases isn't nomark, it would be a function that only removes the final mark at the end of a cluster
+
+[18:09] <disbot13> <aruniecrisps> Which usually is a vowel mark
+
+[18:10] <lizmat> understood.... I just wanted to mention nomark as a quick way of finding out if something would need to be done
+
+[18:10] <disbot13> <aruniecrisps> @nemokosch you can't just use S/// to replace the vowel because that grapheme is normalized
+
+[18:10] <lizmat> if .nomark returns the same as the invocant, there are no diacritics
+
+[18:11] <lizmat> which could allow you to shortcut maybe
+
+[18:11] <disbot13> <aruniecrisps> The character that is counted as the last character is the base consonant which we don't want at all
+
+[18:12] <disbot13> <nemokosch> if the word ends with a vowel, how can the last character be a consonant?
+
+[18:13] <disbot13> <aruniecrisps> Because the vowel isn't represented by a separate vowel character like it is in Latin or Cyrillic
+
+[18:13] <disbot13> <aruniecrisps> It's a diacritic
+
+[18:13] <disbot13> <aruniecrisps> One second I'm on phone I'll make this easier to understand
+
+[18:16] <disbot13> <nemokosch> ooo 🤯
+
+[18:16] <ShimmerFairy> Out of curiosity, have you tried working on this problem with the latest Rakudo versions? Now that it's been updated to the latest Unicode, it has Unicode's new rules for Indic grapheme clusters and such, so I wonder if that's changed how you use NFG strings for the task.
+
+[18:17] *** bobv left
+[18:18] <disbot13> <aruniecrisps> Okay so let's take the letter க (the tamil letter ka) as an example; it's not a consonant or a vowel, it's a syllable. it works kind of like how it does in katakana in that this letter is a consonant and a vowel
+
+[18:18] <disbot13> <aruniecrisps> this in particular is the sound 'cu' in cut
+
+[18:18] <disbot13> <aruniecrisps> but if i wanted to make this syllable the ki in kit, i would have to modify it so that it looks like this கி
+
+[18:19] <disbot13> <aruniecrisps> and if i just wanted the k consonant, i add a dot on top of it like this: க்
+
+[18:20] <disbot13> <nemokosch> yes, this is quite incompatible with a grapheme-based approach
+
+[18:20] <disbot13> <aruniecrisps> but according to Unicode these are all just variants of the letter க so i can't just replace the last vowel like i could in other languages
+
+[18:21] <disbot13> <nemokosch> now I get it
+
+[18:22] <disbot13> <nemokosch> it's not necessarily useful to just say that கி is one letter
+
+[18:23] <disbot13> <aruniecrisps> @shimmerfairy I have used the latest Raku versions, and they do solve a bunch of problems for me, in particular i can just ask uniprops to see whether the last codepoint is a vowel killer ('Virama' according to Unicode) if i flatten the string to a bunch of codepoints. This solves the problem of manually checking to see whether the code point is a set of all South Asian languages Viramas
+
+[18:24] <disbot13> <aruniecrisps> @nemokosch well the thing is கி is one letter according to Tamil; we count things by grapheme as well
+
+[18:24] <disbot13> <aruniecrisps> we count characters as graphemes
+
+[18:24] <disbot13> <aruniecrisps> so Raku is correct for doing this
+
+[18:25] <lizmat> m: dd "கி".chars
+
+[18:25] <camelia> rakudo-moar 354284518: OUTPUT: «1␤»
+
+[18:25] <disbot13> <nemokosch> sounds like a rather conflicted reasoning
+
+[18:25] <disbot13> <nemokosch> Raku is less wrong then Tamil
+
+[18:25] <disbot13> <nemokosch> this is what I gather
+
+[18:26] <disbot13> <aruniecrisps> they're both correct
+
+[18:27] <disbot13> <aruniecrisps> the thing is Raku has really nice defaults for Unicode, but the problem is that actually manipulating those graphemes without anything more than nomark is a headache
+
+[18:27] <disbot13> <aruniecrisps> partially due to unicode's handling of these languages
+
+[18:28] <lizmat> so would making .Uni more like strings help ?
+
+[18:28] <lizmat> especially wrt .subst ?
+
+[18:30] <disbot13> <aruniecrisps> honestly it probably would help
+
+[18:30] <lizmat> so what would a typical needle be ?
+
+[18:30] <disbot13> <aruniecrisps> like this is my current code for checking if a word using an South Asian abugida ends in a consonant:
+
+[18:30] <lizmat> (as opposed to the haystack)
+
+[18:31] <disbot13> <aruniecrisps> sub ends-in-consonant(Str $s) is export {      $s.comb».uniprops('InSC').flat.tail eq 'Virama'  }
+
+[18:31] <disbot13> <aruniecrisps> multi lastmark(Str $s where .NFD.codes > 1) is export { $s.NFKD.list[ - 1].chrs } multi lastmark(Str $s) { '' }
+
+[18:31] <disbot13> <aruniecrisps> oops
+
+[18:31] <disbot13> <aruniecrisps>  multi lastmark(Str $s where *.NFD.codes > 1) is export { $s.NFKD.list[* - 1].chrs } multi lastmark(Str $s) { '' } 
+
+[18:31] <disbot13> <nemokosch> markdown for the one
+
+[18:32] <disbot13> <nemokosch> win, even
+
+[18:32] <lizmat> $s.substr(*-1)   would give you the last char
+
+[18:32] <lizmat> wouldn't that help ?
+
+[18:33] <disbot13> <nemokosch> the vowel would at the very least be a part of the last character, no?
+
+[18:33] <lizmat> $s.substr(*-1).uniprops("InSC") eq 'Virama'  ?
+
+[18:33] <disbot13> <aruniecrisps> for ends-in-consonant or lastmark?
+
+[18:33] <lizmat> ends-in-consonant
+
+[18:34] <disbot13> <aruniecrisps> $s.substr(* - 1) would get us something like க், and and uniprops on that wouldn't equal Virama
+
+[18:35] <disbot13> <aruniecrisps> it would equal (Consonant Virama)
+
+[18:35] <lizmat> $s.substr(*-1).uniprops("InSC").tail eq 'Virama'  ?
+
+[18:35] <disbot13> <nemokosch> that should be good news, no? 😅
+
+[18:36] <disbot13> <aruniecrisps> that indeed does work
+
+[18:36] <disbot13> <aruniecrisps> thanks for the help liz
+
+[18:37] <lizmat> yw
+
+[18:46] <ShimmerFairy> lizmat: fwiw I do think we need first-class support for working with strings of text at levels other than graphemes (e.g. wanting to write a Grammar for a file format where you want users to specify unnormalized strings), along with better support for Unicode properties and whatever else in the standard is useful to string processing.
+
+[18:46] <lizmat> would that need to live in core initially ?
+
+[18:47] <ShimmerFairy> That being said, I'm under no illusions that going over Raku's Unicode support like that would be a huge undertaking, so I'm not expecting it to be solved anytime soon. (Though I should at least get back to that review of the predefined Grammar rules.)
+
+[18:48] <disbot13> <nemokosch> the other thing is (probably also a huge undertaking) that Raku's string processing is just too slow for anything you wouldn't want to read in one go
+
+[18:51] <ShimmerFairy> lizmat: I think it would be possible, for the most part, to write a module implementing 'StrV2' and whatnot. The only hard parts would be Grammar support (e.g. `$my-Uni-str ~~ /<:L>+ <:M>/`) and possibly IO stuff.
+
+[18:53] <ShimmerFairy> MoarVM/NQP's handling of Unicode properties isn't the best (which would impact any proposed features needing properties), but a module could easily parse the UCD and set up its own kind of uniprop for that.
+
+[18:53] <lizmat> I guess...  but perhaps having .subst("foo".NFC, "bar".NFC) work would already be a something really useful for 
+
+[18:53] <lizmat> aruniecrisps
+
+[18:54] <ShimmerFairy> Yeah, non-regexy .subst variants ought to be just as doable without underlying Grammar support
+
+[18:54] <disbot13> <nemokosch> the first parameter of .subst is (usually) a regex, though, right?
+
+[18:54] <lizmat> well..  if you *can* specify it as a string, it's *much* faster
+
+[18:55] <disbot13> <nemokosch> sounds like a worthy special case
+
+[18:55] <lizmat> that's why it is implemented
+
+[18:56] <ShimmerFairy> Oh yeah, I suppose string literals would be another issue a module can't easily solve. Even if you could make up your own Q adverbs for custom string type literals, you'd still need the underlying Raku compiler to hand over the codepoints untouched.
+
+[18:56] <disbot13> <nemokosch> it's tempting to say: it could be a different quotation
+
+[18:57] <ShimmerFairy> But overall, at first thought a module exploring ideas should be able to illustrate/work out a hefty chunk of the potential redesign, if not most of it.
+
+[18:57] <disbot13> <nemokosch> I think as a different quotation, a slang could already do that
+
+[18:58] <disbot13> <nemokosch> although I have no idea how low it would have to dig to replicate the parsing logic
+
+[18:59] <ShimmerFairy> Like I said though, you'd still need to make sure Raku/NQP doesn't normalize the source code before it gets to you, so that you can manipulate it yourself. (One thing I've realized lately is that Raku ironically should probably not be parsing source as NFG text, for issues like this.)
+
+[19:00] <disbot13> <nemokosch> yeah... I for one don't know the order of things during parsing well enough to know whether a slang comes in too late or just in time to avoid normalisation
+
+[19:00] <ShimmerFairy> But perhaps "unnormalized string literals" are a low-priority feature in the grand scheme. Have to check what, say, C++ has to say about this sort of thing.
+
+[19:01] <lizmat> as long as it's valid NFG, the closing quote handling could probably re-encode it to whatever we want
+
+[19:01] <disbot13> <nemokosch> the problem is, it won't round trip
+
+[19:02] <disbot13> <nemokosch> so I guess you get the NFC version or something, at best
+
+[19:02] <lizmat> why?   It would be just a case of adapting NFC.raku
+
+[19:02] <lizmat> m: dd "foo".NFC
+
+[19:02] <camelia> rakudo-moar 7f39c4bb1: OUTPUT: «uint32  = Uni.new(0x0066, 0x006f, 0x006f).NFC␤»
+
+[19:03] <lizmat> so it wouldn't return that, but something like   §foo§    where § as quoting character would indicate NFC
+
+[19:03] <disbot13> <nemokosch> my point is that this isn't "unnormalized string"
+
+[19:03] <disbot13> <nemokosch> it's just "less normalized"
+
+[19:05] <lizmat> they're valid codepoints, so not just any ints
+
+[19:09] <ShimmerFairy> For a reimplementation of the standard normalization forms ('Module::NFCv2' etc.), the fact that it gets normalized beforehand doesn't matter. But it would be an issue if you wanted a Uni string literal specifically, since you will lose details when normalizing. (Anything with an NFC_QC property of "No", specifically.)
+
+[19:10] <disbot13> <nemokosch> so my understanding is: NFG <-> NFC is bijective for our purposes
+
+[19:10] <lizmat> ok, so you're saying it is impossible to create all possible .NFC from a string (in NFG)  ?
+
+[19:11] <disbot13> <nemokosch> any valid NFC sequence can be turned into one unambiguous sequence of NFG and vice versa
+
+[19:11] <lizmat> so that some NFC's would need to be created "manually"  ?
+
+[19:11] <disbot13> <nemokosch> however, NFC itself is "lossy"
+
+[19:11] <lizmat> but I think ShimmerFairy is stating that NFG is lossy ?
+
+[19:12] <lizmat> or am I misunderstanding ?
+
+[19:12] <ShimmerFairy> m: say "\c[GREEK QUESTION MARK]".uniname # An example of a codepoint that gets lost in NFC
+
+[19:12] <camelia> rakudo-moar 7f39c4bb1: OUTPUT: «SEMICOLON␤»
+
+[19:12] <disbot13> <nemokosch> so it gets lost in NFC - I think that's understood
+
+[19:13] <lizmat> right, so technically it's possible to create a quoting slang that would handle NFC and friends
+
+[19:13] <disbot13> <nemokosch> yes, NFC-normalized codepoint-strings should be possible imo
+
+[19:15] <disbot13> <nemokosch> it's just... they aren't so interesting because you could retrieve NFC codepoints of a string at any time
+
+[19:15] <disbot13> <nemokosch> so it's not a big win
+
+[19:16] <ShimmerFairy> Refreshing myself on the NFs, it seems that all the normalization forms are fine if your text was NFC'd first. The table under Goal 1 here shows equivalent transformations; anything with an inner "toNFC(x)" is relevant here: https://www.unicode.org/reports/tr15/#Design_Goals
+
+[19:30] <disbot13> <nemokosch> it's time to teach people to always write in NFC /jk
+
+[19:39] *** hvxgr_ left
+[19:40] *** ds7832 joined
+[19:42] *** Aedil left
+[20:05] <ds7832> Just stumbled upon this: As expected, comparing two Lists works by element-wise comparison. However, comparing two different Seqs works by comparing their stringifications. Is this behavior of Seq intended?
+
+[20:06] <ds7832> m: say (10, 5) cmp (7,6)
+
+[20:06] <camelia> rakudo-moar 7f39c4bb1: OUTPUT: «More␤»
+
+[20:06] <ds7832> m: say (10, 5).Seq cmp (7,6).Seq
+
+[20:06] <camelia> rakudo-moar 7f39c4bb1: OUTPUT: «Less␤»
+
+[20:06] <ds7832> or even if only one of them is a Seq:
+
+[20:06] <ds7832> m: say (10, 5) cmp (7,6).Seq
+
+[20:06] <camelia> rakudo-moar 7f39c4bb1: OUTPUT: «Less␤»
+
+[20:07] <ds7832> m: say (1, "5 6") cmp (1, 5, 6).Seq
+
+[20:07] <camelia> rakudo-moar 7f39c4bb1: OUTPUT: «Same␤»
+
+[20:09] <lizmat> I'd say that's a good catch
+
+[20:10] <timo> yeah that doesn't seem right indeed
+
+[20:11] <lizmat> perhaps multi sub infix:<cmp>(List:D \a, List:D \b) {
+
+[20:11] <lizmat> should really be
+
+[20:11] <disbot13> <aruniecrisps> @shimmerfairy @lizmat i would generally agree in that having extra utility functions for handling strings not at the grapheme level might help a lot more, and making Regexes work better with codepoints would help a lot with string substitution algos but ultimately it's up to you guys
+
+[20:12] <lizmat> multi sub infix:<cmp>(Iterable:D \a, Iterable:D \b) {
+
+[20:13] <lizmat> ds7832: could you make a Rakudo issue for that ?
+
+[20:14] <ds7832> yes I'll open an issue :)
+
+[20:14] <lizmat> thanks!
+
+[20:15] *** ds7832 left
+[20:17] *** ds7832 joined
+[20:24] *** DarthGandalf left
+[20:25] *** DarthGandalf joined
+[20:48] *** ds7832 left
+[21:32] <disbot13> <oshaboy> I wanted to make a string decomposition tool that shows the individual codepoints.   But I agree that most time you'd rather have normalization
+
+[21:33] <disbot13> <oshaboy> That would still normalize it
+
+[21:33] <disbot13> <oshaboy> Just with NFD
+
+[21:44] *** smls joined
+[21:54] <smls> m: say "XßX".match(/ :i ss /);
+
+[21:54] <camelia> rakudo-moar 4fb9c0dcb: OUTPUT: «｢ßX｣␤»
+
+[21:54] <smls> Is this a bug?
+
+[21:55] <[Coke]> in that it includes the second X? seems like.
+
+[21:55] <[Coke]> bisectable6: say "XßX".match(/ :i ss /);
+
+[21:55] <bisectable6> [Coke], Will bisect the whole range automagically because no endpoints were provided, hang tight
+
+[21:56] <bisectable6> [Coke], Output on all releases: https://gist.github.com/46d87472f00b6598e8f28cac097e0464
+
+[21:56] <bisectable6> [Coke], Bisecting by output (old=2017.03 new=2017.04.3) because on both starting points the exit code is 0
+
+[21:57] <bisectable6> [Coke], bisect log: https://gist.github.com/57edbe1f03257925291f1ee6ae2bde00
+
+[21:57] <bisectable6> [Coke], (2017-04-14) https://github.com/rakudo/rakudo/commit/822566f1ade5af59dc69ff264609bf75f0bf0f7e
+
+[21:57] <bisectable6> [Coke], Output on all releases and bisected commits: https://gist.github.com/390856f756b92c673ade1b6324f581a7
+
+[21:57] <[Coke]> Looks like it's always been that way.
+
+[21:57] <[Coke]> (since it worked at all)
+
+[21:59] <smls> m: say "ss".match(/ :i ß /);
+
+[21:59] <camelia> rakudo-moar 4fb9c0dcb: OUTPUT: «｢s｣␤»
+
+[22:02] <smls> Looks like the actual matching considers multi-codepoint expansions for casefolding, but the `Match` result object doesn't know about this
+
+[22:28] *** stanrifkin left
+[22:45] *** swaggboi left
+[22:47] *** swaggboi joined
+[23:10] *** Geth joined
+[23:16] *** librasteve_ left
+[23:40] *** smls left

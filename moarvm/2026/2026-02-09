@@ -1,0 +1,133 @@
+[11:01] *** rakkable left
+[11:02] *** rakkable joined
+[11:33] *** librasteve_ joined
+[12:15] <librasteve_> https://rakudoweekly.blog/2026/02/09/2026-06-cod-yn-gymraeg/
+
+[12:56] <timo> patrickb: can you share the code you're using to try all this?
+
+[14:17] <patrickb> The code is here: https://git.sr.ht/~patrickb/app-moarvm-tuidebugger/tree/debug-pcap
+
+[14:17] <patrickb> it needs https://github.com/raku-community-modules/MoarVM-Remote/pull/7 applied
+
+[14:20] <patrickb> I've gained a few more insights. From what I can see, the full thread list response is sent over the wire (visible in wireshark) and seems sane on first sight (I did validate the thread array actually contains the same number of elements as declared before hand). None of that data shows up on the IO::Async::Socket. I.e. a `note` in the `whenever $sock` does not hit.
+
+[14:21] <patrickb> The code surrounding `$sock` seems sensible (i.e. it doesn't look as if the socket is prematurely closed or some such)
+
+[14:22] <patrickb> This makes me start to suspect something is up with IO::Socket::Async itself.
+
+[14:25] <patrickb> lizmat: Can you also have a look at the other MoarVM::Remote PR now that you're at it? :-)
+
+[14:27] <lizmat> patrickb: want me to do a merge of those and a new release?  or can you do the release yourself?
+
+[14:29] <patrickb> timo: There is a `run.sh` script to boot up the debugger. You'll need to adapt the script to work on your machine
+
+[14:30] <timo> did you see that there's a $!debug that outputs the same stuff on $*ERR?
+
+[14:30] <patrickb> lizmat: I wouldn't want to do a release yet. There'll surely be more stuff showing up that will need changes. So I'll be happy to just collect commits for now.
+
+[14:30] <lizmat> okidook
+
+[14:31] <patrickb> timo: I did. But adding my own `note`s lets me debug / gain understanding at my pace.
+
+[14:31] <timo> oh, that seems to be the messagepacked data, not the raw data
+
+[14:32] <patrickb> timo: I've added lots of prints in my local MoarVM::Remote checkout as well.
+
+[14:32] <timo> mhm
+
+[14:33] <patrickb> Of note I have a `note` right at the start of `whenever $sock.Supply(:bin) {`
+
+[14:34] <patrickb> Did you manage to get the thing actually show a UI on your screen?
+
+[14:35] <patrickb> (If so, you're probably the first person apart from me actually running this thing. It's not very useful yet though.)
+
+[14:36] <timo> i'm still doing dayjob work, so can't do this immediately
+
+[14:37] <patrickb> No rush, I'm just curious if the thing actually runs somewhere else (given the long list of `-I...` in that run.sh script)
+
+[14:42] <timo> have you also tried the same thing with the CLI debugger?
+
+[14:49] <patrickb> I did not...
+
+[14:56] <timo> would be a good data point
+
+[14:56] <timo> do you know about the ownup module liz made?
+
+[14:58] <timo> oh, it's a bit difficult to use that with a TUI application though
+
+[15:05] <patrickb> I fail to get the cli debugger going. It doesn't manage to connect to the port. Let's see if I can get it going when starting the child on my own...
+
+[15:06] <patrickb> Nope, doesn't work either.
+
+[15:11] <timo> ... how?
+
+[15:16] <patrickb> got it to work
+
+[15:16] <patrickb> missed a `=` between `--debug-port` and `42745`
+
+[15:17] <patrickb> I can't immediately repro the issue in the CLI
+
+[15:18] <timo> then it seems like you might have a hang inside the TUI client
+
+[15:18] <patrickb> but how could that possibly cause the `whenever $sock` to not fire anymore?
+
+[15:19] <timo> you know a react or supply block has "actor" semantics?
+
+[15:19] * patrickb suspects he's soon gonna learn something new...
+
+[15:20] <timo> so if one of the whenever blocks is blocking, another whenever block can't run
+
+[15:20] <patrickb> yes
+
+[15:20] <timo> that's one possibility that can cause a hang
+
+[15:20] <lizmat> whenevers should be as short and quick as possible  :-)
+
+[15:21] <patrickb> But that `whenever $sock` is in MoarVM::Remote and pretty isolated. Wait... I might start to get it. If I in the TUI manage to act on that supply I'll block any further messages.
+
+[15:21] <patrickb> Yes.
+
+[15:22] <patrickb> It's not like I wouldn't in principle know that. I'm probably doing something stupid. Let's see.
+
+[15:23] <timo> that's probably related to the "sender pays" semantics
+
+[15:24] <timo> the emit that you're doing is blocking until the act is finished?
+
+[15:25] <patrickb> Yeah. I'm doing something stupid. I'm trying to do a full "state refresh" i.e. pull threads, locals, ... right in the breakpoint hit notification
+
+[15:26] <timo> ah, hehe.
+
+[15:26] <patrickb> I guess we found the issue. Thanks!
+
+[15:26] <timo> should be able to just put a .Channel.Supply in between or something :D
+
+[15:26] <timo> cool
+
+[15:27] <timo> you'll want some debouncing on state refreshes anyway probably, and Supply has some cool methods for that
+
+[15:28] <patrickb> Yes something like that. I'll have to mule a bit over this to get an idea of how I want to factor this nicely. I guess I want to have a setup that will ensure I'm not bitten by this again and again...
+
+[15:29] <patrickb> Also I want to ensure all that asynchronity won't mess up the UI. (There is user UI input and debug responses happening independently of one another)
+
+[15:30] <timo> yeah, it's critical to get that right
+
+[15:30] <patrickb> monitors could be a potential part of the solution.
+
+[15:31] <timo> Actor might be more helpful, as it would queue calls instead of blocking until the monitor is free
+
+[15:31] <timo> but it very much depends on the individual piece
+
+[15:32] <timo> most GUI applications have some manner of "GUI Thread" that if any part of the code wants to do something with the UI it would have to submit a little task to the GUI thread first, including grabbing properties of widgets and whatnot
+
+[15:33] <timo> maybe you'll want to adapt that kind of pattern for your program too
+
+[15:35] <patrickb> I already have a pretty sharp separation of UI and domain logic (there is a `View` class that encapsulates all UI stuff)
+
+[15:55] <timo> what are the chances of the same code being able to drive a GTK based GUI without too much changes? :D
+
+[18:34] <patrickb> I've never seen that particular abstraction actually work out without one or all of the UIs feeling severely uncomfortable / unfamiliar to use. To me separating UI from domain logic is mostly about separating concerns and making the software manageable.
+
+[18:35] <patrickb> But in general, I don't see why this shouldn't be doable.
+
+[18:37] <patrickb> (Also I'm pretty sure the by far largest part of the code will be UI, so there won't be that much code to be shared between the different UIs.)
+
