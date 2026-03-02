@@ -1,0 +1,290 @@
+[05:15] *** PerlJam joined
+[05:15] *** moritz_ joined
+[16:21] *** masak joined
+[17:57] *** pmichaud joined
+[17:58] *** colomon joined
+[18:59] <masak> o/
+[19:00] <moritz_> \\o
+[19:00] <spinclad> o/
+[19:00] <colomon> \\o
+[19:00] <TimToady> o
+[19:00] <pmichaud> _o_
+[19:01] <pmichaud> .oO( impersonation of a former maverick )
+[19:01] <moritz_> so, shall we start?
+[19:02] <masak> let's.
+[19:02] <moritz_> I'll just go ahead...
+[19:03] <moritz_> I patched NQP-rx to have methods that generate new array and match objects
+[19:03] <moritz_> and then I started a rakudo branch to use that
+[19:03] <moritz_> ran into problems overriding the vtable methods in the Match class
+[19:03] <moritz_> probably need to discuss with pmichaud
+[19:04] <moritz_> apart from that, applied patches, kept rakudo up to date wrt parrot
+[19:04] <moritz_> started my contribution challenge
+[19:04] <masak> \\o/
+[19:04] <colomon> moritz_++ # contribution challenge
+[19:04] <moritz_> already got one contribution  - see http://proto.perl6.org/
+[19:04] <moritz_> more ideas welcome
+[19:04] <moritz_> that's about it
+[19:05] <moritz_> blockers: lack of parrot-fu
+[19:05] <TimToady> .oO(parrot-flu?)
+[19:05] <masak> seems the 'things starting with q/Q' bug was fixed the other day. that's a relief.
+[19:05] <moritz_> does parrot-flu bring parrot-fu to you?
+[19:05] <moritz_> masak: I fixed it nqp-rx
+[19:06] <moritz_> masak: the same fix didn't work in rakudo
+[19:06] <masak> ah. :/
+[19:06] <TimToady> pay no attention to the joker behind the curtain
+[19:06] <masak> the 'closures not cloning' bug is still wreaking havoc for various people.
+[19:06] <masak> and they're all finding the same pir::clone_mumble fix.
+[19:06] <masak> ...thinking it'll be easy to apply to Rakudo. :)
+[19:07] <colomon> sorear wanted to talk to pmichaud about sorear's proposed fix, I know.
+[19:07] <colomon> something about changing PAST.
+[19:09] <colomon> I think we'd all be extremely happy to see the closure bug fixed.
+[19:09] * spinclad .oO(doesn't understand why newclosure (newlexpad?) shouldn't happen just at .() time)
+[19:11] <moritz_> are we making progress on this issue?
+[19:11] <moritz_> I think I saw some in #parrot
+[19:11] <pmichaud> spinclad: you have to do newclosure at the time the closure is created, not when it's invoked.
+[19:11] <TimToady> there was some pushback in #parrot last night on the subject
+[19:11] <pmichaud> I added some comments in #parrot this morning
+[19:11] *** sorear joined
+[19:12] <colomon> pmichaud: can you give us a super quick summary of what's involved?
+[19:12] <moritz_> http://irclog.perlgeek.de/parrot/2010-05-04#i_2291929
+[19:12] <moritz_> for the discussion
+[19:13] <spinclad> pmichaud: i understand that's the prescription, i just don't follow why.  but i don't want to dive into detail here.  will review moritz_'s link...
+[19:14] <spinclad> .oO( create closure _by_ invoking it... )
+[19:14] <pmichaud> spinclad: short answer:    sub xyz($a) { return -> { say $a } };   my $b = xyz(3);  my $c = xyz(4);  $b();
+[19:15] <pmichaud> by the time you get around to invoking $b, you have to have already cloned $a.
+[19:15] <pmichaud> waiting for $b to be invoked to do the cloning is too late.
+[19:16] <TimToady> I thought spinclad was saying use an empty .() at clone time as a sort of strange curry-the-clone-into-existence
+[19:16] <spinclad> the calls to xyz create two xyz closures, which the blocks returned are scoped inside.
+[19:17] <spinclad> so they should see different $a's.
+[19:17] <TimToady> spec currently says that the -> is actually clone on entry to xyz, more or less
+[19:17] <TimToady> *cloned
+[19:17] <TimToady> not really for bare lambda like that, but for named functions
+[19:18] <pmichaud> right
+[19:18] <spinclad> TimToady: no, i meant .() as the call operator
+[19:18] <TimToady> so if you take a ref to them before the code, you still get the clone
+[19:18] <pmichaud> spinclad: "create closure" is "newclosure"
+[19:18] <pmichaud> spinclad: oh, are you saying that the inner closure should be created on the invocation of xyz?
+[19:18] <TimToady> so in a sense, it is a .() time, just xyz's .() time, not the closure's
+[19:18] <pmichaud> right
+[19:19] <spinclad> no, the outer closure
+[19:19] <pmichaud> PCT already does that, but it currently does capture_lex
+[19:19] <spinclad> that's where $a is bound
+[19:19] <pmichaud> we can have it do newclosure instead, but that gets a bit wasteful for immediate blocks
+[19:19] <pmichaud> (and immediate blocks are the larger majority of blocks)
+[19:19] <TimToady> hence the verbiage in the spec about doing it lazily :)
+[19:19] <pmichaud> so what I proposed on #parrot is that PCT return newclosures by default for all non-immediate blocks
+[19:20] <pmichaud> and the more likely option is that it return newclosures for non-immediate blocks being used in non-void contexts, which PCT also knows about already.
+[19:21] <TimToady> not sure how you're using 'immediate' here...
+[19:21] <pmichaud> bare blocks
+[19:21] <pmichaud> bare blocks == 'immediate'
+[19:21] <TimToady> I'd think those would be pretty rare
+[19:21] <pmichaud> well, it's also for things like blocks to while/for/if/etc.
+[19:21] <TimToady> except in .t files :)
+[19:21] <TimToady> but those aren't bare blocks, and have to be cloned
+[19:22] <TimToady> (conceptually, anyway)
+[19:22] <pmichaud> they need cloning because...?
+[19:22] <pmichaud> exceptions?
+[19:22] <TimToady> outer vars might have been rebound, maybe?
+[19:22] <pmichaud> oh
+[19:23] <spinclad> ( i wonder if we're not currently delaying creating lexpads by one step, so in my view it's the outer lexpad that gets (and should get) created at scope entry, which makes perfect sense to me.  difference in terminology? )
+[19:23] <pmichaud> TimToady: so, if an outer var gets rebound, the body of a while shouldn't see that?
+[19:24] <pmichaud> that seems... odd
+[19:24] <TimToady> it should see it on the next iteration
+[19:24] <pmichaud> okay, that's what happens now
+[19:24] <pmichaud> it's still an "immediate block" -- it's just a new invocation instance
+[19:24] <pmichaud> oh wait
+[19:24] <pmichaud> on the next iteration, but not the current one?
+[19:25] <pmichaud> my $a = 'abc';   while $test { $OUTER::a := 'bar';  say $a; }
+[19:26] <TimToady> depends on what we link the inner $a to, the name $a or the container in it
+[19:26] <pmichaud> so, which is it, o specmaster?
+[19:26] <TimToady> er...
+[19:26] <spinclad> ( no clone, works great? )
+[19:27] <TimToady> I just feel a bit uncomfy with starting out by dividing closures into two categories, from the extensibility standpoint
+[19:27] <TimToady> logically, they all clone
+[19:28] <TimToady> and then we optimize from there
+[19:28] <spinclad> ( clone == create lexpad? )
+[19:28] <pmichaud> right, no problem.  That's what PCT is intended to do.
+[19:28] <pmichaud> spinclad: at the point of the clone the lexpads already exist
+[19:28] <TimToady> and while is not treated diffierently from mywhile, in the abstract
+[19:28] * masak likes that
+[19:30] <pmichaud> anyway, the short-term solution appears to be that non-immediate blocks need 'newclosure' instead of a simple capture_lex .
+[19:30] <TimToady> I see cloning as kind of a one-clone-lookahead, in the sense that on entry to xyz we make sure the inner lambda has a callable lexpad by the time we call it
+[19:30] <TimToady> extra clones are negotiable
+[19:31] <TimToady> so it's like you always get one clone for free, which you need anyway for immediate blocks, and then the control structure using the lambda tells it whether it needs to reclone
+[19:31] <TimToady> but maybe that's just me :)
+[19:33] <pmichaud> PCT does that for the most part
+[19:33] <pmichaud> it doesn't quite do the "clone every inner lambda" yet, because that gets tricky when dealing with package-scoped subs in non-p6 languages.
+[19:34] <TimToady> yeah, global subs are somewhat immiscible with lambdas, though we tried valiantly in p5
+[19:35] <pmichaud> anyway, the solution for PCT is slightly more than just changing capture_lex to newclosure
+[19:35] <pmichaud> and the solution for Rakudo is a lot more complex than that, because Rakudo blocks aren't PAST::Blocks
+[19:35] <spinclad> ( i think of xyz as already running on its lexpad, whose entries happen to be cached in registers, irrelevantly; so xyz needs its lexpad immediately, not just for the sake of subscopes... )
+[19:35] <pmichaud> spinclad: the point is that the subscopes have to already be bound to the current running xyz
+[19:36] <TimToady> well, a lambda needs its lexpad before it ever starts binding its parameters, since they live there
+[19:36] <pmichaud> there's also the difficulty that parrot doesn't really do dynamic outer binding properly
+[19:36] <spinclad> sure, they're bound to xyz's lexpad when they're created == invoked
+[19:37] <pmichaud> not necessarily
+[19:37] <TimToady> I suspect we're having two interfering conversations
+[19:37] <pmichaud> the :outer('...')   flag in Parrot binds to the static copy of a sub, not to a dynamically executing one
+[19:38] <TimToady> yow
+[19:38] <spinclad> how can that work??
+[19:38] <pmichaud> and parrot assumes that this "static sub" has a pointer to the current executing context.  But that's not always the case with recursion or closures.
+[19:39] <masak> this discussion is very interesting. I hate to interrupt it in anyway, but does the fact that you're having it mean that the #rakudosketch is finished for today?
+[19:39] <masak> s/anyway/any way/
+[19:39] <TimToady> it's not the case with any kind of threading
+[19:39] <pmichaud> my #rakudosketch report is that I plan to be back on rakudo development more full-time-ish next week
+[19:39] <spinclad> i apologize for derailing #rs
+[19:39] <pmichaud> TimToady: correct, that too.
+[19:39] <colomon> pmichaud: \\o/
+[19:40] <masak> spinclad: I must confess to being very interested in what was said. otherwise I'd probably have intervened sooner :P
+[19:40] <pmichaud> however, don't get hopes up too far -- Paula's preliminary test results today aren't all that promising.  we'll likely know more on Thursday morning.
+[19:41] * moritz_ keeps fingers crossed
+[19:41] <colomon> we'll be keeping you both in our thoughts and prayers.
+[19:41] * spinclad too
+[19:42] <moritz_> anybody else has anything rakudo related that needs discussing?
+[19:42] <colomon> pmichaud: any chance there are bits of the list/seq/array mess that could be shaved off and approached by the rest of us?
+[19:43] <pmichaud> colomon: in my experience it's one of those all-or-none propositions
+[19:43] <pmichaud> colomon: you can't solve one small piece without affecting a ton of other bits.
+[19:44] <pmichaud> (as evidenced by how radically parts of the spec have changed when these questions have come up in the past)
+[19:45] <pmichaud> I told Paula this morning that I either have to get back to some significant Perl development next week, or I need to start telling others to just do things without my help
+[19:45] <pmichaud> (she's in total agreement with that, btw)
+[19:45] <pmichaud> s/next week/by next week/
+[19:46] <pmichaud> we do want to get a release out, and I need to not be a bottleneck.
+[19:47] <spinclad> could a first step be to translate static Seqs into the static part of mixed Seqs (/Lists/Arrays) ?
+[19:47] <pmichaud> that doesn't look right at first reading to me
+[19:48] <TimToady> mostly we need to nail down exactly when a user sees an iterator, and hide them the rest of the time
+[19:48] <spinclad> build the machinery to draw on the lazy part when one's cursor exhausts the static part
+[19:48] <pmichaud> I suspect that a user sees an iterator in two cases -- when explicitly requested via .iterator, and for filehandles-as-scalars
+[19:48] <spinclad> then start populating the lazy parts
+[19:48] <pmichaud> spinclad: I have that machinery already
+[19:48] <moritz_> pmichaud: that looks about right
+[19:48] <pmichaud> spinclad: that's not the challenging part
+[19:48] <masak> the iterator shouldn't jump out when the user does .perl, as happens now.
+[19:49] <pmichaud> in general, most list-y things should return instances of List
+[19:49] <TimToady> iterators are sort of like naked singularities
+[19:49] <pmichaud> which encapsulates any laziness and iterators
+[19:49] <moritz_> pmichaud: colomon and I worked on a proposal for a design the other day... should I summarize it in a mail?
+[19:49] <pmichaud> moritz_: that'd be fine
+[19:49] <spinclad> draw a better distinction between a List and a cursor iterating it?
+[19:50] <colomon> moritz_: please cc me
+[19:50] <pmichaud> spinclad: that's not really the challenge either
+[19:50] <pmichaud> the tricky part is that List will sometimes have Array-like behaviors, and sometimes it doesn't
+[19:50] <pmichaud> i.e., sometimes you need a List to remember its previously generated elements, and sometimes you want it to forget them as they're generated
+[19:50] <moritz_> spinclad: please read http://irclog.perlgeek.de/perl6/2010-05-02#i_2285198
+[19:50] <moritz_> colomon: sure
+[19:51] <spinclad> will do
+[19:51] <TimToady> as I see it, Lists and Arrays are essentially the same data structure, but with rather different APIs
+[19:51] <pmichaud> and the demarcation seems to be when a List is bound to a container of some sort
+[19:51] * moritz_ thought that was Seq and Array, but I might be wrong
+[19:51] <moritz_> pmichaud: that's the line between something that remembers its value, and something that doesn't
+[19:51] <colomon> I think we still have terminology problems (or class naming problems)
+[19:52] <pmichaud> colomon: yes, we do.
+[19:52] <spinclad> moritz_: yes, i saw that
+[19:53] <spinclad> (the backlog link)
+[19:53] <TimToady> my gut feeling is that we should first ignore the immutable/mutable distinction in figuring out the API, and then add it back in later
+[19:53] <pmichaud> TimToady: yes, that's the approach I was taking
+[19:53] <TimToady> and since Seq is immutable, it doesn't really figure
+[19:53] <pmichaud> +1 to that
+[19:53] <colomon> +1
+[19:53] <pmichaud> I was also planning to ignore Seq altogether for the first pass.  I think it leads down a blind alley.
+[19:54] <pmichaud> blind alley -- dead-end alley.
+[19:54] <TimToady> however, that is not to say that we shouldn't view the problem from the FP viewpoint occasionally :)
+[19:54] <pmichaud> certainly
+[19:55] <[particle]> even a blind alley finds an acorn occasionally.
+[19:55] <TimToady> even a slotted spoon can hold a potato
+[19:55] <spinclad> (List/Seq/Array immutable (from this pov), cursor mutable)
+[19:55] <pmichaud> spinclad: Array has to be mutable
+[19:55] <pmichaud> so you can push/pop/shift/unshift
+[19:56] <spinclad> yes, but not for iterating: that you do with a cursor
+[19:56] <pmichaud> spinclad: sure, but what's the type of the cursor?
+[19:56] <spinclad> dunno yet
+[19:56] <pmichaud> the cursor needs to be embedded in a List of some sort
+[19:56] <spinclad> attached to ?
+[19:56] <masak> just wanted to say that I've been going over http://use.perl.org/~masak/journal/39597 and closing some more tickets that've been fixed. about a third of them are fixed now.
+[19:57] <pmichaud> otherwise we see all of the cursors, which is what we're trying to avoid
+[19:57] <colomon> masak++
+[19:57] <colomon> we probably shouldn't rehash the entire list/seq/array thing on rakudosketch, I reckon.
+[19:58] <pmichaud> fairy nuff
+[19:58] <colomon> but it would be great to have this conversation asap
+[19:58] <colomon> (ie rakudosketch determination is that we need to have this conversation.  :)
+[19:58] <moritz_> I'm writing this email right now - I hope for non-bikesheddy replies
+[19:59] <moritz_> (which is why I send it to p6c, not p6l :)
+[19:59] <pmichaud> definitely to p6c for now
+[19:59] <pmichaud> anyway, my view is that most list-y type operations should be returning something that ~~ List
+[20:00] <pmichaud> and that List knows how to do things like .[] and can have values shifted off of it
+[20:00] <TimToady> a List is sort of an array that knows its a cursor
+[20:00] <pmichaud> and that .perl on a List doesn't cause any generators to appear
+[20:01] <pmichaud> s/generators/iterators
+[20:01] <spinclad> (does .perl twice on the same List show the same list?)
+[20:01] <pmichaud> .perl on a List produces either the elements or the generators for the elements
+[20:01] <pmichaud> spinclad: depends on how the List is bound
+[20:01] <TimToady> .perl doesn't return a List
+[20:02] <pmichaud> I meant that .perl  could  return   either   "5, 6, 7 ,8"   or "5..8"
+[20:02] <pmichaud> i.e., if the internal iterator had a suitable mechanism for .perl-ing itself, it can do that as opposed to making the list non-lazy
+[20:03] <pmichaud> "reifying the entire list"
+[20:03] <TimToady> I think .perl should certainly be biased in terms of an abstract representation, especially if it's impossible to make entirely concrete
+[20:03] <pmichaud> either way, .perl hides the existence of the internal iterator if it can
+[20:04] <pmichaud> moritz_: does your description exclude Seq ?
+[20:04] <moritz_> pmichaud: yes. I have no clue what Seq is supposed to be
+[20:04] <pmichaud> moritz_: +1 to that
+[20:04] <pmichaud> leave Seq out for now
+[20:07] <pmichaud> anyway, I will plan to focus on closures and lists over the next few days
+[20:07] <pmichaud> see if we can get those ironed out finally
+[20:08] <colomon> +1
+[20:08] * TimToady refrains from making pun on 'sense of closure'
+[20:09] <moritz_> +2
+[20:09] <pmichaud> afk for a while
+[20:10] * spinclad echoes moritz_
+[20:10] <colomon> moritz_: not that it's any surprise after pmichaud's comments, but I finally took a decent look at the lazy seq / array patch, and it's probably not what is needed.
+[20:11] <colomon> does look like some clever work, for sure, but I don't think it fits in with pmichaud's plans.
+[20:14] <colomon> I'm hoping at making major inroads on the Numeric work this week.
+[20:14] <pmichaud> (my 'plans' being primarily driven by 'what can actually work' :-)
+[20:14] <masak> good plan :)
+[20:15] <colomon> and I might tackle implementing classify if someone doesn't beat me to it.  ;)
+[20:15] <colomon> q
+[20:22] <spinclad> other business?
+[20:23] <[particle]> everyone getting ready for gsoc? has the bonding begun?
+[20:23] <moritz_> masak has bonded us, yes
+[20:24] <masak> yep.
+[20:24] <moritz_> he has a commit bit, a blog, knows where the code lives, ... :-)
+[20:24] <masak> ready to rock and roll.
+[20:24] <moritz_> only his mentor is idling in Iceland
+[20:24] <[particle]> phew, i was worried about him.
+[20:24] <masak> :)
+[20:24] <moritz_> I think pmurias also got in contact with ruoso :-)
+[20:25] <colomon> masak: when do you intend to start your GSoC work?
+[20:25] <masak> colomon: as soon as $work settles down, basically.
+[20:25] * colomon understands that issue all too well...
+[20:25] <masak> I could set an optimistic starting date, but that wouldn't be underpromising and overdelivering :)
+[20:26] <masak> so let's say May 28th, when work is supposed to start :)
+[20:26] <colomon> :)
+[20:26] <colomon> I was mostly wondering how much of it might sneak into R*
+[20:26] <masak> I'm hoping a simple Buf type might, at least.
+[20:27] * masak almost typo'ed 'Bug'
+[20:27] <spinclad> :)
+[20:27] <pmichaud> I hope a simple Buf type, but we'll take whatever is available.
+[20:27] <pmichaud> I think masak has already over-delivered on the Bug class :-)
+[20:27] <masak> :)
+[20:28] <masak> would be nice to get reading of binary data to work, too.
+[20:28] <masak> but no promises.
+[20:28] <masak> we'll see.
+[20:28] <moritz_> masak: somehow I think reading binary data will be easier than writing
+[20:28] <spinclad> it's easy to find them, though; just search for things that ~~ Bug
+[20:28] *** colomon left
+[20:28] *** colomon joined
+[20:29] <masak> spinclad: RT gives 658 hits :P
+[20:29] <colomon> dang it, one day I'll stop closing the wrong window on my multi-screen setup.
+[20:31] <masak> only 104 of those are new/open, though.
+[20:36] <masak> maybe the rakudosketch ended for today?
+[20:37] <pmichaud> probably.  I think I hijacked things today -- apologies.  I should be in better form next week :)
+[20:37] <moritz_> pmichaud: I think it was great that you did hijack things
+[20:37] <masak> aye.
+[20:37] <spinclad> with my help...
+[20:37] <masak> thanks to everyone for participating. in many ways, we're on track, which feels nice. keep closing those tickets!
+[20:37] <moritz_> pmichaud: we discussed topics we were in dire need for discussing with you
+[20:38] <pmichaud> moritz_: more to come, too :)
+[20:42] <spinclad> i intensely felt the presence of the right people to talk about both the immediate pressing R* and deeper issues, and the conflict between focuses.  may it somehow be for the best!
+[20:52] <spinclad> gavel?
+[20:52] <masak> *nod*
+[20:52] <spinclad> <bang!/>
+[20:53] *** masak left
+[23:08] <spinclad> (wishing to amend some words of mine earlier:  cursor would also be immutable; an iteration loop would pass itself the next cursor in sequence each time around.)
