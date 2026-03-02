@@ -1,0 +1,309 @@
+[00:00] <lee_> i'll poke around Configure.pl
+[00:06] <benabik> Hm.  '1' is not a valid number:  != 1 at line 561, near ";\\n       "
+[00:07] <benabik> That's nqp::atpos($res,2) != nqp::chars($src)
+[00:11] <jnthn> Could throw some debug stuff into the radix impl
+[00:11] <jnthn> Though I think you already tried that and it looked sane?
+[00:11] <benabik> Yeah.
+[00:12] <benabik> It's returning [1,1,]
+[00:12] <diakopter> jnthn: we kindof need our own version of address sanitizer  :/
+[00:12] <benabik> according to atpos
+[00:15] <diakopter> erm, somehow I buhleted my progress on chain
+[00:15] <diakopter> sigh.
+[00:16] <jnthn> benabik: What's the empty thing at the end?
+[00:17] <benabik> jnthn: I printed "["~nqp::atpos($res,0)~", "nqp::atpos($res,1) ... 2)
+[00:18] <benabik> With the debugging from MVM_radix
+[00:18] <benabik> radix: [33.000000, 100.000000, 2]  '1' is not a valid number: 1, 1,  != 1 at line 561, near ";\\n        "
+[00:19] <jnthn> well, repr_box_str is wrong...
+[00:19] <benabik> That seems highly suspicious.
+[00:20] <diakopter> jnthn: erm, oops.... :/
+[00:20] <jnthn> MVMObject * MVM_repr_box_str(MVMThreadContext *tc, MVMObject *type, MVMString *val) { MVMObject *res = MVM_repr_alloc_init(tc, type); MVM_repr_set_str(tc, res, val); return res;
+[00:20] <jnthn> }
+[00:20] <jnthn> ...oops
+[00:20] <jnthn> But anyway, needs to root the val
+[00:20] <benabik> radix: [1.000000, 10.000000, 1]  '1' is not a valid number: 1, 1,  != 1 at line 561, near ";\\n        "
+[00:20] <benabik> That's better.
+[00:21] <jnthn> Moment, lemme push this patch
+[00:21] <diakopter> jnthn: how'd you find that
+[00:21] <jnthn> diakopter: By suspecting repr_box_n, seeing it ws fine, then my eyes fell on the function right below it :)
+[00:21] <diakopter> heh.
+[00:22] <jnthn> and I suspected repr_box_n 'cus radix uses it
+[00:22] <diakopter> I shouldn't say "oops" with so much certainty that I wrote/botched it..
+[00:22] <diakopter> [since I don't have full certainty]
+[00:22] * jnthn doesn't bother to git blame :)
+[00:27] <jnthn> (It really isn't worth worrying, in general, "who is to blame". This stuff is fiddly, the majority of developers simply aren't up to building VMs, and here we are doing this alongside having sometimes-demanding $dayjobs too...)
+[00:27] <dalek> MoarVM: 8515ae2 | jonathan++ | src/6model/reprconv.c:
+[00:27] <dalek> MoarVM: Missing MVMROOT in MVM_repr_box_s.
+[00:27] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/8515ae2365
+[00:27] <jnthn> (majority of develoeprs meaning, "in the world"...the folks working on MoarVM clearly are up to it :))
+[00:29] <benabik> Still not a valid number.  :-(
+[00:29] <jnthn> grr
+[00:29] <jnthn> It was still a bug.
+[00:29] <benabik> True.
+[00:31] <benabik> Maybe a bug in push?  It seems to lose the 10 from the middle.
+[00:33] <diakopter> jnthn: are we marking special_return_data
+[00:33] <jnthn> oh...I wonder if...argh, that'd be nasty
+[00:34] <jnthn> diakopter: no, 'cus we don't know what it is, but you're not meant to put object/string pointers in there
+[00:34] <jnthn> diakopter: afaik, things only put indirect pointers to thoes (pointer to a register) in there
+[00:35] <jnthn> So, considering:
+[00:35] <jnthn> MVM_repr_push_o(tc, result, MVM_repr_box_num(tc, box_type, value));
+[00:35] <jnthn> What if it pushes tc to the stack, pushes result to the stack, MVM_repr_box_num allocates, and result is already on the stack so updating the local isn't good enough?
+[00:35] <diakopter> yeah
+[00:36] <diakopter> gotta ssa
+[00:36] <jnthn> *nod*
+[00:36] <jnthn> and worst csae, volatile
+[00:36] <jnthn> Anyway, I bet it's that
+[00:37] <diakopter> well the temp push macro should take care of that
+[00:37] <diakopter> (forcing an intermediate)
+[00:38] * diakopter resolves to do that full code review while jnthn's sleeping
+[00:38] <diakopter> seems more important than chain/xor
+[00:39] <benabik> Is there a way to root objects other than piles of nested MVMROOT?
+[00:39] <diakopter> you could make a variadic macro with the things to root at the ed
+[00:39] <diakopter> end
+[00:40] <diakopter> or a bunch of macros with different numbers of args up to 9 or whatever
+[00:40] <diakopter> that nest them for you
+[00:40] <jnthn> benabik: I normally don't nest immediately sequential ones, fwiw
+[00:40] <jnthn> benabik: As in, don't indent the second one
+[00:40] <jnthn> Note that MVMROOT is a lot *nicer* than what we used to have! :)
+[00:41] <dalek> MoarVM: 9db20b0 | jonathan++ | src/core/coerce.c:
+[00:41] <dalek> MoarVM: Fix potential rooting bug with nqp::radix.
+[00:41] <dalek> MoarVM:
+[00:41] <dalek> MoarVM: The result could get moved when it was already on the C arg stack.
+[00:41] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/9db20b001b
+[00:41] <jnthn> benabik: Try that'n :)
+[00:43] <diakopter> benabik: were you using --optimize?
+[00:43] <benabik> diakopter: Nope.
+[00:44] <jnthn> I can see this happening without --optimize
+[00:47] <jnthn> ok, sleep time here
+[00:47] <jnthn> 'night o/
+[00:47] * benabik prefers --debug when he's trying to fix bugs.
+[00:48] <diakopter> I was suggesting trying --optimize to see if things break
+[00:51] <benabik> jnthn++++
+[00:52] <diakopter> it fixed it?
+[00:53] <benabik> Yes!
+[00:53] <diakopter> cool :)
+[00:56] *** colomon joined
+[00:59] <benabik> $ nqp-m>
+[00:59] <benabik> Failed to seek in filehandle: 9
+[00:59] <benabik> frame_name_606
+[00:59] <benabik> ERm, the > was on the next line.
+[00:59] *** woosley joined
+[00:59] <timotimo> yeah, the repl doesnt work
+[00:59] <benabik> Known error.  Cool.
+[01:48] <dalek> MoarVM: ac6f817 | jimmy++ | src/io/procops.c:
+[01:48] <dalek> MoarVM: Fix potential rooting bug with nqp::clargs.
+[01:48] <dalek> MoarVM:
+[01:48] <dalek> MoarVM: The result could get moved when it was already on the C arg stack.
+[01:48] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/ac6f81792d
+[01:51] <JimmyZ> we need a book about <<The Missing MVMROOT and The Trap>>
+[01:51] <JimmyZ> or pitfalls
+[01:53] <JimmyZ> or A authoritative Article
+[02:28] <diakopter> JimmyZ: :D
+[02:30] <diakopter> JimmyZ: grep the .c and .h for this string:  , MVM_repr   (comma included)  and you'll find 20 more than need that
+[02:31] <diakopter> *that need that
+[02:32] <JimmyZ> diakopter: not only MVM_repr allocs ;)
+[02:33] <diakopter> JimmyZ: good point.
+[02:34] <JimmyZ> diakopter: MVM_repr_at or MVM_repr_get doesn't allocs
+[02:35] <JimmyZ> bind doesn't too
+[02:35] <diakopter> JimmyZ: https://gist.github.com/diakopter/7729637a4a6b5ee47878
+[02:36] <diakopter> you can ignore serialization.c because it's protected by the gen2 force allocation
+[02:36] <JimmyZ> oh, the other reason that we need the article is it's useful for ext developers
+[02:39] <diakopter> JimmyZ: I updated the gist
+[02:40] <JimmyZ> diakopter: great
+[02:40] <diakopter> only ones that pass more than one MVMObject in the invocation should be fixed
+[02:51] <dalek> MoarVM: d801867 | jimmy++ | src/ (3 files):
+[02:51] <dalek> MoarVM: Fix potential rooting bug
+[02:51] <dalek> MoarVM:
+[02:51] <dalek> MoarVM: The result could get moved when it was already on the C arg stack.
+[02:51] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/d8018674d1
+[02:59] <diakopter> JimmyZ: actually if you change the search to this, more appear: ,[\\s\\r\\n]*MVM_[a-zA-Z_]+\\(
+[03:00] <JimmyZ> I don't have ack
+[03:00] <diakopter> neither do I :P
+[03:00] <diakopter> JimmyZ: aren't you on Windows?
+[03:01] <JimmyZ> yes
+[03:01] <diakopter> Notepad++ - I used the Find in Files for that (regex mode)
+[03:02] <diakopter> JimmyZ: those things in reprconv you just fixed... actually you need to root obj as well
+[03:02] <diakopter> and key
+[03:02] <diakopter> so you need to put them both in variables
+[03:03] <diakopter> since it's a macro
+[03:03] <JimmyZ> oh, I have sublime
+[03:08] <diakopter> JimmyZ: see what I mean about the temp variables?
+[03:08] <diakopter> (you have to root them)
+[03:13] <JimmyZ> diakopter: I don't need to root it. people will root it before calling the macro
+[03:15] <JimmyZ> anyway, I didn't see it is used.
+[03:18] * JimmyZ hopes MVM_repr_* function will be macro
+[06:16] *** FROGGS joined
+[08:07] *** FROGGS[mobile] joined
+[08:10] <FROGGS[mobile]> jnthn: What should I do next? (except chain and xor)
+[08:55] <JimmyZ> make `compile core.setting` works :P
+[08:59] <FROGGS[mobile]> gah :p
+[09:16] <diakopter> :)
+[09:57] <dalek> MoarVM: 9ccc1d0 | (Tobias Leich)++ | / (6 files):
+[09:57] <dalek> MoarVM: added getlexrelcaller
+[09:57] <dalek> MoarVM: review: https://github.com/MoarVM/MoarVM/commit/9ccc1d016c
+[10:00] <JimmyZ> FROGGS[mobile]: Is buglet branch useful?
+[10:12] <FROGGS> JimmyZ: no, can be deleted
+[10:31] *** donaldh joined
+[10:38] *** colomon joined
+[10:41] *** wsri joined
+[11:18] *** lizmat joined
+[11:27] *** lue joined
+[11:53] *** jnthn_ joined
+[12:25] <FROGGS> what is the 'g' in getlex_ng for?
+[12:28] <tadzik> Generation
+[12:28] <tadzik> Getlex: The Next Generation
+[12:30] <FROGGS> meh
+[12:40] <arnsholt> Is there a preferred casing for Moar?
+[12:41] <FROGGS> MoarVM I'd say
+[12:41] <FROGGS> like the difference of Perl and perl
+[12:42] <FROGGS> MoarVM/moar
+[12:43] <FROGGS> nqp: my $a = 0; nqp::getlex_i('$a')
+[12:43] <camelia> nqp-parrot: OUTPUT«Assignment ("=") not supported in NQP, use ":=" instead at line 2, near " 0; nqp::g"␤current instr.: 'panic' pc 16306 (gen/parrot/stage2/NQPHLL.pir:6018) (gen/parrot/stage2/NQPHLL.nqp:426)␤»
+[12:43] <camelia> ..nqp-jvm: OUTPUT«Assignment ("=") not supported in NQP, use ":=" instead at line 2, near " 0; nqp::g"␤  in panic (gen/jvm/stage2/NQPHLL.nqp:377)␤  in infix:sym<=> (gen/jvm/stage2/NQP.nqp)␤  in !protoregex (gen/jvm/stage2/QRegex.nqp:742)␤  in infix (gen/jvm/stage2/NQPHLL.nqp)…»
+[12:43] <camelia> ..nqp-moarvm: OUTPUT«Assignment ("=") not supported in NQP, use ":=" instead at line 2, near " 0; nqp::g"␤panic␤»
+[12:43] <FROGGS> nqp: my $a := 0; nqp::getlex_i('$a')
+[12:44] <camelia> nqp-jvm: OUTPUT«Lexical '$a' not found␤  in  (/tmp/1y2FZoWpHu:1)␤  in  (gen/jvm/stage2/NQPHLL.nqp:1098)␤  in eval (gen/jvm/stage2/NQPHLL.nqp:1084)␤  in evalfiles (gen/jvm/stage2/NQPHLL.nqp:1290)␤  in command_eval (gen/jvm/stage2/NQPHLL.nqp:1194)␤  in command_line (gen/jv…»
+[12:44] <camelia> ..nqp-moarvm: OUTPUT«Lexical with name '$a' has wrong type␤frame_name_0␤»
+[12:44] <camelia> ..nqp-parrot: OUTPUT«Lexical '$a' is of wrong register type in lexical lookup␤current instr.: '' pc 53 ((file unknown):44) (/tmp/t1CMjzXfvp:1)␤»
+[12:44] <FROGGS> nqp: my $a := 0; nqp::getlex_o('$a')
+[12:44] <camelia> nqp-parrot: OUTPUT«Error while compiling block : Error while compiling op getlex_o (source text: "nqp::getlex_o('$a')"): No registered operation handler for 'getlex_o'␤current instr.: '' pc 55111 (gen/parrot/stage2/QAST.pir:20131) (gen/parrot/stage2/QAST.nqp:3320)␤»
+[12:44] <camelia> ..nqp-moarvm: OUTPUT«Error while compiling op getlex_o (source text: "nqp::getlex_o('$a')"): No registered operation handler for 'getlex_o'␤frame_name_1083␤»
+[12:44] <camelia> ..nqp-jvm: OUTPUT«No registered operation handler for 'getlex_o'␤  in compile_op (gen/jvm/stage2/QAST.nqp:231)␤  in as_jast (gen/jvm/stage2/QAST.nqp:3696)␤  in as_jast (gen/jvm/stage2/QAST.nqp:2968)␤  in  (gen/jvm/stage2/QAST.nqp:3665)␤  in compile_all_the_stmts (gen/jvm/sta…»
+[12:44] <FROGGS> nqp: my $a := 0; nqp::getlex('$a')
+[12:44] <camelia> nqp-moarvm, nqp-jvm, nqp-parrot: ( no output )
+[12:44] <FROGGS> k
+[13:10] *** jnap joined
+[13:15] <diakopter> hi from a plane
+[13:17] <tadzik> ...I live in a 3rd world
+[13:19] *** _ilbot joined
+[13:19] *** moderator changes topic to: https://github.com/moarvm/moarvm | IRC logs at  http://irclog.perlgeek.de/moarvm/today
+[13:20] <FROGGS> tadzik: you don't fly by plane on a daily basis?
+[13:20] <FROGGS> hi diakopter
+[13:20] <tadzik> my planes don't have wifis
+[13:21] <tadzik> they have power sockets sometimes, which is cool
+[13:21] <FROGGS> true, germanwings has no wifi too
+[13:21] * moritz never had wifi on a plane
+[13:21] <tadzik> oh, I saw it once on Delta, but the price was laughable
+[13:22] <FROGGS> I've seen a sticker once in a plane from NY to Austin
+[13:22] <tadzik> barbaric
+[13:22] <tadzik> like charging $10 for a toilet
+[13:23] <FROGGS> I'd buy a toilet for $10
+[13:23] <diakopter> $22 for a 6-hour flight, about 0.5s latency.. $49 unlimited/month
+[13:24] <FROGGS> hmmm, it is okay since $22 is like four euros :P
+[13:24] <tadzik> :D
+[13:24] <tadzik> well, I still think $22 for 6 hours is crazy
+[13:24] * diakopter goes to do a bandwidth test over ssh tunnel <wicked grin>
+[13:24] <FROGGS> hehe
+[13:25] <diakopter> tadzik: you'll think it's less crazy when you can use my hotspot on the 60hour flight to orlando..
+[13:25] <tadzik> diakopter: mebbe :)
+[13:25] <diakopter> er, 6-hour
+[13:25] <tadzik> 60 hours would be like going 3 times around the world
+[13:32] <diakopter> moritz: btw, you're a font, not a fount
+[13:32] <diakopter> :D
+[13:33] <diakopter> is it bad that I can't even get a bandwidth speed test to start?
+[13:34] <diakopter> stupid flash isn't respecting the proxy, I think
+[13:36] <diakopter> hmm, that's kindof sucky, 300 Kb/s
+[13:37] <diakopter> with 8% loss
+[13:38] *** colomon joined
+[13:38] <diakopter> newaze.
+[13:43] *** benabik joined
+[13:44] * diakopter tries to decipher the jvm impl of chain
+[13:44] <diakopter> mebbe the parrot one would be easier. :)
+[13:44] <FROGGS> ++diakopter
+[13:44] <FROGGS> :o)
+[13:45] <diakopter> pre-increment indeed
+[13:45] <FROGGS> diakopter: you might document it right after knowing what it does :o)
+[13:45] <diakopter> well I have an idea what it does
+[14:29] <diakopter> wtf..
+[14:29] <diakopter> $il.append(savesite(JAST::InvokeDynamic.new(
+[14:29] <diakopter> 'subcall_noa', 'V', [$TYPE_STR, 'I', $TYPE_TC, $TYPE_SMO, $TYPE_SMO],
+[14:29] <diakopter> 'org/perl6/nqp/runtime/IndyBootstrap', 'subcall_noa',
+[14:29] <diakopter> )));
+[14:33] <diakopter> I give up; heading to parrot..
+[14:40] <FROGGS> yeah, I've seen that too
+[15:16] <diakopter> FROGGS: I can't even find anything in nqp/rakudo source that helps inform me what op chain is supposed to do!!
+[15:16] <FROGGS> :/
+[15:16] <diakopter> I thought it was for chaining comparison operators
+[15:17] <FROGGS> looks like it has something to do with currying
+[15:17] <diakopter> .. but I can't find any usage of it
+[15:18] <FROGGS> see
+[15:18] <FROGGS> /home/froggs/dev/
+[15:18] <FROGGS> err
+[15:18] <FROGGS> rakudo/src/Perl6/Actions.nqp:5904:                (($past.op eq 'call' || $past.op eq 'chain') &&
+[15:18] <diakopter> yeah, but that case isn't handled lower down
+[15:19] <FROGGS> hmmm
+[15:19] <FROGGS> I dunno
+[15:24] <FROGGS> current state:
+[15:24] <FROGGS> Stage start      :   0.000
+[15:24] <FROGGS> setlexvalue only handles static case so far
+[16:00] *** _ilbot joined
+[16:00] *** moderator changes topic to: https://github.com/moarvm/moarvm | IRC logs at  http://irclog.perlgeek.de/moarvm/today
+[17:10] <FROGGS> jnthn: this might be interesting for you :/  https://gist.github.com/FROGGS/4a0122b45009bb6917ea
+[17:11] <FROGGS> double free when running normally, but under valgrind it complains about missing p6store
+[17:11] <FROGGS> I am firing up my windows to see what happens there
+[17:19] *** BenGoldberg joined
+[17:22] <jnthn> evening o/
+[17:23] <BenGoldberg> Good afternoon :)
+[17:23] <jnthn> benabik: Great that it fixed the number parse issue :)
+[17:29] <jnthn> getlex_ng - n = by name, g = generic
+[17:32] <benabik> jnthn: Yes, thank you.  Been staring at that for a while and not realizing the GC implications.
+[17:32] <jnthn> I didn't at first... :)
+[17:36] *** ssutch joined
+[17:39] <timotimo> greetings jnthn
+[17:41] <diakopter> jnthn could you gie an english explanation of the chain op
+[17:43] <diakopter> .oO( as opposed to Polish, I guess..? )
+[17:48] <jnthn> diakopter: Ano, je na chajnovanie operatory...oh wait, English...
+[17:49] <jnthn> It is a lot like call
+[17:49] <jnthn> Except you nest them and they only evaluate arguments once
+[17:49] <jnthn> iirc, a < b < c is like (chain < (a, chain < (b, c)) or so
+[17:50] <jnthn> So it's like a call constrained to have 2 arguments
+[17:50] <jnthn> And supporting chaining semantics
+[17:50] <jnthn> You find the thing to call in name
+[17:50] <jnthn> the loop in the implementation is just iteratively recursing the nested chains.
+[17:51] <diakopter> < is right associative?
+[17:51] <diakopter> oh, so it's always a named call
+[17:52] <jnthn> I think chaining things are at same prec?
+[17:52] <jnthn> oh, assoc...
+[17:52] <jnthn> Not sure
+[17:52] <jnthn> See grammar ;) But I think whatever happens, by the time we get to chain we have something in the right form.
+[17:59] <BenGoldberg> r: say [<] 1, 2, 3
+[17:59] <camelia> rakudo-parrot 3cef56, rakudo-jvm 882e33: OUTPUT«True␤»
+[17:59] <BenGoldberg> r: say [\\<] 1, 2, 3
+[17:59] <camelia> rakudo-parrot 3cef56, rakudo-jvm 882e33: OUTPUT«True True True␤»
+[18:00] <BenGoldberg> r: say [\\~] 1, 2, 3
+[18:00] <camelia> rakudo-parrot 3cef56, rakudo-jvm 882e33: OUTPUT«1 12 123␤»
+[18:02] <TimToady> nr: say 1 < 0 < die "Oops"
+[18:02] <camelia> rakudo-parrot 3cef56, rakudo-jvm 882e33, niecza v24-98-g473bd20: OUTPUT«False␤»
+[18:02] <TimToady> whew!
+[18:02] <TimToady> chains are supposed to short-circuite left-to-right
+[18:02] <TimToady> *cuit
+[18:04] <BenGoldberg> r: say [R<] 1, 2, 3
+[18:04] <camelia> rakudo-parrot 3cef56, rakudo-jvm 882e33: OUTPUT«False␤»
+[18:04] <BenGoldberg> r: say [R>] 1, 2, 3
+[18:04] <camelia> rakudo-parrot 3cef56, rakudo-jvm 882e33: OUTPUT«True␤»
+[18:04] <jnthn> aye, as well as evaluate each needed arg once
+[18:04] <BenGoldberg> r: say [\\R>] 1, 2, 3
+[18:04] <camelia> rakudo-parrot 3cef56, rakudo-jvm 882e33: OUTPUT«True True True␤»
+[18:04] <jnthn> Those two things are what chain is about really
+[18:05] <jnthn> ok, gonna go find dinner. bbl &
+[18:05] <BenGoldberg> r: say True > False
+[18:05] <camelia> rakudo-parrot 3cef56, rakudo-jvm 882e33: OUTPUT«True␤»
+[18:05] <BenGoldberg> r: say True < False
+[18:05] <camelia> rakudo-parrot 3cef56, rakudo-jvm 882e33: OUTPUT«False␤»
+[18:05] <BenGoldberg> r: say True > 99
+[18:05] <camelia> rakudo-parrot 3cef56, rakudo-jvm 882e33: OUTPUT«False␤»
+[18:05] <BenGoldberg> r: say True >= 99
+[18:05] <camelia> rakudo-parrot 3cef56, rakudo-jvm 882e33: OUTPUT«False␤»
+[18:05] <BenGoldberg> r: say 1+True
+[18:05] <camelia> rakudo-parrot 3cef56, rakudo-jvm 882e33: OUTPUT«2␤»
+[18:19] <FROGGS> jnthn: generic in what sense? there is also getlex and getlex_no
+[18:19] <FROGGS> jnthn: does the _ng return the register?
+[19:04] <FROGGS> diakopter: is it okay if I try to port chain?
+[19:34] <FROGGS> diakopter / jnthn: chain, translated from parrot: https://gist.github.com/FROGGS/9bf9c160196cec89f617
+[19:34] <FROGGS> is there a way to test that in nqp?
+[20:04] <diakopter> FROGGS: thing is, I didn't see where the parrot version was stashing the value of the rhs
+[20:08] <diakopter> [saving it to do the next comparison]
+[20:39] <jnthn> FROGGS: iirc, it always w(obj) and will box anything else
+[20:59] *** colomon joined
+[21:51] *** donaldh_ joined
+[23:04] *** BenGoldberg joined
+[23:43] *** benabik joined

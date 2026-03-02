@@ -1,0 +1,719 @@
+[00:09] *** cognominal joined
+[01:08] *** LWA joined
+[01:42] *** benabik joined
+[02:45] *** {amon} joined
+[02:54] *** raiph2 joined
+[06:01] *** LWA joined
+[06:11] *** FROGGS joined
+[06:13] *** sorear joined
+[06:19] <FROGGS> o/
+[06:21] <FROGGS> .tell diakopter Wut? http://irclog.perlgeek.de/moarvm/2013-09-09#i_7563809
+[06:21] <yoleaux> FROGGS: I'll pass your message to diakopter.
+[06:21] *** LWA joined
+[06:52] <diakopter> FROGGS: well I took that part back sortof
+[06:53] <FROGGS> yeah
+[06:53] <diakopter> I think it needs to call unwind from where it is to the start frame of the throw
+[06:53] *** not_gerd joined
+[06:53] <FROGGS> what I'd like to know is how I could make the usage of ah here safe: https://github.com/MoarVM/MoarVM/commit/9de0ad5877ba092986c6d1e53f41d98491cdb4b5#L3R329
+[06:54] <not_gerd> o/
+[06:54] <diakopter> (and then swap back in the old stack, so to speak)
+[06:54] <FROGGS> diakopter: it does that (unwind)
+[06:54] <diakopter> oh; I missed that
+[06:54] <FROGGS> in the last link at line 340
+[06:54] <FROGGS> err, 339
+[06:55] <FROGGS> body.origin is the frame of the throw
+[06:55] <diakopter> I don't see it
+[06:55] <FROGGS> https://github.com/MoarVM/MoarVM/commit/9de0ad5877ba092986c6d1e53f41d98491cdb4b5#L3R339
+[06:55] <diakopter> I think it needs to call unwind_to_frame
+[06:55] <FROGGS> and the activehandler takes this frame (and the goto_offset) when leaving the CATCH
+[06:56] <FROGGS> that happens in `unwind_after_handler` or what the function is called
+[06:56] <diakopter> oh.. /me looks
+[06:57] <JimmyZ> \\o not_gerd
+[06:57] <FROGGS> https://github.com/MoarVM/MoarVM/blob/master/src/core/exceptions.c#L178
+[06:57] <FROGGS> diakopter: ^^
+[06:57] <jnthn> "(and then swap back in the old stack, so to speak)" - no, the old stack is still there...
+[06:57] <jnthn> We run exception handlers *on the top of the stack* and then unwind. In the resume case, we just don't unwind to where the handler was found. :)
+[06:58] <FROGGS> at line 160ff the handler gets registered, and when we hit a nqp::resume, I just update the frame and goto_offset
+[06:58] <jnthn> didn't look at patch yet, gotta teach...
+[06:58] <FROGGS> jnthn: moarning, you were able to sleep?
+[06:58] <not_gerd> I assume it would be bad to do type conversions via get_boxed_ref?
+[06:58] <diakopter> oic
+[06:59] <jnthn> FROGGS: kinda :/
+[06:59] <FROGGS> :/
+[06:59] <diakopter> not_gerd: yeah, coerce.c is best
+[07:00] <FROGGS> the only unsafe thing I see is this: https://github.com/MoarVM/MoarVM/blob/master/src/core/exceptions.c#L338
+[07:02] <FROGGS> it just expects that a handler was already registered for that frame
+[07:02] <diakopter> not_gerd: though some of those can call back into bytecode
+[07:03] <not_gerd> trying to figure out how best to do the conversion from a generic CPointer to more specific reprs like CScalar, CArray, ...
+[07:03] <not_gerd> custom ops it is
+[07:03] <diakopter> well, whatever you choose needs to be implementable on jvm, and arnsholt needs to be on board (not to mention jnthN), and all that :)
+[07:04] <not_gerd> I'm still figuring out the details
+[07:04] <not_gerd> I believe I'm on the right track here
+[07:04] <diakopter> though sorear++ has proven that almost any non-local control flow can be implemented on the jvm
+[07:05] <not_gerd> one CPointer repr that can box/unbox to int (for manual pointer arithmetics) and can be converted to/from the more specific reprs CScalar, CArray, CStruct, CUnion, CFlexibleStruct
+[07:06] <diakopter> but as long as whatever custom ops you add are either also implemented on the jvm in nqp::, or hidden behind each's qast compiler for other existing/new functions...
+[07:06] <not_gerd> they don't exist on JVM yet, but if I can get arnsholt on bord, that won't remain so ;)
+[07:06] <diakopter> I wonder how much the struct ones will reproduce p6opaque
+[07:07] <not_gerd> to some degree, they will
+[07:07] <diakopter> is it possible to simply use p6opaque instead?
+[07:08] <diakopter> (with the other types inlined)
+[07:08] <diakopter> since you can control every bit in a p6opaque body
+[07:08] <not_gerd> might or might not be a good idea
+[07:08] <diakopter> I suspect jnthn would prefer that sort of approach
+[07:09] <diakopter> the thing about p6opaque is it uses the copy_to and other body-oriented "repr functions" to inline other types' bodies
+[07:10] <diakopter> so in most cases you'd be inlining CPointers and such
+[07:12] <diakopter> the interesting thing there is you wouldn't want to allow inlining any reference/container types.. you wouldn't want any managed pointers in those bodies
+[07:12] <diakopter> to ensure the managed pointers could never escape to unknown native code
+[07:13] <diakopter> I mean, if we're talking about native code that uses the moarvm public .h, then it should be integrating using extops
+[07:13] <diakopter> (or its own custom reprs)
+[07:14] <diakopter> er, *and*
+[07:14] <diakopter> oh, hm
+[07:14] <diakopter> actually you couldn't pass a pointer to the body of the CStruct if it was a p6opaque
+[07:15] <diakopter> unless it was in the "body pointer" slot...
+[07:15] <diakopter> which would be fine, since it'd already be a malloc'd area
+[07:16] <diakopter> yeah, the body pointer slot approach would work nicely
+[07:16] <diakopter> you wouldn't have to worry about pinning managed memory
+[07:18] <not_gerd> note that the way I'm doing it, CStruct is the name of the repr that references a C struct, same as it is right now
+[07:18] <diakopter> TimToady: ahoy
+[07:18] <not_gerd> I'm going to add something like CBlob that is inlineable
+[07:18] <not_gerd> these could be managed by p6opaque
+[07:19] <diakopter> it's just CStruct... well does it know about its slots?
+[07:19] <not_gerd> yes
+[07:19] <diakopter> so its already reproducing much of p6opaque
+[07:19] <arnsholt> What's the use case you're aiming for here?
+[07:20] <arnsholt> I'm all for suggestions, but what is the motivation for a complete reworking of the internals?
+[07:21] <not_gerd> arnsholt: it's more of a cleanup than a complete reworking
+[07:21] <not_gerd> the existing types are reference types
+[07:21] <diakopter> sounds like not_gerd has grand schemes for writing C-equivalent in nqp/p6 :D
+[07:21] <not_gerd> ;)
+[07:22] <not_gerd> the types I'm implementing are CPointer, CScalar, CArray, CStruct, CUnion, CFlexibleStruct, CBlob
+[07:22] <not_gerd> all but the last to point to the actual C memory
+[07:22] <not_gerd> CBlob gets managed by p6opaque to do inlining
+[07:22] <FROGGS> I just hope we are not trying to do too much in this early stage (don't wanna see MoarVM becoming the next Parrot)
+[07:23] <not_gerd> sounds sane?
+[07:23] <arnsholt> But why? What's the use case at the NativeCall level this should enable?
+[07:23] <not_gerd> writing C structures in Perl6?
+[07:24] <not_gerd> hasn't that always been a goal?
+[07:24] <arnsholt> But most of that already works
+[07:24] <diakopter> well.. of people who dream of porting the runtime to HLL eventually, like me
+[07:24] <diakopter> but most people don't dream of that
+[07:24] <not_gerd> arnsholt: how does inlining structures work?
+[07:24] <arnsholt> What new functionality requires a complete do-over?
+[07:24] *** odc joined
+[07:24] <FROGGS> I like the "create a Perl 6 class with int8-attr for example, and unpack somthing to it"-approach
+[07:24] <not_gerd> it's a re-implementation, not a completely new factoring
+[07:25] *** cognominal joined
+[07:25] <not_gerd> take out CBlob, and we reproducethe existing system
+[07:25] <arnsholt> Inlining doesn't, I know. But there's a certain amount of design work to do before we can start worrying about the implementation of that
+[07:25] <not_gerd> add CBLob, and we can do inlining
+[07:26] <arnsholt> Re-implementing it differently from Parrot and JVM means that NativeCall won't work with your version, you do realize that?
+[07:27] <arnsholt> NativeCall relies on all the different NQP backends exposing the same API
+[07:27] <JimmyZ> NativeCall.pm6 is about 250 lines code?
+[07:28] <arnsholt> JimmyZ: That's just the code exposing the Perl 6 interface
+[07:28] <arnsholt> All of the heavy lifting is done in NQP
+[07:28] <FROGGS> we don't need to force backend-spefic rakudo-modules, do we?
+[07:28] <not_gerd> arnsholt: who said anything about changing the API?
+[07:28] <not_gerd> (aside from adding to it)
+[07:29] <arnsholt> You are. The REPRs are a core part of the API
+[07:29] <not_gerd> I'm adding reprs, not removing them
+[07:31] <arnsholt> JimmyZ: There's about 3000 lines of C for the Parrot backend, for example
+[07:31] <arnsholt> Adding REPRs for one backend means that the other backends have to add them as well
+[07:32] <arnsholt> And I just don't see why you're adding all this stuff right now
+[07:32] <not_gerd> so, you *don't* want to add CUnion, CScalar?
+[07:32] <not_gerd> why?
+[07:32] <arnsholt> Sure, I want to add them eventually
+[07:32] <arnsholt> But there's no need to implement lots of internals when we have no idea how the externals are going to work
+[07:33] <arnsholt> And I'm not even sure what CScalar is supposed to do
+[07:33] <not_gerd> CStruct and CArray right now are implemented as reference types
+[07:33] <not_gerd> they don't inline the C memory, they point to it
+[07:33] <not_gerd> the same should be done for C scalar types
+[07:34] *** donaldh joined
+[07:34] <not_gerd> a C scalar is just a pointer and a type annotation in the repr data
+[07:34] <arnsholt> Right, so it's a non-array int* or whatever
+[07:34] <not_gerd> yes
+[07:34] <arnsholt> Might be a good idea, I agree
+[07:35] <arnsholt> But again, we should figure out the externals here as well
+[07:35] <FROGGS> might it make sense to just satisfy NativeCall now and talk about extensions after that?
+[07:35] <not_gerd> well, then consider my work a prototype that we might ultimately throw away
+[07:36] <not_gerd> I'll do the work anyway, regardless of anyone else's approval ;)
+[07:36] <arnsholt> That'll work, I guess
+[07:36] <not_gerd> if it turn out not to be useful, tough luck for me
+[07:36] <arnsholt> Even if I'd rather not throw lots of code away =)
+[07:36] <not_gerd> ;)
+[07:37] <not_gerd> well, just trying to make the parrot version compile is quite a bit of work, and boring at that
+[07:37] <not_gerd> re-implementation is more fun ;)
+[07:37] <FROGGS> I fully understand that :o)
+[07:38] <JimmyZ> revise it or re-implementation with the experience
+[07:38] <FROGGS> but in the shelf behind me is a book called 'The Myth of a Man Month', it tends to remind me of not doing too much
+[07:40] <diakopter> arnsholt: don't think of it as throwing code away.
+[07:41] <diakopter> I'm sure all the existing code contributed much to new design and undertanding
+[07:41] <diakopter> so, it lives on. :)
+[07:42] <JimmyZ> as revising it will be much better
+[07:45] <diakopter> FROGGS: ah->frame                = (void *)ex->body.origin;  # does this need the frame ref incr?
+[07:46] <FROGGS> diakopter: it does it here already: https://github.com/MoarVM/MoarVM/blob/master/src/core/interp.c#L3365
+[07:46] <FROGGS> diakopter: is that enough?
+[07:47] <diakopter> well I see how it gets it for teh ex/ex_obj object
+[07:47] <diakopter> but is the ah object always destroyed at the exact same time as that?
+[07:48] <FROGGS> I think the ah gets destroyed before the exception object
+[07:48] <diakopter> probably needs its own refcount
+[07:48] <diakopter> to be safe, for sure
+[07:48] <FROGGS> yeah
+[07:49] <FROGGS> then I have to refcnt_inc this one too, to be able to refcnt_dec it later: https://github.com/MoarVM/MoarVM/blob/master/src/core/exceptions.c#L338it
+[07:49] <diakopter> that line is the ah assignment..
+[07:50] <diakopter> you mean the line after?
+[07:50] <FROGGS> sorry, meant this one: https://github.com/MoarVM/MoarVM/blob/master/src/core/exceptions.c#L154
+[07:51] <diakopter> if jnthn wrote that he might have been mentally optimizing it away if he could guarantee certain things
+[07:51] <diakopter> but generally yeah it needs it
+[07:52] <not_gerd> btw, is there a reason why we malloc() reprs instead of just initializing a static C var?
+[07:52] <FROGGS> I mean, I cant decide whether I have to refcnt_dec in `unwind_after_handler`, so when I decrease always, I have to increase always before
+[07:53] <diakopter> not_gerd: b/c they can store instance-specific data I think
+[07:53] <diakopter> (and the ideal is to allow multiple instances per process eventually I think.... though libuv will need some coaxing to enjoy that)
+[07:53] <not_gerd> but we still store the pointer to the repr in a static var
+[07:53] <not_gerd> is that going to change?
+[07:53] <diakopter> oh.
+[07:54] <diakopter> hm
+[07:54] <diakopter> not sure.
+[07:55] <not_gerd> if reprs are supposed to be immutable after initialization, it makes sense to store them directly as static vars
+[07:55] <not_gerd> avoids runtime allocation
+[08:00] <diakopter> not_gerd: interestingly, reprs themselves could have their own repr O_O
+[08:01] * not_gerd dodges the logic bomb
+[08:01] <JimmyZ> Isn't it $x.HOW.HOW.HOW?
+[08:02] <diakopter> sorta
+[08:02] <not_gerd> reprs aren't object, but they could be
+[08:02] <not_gerd> after I'm done, you can do pointer arithmetics by unboxing a CPointer to int
+[08:03] <not_gerd> which means you could write your own reprs in P6 if they were objects
+[08:03] <diakopter> well...
+[08:03] <not_gerd> note that this wasn't a serious proposal ;)
+[08:03] <diakopter> not_gerd: did you notice CCode repr?
+[08:03] <diakopter> (function pointer)
+[08:04] <diakopter> MVMCCode perhaps
+[08:04] <diakopter> er. MVMCFunction
+[08:04] <JimmyZ> MVMCode.c
+[08:05] <diakopter> no
+[08:05] <diakopter> it's not for arvitrary C functions... just ones that can be called with that signature
+[08:06] <diakopter> *arbitrary
+[08:06] <diakopter> like its comment says, it's for internals stuff
+[08:07] <diakopter> so we can have HLL "methods" implemented as C functions directly
+[08:07] <diakopter> namely, find_meth, new_type, and other extremely performance critical things
+[08:08] <not_gerd> we could interface with dyncall that way
+[08:09] <diakopter> I thought that's what nativecall *does*
+[08:09] <diakopter> (for arbitrary C functions)
+[08:09] <not_gerd> I mean instead of adding ops for dyncall, we could make it conform to that interface
+[08:09] <diakopter> oh. hrm.
+[08:10] <diakopter> it's certainly compilable that way
+[08:10] <not_gerd> ie there's a dyncall dispatch CFunction constant that does arg marshalling
+[08:12] <diakopter> would that be more or less object overhead than what nativecall on parrot does?
+[08:15] <not_gerd> not sure yet what would be the better approach
+[08:15] <not_gerd> I'll take a look at what arnsholt does on the JVM before I decide anything
+[08:33] *** not_gerd joined
+[08:34] <jnthn> I didnt' intend the MVMCFunction thing to be anything to do with FFI, fwiw.
+[08:34] <jnthn> I'm not sure we should dual-purpose it for that either.
+[08:36] <jnthn> Also, no, REPRs aren't objects and they shouldn't be.
+[08:36] <jnthn> Add REPR inheritance and you screw the whole performance design of 6model.
+[08:36] <jnthn> Well, we could maybe cope but anyway, we aren't going there.
+[08:38] <jnthn> not_gerd: On nativecall stuff, I'd really rather start out in Moar just implementing what we use today from the Perl 6 NativeCall module.
+[08:39] <jnthn> MoarVM is about the worst possible place to prototype anythinjg else righjt now because we can't try out the Perl 6 level bit
+[08:40] <dalek> MoarVM/nativecall2: 0f0ed84 | (Gerhard R)++ | / (18 files):
+[08:40] <dalek> MoarVM/nativecall2: Add CBlob and implement CPointer
+[08:40] <dalek> MoarVM/nativecall2: review: https://github.com/MoarVM/MoarVM/commit/0f0ed84e27
+[08:41] <not_gerd> jnthn: I'm planning to conform to existing API
+[08:41] <jnthn> CBlob sounds terribly like CArray... :)
+[08:41] <jnthn> not_gerd: OK. I'm certainly open to giving NativeCall more featuers and capabilities. I just feel the Perl 6 level needs to be worked on alongside the guts.
+[08:42] <not_gerd> but CArrayBody contains a pointer to the storage instead of *being* the storage
+[08:42] <not_gerd> my idea is have have a CBlob which is just a sized memory blob that can be inlined
+[08:42] <jnthn> It still has to be held at a level of indirection.
+[08:42] <jnthn> But yes, you could have one less
+[08:43] <jnthn> You can't pass C-land a pointer to memory managed by the Moar GC as it may move
+[08:45] <not_gerd> well, my idea was to only allow pointers to MVMObject (and not within theirs bodies) and keep a bitmap of where they are located within the C blob
+[08:45] <not_gerd> would that be workable?
+[08:46] <not_gerd> I guess not because there's no place to hang off the bitmap
+[08:47] <jnthn> Aye, and anything we pass to native code, we can no longer keep track of
+[08:47] * FROGGS must suppress puns >.<
+[08:47] <jnthn> It may stash copies of that pointer all over and we can't keep them up to date.
+[08:50] <JimmyZ> not_gerd: ptr_obj->st->REPR->ID could be written as REPR(ptr_obj)->ID, FYI :)
+[08:50] <jnthn> And probably should be... :)
+[08:51] <not_gerd> sure, but REPR lacks an MVM
+[08:51] <not_gerd> I guess that's no reason to not use it right now
+[08:51] <JimmyZ> MVM?
+[08:52] <not_gerd> headers will need a reorganization if we want to be installable
+[08:52] <not_gerd> anything not prefixed with MVM should reside in private headers
+[08:52] <not_gerd> which we don't have right now
+[08:53] <JimmyZ> oh, you're right. I wanted to talk about it before.
+[08:53] <JimmyZ> headers-reorganization
+[08:55] <dalek> MoarVM/nativecall2: 3704ab4 | (Gerhard R)++ | src/native/ops.c:
+[08:55] <dalek> MoarVM/nativecall2: Use REPR macro
+[08:55] <dalek> MoarVM/nativecall2: review: https://github.com/MoarVM/MoarVM/commit/3704ab4103
+[09:21] *** dalek joined
+[09:21] *** japhb joined
+[09:21] *** Woodi joined
+[09:21] *** benabik joined
+[09:21] *** not_gerd joined
+[09:21] *** cognominal joined
+[09:21] *** odc joined
+[09:21] *** LWA joined
+[09:21] *** FROGGS joined
+[09:21] *** BinGOs joined
+[09:21] *** woosley joined
+[09:21] *** tokuhirom joined
+[09:21] *** masak joined
+[09:21] *** [Coke] joined
+[09:21] *** eternaleye joined
+[09:21] *** Ulti joined
+[09:21] *** lizmat joined
+[09:21] *** rblackwe joined
+[09:21] *** ggoebel joined
+[09:21] *** tadzik joined
+[09:21] *** colomon joined
+[09:21] *** woolfy joined
+[09:21] *** yoleaux joined
+[09:21] *** diakopter joined
+[09:21] *** Util joined
+[09:21] *** PerlJam joined
+[09:21] *** JimmyZ joined
+[09:21] *** gshank joined
+[09:21] *** timotimo joined
+[09:21] *** flussence joined
+[09:21] *** ChanServ joined
+[09:21] *** pmichaud joined
+[09:21] *** `patch` joined
+[09:21] *** _sri joined
+[09:21] *** arnsholt joined
+[09:21] *** ingy joined
+[09:21] *** patspam joined
+[09:24] *** foo_bar_baz joined
+[11:52] *** Woodi joined
+[12:18] *** dolmen joined
+[12:37] *** benabik joined
+[12:57] <jnthn> There's a nice bundle of Solaris patches (plus a configure related question) on the perl6-compiler mailing list, if somebody feels like processing them.
+[12:57] <jnthn> (I likely won't ahve tuits until Thu or Fri)
+[13:07] <not_gerd> and just now I thought it would be fine to use anonymous unions as we were already doing so :(
+[13:12] <not_gerd> actually, solaric studio might support them if -features=extensions is passed
+[13:12] <not_gerd> * solaris
+[13:13] <nwc10> I'm confident that you will hit another compiler that can't deal with them
+[13:14] <not_gerd> gcc, msvc, clang can deal with them
+[13:15] <nwc10> sure. xlc on AIX? HP's C compiler?
+[13:16] <not_gerd> xlc supports them
+[13:17] <JimmyZ> anonymous unions is fine. libuv is using it too
+[13:17] <not_gerd> JimmyZ: do they use them in their solaris code?
+[13:18] <not_gerd> HP C for OpenVMS appears to support them as well
+[13:18] <woolfy> jnthn: as soon as I see you, you will have tuits.
+[13:19] <woolfy> I still have loads of MoarVM-tuits!
+[13:20] <JimmyZ> not_gerd: looks like not
+[13:20] <woolfy> I just wish I had some barrels of time to accompany the tuits...
+[13:21] <JimmyZ> not_gerd: libuv has an stdint-msvc2008.h
+[13:21] <JimmyZ> FYI
+[13:21] <not_gerd> JimmyZ: I know
+[13:21] <not_gerd> but we want inttypes.h as well
+[13:34] <diakopter> jnthn: surely you didn't think I was actually proposing reprs becomes object!?!??!?
+[13:38] <diakopter> oh, not_gerd said that
+[13:58] *** jnap joined
+[14:00] *** Ulti left
+[14:04] <diakopter> not_gerd: the validation branch looks good
+[14:11] <jnthn> diakopter: Not sure who said what, I was just commenting on something I saw in backlog... :)
+[14:11] <jnthn> ...while I was having my first coffee of the day :)
+[14:13] <not_gerd> diakopter: we do some re-dispatching on .j/.a that's not necessary right now
+[14:13] <not_gerd> I'd leave it in - we can always remove stuff later if it stays unnecessary
+[14:14] <jnthn> .j/.a ?
+[14:15] <jnthn> oh, guess it was about validator :)
+[14:15] <not_gerd> annotations for jumplist and preparg
+[14:15] <jnthn> :)
+[14:18] <not_gerd> jnthn: is there a reason why we allocate REPROps and then put the pointer in a static var instead of using a static var for the whole structure?
+[14:18] <not_gerd> as in, do we plan to get ris of those static variables?
+[14:18] <not_gerd> otherwise, I'd rather get rid of the allocations
+[14:18] <not_gerd> s/ris/rid/
+[14:19] <jnthn> I can't remember why we keep it around in a static...
+[14:19] <jnthn> Anyway, the repr ops tables are immutable
+[14:20] <jnthn> So there's no real problem with them being shared even betwee MVMInstance
+[14:20] <not_gerd> would probably help startup a (tiny) bit
+[14:20] <jnthn> But...
+[14:20] <jnthn> ->name points to an MVMString...
+[14:20] <jnthn> Which is instance-specific...
+[14:21] <jnthn> On the third hand, that being a char* and on the tiny number of occasions we ned it we decode it ton an MVMString (only .REPR introspection, I guess) also works.
+[14:22] <not_gerd> the repr struct could just hold a C pointer and the strings would be held in some arrays indexed by REPR->ID
+[14:22] <jnthn> Especailly as then you can see what REPr you have easier in the debugger ;)
+[14:22] <jnthn> Or what, yues.
+[14:22] <jnthn> Either works for me. :)
+[14:23] <jnthn> Anything that is trying to make a decision by REPR name on a hot path is probably wrong...
+[14:23] <jnthn> I guess maybe we need the name strings for the REPR name to ID hash.
+[14:24] <not_gerd> diakopter mentioned that string constants need a proper abstraction anyway
+[14:24] <not_gerd> whoever does it can take care of this as well ;)
+[14:27] <jnthn> well...I guess they kinda do-ish...but that's really into micro-opt :)
+[14:28] <diakopter> jnthn: yeah but the name strings for the hash can be instance-specific
+[14:28] *** benabik joined
+[14:28] <diakopter> I think the ->name as char * is a good idea; it makes error messages and debugging huge amounts faster
+[14:33] <jnthn> diakopter: Yes, I think that's what I was suggesting
+[14:33] <jnthn> diakopter: Oh, to be clear I meant the array of MVMString names had to be per-instance, like the REPR lookup hash is.
+[14:35] <diakopter> jnthn: I meant, we can have name strings for each repr in each instance
+[14:35] <jnthn> diakopter: Yes, me too :)
+[14:46] <not_gerd> how do I allocate immortal objects?
+[14:47] <diakopter> well you switch the allocator into gen2 mode
+[14:47] <jnthn> Wait :)
+[14:47] <jnthn> Immovable, or immortal? :)
+[14:48] <not_gerd> immortal
+[14:48] <not_gerd> I need to stub some type and it would reduce boiler-plate
+[14:49] <jnthn> moment, finsihing class
+[14:50] <diakopter> not_gerd: if you just want to cache something, just create a slot for it on instance; that can get a hundred more slots or whatever
+[14:53] <not_gerd> isn't there some GC flag I could set that says 'hey, leave me alone'
+[14:53] <diakopter> what do you mean "leave me alone"
+[14:53] <diakopter> it'll still find pointers to it
+[14:54] <diakopter> what do you suggest doing with those pointers
+[14:55] <diakopter> not_gerd: why do you want special treatment from the GC? what special behavior/situation does it need?
+[14:55] <diakopter> (why does it matter that you're calling it immortal?)
+[14:56] <not_gerd> I don't want to actually implement most of the 6model bits right now
+[14:56] <diakopter> I'm beginning to suspect the answer to your question is: "add the pointer to permroots"
+[14:56] <diakopter> implement most of the 6model bits???
+[14:57] <diakopter> I don't see your implication
+[14:57] <not_gerd> I basically only need the repr parts
+[14:57] <diakopter> the repr parts of what?
+[14:57] <diakopter> I don't even know what you're working on
+[14:57] <diakopter> so I have zero context for your question
+[14:58] <diakopter> it sounds like the answer is "add a permanent root"
+[14:58] <diakopter> (after stashing its pointer on instance)
+[14:58] <not_gerd> sounds good
+[14:59] <not_gerd> for testing purposes, I basically need an object that only holds a pointer to a malloc'd memory block
+[14:59] <not_gerd> I never call methods on it or do anything else interesting with it
+[14:59] <diakopter> that's not CPointer?
+[14:59] <not_gerd> I just want it to not be collected prematurely
+[15:00] <not_gerd> not in my factoring
+[15:00] <diakopter> yes, save the pointer somewhere, and add the address of that saved pointer to permanent roots
+[15:00] <not_gerd> thanks
+[15:00] <diakopter> so the gc knows not to collect and also where to update that pointer if it moves it
+[15:01] <diakopter> wait, what repr are you using then
+[15:01] <diakopter> if not CPointer
+[15:02] <not_gerd> I called it CBlob
+[15:02] <not_gerd> a CPointer can point into that
+[15:02] <diakopter> "into"
+[15:02] <diakopter> ?
+[15:02] <not_gerd> you can do 'safe' pointer arithmetic as long as you never leave the blob
+[15:03] <diakopter> oh.. I was going to add this sort of thing..
+[15:03] <diakopter> *ask to add
+[15:05] <diakopter> not_gerd: but why would you want the blob in the body of the object?
+[15:05] <diakopter> oh, nm
+[15:06] <not_gerd> diakopter: that... probably won't work out
+[15:06] <diakopter> what won't work out
+[15:07] <not_gerd> I wanted CBlob to name the thing that can be inlined into arbitrary p6opaque objects
+[15:07] <diakopter> eh?
+[15:07] <not_gerd> you would acces the value by getting a CPointer that points into the inlined blob
+[15:07] <not_gerd> now, it gets fun when objects start moving...
+[15:08] <diakopter> that's what jnthn was saying, you can't pass those pointers to untrusted code
+[15:08] <diakopter> why would you want blobs inlined?
+[15:08] <not_gerd> jnthn was talking about the flip side - putting 6model object pointers into C structures
+[15:09] <jnthn> Not having the GC support interior pointers was kinda a design simplification I knowingly made.
+[15:09] <not_gerd> I was talking about putting C structures into 6model objects
+[15:09] <jnthn> That is, I've done stuff assumign I'd never have to care for this.
+[15:09] <diakopter> yes, those are still pointers to 6model objects
+[15:09] <diakopter> which can move, so you can't do that
+[15:10] <not_gerd> well, with enough effort, you can probably make something like this work
+[15:10] <jnthn> So the GC really doesn't know what to do with pointers into the insides of objects and it'd be a decent bit of effort to teach it and I'll take a good bit of convincing to do it.
+[15:10] <not_gerd> I don't want to do it, though
+[15:10] <jnthn> 'cus the GC is complex enough already ;-)
+[15:11] <not_gerd> I want to make putting MVMObject* into 6model objects work, though
+[15:11] <not_gerd> get the users enough rope to hang themselves ;)
+[15:12] <diakopter> how don't we already have that, with the gc_mark routine of each repr?
+[15:12] <jnthn> You should be able to put a P6opaque-like thing into a P6opaque-like thing
+[15:14] <not_gerd> diakopter: yes, I'll be doing it using gc_mark and a bitmap
+[15:14] <jnthn> (as in, at a 6model level that should be possible...it's not done anywhere yet...)
+[15:14] <not_gerd> but once you can pass such struct to C-land, the temptation will be there to store those MVMObject* somewhere else ;)
+[15:15] <diakopter> you can't pass anything with object pointers to C land
+[15:15] <not_gerd> you can
+[15:15] <not_gerd> (see comment about hanging yourself)
+[15:15] <diakopter> (unless the C code is already aware of all the restrictions, in which case why are you writing C in the high level language in the first place)
+[15:15] <diakopter> right, but why would you want to do that
+[15:17] <not_gerd> -Ofun doesn't care about why, just *how*
+[15:17] <diakopter> frankly that's silly and you can't design based on -Ofun
+[15:18] <not_gerd> diakopter: it's design by implementation
+[15:19] <not_gerd> I'm fully aware that we might just scratch the whole thing
+[15:19] <not_gerd> there'S probably be bits to keep around, though
+[15:19] <not_gerd> there'll
+[15:19] <FROGGS> parrot keeps bits around too
+[15:19] <diakopter> so I'm asking, why would you want to pass 6model pointers to C land unless it's code that's already written against moarvm.h
+[15:21] <not_gerd> you could have some black-box C à qsort()
+[15:21] <not_gerd> put your MVMObject* in some CArray and provide an accessor
+[15:21] <diakopter> to sort what?
+[15:21] <not_gerd> the CArray
+[15:22] <not_gerd> it's just an example
+[15:22] <diakopter> when we call into native/C code, we mark the thread blocked
+[15:22] <diakopter> so the GC can run *during* the call out
+[15:22] <diakopter> so you can't be looking at managed memory during that
+[15:23] <diakopter> because of the assumption that native code can't see managed memory
+[15:23] <not_gerd> that does make it far less useful
+[15:24] <diakopter> it's so you can have IO/delayed/longish-running things in native code and not block all the other threads when the gc needs to run
+[15:32] <diakopter> not_gerd: note the implications for the JIT, too
+[15:33] <diakopter> the JIT will still need gc sync point interrupt checks injected
+[15:34] <diakopter> maybe more intelligently less often, but definitely still with some frequency
+[15:35] <diakopter> and the JIT will need to know how to spill all registers to memory
+[15:35] <diakopter> (and back after the gc run)
+[15:35] <diakopter> pointer registers, anyway
+[15:53] *** FROGGS[mobile] joined
+[16:00] <diakopter> commutatoriation&
+[16:49] *** jnap joined
+[17:17] <dalek> MoarVM/nativecall2: 502ad30 | (Gerhard R)++ | / (12 files):
+[17:17] <dalek> MoarVM/nativecall2: Work on CBlob and fake pointer repr inheritance
+[17:17] <dalek> MoarVM/nativecall2: review: https://github.com/MoarVM/MoarVM/commit/502ad30e77
+[17:17] <dalek> MoarVM/nativecall2: e5639bd | (Gerhard R)++ | src/native/CScalar.c:
+[17:17] <dalek> MoarVM/nativecall2: Add some constants for CScalar
+[17:17] <dalek> MoarVM/nativecall2: review: https://github.com/MoarVM/MoarVM/commit/e5639bdd7f
+[17:17] <dalek> MoarVM/nativecall2: b74681d | (Gerhard R)++ | / (10 files):
+[17:17] <dalek> MoarVM/nativecall2: Fix bugs and wire up what we have so far
+[17:17] <dalek> MoarVM/nativecall2: review: https://github.com/MoarVM/MoarVM/commit/b74681dd14
+[17:28] <diakopter> not_gerd: do you plan on storing sizeof() of all the MoarVM structs statically so the runtime can grab them?
+[17:28] <diakopter> also offsets of every member
+[17:29] * diakopter thinks that would be helpful :)
+[17:32] <diakopter> not_gerd: I do think the blob has potential for other things, though
+[17:34] <not_gerd> the use case I was interested in was creating C structures
+[17:34] <not_gerd> allocate a blob, than cast to the correct pointer type
+[17:34] <not_gerd> * then
+[17:35] <not_gerd> first, I need to figure out why I end up in an endless loop, though
+[17:35] <diakopter> I still don't understand why you want those as part of the object body
+[17:35] <not_gerd> doesn't sppear to be the runloop
+[17:36] <not_gerd> I hope it's not another silly bug like `ptr = (MVMCPointer *)ptr;` instead of `ptr = (MVMCPointer *)ptr_obj;`
+[17:36] <diakopter> not_gerd: about how many nanoseconds should it take to qsort a thousand integers
+[17:37] <not_gerd> took far longer than it should have to track down
+[17:37] <not_gerd> well, qsort() isn't the greatest because it can't inline the comparison function
+[17:38] <diakopter> sorry, I meant *a* quicksort
+[17:39] <not_gerd> why do you ask - to check if a custom implementation is correct?
+[17:39] <diakopter> which sort would be best for items that are probably fairly close to sorted already
+[17:39] <not_gerd> http://www.sorting-algorithms.com/
+[17:40] <diakopter> that's a url, not a sort algorithm
+[17:40] <not_gerd> it has pretty animations that contain the answer
+[17:41] <not_gerd> hm..
+[17:41] <not_gerd> it doesn't work correctly in my FF
+[17:41] <not_gerd> that used to work :(
+[17:42] <diakopter> oh, actually, very few unique is more the use case
+[17:47] <not_gerd> you might also look into hybrid algorithms like timsort or introsort which normally cover a good range of use cases
+[17:48] <diakopter> qsort3 and shell sort handle that case the best (according to those animations)?
+[17:49] <jnthn> Ther'es already a quicksort algo in Moar somewhere :)
+[17:50] <jnthn> used for fates or something i guess...
+[17:51] <not_gerd> do we need to sort linked lists, by the way?
+[17:54] <diakopter> not yet, that I know of
+[17:54] <jnthn> dinner...somewhere near, given the color of the sky... &
+[18:07] <not_gerd> should I do something special to an object before adding it as permroot?
+[18:07] <not_gerd> move it out of the nursery or something? alloc it in gen2 from the start?
+[18:08] <diakopter> no
+[18:08] <diakopter> you don't add objects to permroots
+[18:08] <diakopter> you add addresses of pointers to objects
+[18:08] <diakopter> to permroots
+[18:09] <diakopter> roots aren't necessarily particular objects; they're memory locations that hold objects that should always be rooted
+[18:10] <not_gerd> well, I put a type object into a staic var and  did a MVM_gc_root_add_permanent()
+[18:11] <diakopter> just a temporary static, right?
+[18:11] <not_gerd> no
+[18:11] <not_gerd> do I need to set that to NULL before instance destruction?
+[18:11] <diakopter> you can't store object pointers in statics
+[18:12] <diakopter> that's why I said you have to hang it off of instance
+[18:12] <diakopter> temporary in the context of development cycle, I mean
+[18:13] <not_gerd> someday, I should probably read through the gc algorithm
+[18:13] <not_gerd> MVM_gc_root_add_permanent() only cares about the variable's address, so I thought it would be fine
+[18:13] <not_gerd> but that variable needs to reside in managed memory?
+[18:14] <diakopter> no, instance-specific memory
+[18:14] <diakopter> so it should hang off instance
+[18:14] <diakopter> if it's a stub type, why not add it to where all the other stub types are
+[18:15] <diakopter> MVM_gc_root_add_permanent(tc, (MVMCollectable **)&tc->instance->boot_types->BOOTIntArray);
+[18:15] <not_gerd> because I had not yet decided if it should remain a stub type
+[18:15] <not_gerd> but if it breaks the gc, I should do it
+[18:16] <not_gerd> (obviously)
+[18:16] <diakopter> like I said last night, you can't put instance-specific pointers in static variables because we could have multiple instances
+[18:17] <not_gerd> sure, it was only ever a temporary solution so I could get to testing more interesting stuff
+[18:17] <diakopter> (but like I said, libuv might need some convincing to enable that.. )
+[18:17] <diakopter> that's what I meant by temporary
+[18:17] <diakopter> temporary in the development cycle
+[18:17] <diakopter> it's fine to store it in a static if you're just doing it for this phase of the developement cycle
+[18:18] <diakopter> get it?
+[18:20] <not_gerd> personally, I don't hope it's fine - otherwise, there's something else that broke global destruction ;)
+[18:21] <diakopter> no, you would still have to root it
+[18:22] <not_gerd> it *is* rooted, but now MVM_gc_collect_free_nursery_uncopied loops endlessly on global destruction
+[18:22] <diakopter> well, it's probably not a problem in your code
+[18:23] <diakopter> the global destruction is quite new
+[18:24] <diakopter> oh.
+[18:24] <diakopter> yeah that's my bug
+[18:24] <diakopter> haha
+[18:24] <not_gerd> *now* you tell me ;)
+[18:24] <diakopter> well I just found it
+[18:24] <diakopter> in my mind anyway
+[18:24] <diakopter> have to actually look at the source to confirm
+[18:25] <diakopter> instead of mentally running the code
+[18:25] * diakopter wonders if everyone does that
+[18:26] <diakopter> seriously though, it's fine to store it in a static for development purp;oses
+[18:27] <diakopter> not_gerd: I'm not going to be able to fix that for 4-5 hours; just comment out the global destrutcion for now
+[18:28] <not_gerd> what to do with CBlob depends on whether we want a proper OO interface to it
+[18:28] <not_gerd> the interface right now is get a pointer to the blob and do all manipulation through that
+[18:28] <not_gerd> (or it will be once I implement it ;))
+[18:29] <diakopter> 17:35 < diakopter> I still don't understand why you want those as part of the object body
+[18:29] <not_gerd> they no longer are
+[18:29] <diakopter> oh
+[18:29] <not_gerd> a CBlob is just a memory block you can point pointers at
+[18:30] <not_gerd> say you want to create a CArray
+[18:30] <not_gerd> you allocate a blob, get a pointer to it's start and cast the pointer to array
+[18:31] <diakopter> does the pointer know the size of the blob?
+[18:31] <not_gerd> indirectly - the blob does, and th CPOinter references the blob
+[18:31] <diakopter> (how else would the array know how big it can be)
+[18:32] <not_gerd> that's the difference between a CPointer coming from native or from 6model-land
+[18:32] <not_gerd> coming from 6model-land, it knows it's blob and thus knows what pointer-arithmeticsare safe
+[18:33] <diakopter> CPointer is still immutable, right?
+[18:34] <not_gerd> no, it can be modified by boxing int
+[18:35] <not_gerd> typed pointers are immutable, though
+[18:35] <diakopter> how could that possibly be safe
+[18:35] <not_gerd> because it knows the blob
+[18:35] <diakopter> when you box an int?
+[18:35] <not_gerd> you derive a pointer from a blob
+[18:35] <diakopter> you just said it can box an int
+[18:35] <not_gerd> unbox it to int and do arithmetics
+[18:36] <diakopter> does the set_int repr op throw an exception on it?
+[18:36] <not_gerd> on re-boxing, it checks if it still lies within the blob
+[18:36] <not_gerd> yes do set_int throwing
+[18:36] <not_gerd> (or is that a no-no?)
+[18:38] *** jnap joined
+[18:39] <diakopter> well.... where else would you be doing the check you just mentioned
+[18:40] <not_gerd> well, depends on what we want boxing semantics to be
+[18:40] <diakopter> eh?
+[18:40] <not_gerd> one could argue that just boxing should always be safe
+[18:40] <not_gerd> no idea if we want that
+[18:42] <diakopter> I don't know what other repr op you're referring to other than set_int
+[18:43] <not_gerd> no, it uses set_int, but it could be made to use a custom op if so desired
+[18:43] <not_gerd> I was asking if it is
+[18:43] <not_gerd> sorry for being unclear
+[18:43] <diakopter> I really think set_int should throw
+[18:44] <not_gerd> then I'm happy as well as that's what it does right now
+[18:44] <diakopter> but it wouldn't do what you said on boxing
+[18:44] <diakopter> it would throw
+[18:44] <diakopter> I suggest an op that takes a pointer, integer, and returns a pointer
+[18:44] <diakopter> (new) pointer
+[18:44] <diakopter> I don't think you should try to overload the boxing op that way
+[18:48] <diakopter> I strongly suggest keeping the native types immutable with regard to all the standard ops
+[18:48] <diakopter> I doubt jnthn would accept the design otherwise (for the same reasons I'm saying)
+[18:48] <diakopter> not_gerd: do you think that can work?
+[18:49] <not_gerd> sure
+[18:49] <diakopter> otherwise it raises the complexity level of the repr ops
+[18:49] <not_gerd> would add another op and increase the number of objects neede when doing arithmetics, but that's  probably not an issue
+[18:50] <not_gerd> pointer arithmetics isn't really something we should optimize for
+[18:50] <diakopter> certainly not above the optimizing jit level
+[18:51] <diakopter> the optimizing jit can do all kinds of seemingly risky things :D :D
+[18:53] <not_gerd> it's a bit of a semantic mismatch that pointers need to be 6model objects, though - we dont have pointer registers, right now
+[18:55] <diakopter> no, same as int objects
+[18:55] <diakopter> the assumption is that eventually a jit will do the right thing
+[18:56] <diakopter> jnthn: make sure to read all teh backlog before replying
+[18:56] <jnthn> Everything that ain't a native int or native float ends up as a 6model object in Moar.
+[18:56] <jnthn> In general, the idea with REPRs that want special things is not to extend the REPR API for every possible use case, but to add repr-specific ops.
+[18:57] <not_gerd> well, at some level, a pointer *is* just an int
+[18:57] <not_gerd> however, at the API lvel, we can do whatever we want
+[18:57] <jnthn> (ab)?using set_int for setting a pointer...hmm :)
+[18:57] <jnthn> I'm still pondering that.
+[18:58] <jnthn> It bothered me muchly in Parrot how set_integer and the like got used for all kinds of things...
+[18:58] <jnthn> otoh, yes, a pointer really is kinda an int :)
+[18:58] <jnthn> Even the CLR believes that (e.g. IntPtr) :)
+[18:58] <diakopter> yeah but it's unsafe
+[18:59] <jnthn> aye
+[18:59] <not_gerd> well, it means boxing can now throw
+[18:59] <jnthn> Well, *everything* in NativeCall is unsafe :)
+[18:59] <not_gerd> (and it is of course unsafe if the Pointer does not come from a Blob)
+[18:59] <jnthn> boxing throws anyway for reprs that don't implement that section of the REPR API...
+[19:00] <jnthn> Or did I miss something?
+[19:00] <jnthn> diakopter: Did your "set_int should throw" mean anything more than "'cus that's the default for types that don't box an int"?
+[19:00] <not_gerd> but it's more like 'I don't support that API' and not 'I throw because I don't like that particular int'
+[19:00] <diakopter> jnthn: no
+[19:01] <diakopter> jnthn: but I was also saying that cpointer shouldn't box ints
+[19:01] <jnthn> ok
+[19:04] <not_gerd> the way I have it right now, a CPointer is basically an int (with its range determined by the associated CBlob) that can be converted to typed pointers like CScalar, CStruct, ...
+[19:05] <diakopter> so it's unsafe in the sense things could be mis-casted, but it's safe in the sense that it won't trample on memory outside the blob
+[19:06] <not_gerd> correct
+[19:08] <jnthn> not_gerd: A CPointer coming back from C land doesn't know its limits, though, I guess?
+[19:08] <jnthn> not_gerd: Or we presume it's unarithmeticable?
+[19:08] <not_gerd> right now, it is if its untyped
+[19:08] <not_gerd> we might want an immutable untyped type
+[19:09] <diakopter> I thought we weren't making mutable ones
+[19:09] <jnthn> CPointer is immutable, though?
+[19:10] <not_gerd> mutable via boxing
+[19:10] <jnthn> ?
+[19:10] <jnthn> As in, the result is a new CPointer object?
+[19:10] <diakopter> not_gerd: boxing *is* set_int
+[19:10] <jnthn> Just like adding two Ints in Perl 6 is a new Int?
+[19:11] <diakopter> that's why I was asking what other repr op you were referring to other than set_int when yo usaid boxing
+[19:11] <diakopter> so, I'll ask again, which op are you referring to when you say "via boxing"
+[19:12] <jnthn> I think we can fairly safely say that the Perl 6 API for pointer arithmetic is gonna want to act like the Perl 6 API for integer arithmetic, which is to say you don't mutate the inputs to the addition.
+[19:16] * TimToady wonders if lines(IO) can ever just be an array of pointers into a readonly memory-mapped file...
+[19:16] <not_gerd> oO( is probably just confused about box_i semantics )
+[19:16] <TimToady> (modulo letting lines return something that only lazily converts to NFG)
+[19:17] <diakopter> TimToady: I'm pretty optimistic the royal optimizer will have enough information to safely optimize to that
+[19:17] <TimToady> 'course, ASCII is already NFG :)
+[19:18] <TimToady> and Latin-1, if you count uint8s
+[19:18] <jnthn> evil!!
+[19:18] <jnthn> (As in, beautiful.)
+[19:19] <TimToady> but yeah, probably we need to mostly think about UTF-8 as input
+[19:21] <not_gerd> are latin-1 strings directly mmap() from the bytecode file?
+[19:21] <not_gerd> if not, can we and should we make that work?
+[19:21] <jnthn> not_gerd: Maybe one to look at after the NFG work.
+[19:22] <jnthn> Shouldn't make diakopter++'s merging work any harder :)
+[19:22] <diakopter> I'd say to push that down to the jit optimizer.. note: I'm gonna say that about nearly every optimization proposal
+[19:23] <jnthn> This feels orthogonal to the jit :P
+[19:23] <diakopter> cross-opcode optimization, I mean
+[19:23] <jnthn> oh...
+[19:23] <diakopter> how is it orthogonal?
+[19:24] <not_gerd> when the JIT starts up, we already have copied the strings to memory
+[19:24] <jnthn> diakopter: Just using the mmap's bytecode's string heap blob as the ->int8s in an MVMString sounds to me like a loading-the-bytecode time decision, but I think I was commenting on something other than you.
+[19:24] <diakopter> oh, I missed that line
+[19:25] <diakopter> not_gerd: no, but my first visual studio profile of startup showed that more than 90% of the time was spent decoding bytecode strings
+[19:26] <jnthn> o.O
+[19:26] <jnthn> I'm betting a s**tload of it was the darn serialization base-64 too!
+[19:26] <diakopter> actually no
+[19:26] <diakopter> well, yes if you mean decoding those strings to in-memory strings
+[19:26] <jnthn> diakopter: oh wait, what did you mean by "bytecode strings"?
+[19:27] <diakopter> but then doing the actual base64 decoding is trivial, less than half a millisecond on all of them
+[19:27] <diakopter> I measured them specifically
+[19:28] <jnthn> diakopter: yes, I meant decoding them to in-memory strings
+[19:28] <jnthn> diakopter: Which feels wasteful for the ser blob, but we can deal with that later on I guess :)
+[19:28] <diakopter> right, there might as well be a binary blob in the serialization
+[19:28] <diakopter> (extend the bytecode spec)
+[19:28] <jnthn> aye
+[19:29] <jnthn> That's what I've been thinking. Just not felt it was a priority yet :)
+[19:29] <not_gerd> what was the rational behind using base64 - the JVM needs it, IIRC
+[19:29] <diakopter> also, it would be best to eliminate decoding altogether and point directly into the bytecode for the strings loaded from serialization/string heap.
+[19:29] <not_gerd> any other reasons?
+[19:30] <jnthn> not_gerd: No, the JVM actually just has the binary file in the JAR now.
+[19:30] <diakopter> (like not_gerd says)
+[19:30] <diakopter> about latin1
+[19:30] <jnthn> not_gerd: The reason - and you won't believe this - was that when I tried to put a string literal with escape sequences in PIR to have it be a binary string, IMCC always screwed it up.
+[19:30] <diakopter> would be good to make an alternative string constructor (like parrot does) to create a string from a trusted blob source
+[19:30] <jnthn> not_gerd: So I base-64'd it 'cus I didn't want to debug IMCC.
+[19:30] <jnthn> :)
+[19:30] <arnsholt> =D
+[19:31] <diakopter> pir's an awesome bytecode format
+[19:31] <jnthn> I meant to go back and deal with it later. 2 years on... :)
+[19:31] <arnsholt> Yeah, Moar should totally have something like PIR! O:)
+[19:31] * arnsholt runs away
+[19:31] <diakopter> well, nqp will be quite sufficient for that when it's fast
+[19:32] <jnthn> There's a reason I chose not to give MoarVM an IL :P
+[19:32] <arnsholt> jnthn: Which is why I said that in the first place, obviously =D
+[19:36] <diakopter> but my point was that the fact they're base64 isn't the problem; it's that they need decoded from utf8..
+[19:36] <diakopter> (to proto-nfg)
+[19:36] <diakopter> (quasi-utf-32)
+[19:36] <jnthn> aye :)
+[19:37] <diakopter> but I still say that we should reserve all cross-opcode optimization designing for the grandaddy optimizer
+[19:43] *** foo_bar_baz joined
+[19:44] *** yoleaux joined
+[19:55] <diakopter> jnthn: see what I said about global locking on #perl6?
+[19:56] <jnthn> diakopter: Yeah. I suspect I'm too beat to sanely comment today, though my gut feeling is "this will have a deadlock risk", but I can't actually back that up with a scenario.
+[19:57] <diakopter> well no, the lock objects (tokens) wouldn't be tied to a single thread necessarily
+[19:57] <diakopter> its just like a Lock object on jvm, except integrated with all the repr ops
+[19:57] <diakopter> (through the natural "this thread owns this" locking)
+[19:58] <diakopter> (if we end up having that)
+[19:58] <diakopter> so that makes it the user's responsibility to keep it unique
+[19:59] <diakopter> er, keep it undeadlocked
+[19:59] <diakopter> (just like any other lock)
+[20:00] <jnthn> Thankfully, Promise, Channel, etc. will push a bunch of things in the "lots of single threaded pieces communicating through well-defined, composable synchronization primitives", which I hope means the typical Perl 6 developer won't encounter locks when writing their parallel/concurrent programs :)
+[20:01] <jnthn> s/",/" direction,/
+[20:02] <diakopter> jnthn: yeah, well, while compiler-writers are the majority of Perl 6 developers... (for the foreseeable future).... :)
+[20:06] <diakopter> (I'm implying that it won't be efficient enough for a while)
+[20:19] * [Coke] wonders if there will be rakudo-moar hacking this weekend.
+[20:25] *** cognominal joined
+[21:03] *** rblackwe joined
+[21:04] <diakopter> [Coke]: probably not time.. :P
+[22:42] <dalek> MoarVM/nativecall2: 460c903 | (Gerhard R)++ | src/ (5 files):
+[22:42] <dalek> MoarVM/nativecall2: Hang CBlob_WHAT off the instance and disable global destruction
+[22:42] <dalek> MoarVM/nativecall2: review: https://github.com/MoarVM/MoarVM/commit/460c903cea
+[22:42] <dalek> MoarVM/nativecall2: 444577a | (Gerhard R)++ | / (10 files):
+[22:42] <dalek> MoarVM/nativecall2: Native ops refactor
+[22:42] <dalek> MoarVM/nativecall2: review: https://github.com/MoarVM/MoarVM/commit/444577a990
+[22:42] <not_gerd> that's it from me
+[22:43] <not_gerd> good night
+[22:43] *** not_gerd left
+[22:43] <diakopter> g'n' not_gerd
+[23:24] *** cognominal joined
