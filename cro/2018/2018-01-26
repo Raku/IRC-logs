@@ -1,0 +1,199 @@
+[02:57] *** ilbot3 joined
+[02:57] *** moderator changes topic to: Cro: libraries and tools for building reactive services in Perl 6 | http://cro.services/ | Logs: https://irclog.perlgeek.de/cro/
+[10:04] *** sena_kun joined
+[10:18] <Geth> ¦ cro-http/push-promise: 176c7c2ef4 | Altai-man++ | t/http2-push-promise.t
+[10:18] <Geth> ¦ cro-http/push-promise: Skip if no ALPN
+[10:18] <Geth> ¦ cro-http/push-promise: review: https://github.com/croservices/cro-http/commit/176c7c2ef4
+[10:19] <jnthn> Ah, that'll fix the Travis :)
+[10:20] <sena_kun> Yeah.
+[10:21] <sena_kun> a new adventure into FrameParser~
+[10:22] <jnthn> Is all happy now with Chrome?
+[10:23] <sena_kun> first request - yes, a second one, where the headers are already indexed - no.
+[10:23] <sena_kun> I suspect this bug can be... Anywhere, though, between hpack/frame parser.
+[10:33] *** Geth joined
+[10:51] *** Geth joined
+[13:15] <sena_kun> jnthn, I found it, but not sure how to fix it though. :/
+[13:27] <jnthn> Was the HPACK patch you sent part of the fixing it? :)
+[13:29] <jnthn> Ah, and I'd still s/header-table/dynamic-table/ in the latest version of the patch
+[13:32] <sena_kun> not yet.
+[13:32] <sena_kun> ugh.
+[13:33] <sena_kun> jnthn, I clearly see issue's origin, but it's a concurrency one. If you have 3 minutes now, I can clearly explain it so you can suggest something.
+[13:35] <jnthn> OK, go on
+[13:38] <sena_kun> jnthn, firstly we get settings frame, that set some big table size, so we like `start $connection-state.settings.emit($result)` it(see https://github.com/croservices/cro-http/commit/a8c89171af6d430df2605643410a77c065870e02#diff-a2a80b47fb79ac9f57c6c55b12154602 - this commit indeed fixes another issue). But then we got headers, that's just emitted(no start). Consumer firstly sees headers, then settings(eww), it uses the default table size,
+[13:38] <sena_kun> cookies are thrown away, boom. Of course, if you remove `start`, it works, but other tests fail. I think we need to preserve all headers before we got first settings frame, but, well, the issue is more fundamentail, I think. start is naturally slower than plain emit.
+[13:39] <sena_kun> *sets
+[13:39] <jnthn> Ah
+[13:40] <jnthn> And the start is there to make sure we don't get into deadlocks
+[13:40] <sena_kun> t/http2.t fails without it, like `# expected: '3'
+[13:40] <sena_kun> #      got: '0'`.
+[13:40] <sena_kun> Failed test 'Concurrent responses are handled'
+[13:40] <sena_kun> So we cannot remove it.
+[13:41] <jnthn> Maybe we can whenever start { $connection-state.settings.emit($result) } { put code that we want to do next here }
+[13:41] <sena_kun> in frame parser?
+[13:41] <jnthn> Yeah
+[13:42] <jnthn> So that we defer further processing until we know the settings emit happened
+[13:42] <sena_kun> it's quite async, I am not sure how it'll help. We need a lock, I guess.
+[13:43] <sena_kun> Ah, stop, maybe start {}.get?
+[13:43] <jnthn> The start is there to avoid a deadlock as I remember it. I'm pretty sure that inserting more locking will not help.
+[13:44] <jnthn> We just need to enforce an ordering on the things we do, no?
+[13:44] <sena_kun> yeah.
+[13:44] <jnthn> So, moving the second emit of the headers into the body of a whenever, which will run after the settings change has been sent, should do it, I think?
+[13:44] <sena_kun> but I am not clearly see what we can put inside of whenever start now.
+[13:46] <jnthn> Ah, I see
+[13:47] <jnthn> Hmm...
+[13:47] <sena_kun> *seeing
+[13:47] <jnthn> Yeah, looking more at the code, I see
+[13:47] <jnthn> Also trying to remember why we needed that `start`
+[13:47] <sena_kun> the PR can be merged, I guess.
+[13:48] <jnthn> Which tests fail, precisely?
+[13:48] <sena_kun> http2.t
+[13:48] <sena_kun> I'll push updated cro-http now...
+[13:49] <Geth> ¦ cro-http/push-promise: 0d727c18f1 | Altai-man++ | lib/Cro/HTTP2/GeneralParser.pm6
+[13:49] <Geth> ¦ cro-http/push-promise: Use table size limit setting
+[13:49] <Geth> ¦ cro-http/push-promise: review: https://github.com/croservices/cro-http/commit/0d727c18f1
+[13:49] <sena_kun> You need this and patched HPACK, then `perl6 -I../../p6-http-hpack/lib/ -Ilib t/http2.t`.
+[13:49] <sena_kun> Of course, relative path is so relative.
+[13:50] <jnthn> Merged PR, btw
+[13:50] <jnthn> Can you see what happens if we do $client ?? (start ...) !! (...) ?
+[13:50] <jnthn> That is, only async send it when we're in client mode?
+[13:51] <sena_kun> trying it.
+[13:52] <jnthn> (Currently looking at something else, so can't try it out right now)
+[13:52] <sena_kun> np
+[13:53] <sena_kun> it works with both http2.t and in chromium. \\o/
+[13:53] <sena_kun> running other tests now...
+[13:55] <sena_kun> jnthn++
+[13:57] <Geth> ¦ cro-http/push-promise: fa6ab2c501 | Altai-man++ | lib/Cro/HTTP2/FrameParser.pm6
+[13:57] <Geth> ¦ cro-http/push-promise: Fix race, jnthn++
+[13:57] <Geth> ¦ cro-http/push-promise: review: https://github.com/croservices/cro-http/commit/fa6ab2c501
+[13:59] <jnthn> Nice :)
+[14:00] <sena_kun> ># Looks like you failed 3 tests of 4
+[14:00] <sena_kun> kill me please. :]
+[14:00] <jnthn> arggh
+[14:00] <sena_kun> looking into it...
+[14:31] <Geth> ¦ cro-core: 33fb5d9437 | Altai-man++ | lib/Cro/Message.pm6
+[14:31] <Geth> ¦ cro-core: Lower binary blob limit to 512
+[14:31] <Geth> ¦ cro-core:
+[14:31] <Geth> ¦ cro-core: 4096 is quite a too much, since servers(e.g. akamai) generally sends
+[14:31] <Geth> ¦ cro-core: data in smaller chunks, but even e.g. 2048 is tedious to see.
+[14:31] <Geth> ¦ cro-core: review: https://github.com/croservices/cro-core/commit/33fb5d9437
+[14:31] <sena_kun> made limit lower.
+[15:06] <sena_kun> >MoarVM panic: Heap corruption detected: pointer 0x7fa0f4398ac8 to past fromspace
+[15:06] <sena_kun> I guess it's not exactly Cro issue here...
+[15:08] <jnthn> Uh, no
+[15:09] <Geth> ¦ cro-http/push-promise: 47d9a920f6 | Altai-man++ | 3 files
+[15:09] <Geth> ¦ cro-http/push-promise: Allow for client to enable push
+[15:09] <Geth> ¦ cro-http/push-promise: review: https://github.com/croservices/cro-http/commit/47d9a920f6
+[15:11] <Geth> ¦ cro-http: Altai-man++ created pull request #20: Push promise support
+[15:11] <Geth> ¦ cro-http: review: https://github.com/croservices/cro-http/pull/20
+[15:13] <jnthn> sena_kun: Ready for merge, in your opinion?
+[15:14] <sena_kun> not yet, I'm resolving conflict in META now.
+[15:14] <sena_kun> :)
+[15:14] <sena_kun> about "readiness", well... It passes all tests, works in both main browsers, with curl and some other tools.
+[15:15] <jnthn> You tried push promises and saw Chrome dev tools reporting that the thing was pushed, also?
+[15:15] <sena_kun> will try it now, yup.
+[15:19] <Geth> ¦ cro-http/push-promise: 5a7b913b09 | Altai-man++ | 8 files
+[15:19] <Geth> ¦ cro-http/push-promise: Implement JWT-based Auth with tests;
+[15:19] <Geth> ¦ cro-http/push-promise:
+[15:19] <Geth> ¦ cro-http/push-promise: Also reformat META6.json to use 4 white space characters.
+[15:19] <Geth> ¦ cro-http/push-promise: review: https://github.com/croservices/cro-http/commit/5a7b913b09
+[15:19] <Geth> ¦ cro-http/push-promise: b233caae47 | Altai-man++ (committed using GitHub Web editor) | 8 files
+[15:19] <Geth> ¦ cro-http/push-promise: Merge branch 'master' into push-promise
+[15:19] <Geth> ¦ cro-http/push-promise: review: https://github.com/croservices/cro-http/commit/b233caae47
+[15:19] <sena_kun> Fixed the conflict, doing yet another test for push promises...
+[15:31] <jnthn> Just uploaded IO::Socket::Async::SSL 0.6 to CPAN
+[15:43] <sena_kun> *sighs*
+[16:41] <sena_kun> jnthn, where we can get :authority? Is it a configurable value?
+[16:42] <jnthn> https://tools.ietf.org/html/rfc7540#section-8.1.2
+[16:42] <jnthn> 8.1.2.3 specifically
+[16:43] <sena_kun> well, I see it right now. :)
+[16:43] <jnthn> "Clients that generate HTTP/2 requests directly SHOULD use the ":authority" pseudo-header field instead of the Host header field.
+[16:43] <jnthn> Are we doing that? :)
+[16:43] <sena_kun> I'm trying it with firefox now.
+[16:43] <sena_kun> and chromium too.
+[16:44] <jnthn> Ah, you're looking at the mention of this in 8.2 on Push Promises?
+[16:44] <jnthn> The server MUST include a value in the ":authority" pseudo-header
+[16:44] <jnthn> field for which the server is authoritative (see Section 10.1).  A
+[16:44] <jnthn> client MUST treat a PUSH_PROMISE for which the server is not
+[16:44] <jnthn> authoritative as a stream error (Section 5.4.2) of type
+[16:44] <sena_kun> yes
+[16:44] <jnthn> PROTOCOL_ERROR.
+[16:44] <sena_kun> Yup.
+[16:44] <sena_kun> Though, when I fixed that I'm still getting STREAM_REFUSED.
+[16:44] <sena_kun> And like no reasons why so.
+[16:44] <sena_kun> :/
+[16:45] <sena_kun> RFC defines it as "When client for some mystical reason doesn't want to...".
+[16:47] <sena_kun> so we need to pass :authority further to respond with it...
+[16:47] <jnthn> We could in the first instance pass in the :host of the server
+[16:47] <jnthn> To the response serializer
+[16:48] <sena_kun> yeah.
+[16:48] <jnthn> (When building up the pipeline, it's easy to pass it in to the constructor)
+[16:48] <sena_kun> do you want yet anothet flag?
+[16:48] <sena_kun> *another
+[16:49] <jnthn> Flag?
+[16:49] <jnthn> Oh, in the API for Cro::HTTP::Server?
+[16:49] <sena_kun> yeah. you meant that, didn't you?
+[16:49] <jnthn> No, initially I thought just pass :authority($host) - that is, treat what's specified for $host
+[16:49] <jnthn> as a default
+[16:50] <jnthn> Though we could of course have a :$authority = $host
+[16:50] <sena_kun> well, I'm starting to melt at this point. :/
+[16:51] <jnthn> Time for a break? :)
+[16:52] <sena_kun> no.
+[16:53] <sena_kun> https://www.youtube.com/watch?v=9VGKisqEAkE - never surrender, never retreat!
+[16:55] <sena_kun> ok, good news: when ":authority" set to "localhost:$myport", the browser doesn't refuses.
+[16:55] <sena_kun> so I guess our next thing is to figure out host:port.
+[16:56] <sena_kun> aaaaah.
+[16:56] <sena_kun> we already have host:port, so I just need to pass that.
+[16:56] <jnthn> Right :)
+[16:56] <jnthn> That said, we may want to let people pass :authority<foo.com> to Cro::HTTP::Server
+[16:57] <jnthn> And *default* it to what they pass for :host
+[16:57] <sena_kun> :authority must include port too.
+[16:57] <jnthn> Which in turn defaults to localhost
+[16:57] <jnthn> That should do it
+[16:57] <sena_kun> though for https it's just 443.
+[16:57] <jnthn> Ah, so just :$authority = "$host:$port" then :)
+[16:57] <sena_kun> yeah
+[16:57] <sena_kun> also.
+[16:58] <sena_kun> about all those options.
+[16:59] <sena_kun> I didn't look there for a while(maybe a month or something), but it kind of looked like a mess with all those options. Not sure if it's just me. Perhaps, never mind me. Dunno if it can be organized better.
+[17:01] <jnthn> It'd be unusual for a given user-case to use the lot of them, though
+[17:03] <sena_kun> I mean the inner structure of Client. We just take a loooot of them and use it all around, so complexity of finding where is what and who passes what to who increases.
+[17:03] <jnthn> Oh, I thought we were talking about server :)
+[17:03] <sena_kun> Yeah.
+[17:04] <sena_kun> I just changed the topic without noticing.
+[17:04] <jnthn> :P
+[17:04] <sena_kun> Everything was just in my head. :)
+[17:04] <jnthn> Perhaps we can do something smarter there
+[17:05] <sena_kun> Yeah. Not sure about time/efficienty ratio of such changes though.
+[17:08] <jnthn> Well, I figure we're talking internal changes, not external API ones, so we don't have to hurry too much
+[17:08] <sena_kun> sure.
+[17:12] <jnthn> yay, upload worked out nicely: http://modules.perl6.org/dist/IO::Socket::Async::SSL:cpan:JNTHN
+[17:13] <jnthn> Was a bit worried something mighta been off with it as I got dupe notification on #perl6
+[17:14] <sena_kun> chromium shows me
+[17:15] <sena_kun> Initiator: Push (index)
+[17:15] <sena_kun> So.
+[17:15] <sena_kun> \\o/
+[17:15] <sena_kun> Commiting changes...
+[17:15] <sena_kun> tests first...
+[17:16] <jnthn> \\o/
+[17:19] <Geth> ¦ cro-http/push-promise: 1f225ff2d2 | Altai-man++ | 2 files
+[17:19] <Geth> ¦ cro-http/push-promise: Set :authority header
+[17:19] <Geth> ¦ cro-http/push-promise: review: https://github.com/croservices/cro-http/commit/1f225ff2d2
+[17:19] <sena_kun> so.
+[17:19] <sena_kun> I'll merge it, right?
+[17:20] <jnthn> Can do :)
+[17:20] <Geth> ¦ cro-http/master: 50 commits pushed by Altai-man++, (Jonathan Worthington)++
+[17:20] <Geth> ¦ cro-http/master: review: https://github.com/croservices/cro-http/compare/5a7b913b09...cd30794be1
+[17:21] <sena_kun> phew.
+[17:21] <sena_kun> moving to next task...
+[17:21] <sena_kun> or is there something else you'd like to see implemented, jnthn?
+[17:22] <jnthn> I think that's all
+[17:22] <jnthn> I've got "Generalize body parsing" on my Cro todo list for this month
+[17:22] <jnthn> But I think we've already got plenty for a nice 0.7.3
+[17:23] <sena_kun> I can do it tomorrow/the day after tomorrow if there'd be some recommendations on generalization.
+[17:24] <jnthn> I think I'll take care of it, tbh; I'm not 100% sure what I want, and I think I need to play around with it a bit in code.
+[17:25] <jnthn> And there's not really much code to write
+[17:25] <sena_kun> ah, okay.
+[17:25] <jnthn> It's really just figuring out if we can extract some body-related logic to a more general role, so we can, for example, re-use things like JSON body parsing stuff on incoming websocket messages
+[17:26] <jnthn> Anyway, will see what I've time to do early next week on that
+[17:28] <jnthn> We've already got a lot of stuff done to make a nice release though
+[17:28] <jnthn> I think we'll manage 0.8.0 in February
