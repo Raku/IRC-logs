@@ -1,0 +1,118 @@
+[00:07] <Ven> ugh, there I am, writing clojure and all, and forgetting
+[00:07] <Ven> (defmacro x [] `(defn foo [] 1))
+[00:07] <Ven> isn't going to work as intended *at all*
+[00:09] <Ven> well, not from another namespace at least
+[00:13] <Ven> masak: of note https://clojuredocs.org/clojure.walk/postwalk-replace
+[00:14] <Ven> also http://hubpages.com/technology/Clojure-macro-writing-macros
+[00:16] *** Ven_ joined
+[00:18] *** FROGGS joined
+[00:50] *** FROGGS joined
+[02:32] *** pdcawley joined
+[02:48] *** ilbot3 joined
+[07:13] <masak> ...and we're back.
+[07:15] <masak> having slept on it, I'm not too worried about the linter problems.
+[07:16] <masak> I even have a hypothesis that doesn't require the world to be too screwed up and action-at-a-distance-y
+[07:17] <masak> namely that *something* in a for loop is going down the 'object term' parsing branch before it goes down the 'for loop body' branch
+[07:17] <masak> gonna re-enable those tests and test it now
+[07:21] <masak> ...yes, that seems to be it.
+[07:22] <masak> in other words, allowing that whitespace after the '{' made term:objcet suddenly start to parse but then fail in the middle, but not before it had some other side effect that caused the linter test to fail
+[07:24] * masak mumbles a Diax's Rake
+[07:25] <masak> well, there are two smaller mysteries inside that solved mystery:
+[07:25] <masak> (a) what (inside statement:for) calls term:object ?
+[07:25] <masak> (b) what (inside term:object) screws up the linter test ?
+[07:28] <masak> as to (a), it's the added logic that catches and throws an error on `say 1, 2` listop calls.
+[07:30] <masak> added a guard -- that fixes it.
+[07:30] <masak> that whole clause there is too big, though, and screws up the elegance of the EXPR rule
+[07:31] <masak> will open an issue about that
+[07:34] <masak> $ perl6 bin/007 -e='my agent = { speak() { say("Bond") } }; agent.speak()'
+[07:34] <masak> Type check failed in binding key; expected Str but got Q::Identifier
+[07:34] <masak> in block  at /home/masak/ours/007/lib/_007/Q.pm:351
+[07:34] <masak> that's this line, by the way:
+[07:34] <masak> $obj.properties{$.ident} // die "no such property: $.ident";
+[07:35] <masak> (the line where I said it looked like it should say $.ident.name
+[07:35] <masak> )
+[07:36] <masak> changing it to that makes it work.
+[07:44] <masak> ...but now there's a test failure. interesting.
+[07:46] <masak> oh. it was a malformed AST in the test. phew.
+[07:46] <masak> (it said `"a"` instead of `(ident "a")`)
+[07:46] *** FROGGS joined
+[07:46] <masak> getting off the train, bbl &
+[10:02] <masak> yeah, the whole "illegal listop" detection shenanigans gets a whole lot more brittle and dangerous once we have object syntax colliding with block syntax.
+[10:02] <masak> *especially* since many of the normal statement forms are <sym> <EXPR> <pblock>
+[10:03] <masak> I think I'm going to roll back 48eb3d immediately after this merge. it's not worth the heartache just for the nice error message.
+[10:06] <masak> ven/Ven_/vendethiel: please have a look-through/meta-review: https://github.com/masak/007/commit/2fbc86aaee124c0ceb49f54f4adcf0509e062ead
+[10:07] <masak> if you're happy with what you see, I will merge into master.
+[10:16] * masak starts a branch with the-things-to-do-after-merge
+[13:33] *** vendethiel joined
+[13:37] <vendethiel> had no idea you could "commit with", tbh :)
+[13:37] <vendethiel> you were right to fix the Str/Identifier mismatch. The code was written that way on purpose, but with misunderstanding
+[14:08] *** Ven joined
+[14:09] <masak> "commit with" is just person A doing commit and person B doing amend (or rebase or cherry-pick)
+[14:13] <masak> Ven: re Str/Identifier -- basically, Str isn't an exposed "thing" in 007, neither on the Q level or on the Val level. it can only exist as an internal implementation detail. so when I saw it "bare" in the test AST it immediately stood out as amiss.
+[14:13] <Ven> fair enough :)
+[14:13] <Ven> I admit I didn't generate a tree to try it
+[14:13] <masak> https://github.com/masak/007/commit/2fbc86aaee124c0ceb49f54f4adcf0509e062ead#commitcomment-14381492 -- good point
+[14:14] <masak> and only now do I see that we only test for "some error", which is not a good test :)
+[14:14] <Ven> :)
+[14:14] <masak> fixing
+[14:14] <Ven> I should've assert-match'd
+[14:14] <masak> _007::Test has is-error for this
+[14:15] <masak> but it basically requires you to go and create the X:: type too
+[14:15] <masak> I might do that while I'm at it
+[14:16] <Ven> ..yeah, might be good to do it now
+[14:16] <Ven> not letting it linger
+[14:16] <masak> aye
+[14:16] <Ven> I have some macro talk for after that
+[14:16] <masak> looking forward to it
+[14:16] <masak> I'm on a train, so my replies will be intermittent
+[14:17] <Ven> ah, ok
+[14:17] <Ven> going back home? You seen to be back to a timezone alike mine
+[14:17] <Ven> (maybe you checked the two links I left yesterday?.. or rather early this night?)
+[14:19] <masak> I'm back to UTC+01:00, yes.
+[14:19] <masak> didn't check the links yet.
+[14:20] <Ven> ok :)
+[14:21] <masak> heh -- the AST was more wrong (missing a `stexpr`), further hammering down the "don't test for general failure" point ;)
+[14:23] <masak> passed -- running general `prove`.
+[14:28] <masak> Ven: new and improved, please double check: https://github.com/masak/007/commit/fd02a5b0bdab25c4daea2d77f458fa3354aad6ac
+[14:29] <Ven> <?{ $<termish>[*-1].ast ~~ Q::Identifier }>
+[14:29] <Ven> I'm not sure what's that for, btw?
+[14:29] <masak> it's a stopgap thing to placate the failing linter tests
+[14:29] <Ven> ok
+[14:29] <masak> I have a commit here to apply after your merge
+[14:29] <masak> that removes that whole error checking
+[14:29] <Ven> ok!
+[14:29] <masak> and makes EXPR nice and simple again
+[14:29] <Ven> good
+[14:29] <Ven> looks good!
+[14:30] <Ven> :)
+[14:30] <masak> merged, pushed.
+[14:30] <masak> Ven++
+[14:31] <Ven> \\o/
+[14:32] <Ven> sorry for the time it took, though
+[14:32] <masak> np
+[14:32] <masak> also pushed the queud-up commits :)
+[14:32] <masak> getting off the train soon :)
+[14:33] <masak> a high-ish priority is to handle the check list in that PR
+[14:33] <masak> culminating in an updated web page
+[14:33] <Ven> don't you want to move that checklist to the issue instead?
+[14:34] <masak> yes, good idea. please feel free to.
+[14:34] <masak> detrain &
+[14:57] <Ven> did do done
+[15:50] *** Ven joined
+[16:12] *** Ven joined
+[16:27] <Ven> I'm just gonna start talking, and preface with: this is in context of a clojure project https://github.com/vendethiel/ideas-luminus.clj
+[16:28] <Ven> I've been toying with this project for a LONG time, as the first commit was in april 2014
+[16:28] <Ven> still, I didn't get much done, because I felt like I didn't get to have much fun. So I decided to use macros (obvious!)
+[16:30] <Ven> as the project is web-based, I decided to write some macros to automate the CRUD stuff yet
+[16:30] <Ven> so, of course, I started writing a macro that read: `(defn foo-bar [] ...)
+[16:31] <Ven> ..that didn't go well
+[16:32] <Ven> the walker appends the namespace to any identifier. so when used from another module, it declared my-macros/foo-bar, and didn't work at all, of course.
+[16:32] <Ven> so, I used name. an example of such an use can be found here: http://stackoverflow.com/questions/7650458/make-a-namespace-qualified-function-name-in-a-macro
+[16:32] <Ven> (I changed my solution since then in my repo)
+[16:33] <Ven> if that reminds you of lexical scopes in p6 (clojure also is, but its lexical scope is `let`-based) and name <=> melt, well, same for me ;-)
+[16:51] *** Ven joined
+[17:14] *** Ven joined
+[17:41] <masak> interesting. will look more closely later.
+[20:17] *** FROGGS joined
+[21:14] <masak> as for the SO question/answer, I think I understand both the question and answer roughly. but I'm still a slow reader when it comes to anything with Scheme and quasiquoting.
+[23:29] *** pdcawley_ joined
