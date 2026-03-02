@@ -1,0 +1,71 @@
+[00:27] *** sufrostico joined
+[00:36] *** sufrostico joined
+[01:48] *** ilbot3 joined
+[01:48] *** moderator changes topic to: Fire is step THREE! | https://github.com/perl6/toolchain-bikeshed | Channel logs: http://irclog.perlgeek.de/perl6-toolchain/today | useful prior art: https://metacpan.org/pod/CPAN::Meta::Spec
+[03:27] *** MadcapJake_ joined
+[06:36] *** domidumont joined
+[06:37] *** domidumont joined
+[06:52] *** domidumont joined
+[06:56] *** domidumont joined
+[07:31] <nine> "As several of the initial commenters on GitHub bug reports noted, another problem with npm is that modules are not namespaced by origin or user account. That made it impossible for downstream projects to simply switch from Koçulu's left-pad package to Westland's." http://lwn.net/Articles/681410/
+[07:31] <nine> And suddenly we have a very real example for why the whole :auth complexity might really become usefull.
+[07:32] <nine> ugexe: sorry to keep your pull request waiting. I've dug myself deep into this EVAL at compile time issue and despite months of effort can't seem to find a way out :/
+[07:59] *** leont joined
+[11:30] *** tony-o joined
+[12:49] *** sufrostico joined
+[13:17] *** sufrostico joined
+[14:33] *** sufrostico joined
+[15:32] <ugexe> also `emulates`
+[15:49] *** domidumont joined
+[16:28] <ugexe> can you elaborate on the problem of using EVAL at compile time, what its being used for, and the area of code where this stuff happens at?
+[16:32] *** leont joined
+[16:38] <nine> In general if you run an EVAL during compilation of a module, the resulting precomp file ends up kinda broken giving all sorts of nonsensical errors. The cause is that an EVAL creates its own serialization context and this SC is not stored anywhere but referenced by the module that we tried to compile.
+[16:39] <nine> The EVAL in question is https://github.com/rakudo/rakudo/blob/0204bffa351c049a573cfdabc5fba4c9ec3554fc/src/core/CompUnit/PrecompilationRepository.pm#L89
+[16:39] <nine> Used for reading back in the DependencySpecification so we can check if a precomp file is still up to date.
+[16:40] <nine> Now I have some idea on how to fix compile time EVAL. It's just really, really hard and requires lots of quality time where I figure out how the compiler works exactly.
+[17:06] *** domidumont joined
+[17:14] *** Kassandry joined
+[17:21] *** sufrostico joined
+[17:24] *** sufrosti1o joined
+[18:09] *** leont joined
+[18:16] *** leont joined
+[18:24] <leont> I can't get my script (as installed to ~/.rakudobrew/moar-nom/install/share/perl6/site/bin/) to work at all :-/
+[18:45] <nine> leont: do you have more info?
+[18:45] <leont> There's a shim in there, but when I try to use it it hangs
+[18:53] * sjn has precomp-related hanging all the time
+[19:07] <nine> involving certain modules?
+[19:10] <diakopter> nine: a naive idea is to incorporate/merge the interior EVAL's SC contents into the outer one's
+[19:11] <diakopter> well, sligtly less than utterly naive
+[19:12] <tony-o> nine: leont's precomp hanging is reproducible on TAP::Harness' 'prove6'
+[19:12] <leont> Yeah
+[19:13] <leont> Then again, it takes ages to precompile too (allegedly related to having multiple classes in file)
+[19:21] <ugexe> does it take forever to precompile when you run it without installing it?
+[19:21] <tony-o> it doesn't for me
+[19:21] <tony-o> i don't think
+[19:23] <tony-o> 3.7s start up time for precomp
+[19:23] <tony-o> .8s after initial run
+[19:24] <leont> What he said. It works fine from checkout, but not so fine when installed
+[19:30] <nine> diakopter: that's actually what I'm trying to do.
+[19:31] <nine> diakopter: well, I'm sharing the outer World's SC with the EVAL World
+[19:32] <diakopter> nince: I mean, another option is to force the inner one to precomp mode also, and create a new dependency on disk
+[19:32] <diakopter> nine: ^
+[19:32] <nine> leont: could you try on rakudo commit 5025c8cd83e3db06c2471759562af3a14f7d0e9a?
+[19:34] <nine> diakopter: the hardest problem seems to be the strong assumption that there's a 1:1:1:1 relationship between comp unit, World, SC and byte code file. I'm already trying to break that for the first 3. I can hardly imagine things becoming easier by breaking it on the file level, too :)
+[19:35] <leont> Currently working on my slides for tomorrow, may try later tonight…
+[20:03] <ugexe> to elaborate on multiple classes in a file, its because installation precomp uses the module's *name* to generate the id it later uses
+[20:03] <ugexe> instead of the path
+[20:37] <ugexe> probably also means such files get duplicated on install, so you have multiple sha1 file names with the same contents
+[20:56] <nine> ugexe: what exactly do you mean?
+[20:59] <ugexe> nine: it iterates <provides>.kv during install. so say you have a provides like this: https://github.com/Leont/tap-harness6/blob/master/META.info#L6 ... then look at this: https://github.com/rakudo/rakudo/blob/nom/src/core/CompUnit/Repository/Installation.pm#L161-L163
+[21:00] <ugexe> it creates the file id using $name, so $whatever.child($id) will point to a new file for every item in that provides
+[21:02] <ugexe> even though every file in the provides is the same
+[21:13] <ugexe> part of this is resolved in my PR. when saving the meta6 during install (so dist/jf982jf9j23f0j) it no longer does `<name> => <ext> => { :file(092jf09j2f), :time() }`, but leaves the original structure in place and expands like `<name> => <original relpath> => { :file(some sha1), :time(123) }` (i.e. adding a hash to the leaf node with the additional meta data). this leaves the original path, which
+[21:13] <ugexe> should be treated as a *path-name* just like every other file that gets installed, but adds the slight inconvience of looking up the path-name for a module name
+[21:14] <ugexe> (see non-PR related code for such a lookup here: https://gist.github.com/ugexe/c5a74134164bcaabd756#file-installation-pm6-L38 )
+[21:15] <ugexe> that method install still has the flaw of creating extra files, but it would be trivial to fix with path-name lookup
+[21:33] <ugexe> it used to screw up precomp back in the day when a module source code was grepped for module names to create a provides build graph. *a* solution was to replace every module name after a use/require with the literal path, so the topological sort did not double count different names from the same file
+[21:33] <ugexe> (replace it in the source for counting the occurances only, not actually saving the modified source)
+[21:38] *** sufrostico joined
+[21:38] *** sufrosti1o joined
+[22:01] *** lizmat joined
+[22:36] *** autarch joined

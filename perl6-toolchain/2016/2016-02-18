@@ -1,0 +1,70 @@
+[02:49] *** ilbot3 joined
+[02:49] *** moderator changes topic to: Fire is step THREE! | https://github.com/perl6/toolchain-bikeshed | Channel logs: http://irclog.perlgeek.de/perl6-toolchain/today | useful prior art: https://metacpan.org/pod/CPAN::Meta::Spec
+[03:05] *** El_Che joined
+[04:04] *** El_Che joined
+[07:32] *** FROGGS joined
+[07:54] *** ugexe joined
+[10:32] *** hankache joined
+[11:06] *** hankache joined
+[12:22] *** sufrostico joined
+[12:59] *** sufrostico joined
+[14:08] *** hankache joined
+[15:50] *** sufrostico joined
+[16:23] *** sjn joined
+[17:28] *** sufrostico joined
+[18:07] *** Kassandry joined
+[18:44] <ugexe> `method !add-short-name` should not be called if a dist is already installed and ?$force. i dont know if the best way is to just skip it, or to still look for its existence in the short-id file first
+[19:03] <nine> Can you think of other ways in which duplicate entries could end up in the short/ files?
+[19:12] <ugexe> only if an uninstall did not goes as planned (deleting everything but the short-id for some reason)
+[19:13] <ugexe> such that the files don't exist to require :force, but the short-id artifacts still remain in a file
+[19:18] <ugexe> might be small enough to just `spurt: unique(|$file.IO.lines, $id)`
+[19:24] <nine> FWIW we already use .unique when reading those files, so not many cycles are wasted
+[19:26] <nine> So I think time is better spent on turning those files into directories as that will also solve this issue
+[19:27] <nine> We just have to find a good plan for upgrading repositories.
+[19:28] <ugexe> ive been using `$dist.id\\0$directory\\n` and waiting for some asshole to use \\n in their directory name
+[19:30] <nine> I fear we'll have to carry the code to read the old repository format forever as the only universal safe time to upgrade a repo that comes to my mind is on installation of a new module.
+[19:30] <ugexe> er, .Str, not .id (so i can run `xxx-matcher` against the Str)
+[19:32] <ugexe> can the repo format not be upgraded during a rakudo upgrade somehow?
+[19:33] *** perlpilot joined
+[19:33] <nine> The perl, site and vendor repos yes. But we don't know where all the user repos in the home directories are and could not even guess at user defined repositories.
+[19:33] <nine> I'm not sure if someone has discovered how to even use a completely custom repo, but it's possible.
+[19:33] <ugexe> ah, i didnt know non ::Installable repos used the format
+[19:35] <nine> The repo in ~/.perl6 is a Repository::Installation: "inst#$home/.perl6/$ver"
+[19:35] <nine> And you can '-Iinst#/tmp/foo/bar' for a completely custom Repository::Installation
+[19:36] <ugexe> yeah, but it still needs something to early load
+[19:36] <ugexe> otherwise a BEGIN from some module can fire bfore your CUR's BEGIN for registering itself
+[19:37] <nine> No, those are just CompUnit::Repository::Installation objects from the setting. They are loaded before any user code and set up by CompUnit::RepositoryRegistry when initializing $*REPO
+[19:39] <ugexe> is it possible for such a CUR to `use` modules? as in, will it load the `use` target or the CUR first?
+[19:40] <nine> I don't understand your question
+[19:42] <ugexe> you say the CUR initialization happens before any user code. if the user code is a module in the custom CUR `use Github::API;` can it lookup Github::API even though $*REPO hasnt been fully initialized? (or i would think its not initialized, as its still setting up the custom CUR)
+[19:44] <ugexe> so a Custom CUR wants to `use` a module when $REPOs is initialized. will it be able to access that module, which (i assume) needs $*REPOs to locate/use?
+[19:46] <ugexe> (assume the needed module is in CUR::Installation, not the custom CUR itself)
+[19:50] <ugexe> i would guess 1 of 2 things: it works, because CUR::Installation gets loaded first and any CUR loaded after it will have access to any $*REPOs before it (even if $*REPOs has not finished loading *all* CURs) or 2: it does not work because $*REPOs needs to load all CUR before it can be used to access modules
+[19:51] *** patrickz joined
+[19:52] <nine> Well custom Repository classes are a bit of a challenge still as $*REPO must already be set up to even load the module. And once you loaded the module you may no longer change the used PrecompilationRepository.
+[19:53] <ugexe> ah yes. this is what i mean by pre-load. some early stage/phase to handle that (not that i have any idea how)
+[19:53] <nine> Also we don't have a way to register the repository type prefixes with the RepositoryRegistry yet. We would need this to be able to correctly serialize the $*REPO.repo-chain to pass it on to the precompilation process.
+[19:53] *** FROGGS joined
+[19:54] <nine> Both issues may have the same answer: define a directory where a custom repo implementations can be dropped and automatically loaded by rakudo
+[19:55] <ugexe> heh, i proposed that a long long time ago
+[19:56] <nine> So it's probably no bad idea at all :)
+[19:56] <ugexe> i say that because i totally forgot about that
+[19:59] <ugexe> `perl6 -C /usr/lib/CloudPan.pm -I cloud#cloudpan.org/6pan` # from the lizmat gist; perhaps this could allow setting such a location on the fly
+[20:07] *** cognominal_ joined
+[20:07] *** perlpilot_ joined
+[20:09] <ugexe> the bin wrapper needs some rethought... looks like it might shift off the wrong args, as well as possibly stealing the actual scripts :$name :$ver arguments (if any): https://github.com/rakudo/rakudo/blob/nom/src/core/CompUnit/Repository/Installation.pm#L39-L42
+[20:09] *** El_Che_ joined
+[20:10] *** FROGGS_ joined
+[20:12] *** nine joined
+[20:13] *** camelia joined
+[20:14] <nine> Aah...now it would be great if we had figured out what exactly :auth and :version may look like. because that would be the perfect contents of the short/[sha-of-short-name]/ files.
+[20:16] <nine> Ah, keep it simple: three lines in those files with version, auth and api otherwise unescaped
+[20:18] <ugexe> so disallow \\n in auth/ver/api?
+[20:19] <nine> Any objections?
+[20:20] <ugexe> no, i would prefer if we established some disallowed values
+[20:20] <nine> Banning \\n seems like the no-brainer there.
+[20:38] <ugexe> if \\n is encountered should it just die, or be treated literlly?
+[20:42] *** sjn_ joined
+[20:47] *** sufrostico joined
+[21:32] *** sufrostico joined
+[21:38] *** Coke__ joined

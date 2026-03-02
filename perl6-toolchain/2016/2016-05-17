@@ -1,0 +1,107 @@
+[00:05] *** sufrostico joined
+[00:05] *** sufrosti1o joined
+[06:13] *** domidumont joined
+[06:18] *** domidumont joined
+[08:04] <nine> I think, this will interest pretty much everyone here: https://github.com/rakudo/rakudo/commit/2801780673f7f5a32f72e0a1d2b9a81e01f7f2e9
+[08:09] <nine> If I were to write a module manager like panda, I'd use a similar trick. I'd build, install into a this temporary repository, use that for the tests and finally just copy the generated files.
+[08:09] <nine> This way it's easy to run everything as unpriviledged user while the final copying can be done using sudo or some other mechanism.
+[08:10] <nine> It also halfs the time spent for precompilation because right now we're precompiling for running the tests and then again during installation.
+[09:04] *** cognominal joined
+[12:41] *** sufrostico joined
+[13:08] *** hoelzro joined
+[13:14] *** cognominal joined
+[13:39] *** lizmat joined
+[15:02] <ugexe> thats what zef does, although it could not copy the precomp files over
+[15:05] <nine> Copying the precomp files is the interesting new step
+[15:20] <ugexe> this should then allow the Distribution to supply the precomp files in the provides right? assuming CURI.install gets tweaked to differentiate source from precomp
+[15:27] <ugexe> the other thing is running the tests doesn't necessarily precompile everything. some sort of basic precomp method for distributions to call could help, where a naive example would just `use` each module in the provides
+[15:37] <nine> Note: it's not running the tests to precompile, it's running CompUnit::Repository::Installation::install
+[15:49] <nine> tadzik: something for redpanda? ^^^
+[15:50] <ugexe> i see. however doesn't copying the entire repo from one to another bypass any check on a distribution being already installed?
+[15:51] <nine> Of course. That should be done before building using a sensible API that will be much easier to design once your PR lands :)
+[15:52] <tadzik> nine: the "precompile, then copy" part? :)
+[15:53] <nine> tadzik: yes
+[15:53] <tadzik> yep, sounds good :)
+[15:54] <ugexe> right, i am trying to imagine what problems will arise from rebuilding reverse dependencies when moving from one repo to another
+[15:56] <nine> Good point. That's probably gonna need some more code in the Staging repository and maybe some refactoring of the Installation repo so it's easier to override parts.
+[15:59] <nine> The version I committed this morning was really written with distro packaging in mind where you rebuild the packages for reverse dependencies anyway.
+[16:04] <mst> er
+[16:05] <mst> surely for distro packages they'll want to be able to re-precomp revdeps on install
+[16:06] <nine> Why compile anything on install when you have a build server farm?
+[16:09] <nine> On the Open Build Service for example, when you have packages perl6-A-1.0 and perl6-B-1.0 which depends on perl6-A, and you submit perl6-A-1.1, it will automatically rebuild both packages.
+[16:11] <nine> With an automatically increased build number for perl6-B-1.0 which will give you a package like perl6-B-1.0-1.2.noarch.rpm
+[16:11] <ugexe> how is that meant to be handled with optional dependencies? say IO:Socket::SSL was installed from source, and then you go to install HTTP::UserAgent from apt-get
+[16:13] <ugexe> i can understand having to eat the runtime precomp penalty for that, but maybe there is a way to extend the meta spec to help
+[16:15] <nine> Would this be an optional build time or runtime dependency?
+[16:23] <mst> nine: right, but, consider the possibility where I install perl6-A-1.1 from a *different* upstream repository, maybe a backport set or something
+[16:29] <nine> Well the best solution for all involved would be if that repo also contained perl6-B so it can be rebuilt properly.
+[16:30] <nine> When that's not possible, we can still provide a tool to check and if necessary recompile installed modules.
+[16:31] <nine> This could be run by the distro package manager once at the end (instead of once per package).
+[16:31] <nine> Not running this tool would simply result in users paying by having to wait for precompilation into their home repos.
+[16:35] <mst> right, that's what I was thinking of enabling
+[16:36] <mst> nine: also, consider, that solution isn't actually necessarily possible
+[16:37] <mst> plus what if somebody pins the version of A, now you can't update B because it's been built against the later version
+[16:37] <mst> so, no, having recursive rebuilds at the repo level is a nice *optimisation* for simple cases, but you can't at all consider it to be a general solution
+[16:37] <mst> welcome to toolchain. the simple solution never is.
+[16:38] <nine> Well we always have precompilation on first load. *Everything* else is an optimisation on top of that.
+[16:38] <mst> yes
+[16:38] <mst> but precompilation within the system CUR and re-precompilation thereof is an obviously useful thing where feasible
+[16:39] <mst> "dependencies must all match, and you must maintain an entire repository per dependency *version set*" is not something downstream will remotely enjoy
+[16:39] <mst> I should be able to upgrade A without *having* to upgrade B, and vice versa
+[16:40] <nine> That's a fact that's dictated by the language implementation we have, not something we can fix at the toolchain level.
+[16:40] <nine> The only question is where you move the necessary recompilation of reverse dependencies and there I see build farm >> install time >> first use
+[16:41] <mst> oh, sure, all I'm saying is that 'build farm' isn't going to be nearly as widely useful as one might hope
+[16:41] <mst> so 'install time' remains bloody important
+[16:42] <mst> since 'first use' probably won't be able to write into the CUR
+[16:42] <mst> so it would become 'first use per user/chroot/etc.'
+[16:43] <nine> Exactly. So we've had "first use" very much done for a while. Now a first working version of "build farm" usefull for many cases. And still need to get going on "install time".
+[16:43] <mst> sure. just your 'best solution' comment made me twitch, given how many situations that won't actually help
+[16:43] <mst> also, actually, that automatic rebuilding you were discussing bothers me
+[16:44] <mst> because it's going to cause *more* precomp effort a fair amount of the time
+[16:44] *** Coleoid_m joined
+[16:45] <mst> nine: basically, I'm just making sure your cynicism is properly calibrated :)
+[16:45] <nine> The automatic rebuilding is another fact that we cannot change, as those build tools don't bother finding out when a rebuild is necessary and when not. So we may as well benefit from it ;)
+[16:46] <mst> of course
+[16:46] <mst> though it saddens me that that means that if I install, say, A-1.0
+[16:46] <mst> then install B, after A-1.1 got uploaded
+[16:46] <mst> I'm going to end up having to re-precomp B
+[16:46] <mst> even though there *was* a B package that had the right stuff in it
+[16:47] <nine> I think the Minds behind the language actually want us to pin versions as much as possible anyway...
+[16:48] <nine> .oO(kudos to those who spot the compliment)
+[16:49] <mst> certainly, but all good ideas can be taken to excession
+[16:50] <nine> Everything would be much simpler if precomp files wouldn't depend on exact dependencies...
+[16:51] <mst> well, then we'd push the complexity elsewhere
+[16:51] <mst> I still feel like it should be possible to re-precomp against a new version then go "wait, that's the same, just mark this precomp as valid for that as well"
+[16:52] <nine> version 1.1 will most probably just not be the same as 1.0
+[16:52] <mst> hm?
+[16:53] <nine> I may be misparsing your sentence
+[16:54] <mst> I mean B precomped against A 1.0 and B precomped against A 1.1 will often be identical
+[16:54] <mst> assuming 1.0 -> 1.1 is genuinely a minor version bump
+[16:55] <nine> No, they won't. Because they will probably reference some class provided by A and it will be different class objects.
+[16:56] <mst> right, you'd have to parameterise that bit somehow
+[16:56] <nine> The precomp files do not just contain compiled code but also serialized objects, most importantly the class/role/whatever objects built during compilation.
+[16:57] <mst> oh, hrm, I'd've expected you to load those from the precomp file for *A*
+[16:57] <mst> since presumably you want to share those
+[16:58] <nine> Yes, but they are then referenced by B. And a different precompilation file for A will contain maybe even identical class objects, but they will at least have different object ids.
+[16:58] <mst> surely it's referenced by B via A exporting it somehow, and we can track the export names
+[16:58] <nine> Those objects are not referenced symbolically like a runtime linker does in shared object files.
+[16:59] <mst> so basically the compiler is epically broken in that regard and we can't have nice things until somebody has time to fix that
+[16:59] <nine> That's an indirection we are missing, which is the reason why it must be the same precomp file.
+[16:59] <mst> yeah, that's horrible. oh well.
+[17:00] <nine> I've asked jnthn++ about this once. Let's see if I can dig it up again.
+[17:01] <mst> I can understand how it might be non-trivial to add
+[17:01] <mst> but I'm mostly surprised it didn't get done in the first place, given runtime linking has just a teensy bit of prior art to steal from
+[17:04] <nine> Got it: http://irclog.perlgeek.de/moarvm/2016-02-27#i_12108919
+[17:04] <nine> It's a naming issue...
+[17:07] <mst> right, I'm thinking it should be possible to have something along the lines of 'the thing "use B" imports into my current namespace as Foo'
+[17:08] <nine> Yes, feels like there should be some solution.
+[17:09] <nine> Though it also feels like it's a little above my paygrade ;)
+[17:10] <mst> I had fun with this sort of stuff wrt MX::Compile etc.
+[17:10] <mst> part of why that never got finished
+[17:13] <nine> Oh yes, reads like that would run into the same issues...
+[17:14] *** sufrostico joined
+[17:28] *** domidumont joined
+[17:29] *** domidumont joined
+[18:08] *** ilbot3 joined
+[18:08] *** moderator changes topic to: Fire is step THREE! | https://github.com/perl6/toolchain-bikeshed | Channel logs: http://irclog.perlgeek.de/perl6-toolchain/today | useful prior art: https://metacpan.org/pod/CPAN::Meta::Spec
+[23:52] *** lizmat joined

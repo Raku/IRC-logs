@@ -1,0 +1,103 @@
+[08:19] *** domidumont joined
+[08:24] *** domidumont joined
+[08:53] *** autarch joined
+[08:53] *** ranguard joined
+[08:53] *** b2gills joined
+[08:53] *** FROGGS joined
+[08:53] *** hoelzro joined
+[08:53] *** retupmoca joined
+[08:53] *** moritz joined
+[11:36] *** edehont joined
+[12:03] *** domidumont joined
+[12:29] *** TimToady joined
+[14:56] *** ugexe joined
+[14:56] <ugexe> is processing -I and -M parameters in order instead of all -I followed by all -M a valid solution loading CUR from the command line? i.e.  `-Ilib/CompUnit/Repository/Foo -MCompUnit::Repository::Foo -Ifoo#bar/baz` (so it would load the module/CUR before lib foo#bar/baz, which itself may contain another CUR used in another parameter further up)
+[14:57] <mst> so, perl5 does all -I first, then -M
+[14:58] <mst> and there are a bunch of advantages to this
+[14:58] <mst> surely perl6 has something lib.pm like?
+[14:58] <mst> so -Mlib=foo#bar/baz
+[14:59] <nine> ugexe: AFAIR -I are collected when setting up the repository chain. When we come across an unknown repo like CompUnit::Repository::Foo, we defer setting up that repo. Later we try to load the repo implementation from the repos we could resolve earlier.
+[15:01] <nine> I don't actually know how -M is implemented
+[15:04] <ugexe> i need to come up with a better example of what I was wrestling with, but heres a basic example
+[15:05] <ugexe> nickl@li685-90:~/perl6/Perl6-CompUnit--Repository--Tar$ perl6 -Ilib -MCompUnit::Repository::Tar -I"CompUnit::Repository::Tar#t/data/zef.tar.gz" -e 'use Zef;'
+[15:05] <ugexe> Could not find CompUnit::Repository::Tar
+[15:05] <nine> You shouldn't even need the -MCompUnit::Repository::Tar. Repository chain setup will already try to load a CompUnit::Repository::Tar after discovering that this name is not a known short-id
+[15:06] <ugexe> if the -I"CUR::Tar#t/data/zef.tar.gz" is moved into the -e as `use lib <CUR::Tar#t/data/zef.tar.gz>` then it works
+[15:09] <mst> right, so
+[15:09] <mst> -Mlib= should also work?
+[15:11] <ugexe> -M treats lib= as part of the actual module name. If you are asking theoretically then I'm not sure... I wasn't aware of that
+[15:12] <ugexe> nine: without the -M (or use CompUnit::Repository::Tar) I get `Could not find CompUnit::Repository::Tar`
+[15:13] <nine> We don't have support for import lists for -M yet
+[15:13] <mst> ah
+[15:13] <mst> ugexe: sorry. that's how perl5 handles it
+[15:13] <mst> I'm mostly used to perl6 trying to be a superset
+[15:14] <ugexe> https://github.com/rakudo/rakudo/blob/nom/src/Perl6/World.nqp#L607 # -M handling
+[15:14] <nine> ugexe: does this error come from resolve-unknown-repos?
+[15:26] <ugexe> nine: https://gist.github.com/ugexe/e93a68b28b769a2404fadcc3377187d8 # under the `Could not find Zef::CLI` in the example lacking a `use CUR::Tar;` the first line of repos listed shows 3 items instead of 1
+[15:28] <nine> ugexe: and it should be in /home/nickl/perl6/Perl6-CompUnit--Repository--Tar/lib I guess?
+[15:29] *** domidumont joined
+[15:29] <ugexe> CUR::Tar is in that folder yes. Zef::CLI is in t/data/zef.tar.gz
+[15:29] <nine> I wonder if there is a difference between a one liner using -e and running a proper script?
+[15:30] <nine> Oh! "use lib" probably doesn't even set up $*REPO which would be where we resolve those Unknown repos. Can you try a BEGIN $*REPO; before the use lib?
+[15:31] <mst> ugexe: sorry if my thoughts are occasionally daft
+[15:32] <mst> I know a lot about toolchainy stuff, more than I ever wanted to know about the perl5 toolchain, and then sometimes I assume slightly more of it applies than actually does and make no sense
+[15:32] <ugexe> Same error with s/use CompUnit::Repository::Tar;/BEGIN $*REPO/ via https://github.com/ugexe/Perl6-CompUnit--Repository--Tar/blob/master/t/03-use.t
+[15:34] <ugexe> mst: I'm happy to hear established solutions to similar problems to make things more intuitive for others
+[15:36] <nine> ugexe: ah in the test file it couldn't have made a difference as the use Test; before that does already set up $*REPO
+[15:36] <ugexe> but BEGIN $*REPO should occur before use Test no?
+[15:36] <nine> use is BEGIN time, too
+[15:37] <ugexe> but i thought `use XXX: BEGIN { use YYY; };` would load YYY first
+[15:38] <nine> No, use Foo; is (just like in Perl 5) something like BEGIN { need Foo; import Foo; }
+[15:38] <nine> In other words: the Grammar calls $*W.do_pragma_or_load_module() immediately upon finishing parsing that statement
+[15:39] <ugexe> hmm, over a year ago I *thought* I had used that to get around a bug in Test.pm but it must have somehow changed the import order or something
+[15:41] <ugexe> hell it was probably 2 years ago
+[15:42] <mst> ugexe: it's not perfect, but there's a bunch of uses for having -I first
+[15:42] <mst> notably options stacking due to scripts chaining stuff and etc.
+[15:42] <mst> I am *not*, btw, claiming that a priori the perl5 way is correct
+[15:42] <mst> I've had to deal with problems because of it doing 'all -I, then all -M'
+[15:43] <ugexe> but wouldnt you still get that effect, just you would have to put your -M after all your -I?
+[15:43] <mst> but the -Mlib= workaround is how I deal with it in perl5 because obviously it's not changeable there at this point
+[15:43] <mst> yes. but, again, if option are coming from multiple sources, it gets complicated
+[15:43] <mst> hang on, I need to recover some neurons and remember a concrete case where it helps rather than hindres
+[15:44] <mst> because of course when the default approach just works, you don't notice
+[15:44] <ugexe> i would imagine it would work more like `use XXX; use lib "lib/XXX-path";` where this would error, but `use lib "lib/XXX-path"; use XXX;` woudl succeed
+[15:47] <mst> ok, so, here's an example
+[15:48] <mst> PERL5OPT="-MFoo"
+[15:48] *** domidumont joined
+[15:48] <mst> to preload some sort of module
+[15:48] <mst> if you have a wrapper script that does 'exec perl -I$MYLIBS $MYPROG'
+[15:48] <mst> you want the -M processed after, because otherwise it might load some bits from the wrong @INC chain
+[15:48] <mst> which can be hilariously annoying later
+[15:51] <mst> ugexe: I'm right in thinking that rakudo can load more than one version of the same module, if two different modules ask for different versions of their dep, right?
+[15:52] <ugexe> true. but what if you want to control where in the repo chain Foo is loaded from? Say (as stupid as this example is) you have lib/Test.pm but you want -MTest to load from rakudos default repo-chain? The -Mlib= thing seems like it can fit such a bill I think
+[15:52] <ugexe> mst: yes, or at least its supposed to
+[15:53] <mst> ok, so, the biggest thing that goes wrong with the perl5 stuff isn't nearly so much an issue for you, I think
+[15:53] <mst> which means it might turn out that 'process in order for POLS' is a better trade-off
+[15:55] <nine> ugexe: your example is not stupid at all. It's actually exactly what I'm try to debug right now. There's a bootstrapping issue with using the Staging repo to install the Staging repo implementation.
+[15:57] <mst> ugexe: right, but, what I'm saying is, it might be ok to have '-MTest -Ilib' work the way you'd expect it to
+[16:00] <ugexe> yeah i understand. i was actually hoping to hear potential drawbacks because I wasn't able to think of any of the top of my head
+[16:00] <mst> the ones I can think of appear to basically be drawbacks that you don't suffer from
+[16:01] <mst> I should, however, probably try and take a survey of perl5-ers to see if anybody else can think of something
+[16:08] * mst asks #p5p and #toolchain
+[16:17] <mst> ugexe: initial responses: http://paste.scsys.co.uk/526265
+[16:18] <mst> also
+[16:18] <mst> 17:18 < Zefram> also, having all -I options processed first means that modules  have a consistent view of @INC.  that'd probably be useful for  something
+[16:19] <mst> which, in *general*, is DWIM
+[16:19] <mst> I feel like for CURs themselves an escape hatch may be required or something, but Iunno
+[16:19] <mst> (I'm now at "I don't have an opinion here and I bet the problems with the other approach wouldn't become fully apparent unless we did it argh")
+[16:23] <mst> notable is that given PERL5LIB goes first (and probably needs to), 'lifting' -I options into PERL5LIB for whatever reason is way simpler if you don't have to worry about ordering so much
+[16:24] <mst> < kentnl> best I have is "easier to store in an options hash"
+[16:25] <mst> ugexe: if these seem convincing, 'make -Mlib= work so people can have finer control, and keep the current ordering' has worked fine for me in perl5 over the years
+[16:30] *** domidumont joined
+[16:32] <mst> I think if you see -I as REALLYREALLYBEGIN { use lib ... }
+[16:32] <mst> it all sort of makes sense
+[16:36] <ugexe> isn't zeframs example just a general repo chain ordering issue? i'm not wrapping my head around how loading a module at a specific point in the chain applies outside of loading any dependencies that module might have further down the chain
+[16:39] <ugexe> or is it along the lines of "-Mxxx would never be able to apply before PERL6LIB=..." (assuming PERL6LIB gets put at the head)
+[16:42] <mst> I went and asked other people because my brain was melting
+[16:42] <mst> I am not going to successfully answer that :)
+[16:42] <mst> (maybe tomorrow)
+[16:44] <ugexe> fwiw the order of `PERL6LIB="yyy/" perl6 -Izzz -e 'use lib "xxx";'` is xxx, zzz, yyy, <rest of default repos>
+[16:52] <mst> yes, also how perl5 would do it
+[17:26] *** mst joined
+[17:26] *** mst_ joined
+[17:46] *** domidumont joined

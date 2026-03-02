@@ -1,0 +1,119 @@
+[01:48] *** ilbot3 joined
+[01:48] *** moderator changes topic to: Fire is step THREE! | https://github.com/perl6/toolchain-bikeshed | Channel logs: http://irclog.perlgeek.de/perl6-toolchain/today | useful prior art: https://metacpan.org/pod/CPAN::Meta::Spec
+[05:01] *** sivoais joined
+[07:30] *** domidumont joined
+[07:35] *** domidumont joined
+[07:49] *** leont_ joined
+[08:39] *** lizmat joined
+[09:07] *** leont_ joined
+[09:40] *** lizmat joined
+[09:40] *** leont_ joined
+[10:08] *** leont_ joined
+[10:33] *** leont_ joined
+[11:45] *** lizmat joined
+[12:10] *** lizmat_ joined
+[13:50] *** domidumont joined
+[14:01] *** hankache joined
+[14:50] *** leont joined
+[15:25] *** leont joined
+[16:32] *** linux-unix joined
+[16:43] *** hankache joined
+[16:49] <nine_> ugexe: are your meta6 changes backwards compatible with already installed dists? If not, we could include your changes into the repository v1 upgrade
+[16:53] <ugexe> nine_: there is one change in that aspect. the pr changes the installed `provides` section such that it only adds leaf nodes instead of modifying the inner structure
+[16:53] <ugexe> https://github.com/rakudo/rakudo/pull/729/files#diff-9d9f3b6271234e410619d222c23d08f7R198
+[16:54] <ugexe> i.e. gets rid of the `pm => { }` bit and leaves it as `file-path => { }`
+[16:54] <nine_> ugexe: and yes, I've finally started reviewing your epic pull request after merging my EVAL fix. So far the only slight worry is that we're moving further towards dist file system layout conventions.
+[16:54] <nine_> But those may be good anyway and as those paths are much more logical rather than physical it may be less of an issue anyway.
+[16:54] *** root joined
+[16:55] <ugexe> the final layout is up to the CUR to interpret from .meta
+[16:55] <nine_> ugexe: yes, that's the change I'm asking about. Would we still be able to load modules that were installed as pm => {}?
+[16:55] <ugexe> the included implementations are like that as they are meant to be installed
+[16:55] <ugexe> all modules had pm => {} afaik
+[16:55] <ugexe> er had *something* in { }
+[16:56] <nine_> Ok, $dist<provides>{$spec.short-name}.values[0]<file> will find $dist<provides>{$spec.short-name}<pm><file> just as well so it should be transparent to upgrades.
+[16:57] <nine_> I wonder if we shouldn't just get rid of the .values[0] there? Having <pm> there made no sense at all and is just historic baggage.
+[16:58] <ugexe> thats not why its there. originally you have `$name => $path`, and this adds additional information to a leaf node via $name => $path => { file => xxx, attr1 => 1, attr2 => 2 }
+[16:59] <ugexe> which from-json ends up turning into a hash or something that required the .values[0] dance to work with or without that leaf node
+[17:00] <nine_> Isn't it $name => $path => { file => $path, attr1 => 1, attr2 => 2} and thus the path => being quite redundant?
+[17:00] <nine_> Looks to me like we'd do just fine with $name => { file => $path, attr1 => 1, attr2 => 2}
+[17:00] <ugexe> no, because $path is really a path-name. file => may point at a mangled name
+[17:01] <ugexe> if there is no leaf node you can assume $path is not mangled
+[17:01] <nine_> But since we access the leaf hash through .values[0], I assume we don't care about the $path anyway :)
+[17:01] <ugexe> yes you do, because you call .content() on the name-path, not the module name
+[17:01] <mst> I think that's there for informational purposes for things wanting to map back to original names?
+[17:02] <ugexe> ^
+[17:02] <nine_> Why not making it $name => { file => $file, path => $path, attr1 => 1, attr2 => 2 } then?
+[17:03] <nine_> Just doesn't feel right to have a hash with a single unknown key there
+[17:03] <ugexe> they keys are all known
+[17:03] <nine_> If they are known, why do we need .values[0] then?
+[17:04] <ugexe> because it works on a plain string OR a leaf node
+[17:04] <leont> Can more people test my harness branch? Especially running spectest with it (as a stresstest).
+[17:04] <leont> With TEST_JOBS=1 it should be very close to being production ready, though I have managed to make rakudo crash with it eventually (on a spectest, around S32).
+[17:05] <ugexe> m: say "xxx".values[0].values[0]
+[17:05] <camelia> rakudo-moar 6d21e8: OUTPUT«xxx␤»
+[17:05] <nine_> ugexe: but for .values[0]<file> it needs to be a hash
+[17:06] <leont> Parallel is less stable for reasons that I don't understand yet
+[17:06] <nine_> ugexe: I'd suggest standardizing it to be a hash on installation, so we can expect it to be a hash when trying to load a module.
+[17:07] <ugexe> huh?
+[17:07] <mst> normalizing the data during generation seems simpler?
+[17:09] <nine_> ugexe: the META6.json file of the dist may contain 'provides': {'Foo': 'lib/Foo.pm', 'Bar': {'file': 'lib/Bar.pm', 'attr1': 1}} which .install normalizes to provides => {Foo => {file => 'lib/Foo.pm'}, Bar => {file => 'lib/Bar.pm', attr1 => 1}}
+[17:09] <nine_> ugexe: then .need can just access $dist<provides{$spec.short-name}<file>
+[17:12] <ugexe> no, it does not allow the user to provide the leaf node and this is on purpose as it should be considered for users that which to provide the precomp'd version of a file (if its ever possible). yes the PR does that 2nd example already
+[17:13] <ugexe> fwiw <file> is not an absolute path, its just a file name. so typically its going to be the sha1
+[17:13] <nine_> ugexe: could we still keep the .name, .auth, .ver and .api accessor methods in Distribution with implementations like method name() { $.meta<name> }? That would make reduce the necessary adaptions and keep the convenience.
+[17:14] <nine_> Providing precomped files at installation time doesn't make sense to me. We do have to recompile whenever a dependency changes.
+[17:14] <ugexe> yes, but some of that stuff still needs to be broken (standardize what `auth` references, not auth || authority || author)
+[17:15] <nine_> ugexe: oh, yes, absolutely standardize on 'auth'. There's zero reason to keep the variations. Just keep accessors for the standard names.
+[17:16] <ugexe> well for instance on travis you could likely give the precomp and it would be fine as all the paths are the same
+[17:16] <nine_> and yes, of course, the <file> coming from the META6.json will be 'lib/Foo.pm' while the <file> of the CompUnit::Repository::Installation::Distribution will be more like 'sources/123456789abcdef'
+[17:17] <nine_> I'm not sure what you mean there?
+[17:17] <ugexe> if i have 2 systems that are both identical and i copy rakudo from one to the other, it will work
+[17:17] <ugexe> so i would think precomp would also work
+[17:19] <ugexe> however the main point of that part of the structure is to maintain the original meta6 format so it can be more easily be reconstructed/interpreted like a normal meta6 (just chop the leaf off if one exists, not guess which format the meta6 you got is)
+[17:19] <nine_> In such a case you would copy the repository anyway instead of passing the generated files to .install, wouldn't you?
+[17:20] <nine_> Seems easier and more friendly to the code to just store the unmodified META6.json in addition to all the other files.
+[17:20] <ugexe> yes, its a naive example. but i wanted to keep it in mind for when you have to handle .moarvm and .jar both for a single name-path
+[17:20] <nine_> That's the job of the precomp stores.
+[17:21] <nine_> The repository's responsibility ends where it generates the precomp id and asks the PrecompRepository to load an appropriate precomp file.
+[17:44] <ugexe> Im thinking most of those .values[0] are for compatability with the current install method/format
+[17:44] <ugexe> https://gist.github.com/ugexe/c5a74134164bcaabd756#file-installation-pm6-L29
+[17:45] <ugexe> this was the alternate install method i wrote which does not use the .values[0] but the entire structure of the method was changed
+[17:50] *** lizmat joined
+[17:51] *** lizmat joined
+[17:52] *** leont joined
+[18:18] *** leont joined
+[18:24] *** leont joined
+[18:30] *** leont joined
+[19:02] *** hankache joined
+[21:35] *** leont joined
+[21:56] *** cognominal joined
+[21:58] <MadcapJake> thinking on auth a bit
+[21:58] <MadcapJake> maybe it could be generated (by module managers) from the source-url
+[21:59] <MadcapJake> if someone provides a github link, use :auth<github:username>
+[21:59] <MadcapJake> s/use/provides/
+[21:59] <MadcapJake> if someone provides a cpan link, it provides :auth<cpan:username>
+[21:59] <MadcapJake> etc.
+[22:16] <MadcapJake> ipfs seems to still be figuring out a good URI scheme but this works: https://ipfs.io/ipfs/QmeExiQi24UogL1n4XPxNvya9md3E8j1RzxAU3uhA6bAu5/Test::Lab
+[22:18] <MadcapJake> ugexe: what do you think about this ^^ ?
+[22:22] <ugexe> well i still side mostly that :auth does not tell you where you got it from, only its origination
+[22:24] <ugexe> if i request XXX:auth<github:yyy>:ver<1> i want version 1 of XXX that origins are github:yyy. maybe i get it from perl6 ecosystem, maybe i get it from cpan... however the package manager can still present options as to which source (cpan, perl6 ecosystem) to search
+[22:26] <ugexe> otherwise when you have a dependency like XXX:auth<foo:bar> your package manager has to know how to expand every 'scheme' into a full blown uri
+[22:31] <ugexe> MadcapJake: looks interesting. make sure to mangle the paths though (":" is not valid for directory names on windows)
+[22:34] <ugexe> a naive solution is to s/:/ /, since module names cant have spaces in their name, which allows you to roundtrip the short-name from the directory still (unlike sha1)
+[22:45] <MadcapJake> well this wouldn't be for the path though, this is just for translating source-url's into auth fields
+[22:45] <MadcapJake> though I'm not sure this would work because what would I put for the *?
+[22:46] <MadcapJake> I could do the full hash but that I've been trying to avoid every needing that in any user-code
+[22:46] <MadcapJake> wow that was a terribly written sentence :P
+[22:46] *** lizmat joined
+[22:47] <MadcapJake> I think the only sensible solution would be to use that space for a repo and leave it off otherwise (since that's the only real other layer available in gx
+[22:48] <MadcapJake> I guess the other option would be to take the first author from META6
+[22:49] <MadcapJake> I kind of like the idea of just allowing repos and * otherwise (since it's kind of the "global namespace" of ipfs)
+[22:50] <ugexe> * can be represented by not including it
+[22:50] <MadcapJake> :auth<gx> would work?
+[22:51] <MadcapJake> what does Zef do with the auth field?
+[22:51] <ugexe> technically, it should be :auth<gx:QmeExiQi24UogL1n4XPxNvya9md3E8j1RzxAU3uhA6bAu5>
+[22:52] <ugexe> but it could just be :auth<gx>... but any consumer would have to know what root prefix to use when it sees 'gx'
+[22:52] <MadcapJake> Yeah that's probably true since that's essentially the location where the module is located
+[22:53] <ugexe> auth field is just a string match right now. version and api use ver1 ~~ ver2
+[22:54] <MadcapJake> I could create an ipfs database that users could submit their modules to and then package managers would be able to check the name and version against the database and obtain the hash needed to find the module
+[22:54] <ugexe> correct!

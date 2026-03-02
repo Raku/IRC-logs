@@ -1,0 +1,81 @@
+[02:36] <MadcapJakeDinner> ok now I am stuck: the PrecompRepo.precomile function spits out "No CompUnit::Repository known by 'gx'" and this is the last line before CORE.setting.moarvm:die https://github.com/rakudo/rakudo/blob/a93edd9f0196dc79444b6180fe27a598558b105d/src/core/CompUnit/PrecompilationRepository.pm#L179
+[02:36] <MadcapJakeDinner> precompile*
+[05:47] <MadcapJake> Ok so, here's my progress report:
+[05:49] <MadcapJake> Created a role for the RepositoryRegistry (RR) that contains a two methods to make precomp possible `may-precomp` and `precomp`.  may-precomp is just True and precomp is largely a copy of the one in RR save for one addition to the run call: "-MCompUnit::Repository::GX"
+[05:50] <MadcapJake> With this change I am able to get most of precomp working actually!
+[05:55] <MadcapJake> However, there's still something going wrong here: https://github.com/MadcapJake/gx-perl6/issues/2
+[06:01] <MadcapJake> It seems to be wrt !load-dependencies https://github.com/rakudo/rakudo/blob/nom/src/core/CompUnit/PrecompilationRepository.pm#L64 but I can't decipher what in that routine body is causing the error
+[06:07] * MadcapJake will take another look tomorrow
+[06:07] <MadcapJake> I need some sleep
+[06:20] <nine_> MadcapJake: I wonder why you'd need to duplicate PrecompilationRepository at all?
+[06:21] <MadcapJake> I needed to plug that -M flag in there otherwise it kept saying I didn't have a gx repo
+[06:22] <MadcapJake> see precompile puts the repo chain into RAKUDO_PRECOMP_WITH
+[06:22] <nine_> Really I think you'll save yourself a lot of trouble by working on a proper integration of custom Repository implementations instead of these workarounds.
+[06:23] <MadcapJake> but the enclosed process doesn't understand how to interpret the gx# short-id I am using
+[06:23] <MadcapJake> yeah that's really very true
+[06:24] <MadcapJake> How would I add that? Is there any current design for how that should be implemented?
+[06:25] <nine_> Maybe all we need is a directory containing files like 'inst', 'file' and 'gx', i.e. those short-ids and the file content is just the id of the dist to load and the module name.
+[06:25] <nine_> Then the RepositoryRegistry can look up unknown short-ids in this directory.
+[06:27] <MadcapJake> id of the dist? how would that look?
+[06:27] <nine_> Thinking more about this: could be that we need an alternative for the 'need' method for loading repository implementations. Then the RepositoryRegistry would just call $*REPO.need-repository('gx') and the repo implementations can do their lookup.
+[06:28] <nine_> For example the FileSystem repository would look at the META6.json or have a 'repositories' directory, too. Only that the lookup files just contain the module name and no dist id.
+[06:29] *** domidumont joined
+[06:29] <nine_> MadcapJake: in an ::Installation repository the id is the SHA1 hash that you find in the dist/ directory
+[06:33] <MadcapJake> how much of this could just be implemented within repository-for-spec ?
+[06:34] *** domidumont joined
+[06:34] <nine_> Just the call to $*REPO.need-repository I guess. The more interesting bits are in the repositories' implementations of need-repository. But even that is just looking up what module to load and using .need for the actual loading.
+[06:35] <MadcapJake> another thought is to replace short-id2class with something like register-repository($short-id, $repo)
+[06:36] <MadcapJake> perhaps that's the same as what you're implying :)
+[06:38] <nine_> Who would call that method?
+[06:39] <MadcapJake> nine_: I'm kind of a little confused in so far as how the initialization of all this takes place.
+[06:39] <MadcapJake> Each repo just passes the buck to the next when it fails to find something
+[06:40] <nine_> yes?
+[06:40] <MadcapJake> so where does this short-id stuff come into play?
+[06:40] <MadcapJake> why doesn't each repo just check if the short-id matches and move on if it doesn't
+[06:40] <nine_> How do you build the repository chain in the first place?
+[06:41] <MadcapJake> That's what I can't seem to figure out, PROCESS::<$REPO> seems to do the job :P
+[06:42] <nine_> setup-repositories in RepositoryRegistry
+[06:42] <MadcapJake> It just seems like there are feet in two worlds: one is a linked list traversal and the other is a dispatcher
+[06:45] <nine_> https://github.com/rakudo/rakudo/blob/nom/src/core/CompUnit/RepositoryRegistry.pm#L135 turns a List of strings like 'inst#/home/nine/rakudo/install/share/perl6' into a linked list of CompUnit::Repository objects. For that it obviously needs to know the classes that implement those short-ids.
+[06:45] <nine_> Module loading later just uses the already existing linked list.
+[06:46] <MadcapJake> ahhh I see! So the linked list is assembled by RepoReg via translating short-ids to their corresponding CUR
+[06:46] <nine_> Now that I think of that: my proposal has a little flaw: at the time we try to figure out what 'gx' is, we don't have a linked list yet.
+[06:47] <MadcapJake> it's still just a comma-separated string
+[06:47] <nine_> So we cannot just ask the repositories if they have a class for this short-id. Maybe we'll have to do it in two steps: first assemble a list of repositories that we actually know and then use that to figure out the missing ones.
+[06:49] <nine_> We could in the first step use a CompUnit::Repository::Unknown for the well unknown repositories like gx#... That would probably make it easier to replace them afterwards.
+[06:50] <MadcapJake> yeah that's good. and need for Unknown would just pass immediately on to the next CUR
+[06:50] <nine_> Exactly!
+[06:52] <nine_> The nice thing about this part of rakudo's code base is that there's actually no magic happening here. It's really more of a book keeping job. Just handling a linked list and a couple of files :)
+[06:53] <MadcapJake> Still leaves the question of when you are going back to find those CURUs, you'll only have the path-spec, how will you get the required CUR?
+[06:54] <MadcapJake> Yeah at first it seems pretty complicated but it's getting clearer by the day :)
+[06:54] <nine_> After assembling the list with those Unknowns, RepositoryRegistry does a second pass over the list and for every Unknown calls $*REPO.need-repository($unknown.path-spec). Then it's up to the Repository implementations to find one.
+[06:55] <MadcapJake> Ok so the need-repo would be a sort of second set of links between CURs?
+[06:56] <nine_> No the links are still just $.next-repo. It's a second traversal mechanism. Actually the fourth because we already have .need, .load and .repo-chain
+[06:56] <nine_> Just another method that recursively traverses the list.
+[06:56] <MadcapJake> ok right that's what I was trying to say :P
+[06:57] <MadcapJake> and how would you think CURI or CURFS would handle need-repo?
+[07:01] <nine_> Just like I described earlier: CURFS could look for a 'repositories' directory (just like it looks for a 'resources'). This directory may contain a file called 'gx' which contains the module name like 'CompUnit::Repository::Gx'. Then it just needs to return self.need(CompUnit::DependencySpecification.new(:short-name($module-name)));
+[07:02] <MadcapJake> maybe CURFS could just look for provided names that start with "CompUnit::Repository::" ?
+[07:06] <MadcapJake> I suppose that is a little prohibitive in naming schemes :P
+[07:08] <nine_> CURFS could also just look for a META6.json which may have a mapping
+[07:09] <MadcapJake> Perhaps this is something that could be in META6 (seems a little better to add a couple lines to META6 than require CUR devs to have a one-file folder with a single line and a short name)
+[07:09] <MadcapJake> on the same page, I see :)
+[07:10] <nine_> Yes, the file lookup thingy is more something for CURI as speed is much more important there.
+[07:10] <MadcapJake> "repository": { "gx": "CompUnit::Repository::GX" }
+[07:11] <nine_> Yes, something like that.
+[07:11] <nine_> Maybe 'provides-repository'?
+[07:12] <MadcapJake> yeah I think that a repositories directory for CURI would fit perfectly alongside the others, there would need to be a install-repo or a block added to install for handling repos
+[07:15] <MadcapJake> ok I gotta get to bed but I'll see if I can implement this tomorrow/throughout-the-week :)
+[07:15] <nine_> The latter I guess. It will find the provides-repository in the META data and deal accordingly with it.
+[07:15] <nine_> Yeah!
+[07:15] <MadcapJake> Keep dropping stuff in here if you think of something!
+[07:15] <nine_> ok
+[07:53] *** leont_ joined
+[16:13] *** leont_ joined
+[17:17] *** Kassandry joined
+[17:38] *** domidumont joined
+[18:14] *** domidumont1 joined
+[19:57] *** sivoais joined
+[20:07] *** llfourn_ joined
+[21:50] *** leont_ joined
+[22:41] *** leont_ joined

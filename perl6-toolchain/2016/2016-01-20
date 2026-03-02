@@ -1,0 +1,238 @@
+[02:30] *** MadcapJake joined
+[02:48] *** ilbot3 joined
+[02:48] *** moderator changes topic to: Fire is step THREE! | https://github.com/perl6/toolchain-bikeshed | Channel logs: http://irclog.perlgeek.de/perl6-toolchain/today | useful prior art: https://metacpan.org/pod/CPAN::Meta::Spec
+[03:54] *** moritz joined
+[05:43] *** MadcapJake joined
+[07:09] *** domidumont joined
+[07:14] *** domidumont joined
+[07:25] *** domidumont1 joined
+[07:32] *** domidumont joined
+[07:37] *** domidumont1 joined
+[07:53] *** FROGGS joined
+[09:39] *** leont joined
+[10:49] *** FROGGS joined
+[12:37] *** llfourn joined
+[13:38] *** llfourn joined
+[13:51] *** nine_ joined
+[13:51] *** moritz_ joined
+[13:51] *** jdv79_ joined
+[13:51] *** masak_ joined
+[13:59] *** stmuk joined
+[14:02] *** FROGGS joined
+[14:03] *** PerlJam joined
+[14:05] *** autarch joined
+[15:43] *** FROGGS joined
+[15:46] <ugexe> nine: https://github.com/ugexe/rakudo/commit/31a758b365be1e4b6ee49fa4514c0df0070785c2 this spot causes random precomp errors on windows when doing a force install over a previous install (see: https://ci.appveyor.com/project/ugexe/zef/build/1.0.13#L1120). Doubt this is an ideal solution though
+[15:47] <ugexe> it is random in that it doesnt always happen, not in which file/dir causes the problem
+[15:58] <ugexe> im not sure if `try .unlink` avoiding the failure could have ramifications during a subsequent run if the files that failed to delete somehow get used
+[16:08] <xdg> ugexe, why doesn't it check the return values of unlink?  What if it fails?
+[16:08] <xdg> (or does it throw if it fails?)
+[16:09] <ugexe> because what is it going to do?
+[16:09] <ugexe> windows likely isnt going to let go of the file until the process is done
+[16:09] <ugexe> but thats the part of the it above about 'doubt its an ideal solution' though
+[16:11] <xdg> IIRC, you can't unlink it if there are open handles
+[16:12] <ugexe> right
+[16:16] <ugexe> but what would you do with a caught exception during a *force* install where an unlink fails? you could keep the program indefinitely until it succeeds, or you can fail in a way that doesn't match the option of "force"
+[16:17] <ugexe> keep the programing trying to unlink^
+[16:18] <ugexe> and just having a command prompt open to a directory that a perl6 script is trying to delete can often cause the same problem, not just an open handle from within rakudo itself
+[16:20] <xdg> if you can't unlink it, the win32 api can schedule it for deletion on reboot.
+[16:21] <xdg> but I was actually thinking that if unlink fails, you could get an error about which file is failing and figure out why
+[16:21] <ugexe> if you are force installing a module its going to go into the same sha1 path name that is trying to be deleted
+[16:21] <xdg> In Perl 5, a __DATA__ section that wasn't closed was usually the culprit.
+[16:22] <xdg> maybe sha1's are the right thing, then.
+[16:22] <xdg> s/are/aren't/
+[16:22] <xdg> sha1.n?  And always take the highest n?
+[16:27] <ugexe> dunno if that would work. if sha1.1 and sha1.2 get used by different modules but use the same identity it seems like there would be some ambiguity somewhere
+[16:28] <tony-o> the api idea is a good one, but it seems like it should happen lower in the food chain somewhere
+[16:32] <ugexe> it happens both low and high. the compiler would search for identities including the :api just like it does with :ver. but then your module could look like `package GitHub { class API:api<1> { #`( v1 api access);  }; class API:api<2> { #` (v2 api access ); };`
+[16:33] <ugexe> and then `use GitHub::API:api<1>` or `use GitHub::API:api<2>`
+[16:33] <tony-o> i mean the win32 api for unlinking on reboot, that should happen lower in the foodchain rather than being a part of Precomp
+[16:33] <tony-o> or the option to do that should be present lower in the foodchain, if it isn't there already
+[16:33] <ugexe> well sometimes you cant wait until reboot
+[16:33] <tony-o> for unlink?
+[16:33] <ugexe> yep
+[16:34] <tony-o> for the situation in particular or in general?
+[16:34] <tony-o> are you talking about reinstalls?
+[16:35] <ugexe> in the precomp problem above its using CU::R::I.install(:force). the module it installs will have the same sha1, so its going to go to the same path that already exists. but if that path can't be deleted first then how do you install the new dist to the same folder?
+[16:35] <ugexe> in this case unlink at reboot would not help
+[16:35] <tony-o> that sounds like a die situation or some kind of hacky work around
+[16:36] <tony-o> like taking the highest N in xdg's solution above
+[16:36] <ugexe> but why would you expect 'die' when you pass something like :force
+[16:36] <ugexe> highest N means you cant just generate the path, and involves constantly grepping the directory for highest N
+[16:36] <tony-o> and then checking for .Ns and fixing it when it's possible rather than *now*
+[16:37] <tony-o> which has its own set of problems
+[16:37] <ugexe> how do you test something that isnt fixed now?
+[16:38] <tony-o> if there are .Ns then use the highest .N, on start up if there are .Ns then unlink all but the highest and then mv the remaining .N to whatever the sha1 should be and overwrite the existing
+[16:38] <tony-o> it's hacky, i'm not advocating for it
+[16:38] <tony-o> it's doable, though
+[16:39] <ugexe> that works but introduces lots of slow downs related to constantly looking up available files instead of know the path beforehand and just checking for existence
+[16:39] <tony-o> agreed
+[16:40] <tony-o> what is the other option, to wait?
+[16:40] <ugexe> or just `try` to delte as much as you can
+[16:40] <tony-o> shell an 'rm -Rf ' ?
+[16:41] <ugexe> this is windows, and any shell command will face the same problem
+[16:41] <xdg> stepping back -- if the file is identical, why replace it?
+[16:41] <ugexe> xdg its the same identity, not neccesary the same contents
+[16:41] <xdg> what does that mean?
+[16:41] <tony-o> you can force delete files with an open handle in windows via shell
+[16:42] <ugexe> identity is name, version, auth, api
+[16:42] <tony-o> xdg: the sha1 of the name/ver/auth/api/etc is the same, not the contents of the file
+[16:42] <ugexe> sha1 is of these 4 fields, not of the contents of files
+[16:42] <tony-o> so the path is the same, but the file isn't - the md5sums would differ
+[16:42] <xdg> (dare I ask why bother to sha1 those?)
+[16:42] <tony-o> so that you don't have to deal with special chars in the path
+[16:43] <ugexe> to make the names same to use as a file path
+[16:43] <tony-o> and that ^
+[16:43] <xdg> hmm. seems like overkill to me.
+[16:43] <xdg> whatever
+[16:43] <tony-o> shell("handle $filename"); shell("handle -c $handle-id -p $process-id");
+[16:44] <tony-o> xdg: seems that way but it's one of the better/safer options
+[16:44] <xdg> indirect?  Have a table of name/ver/auth/api SHA1 mapping to table of content SHA1s and put file under content SHA1?
+[16:44] <ugexe> that was done before. its slow
+[16:46] <xdg> slower than sha1.n?
+[16:46] <tony-o> ugexe: ^^ you can shell close files that way even with open handles in windoze
+[16:46] <tony-o> xdg: yes.
+[16:46] <tony-o> not on a small magnitude but once you get a decent number of modules involved, it's very slow
+[16:47] <ugexe> sure, but for all i know that precomp file is actually still in use
+[16:47] <ugexe> trying to install over itself
+[16:47] <xdg> I'd be shocked if a single map lookup is "slow" compared to the load time of the module itself.
+[16:48] <tony-o> that seems like a disparate comparison
+[16:48] <xdg> or do you mean loading the table is slow?
+[16:48] <ugexe> you'd be surprised if you cloned a 6 month old rakudo and installed ~5 modules
+[16:48] <ugexe> ~50
+[16:48] <tony-o> loading the table is slow
+[16:49] <xdg> don't load it.  binary search it and cache the results.
+[16:49] <xdg> (pay the sort cost when modules are installed)
+[16:49] <tony-o> cache it in what, exactly?
+[16:49] <xdg> the runtime
+[16:50] <tony-o> you still have to load that every start up
+[16:50] <tony-o> which is the slow part
+[16:50] <xdg> but maybe you dno't need it again. nevermind.
+[16:50] <ugexe> anytime you start up and use a module rather
+[16:50] <xdg> on posix, you could do it with symlinks
+[16:51] <xdg> Windows... ugh
+[16:51] <xdg> they have a thing like that
+[16:51] <xdg> junctions or something
+[16:53] <xdg> Can rakudo unload the precomps?
+[16:54] <tony-o> even if it can you can't guarantee that there isn't another process using the precomp file
+[16:54] <tony-o> the symlink idea is interesting
+[17:01] <xdg> tony-o, you could even fake it on windows.  Save content SHA1 inside a file named after name/ver SHA1.
+[17:02] <xdg> you're then slurping 50 files for 50 modules instead of loading one database... so not sure that saves you much
+[17:03] <ugexe> thats what Zef::ContentStorage::LocalCache does fwiw
+[17:03] <xdg> How was the table done before?  SQlite?
+[17:03] <ugexe> it was a json file... with way too many levels of structure
+[17:03] <xdg> gaaah!
+[17:04] <xdg> all you need is a text file.  Two columns: name SHA1 and content SHA1.  Sorted on name SHA1.  Do binary search.
+[17:04] <tony-o> sqlite is too much dependency, i have some binary tree code at home somewhere that i was working on to make zef faster
+[17:04] <tony-o> don't even need the content sha1
+[17:04] <xdg> all you need is the equivalent of Perl 5 Search::Dict
+[17:04] <tony-o> you're just moving the problem, though
+[17:05] <xdg> I was thinking content sha1 to ensure different contents can be written without conflict.
+[17:05] <tony-o> multiple installations at once will cause issues
+[17:05] <xdg> only if you don't account for concurrent access
+[17:05] <ugexe> an alternative, faster lookup table format has been discussed recently but nothing beyond that
+[17:05] <tony-o> concurrent writes?
+[17:05] <xdg> shared lock to read and search.  Exclusive lock to write a new sorted list.
+[17:06] <ugexe> all the dist/precomp stuff uses locks before writing
+[17:06] <tony-o> that still just moves the problem to a locked lookup table file rather than the precomp file
+[17:06] <xdg> locked lookup table isn't ever deleted, though.
+[17:07] <xdg> you might still have concurrency issues on windows -- not sure if you can have multiple writers open.
+[17:07] <tony-o> it's the same concept, what do you do when that file is locked for writing?  die? wait?
+[17:07] <tony-o> what if it's locked by a hung process? what do you with that?
+[17:08] <xdg> welcome to concurrent systems programming
+[17:09] <xdg> my point is that by moving the problem to user-space, you have more control than what the OS might give you
+[17:09] <tony-o> those are rhetorical questions
+[17:09] <xdg> Instead of locking the table, use a lock file and lock that.  Then if you've waited "too long", delete the lock file and start over.
+[17:10] <xdg> there's no free lunch
+[17:10] <ugexe> thats what is already done (except for the wait too long part)
+[17:11] <xdg> anyway, I have to get back to work.  I hope there are some useful ideas you can build on.
+[18:00] *** FROGGS joined
+[18:03] *** domidumont joined
+[18:12] *** leont joined
+[18:16] *** flussenc1 joined
+[18:16] *** b2gills1 joined
+[18:17] *** tony-o_ joined
+[18:47] <tony-o_> xdg: i'm familiar with the concepts, i'm simply pointing out that moving the problem isn't actually resolving it
+[18:48] <tony-o_> and i realize there isn't a fix all for the issue
+[18:58] <mst> tony-o_: you're condescending to one of the longer standing members of the perl5 toolchain team
+[18:59] <mst> tony-o_: maybe try assuming he's also familiar with the concepts and not saying dismissive things like "that's just moving the problem" as if it isn't obvious what's what we're doing, and that sometimes moving it to a better spot is the right answer
+[19:12] <tony-o_> mst: i thought i acknowledged moving it might be better, and i'm not trying to be condescending towards anyone. so, my apologies if it's coming across that way.
+[19:13] <mst> tony-o_: you have an unfortunate tendency to come across as rather more hostile than you intend, which is responsible for a fair number of your suboptimal conversational outcomes. note that I mean that to inform, not to attack - I have exactly the same problem myself :)
+[19:15] <tony-o_> no worries, i don't mind feedback on my methods of communication.  thank you
+[19:16] <mst> xdg: might I suggest that applying the filters you've developed for tolerating me may help make talking to tony-o_ more productive :)
+[19:21] *** leont joined
+[19:28] <xdg> mst, thanks for the tip.  So applied.
+[19:29] <xdg> tony-o_, re "moving the problems", it's good to be clear what they are: (a) replacing an open file; (b) concurrent module installation.
+[19:29] <b2gills> mst: I think you are calling the kettle black
+[19:30] <xdg> Solving (a) by transforming it to (b) might be an improvement, since there has to be a solution to (b) anyway.
+[19:30] <xdg> b2gills, at least mst knows his color, even if it doesn't always moderate his comments. :-)
+[19:30] <b2gills> .oO( I should have finished reading before inserting foot )
+[19:32] <masak> in my recent but limited experience, constructions like `try .unlink` are traps waiting to happen
+[19:32] <b2gills> What I often do is write out my response then don't post it for a minute or more. Either I then edit to be nicer, or I just delete it.
+[19:33] <mst> b2gills: I am, quite consciously so, but it looks like you got to the part where I said that already :)
+[19:34] <b2gills> mst: I still think you're awesome
+[19:37] <tony-o_> xdg: i agree with you, fwiw.  i think that file locking and the table might be a much cleaner problem if we can resolve the speed.  like you, i believe it's doable
+[19:37] <tony-o_> s/problem/solution/
+[19:39] <tony-o_> i'm much more aware of how my words come off in person because i can see peoples' reaction to my speech and i can modify it a bit. typing is a little more difficult because i can only get my reaction to what i type unless, like mst did, someone tells me that what i'm typing sounds condescending or harsh
+[19:41] <mst> I'm fortunate in that there are quite a few people who know me well enough that if I start being a prat, a /msg window will light up containing "dude, you're doing it again" or so
+[19:41] <xdg> When I wrote CPAN::Common::Index::Mirror, I used Search::Dict on the 02 packages files (170k lines or so).  It was pretty fast -- far, far better than loading into memory.
+[19:42] <xdg> will it be faster than directly accessing the FS, no
+[19:43] <tony-o_> as long as it isn't what it was then i think we're okay.  people were reporting closer to 90s increased start up time on a 'use Module;'
+[19:43] <tony-o_> i can work it on the plane ride home, i need to look at the code more closely, though.
+[19:43] <xdg> ooh, brainstorming again!... Have the name SHA1 be a *directory* containing precomps
+[19:44] <xdg> usually just one.  if more than one, take the "latest" one
+[19:44] <xdg> (except you're screwed on FAT32 because of 2-second file timestamps)
+[19:45] <mst> oh, there's an interesting question. will win32 let us *rename* a directory?
+[19:45] <xdg> I doubt it, but I don't really know.
+[19:47] <b2gills> # Back in the day if you renamed a dir on Win9x it would keep it's 8.3 short name if it shared the same first 6 chars
+[19:52] <xdg> mst, I just checked and no.  "Permission denied"
+[19:52] <xdg> won't let you rename a dir if there's a handle open to a file in it
+[19:53] <xdg> what i don't like about putting precomp files in a directory is that there's a race to choose the right one
+[19:54] <xdg> stepping back -- is there a "don't use precomp" mode for rakudo?  If this is (or could be), then just run that way for installation
+[19:54] <xdg> `#!rakudo --no-precomp` at the start of panda or whatever
+[19:55] <mst> what bothers me is the case where there's a running daemon or something with it open
+[19:55] <xdg> right
+[19:56] <xdg> "Error: can't upgrade Foo::Bar while it's in use. Please close all running programs..."
+[19:56] <[Coke]> you can add "no precompilation" in the source.
+[19:57] <[Coke]> but that's probably not quite what you need.
+[19:57] <ugexe> thats what my problem is. but then a module installer cant upgrade itself
+[19:57] <xdg> I meant conditionally for a given invocation, but mst is right it doesn't help if some other process has the procomp loaded
+[19:57] <mst> I think having a directory, and then an index into that directory, thereby reducing the problem to making sure the index doesn't get left open, is going to be the only way to win
+[19:57] <mst> and then something can periodically nuke not-in-the-index-anymore precomps
+[19:57] <xdg> Stepping back again: what's happening with the precomp that it has to stay open?
+[19:58] <xdg> Here I freely confess my ignorance of the details of rakudo.  Sorry.
+[19:58] <b2gills> really that's  details of MoarVM
+[19:58] <mst> actually, yeah, if we could make that go away that'd be nice
+[19:58] <mst> except
+[19:58] <xdg> right.  that.
+[19:59] <mst> I'm not sure I -want- to be deleting a precomp that a running rakudo is still using
+[19:59] <ugexe> that was my concern as well
+[19:59] <mst> because, well, because what if your daemon exhibits a bug ... and the precomp you'd need to repro the bug went away
+[19:59] <xdg> if it's like a shared library, no.  If it's a cache of compilation, then no big deal?
+[19:59] <mst> I dunno if that's a realistic problem
+[20:00] <b2gills> I suppose it would depend on if the .moar files are a in-memory data structure or just a serialization
+[20:00] * leont thinks that's not something to worry too much about
+[20:00] <xdg> downgrade to prior version to repro
+[20:00] <mst> well, it also includes what versions of all its dependencies were used
+[20:00] <xdg> o/ leont
+[20:00] <leont> xdg: good to see you here too :-)
+[20:00] <xdg> I'm avoiding thinking about version numbers.
+[20:01] <mst> a fine and long standing traditional activity for chainers ;)
+[20:01] <leont> b2gills: even if it's in-memory data structure that's mmap()ed, that doesn't have to matter if you're careful
+[20:01] <tony-o_> that sounds like a good solution xdg
+[20:01] <tony-o_> oops, typed that 20 minutes ago
+[20:02] <xdg> :-)
+[20:02] <mst> I really want to look at seeing if we can cache dependency lookup information in precomp in a way that allows us to be more selective about blowing caches
+[20:25] *** Kassandry joined
+[20:35] <flussence> if I could change one thing about the precomp system, it'd be to use flat files + directory trees instead of parsing JSON ($PREFIX/dist/*). Or at least, less of the latter.
+[20:36] <flussence> (CURLI is better than that horrible json-inside-tsv thing panda used, at any rate)
+[20:36] <leont> xdg: OT but you might appreciate my Path::Iterator module :-)
+[20:36] <leont> json-inside-tsv? That's perverse!
+[20:37] <flussence> the fun part was when it blew up because the module that wrote the json decided one day it'd start formatting with newlines by default :)
+[20:37] <tony-o_> lol
+[20:38] <leont> Ouch
+[20:45] * flussence wondering if there's any useful ideas we could borrow from distros' package DB designs
+[20:46] <mst> nix might be interesting prior art in that respect
+[20:51] <ugexe> just ask yourself What Would Microsoft Do? clearly the answer is to just use xml
+[21:05] *** hankache joined
+[23:29] *** llfourn joined
