@@ -1,0 +1,990 @@
+[00:03] <tewk> It has been a long time but, why does a sub have a ctx pointer?
+[00:06] <dalek> nqp-rx: 2f65563 | pmichaud++ |  (3 files):
+[00:06] <dalek> nqp-rx: Initial version of smartmatch operator.
+[00:06] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/2f655633ec83704b9018f75bef341ba37a75e8cd
+[00:06] <cotto_work> That'll be shiny
+[00:07] <japhb> oooh
+[00:07] <cotto_work> The longer I put off using nqp-rx, the better it gets.
+[00:07] *** tetragon joined
+[00:07] <chromatic> I put off using it until it has documentation, in hopes that the documentation will get much better.
+[00:07] <cotto_work> and ideally, faster
+[00:08] <chromatic> I have THAT hat downstairs.  Everyone voted.
+[00:11] <cotto_work> if either happens, I'll be happy.
+[00:12] <chromatic> Yesterday should have helped.
+[00:12] <pmichaud> sub has a ctx pointer so that "capture_lex" can grab the correct context from an outer sub
+[00:13] <chromatic> I'm still not sure why that doesn't harm recursion.
+[00:13] <pmichaud> it's only used at initialization -- once a closure has been created it already knows its outer context
+[00:14] <pmichaud> i.e., we don't use the ->ctx pointer to look up the outer stack -- that chain is already in the context once it's initialized
+[00:14] <chromatic> Do we even need to store it in the sub itself?
+[00:14] <tewk> ctx is runtime state though right, I think of the sub as compile time info,
+[00:15] <pmichaud> it's possible we don't, but when we call "capture_lex" on an inner sub it needs to be able to find the context of its outer sub
+[00:15] <dalek> tracwiki: v5 | cotto++ | WhyDoesNQPGenerateInefficientCode
+[00:15] <dalek> tracwiki: https://trac.parrot.org/parrot/wiki/WhyDoesNQPGenerateInefficientCode?version=5&action=diff
+[00:15] <pmichaud> the "current context" of its outer sub, that is.
+[00:15] <chromatic> My naive assumption is that that's its calling context.
+[00:15] <pmichaud> not always.
+[00:15] <tewk> pmichaud, agreed but it seems that it should do that through the continuation chain.
+[00:16] <pmichaud> tewk:  if you mean "caller chain", that doesn't work in some situations.  See the long discussion between myself and Bob Rogers from Summer 2008 about why.
+[00:17] <chromatic> I'd like to find some mechanism that doesn't store call information in the Sub PMC itself.
+[00:17] <tewk> but by placing ctx in sub you can't use the sub in two simluteous threads of execution.
+[00:18] <pmichaud> keep in mind that the existing code is adaptation of previous code that was very broken
+[00:18] <pmichaud> I felt a bit limited in terms of the number of core changes I could make to get *something* that worked.
+[00:18] <tewk> I understand I'm just trying to understand how we can improve it.
+[00:18] <pmichaud> it may be easier now that our contexts are PMCs
+[00:18] <chromatic> Sure, no one thinks that the current situation is ideal.
+[00:18] <chromatic> Merely that it passes its tests, which is a fine enough thing.
+[00:19] <pmichaud> the tricky part is when we call an inner-sub when its outer sub hasn't been invoked yet.
+[00:19] <pmichaud> in Perl, the situation is one of    { my $x;  our sub xyz() { say $a; } }
+[00:20] <pmichaud> er
+[00:20] <pmichaud> { my $x;  our sub xyz() { say $x; } };   xyz();
+[00:20] <pmichaud> er
+[00:20] <pmichaud> (argggh)
+[00:20] <pmichaud> xyz();  { my $x;  our sub xyz() { say $x; } };
+[00:21] <pmichaud> in this case, the caller is not the outer sub.
+[00:21] <chromatic> There's a static, compile-time lex pad there then.
+[00:21] <pmichaud> except that Parrot doesn't support compile-time lexpads
+[00:22] <pmichaud> so we have to create one on the fly... and then we have to have something to attach that lexpad to.  The only thing available (afaik) is the sub itself.
+[00:22] <chromatic> Attaching a compile time lexpad to the sub seems fine in this case.
+[00:22] <pmichaud> that's what ->ctx is for, then.
+[00:23] <pmichaud> but if we do
+[00:23] <pmichaud> xyz();  { my $x;  our sub xyz() { say $x; } };   xyz();
+[00:23] <pmichaud> the $x we see in the second xyz() isn't the same as the one from the first xyz()
+[00:23] <pmichaud> in both calls to xyz(), though, the caller is not the outer context.
+[00:24] <chromatic> change that declaration to 'my $x = 77' and what do you expect it to print?
+[00:24] <purl> chromatic: that doesn't look right
+[00:25] <pmichaud> I expect the first one to be printing undef, the second prints 77
+[00:26] <chromatic> Me too.
+[00:26] <pmichaud> ...and that's what the current code.  Invoking the block causes its ->ctx to point to the new context of the invocation
+[00:27] <pmichaud> it also does a "capture_lex" on the lexically nested xyz sub so that it now points to the new context
+[00:27] <chromatic> Is part of the problem that we have to create an anonymous sub to represent the external context?
+[00:27] <pmichaud> anonymous context, yes.
+[00:27] <pmichaud> oh, wait
+[00:28] <pmichaud> (misread your question)
+[00:28] <pmichaud> that might be part of the problem, yes.  We do have to have something to represent the outer scope, though, yes.
+[00:28] <chromatic> I should have written "outer context".
+[00:28] <pmichaud> so far lexical scopes in Parrot are intimately tied to Parrot subs
+[00:29] <pmichaud> but I can certainly change the code to
+[00:29] <chromatic> If we had a way to create a compile-time lexical scope without forcing the use of an anonymous sub, would that help?
+[00:29] <pmichaud> xyz();  our sub abc() { my $x;  our sub xyz() { say $x; } };   xyz();
+[00:29] <pmichaud> ...and then we still need the Parrot Sub.
+[00:30] <pmichaud> I have a feeling that being able to create a copmile-time lexical scope might not completely be the answer here, no.
+[00:30] <pmichaud> I'd need to think about it a bit.
+[00:31] <chromatic> That case is a little more complicated.
+[00:31] <pmichaud> It's possible that we could use the ->ctx pointer to _only_ refer to compile-time lexical scopes though
+[00:31] <chromatic> It depends on how often xyz binds.
+[00:31] <pmichaud> that would help a lot.
+[00:31] <chromatic> That's what I'm getting at.
+[00:31] <pmichaud> I'd need to think about it just a bit more.
+[00:32] <pmichaud> What is really nasty-ish is that a "capture_lex" operation needs to be done on all inner scopes as soon as an outer scope is entered
+[00:32] <pmichaud> but there's not an easy way to query a sub for all of its inner scopes
+[00:32] <chromatic> Right.  That makes me think the design could use some improvements.
+[00:33] <pmichaud> Oh, likely so.  Jonathan and I briefly explored ways for a sub to be able to find all of its inner subs, but we decided that was particularly messy.
+[00:33] <pmichaud> that said, we might not need to do that now.
+[00:33] <pmichaud> (more)
+[00:33] <pmichaud> since PCT is generating explicit capture_lex operations, and those operations always take place from the outer scope, it's possible that we could tie those to the current caller instead of the sub's ->ctx pointer
+[00:34] <pmichaud> leaving the ->ctx pointer to be used only when an inner sub hasn't been capture_lex'd yet.
+[00:34] <chromatic> Right.
+[00:34] <pmichaud> however, that implies a tighter coupling between Parrot and PCT's code generation than currently exists
+[00:35] <pmichaud> the current code works even when someone fails to do a capture_lex operation.
+[00:35] <pmichaud> in short, we'd need a deprecation cycle for it (or an explicit decision to ignore deprecation in this case)
+[00:36] <pmichaud> (and keeping the ability to have current code working w/o explicit capture_lex is partially what led to the current use of ->ctx in the first place, iirc)
+[00:36] <tewk> but subs are really reified bytecode, they should be read-only
+[00:36] <chromatic> I'm willing to categorize code that works without capture_lex as fortunate and buggy.
+[00:37] <chromatic> or buggy but fortunate
+[00:37] <pmichaud> tewk: they almost *cannot* be completely read-only
+[00:37] <chromatic> where numification reduces that string to merely buggy.
+[00:37] <pmichaud> tewk: at runtime we have to be able to dynamically modify sub's outer contexts.
+[00:37] <pmichaud> *subs'
+[00:38] <pmichaud> chromatic: I'm willing to categorize it that way also.... but there could easily be a fair bit of existing code out there that relies on the buggy behavior.  (This is more than a darkpan argument... I'm the author of some such code.)
+[00:39] <chromatic> The current deprecation and support policy and timeline tend to preclude the existence of unknowable darkpir.
+[00:39] <pmichaud> I don't quite follow that statement.
+[00:39] <chromatic> I don't think any darkpir exists.
+[00:40] <chromatic> I'm not sure how it could.
+[00:40] <pmichaud> okay.
+[00:40] <tewk> I'm thinking about it from a parallelism point of view,  you want to share as much readonly data as you can and seperate mutable data into separate structures.
+[00:40] <pmichaud> I know there is pir that will break if we were to enforce the capture_lex requirement.  It might not be completely dark.
+[00:41] <pmichaud> I don't know how much pir would break.  I know it's greater than zero but it may be ultimately very small.
+[00:41] <pmichaud> one could find it fairly quickly by searching for :outer in the PIR sources, though (and it's okay to skip code generated from PCT, as that's known to be either correct or easily fixed)
+[00:42] <chromatic> I don't want to get in the habit of delaying obvious and mostly obvious bug fixes because they may break code which accidentally worked...
+[00:42] <pmichaud> tewk: I agree, the current situation is LTA from a parallelism point of view.  My point is that with Parrot's current design, "outer scope" isn't static.
+[00:42] <chromatic> ... especially if we can find and fix that code with reasonable ease.
+[00:43] <pmichaud> I'll be happy to create a branch that uses ->ctx only for compile-time lexpads.
+[00:43] <pmichaud> and then we can see what breaks.
+[00:44] <pmichaud> that part shouldn't be a difficult change.
+[00:44] <chromatic> I'd like to see what happens there, if you think it's valuable in the near future.
+[00:44] <pmichaud> well, it could significantly improve gc
+[00:44] <chromatic> I'm not certain it's hurting, but if it's a short experiment to find out, I'm happy to know for sure.
+[00:45] <pmichaud> because right now we keep around contexts long after they've existed, including all of their callers and outers, and including all of the PMCs referenced by their callers and outers (and all of the PMCs referenced by those PMCs...)
+[00:45] <pmichaud> s/existed/exited/
+[00:45] <pmichaud> have to go to a concert -- bbl
+[00:58] *** tetragon joined
+[00:58] *** lucian joined
+[00:59] *** abqar joined
+[01:04] <bacek_at_work> chromatic, ping
+[01:04] <chromatic> pong
+[01:04] <bacek_at_work> do you spare couple of hours to fix last bug in cs_csr_merge branch?
+[01:04] <bacek_at_work> do you have
+[01:05] <chromatic> Not tonight, but perhaps tomorrow.
+[01:05] <bacek_at_work> ok, I'll try to fix tonight
+[01:17] *** brrant joined
+[01:33] *** nopaste joined
+[01:42] *** JimmyZ joined
+[01:54] <JimmyZ> hello chromatic.
+[01:54] <chromatic> Hello.
+[01:54] *** lucian joined
+[01:54] <JimmyZ> nopaste?
+[01:54] <purl> nopaste is at http://nopaste.snit.ch/ (ask TonyC for new channels)  or http://paste.scsys.co.uk/ or App::Nopaste or tools/dev/nopaste.pl or at http://www.extpaste.com/ or http://paste.scsys.co.uk (for #catalyst, #dbix-class, #moose  and others) or http://gist.github.com/ or paste or gtfo or tools/dev/nopaste.pl or https://trac.parrot.org/parrot/browser/trunk/tools/dev/nopaste.pl
+[01:55] <nopaste> "JimmyZ" at 61.144.177.28 pasted "Using GET_ATTR syntax for chromatic" (498 lines) at http://nopaste.snit.ch/18937
+[01:55] *** japhb joined
+[01:57] <JimmyZ> Is it the correct way?
+[01:58] <chromatic> Yes.  Be careful that you undid a change to Hash's init() there though.
+[01:59] *** TonyC joined
+[02:00] <JimmyZ> where?
+[02:00] <JimmyZ> Hash  *registry ?
+[02:00] <chromatic> init().
+[02:00] <chromatic> The first hunk of the patch.
+[02:02] <JimmyZ> yes, I could find where it is used.
+[02:02] <JimmyZ> s/could/could not
+[02:03] <chromatic> -        SELF.set_pointer(registry);
+[02:03] <chromatic> I'd rather see code removal in a separate patch, so we can verify it.
+[02:04] <JimmyZ> yep, so I will separate it.
+[02:04] <chromatic> Thanks!
+[02:05] <JimmyZ> svn doesn't has a good way to separate though.
+[02:07] *** bacek joined
+[02:13] *** Coke_ joined
+[02:13] *** Coke left
+[02:28] <dalek> parrot: r42867 | pmichaud++ | branches/dectx:
+[02:28] <dalek> parrot: Create a new branch to experiment with sub->ctx pointer a bit.
+[02:28] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42867/
+[02:33] *** mikehh_ joined
+[02:33] *** theory joined
+[02:43] *** plobsing joined
+[02:46] <pmichaud> purl message chromatic There appears to be a big stumbling block to eliminating sub->ctx .  Without it, I don't see a way to implement a lexically scoped eval() given Parrot's other compilation/:outer constraints.
+[02:46] <purl> Message for chromatic stored.
+[03:01] <Coke> NYS--
+[03:04] <pmichaud> purl message chromatic on second thought... we _might_ be able to do it, but it involves either adding an extra method to sub (to set its outer_ctx), updating capture_lex (to follow the caller chain looking for an outer sub), or updating Sub.invoke to follow the caller chain.
+[03:04] <purl> Message for chromatic stored.
+[03:06] <dalek> rakudo: 7914ca3 | (Solomon Foster)++ | src/setting/Rat.pm:
+[03:06] <dalek> rakudo: Use Rat::gcd to make infix:<+>(Rat, Rat) and infix:<->(Rat, Rat) yield Rats in more cases.
+[03:06] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/7914ca3aa2f17ced09ff0707700e638d77cd5a1f
+[03:35] *** bacek joined
+[03:43] *** nopaste joined
+[03:46] *** mikehh__ joined
+[03:46] <Coke> pmichaud: message sent.
+[03:46] <purl> Message for sent stored.
+[03:46] *** TonyC joined
+[03:46] <sent> messages?
+[03:46] <purl> To access purl's messages, msg me with the word "messages".
+[03:47] * Coke finds a gramatical error 2s after hitting send. *sigh*
+[03:58] *** nopaste joined
+[03:59] *** xenoterracide joined
+[04:06] <dalek> tracwiki: v6 | coke++ | TracSpammers
+[04:06] <dalek> tracwiki: https://trac.parrot.org/parrot/wiki/TracSpammers?version=6&action=diff
+[04:09] <dalek> tracwiki: v7 | coke++ | TracSpammers
+[04:09] <dalek> tracwiki: https://trac.parrot.org/parrot/wiki/TracSpammers?version=7&action=diff
+[04:14] * Coke removes trac spam. bozos.
+[04:21] <dalek> partcl-nqp: 1b98037 | (Will Coleda)++ | TODO:
+[04:21] <dalek> partcl-nqp: add a note on the t/cmd_for.t failure...
+[04:21] <dalek> partcl-nqp: review: http://github.com/partcl/partcl-nqp/commit/1b9803718d613598db0e352d90c61aca9e4f0b4c
+[04:25] *** mikehh joined
+[04:28] *** TonyC joined
+[04:33] *** TonyC joined
+[04:34] *** bacek joined
+[04:38] *** nopaste joined
+[04:39] <dukeleto> 'ello
+[04:50] <cotto> h'
+[04:53] <cotto> It's not really pronounceable, but it cancels out nicely.
+[04:54] <cotto> Coke++ for the spam deletion.  I don't think there are too many brides around surfing the tt queue.
+[05:05] *** hercynium joined
+[05:14] <cotto> Coke, can you bulk delete comments?
+[05:29] <JimmyZ> hello, cotto. Could help me for some questions?
+[05:30] <JimmyZ> It's about pmc class.
+[05:34] <dalek> TT #1344 created by kurahaupo++: documentation spell-checking
+[05:35] <cotto> I can try.
+[05:38] <JimmyZ> cotto: I saw some PMCs(such as bignum.pmc) must be used PMC_data(self) = mem_allocate_zeroed_typed(Parrot_BigNum_attributes); for init. othwise, the test failed.
+[05:38] <JimmyZ> why?
+[05:39] <JimmyZ> cotto: bigint.pmc doesn't need.
+[05:40] <JimmyZ> s/othwise/otherwise/
+[05:40] <cotto> afaict, it's cheating.  Since it only needs space for a pointer, it just uses PMC_data(SELF) directly.
+[05:42] <cotto> nm.  I think I misunderstood.
+[05:42] <JimmyZ> cotto: we're using GET_ATTR syntax.
+[05:42] <cotto> PMCs that don't declare auto_attrs need to manually allocate their ATTRs.
+[05:42] <JimmyZ> so we don't need PMC_data
+[05:43] <JimmyZ> cotto: bigint doesn't declare auto_attrs
+[05:43] <cotto> right, so it does the allocation manually
+[05:44] <JimmyZ> cotto: I couldn't find where it does.
+[05:44] <cotto> the GET_ATTR doesn't care if the ATTR struct is allocated manually or not, as long as it hangs off PMC_data()
+[05:44] <plobsing> JimmyZ: doesn't it do it in bigint_init()?
+[05:44] <cotto> bigint_init
+[05:46] <JimmyZ> oh, should we re-add auto_attrs for them?
+[05:46] <cotto> I don't think it'd hurt.
+[05:47] <cotto> It's not necessary though.
+[05:47] <JimmyZ> since we're going to use GET_ATTR syntax and avoid PMC_data syntax.
+[05:48] <JimmyZ> oh ,should say PARROT_$pmcname syntax.
+[05:49] <cotto> That'd be a good idea.
+[05:50] <dalek> TT #1345 created by plobsing++: [PATCH] eliminate {push,shift}_opcode_pmc from pmc_freeze
+[05:51] <cotto> There needs to be a "mark user as spammer and delete all comments by user" button.
+[05:51] <JimmyZ> cotto: but MakeEveryPMCAnObject suggest removing the auto_attr syntax, such as context.pmc
+[05:52] <JimmyZ> oh
+[05:52] <JimmyZ> Did I misunderstand?
+[05:53] <cotto> That's a proposal that needs further discussion, not an agreed-upon implementation goal.
+[05:55] <JimmyZ> cotto: thanks
+[05:55] <cotto> Wiki organization is not our strong point right now.
+[05:56] <JimmyZ> I see.
+[05:57] <cotto> plobsing, I like where your patches are going.
+[05:57] <cotto> 15-20 more of those and freeze/thaw won't be entirely insane. ;)
+[05:58] <plobsing> I see a problem in how freeze/thaw relates to subs that appears non-trivial. I would appreciate advice.
+[05:59] <cotto> I suspect that it'll go over my head real fast.
+[06:00] <cotto> plus I need to do some late-night shopping
+[06:00] <plobsing> who should I direct my questions towards?
+[06:02] <cotto> chromatic would be good
+[06:02] <cotto> possibly bacek
+[06:02] <JimmyZ> and thanks to plobsing
+[06:03] <plobsing> cotto: thanks, I'll bug them when I see them
+[06:30] <dalek> TT #1346 created by jimmy++: [patch]Removed unused macro in pobj.h, reordered codes in args.c
+[06:31] *** nopaste joined
+[06:31] *** hachi joined
+[06:39] <cotto> plobsing, pmichaud might know something too
+[06:39] <cotto> allison definitely would, but she's not here as often
+[06:39] <dalek> parrot: r42868 | cotto++ | trunk (2 files):
+[06:39] <dalek> parrot: [freeze] when pushing/shifting to/from an IMAGE_IO, don't dress up an INTVAL as a PMC*
+[06:39] <dalek> parrot: patch courtesy of plobsing++
+[06:39] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42868/
+[06:40] <dalek> TT #1345 closed by cotto++: [PATCH] eliminate {push,shift}_opcode_pmc from pmc_freeze
+[06:48] <cotto> time for sleeeeeeeeep
+[06:48] <JimmyZ> good night, cotto.
+[06:50] <dalek> TT #1347 created by jimmy++: [patch]removed unused codes in addrregistry.pmc
+[06:50] <dalek> TT #1348 created by jimmy++: [patch]changed addrregistry.pmc to use GET_ATTR syntax
+[06:56] <dalek> TT #1349 created by jimmy++: [patch]changed arrayiterator.pmc to use GET_ATTR syntax
+[07:03] *** uniejo joined
+[07:03] <dalek> TT #1350 created by jimmy++: [patch]changed bigint.pmc to use GET_ATTR syntax
+[07:05] <Coke> I would appreciate it if I had a way to report trac spammers with gmail addresses to google.
+[07:06] <Coke> cotto: can't bulk delete, but can individually delete. I see there are more that I missed before or that didn't come through until later. Will clean them all up tomorrow.
+[07:10] *** theory joined
+[07:20] <dalek> TT #1351 created by jimmy++: [patch]changed bignum.pmc to use GET_ATTR syntax
+[07:27] *** brrant joined
+[07:51] *** bacek joined
+[07:53] *** mikehh joined
+[08:19] *** iblechbot joined
+[08:23] <dukeleto> plobsing: i am very close to fixing coretest
+[08:23] <dalek> TT #1352 created by dukeleto++: [RFC]: Realtime garbage collector for RTEMS
+[08:24] <dukeleto> plobsing: i was actually 1 test away from being done at the coffee shop and I let a cute girl borrow my power supply, so I had to shut down. decisions, decisions.
+[08:24] <dukeleto> plobsing: anyway, it should be fixed shortly
+[08:34] <mikehh> dukeleto: what tests are failing? and where?
+[08:37] <davidfetter> dukeleto, did you get the digits?
+[08:40] <dukeleto> hola
+[08:40] <dukeleto> davidfetter: i gave her my alphanumerics
+[08:41] <dukeleto> davidfetter: it was actually a cute girl that i knew in college on the east coast, and we end up bumping into each other and living 5 blocks or so from each other on the west coast. crazy.
+[08:42] <davidfetter> heh
+[08:42] <dukeleto> mikehh: "make corevm; make coretest" fails due to tests in t/dynpmc/* using test_more.pir functions that need PGE
+[08:42] <dukeleto> is t/dynpmc/*.t generated or something?
+[08:44] <dukeleto> i modified a bunch of tests in t/dynpmc/*.t and they do not show up in "svn diff". what gives?
+[08:45] <mikehh> All tests PASS (pre/post-config, smoke (#30503), fulltest) at r42868 - Ubuntu 9.10 amd64 (g++ with --optimize)
+[08:46] <dukeleto> Properties on 't/dynpmc': svn:ignore
+[08:46] <mikehh> got to take my grandsons to school (only 5 min away) - bbiab
+[08:46] <dukeleto> Why does t/dynpmc have a svn:ignore property?
+[08:47] <dukeleto> mikehh++
+[08:48] <dukeleto> whoa, lots of directoris in t/ have svn:ignore, what the junk is going on?
+[08:53] <dalek> TT #1353 created by dukeleto++: svn:ignore-ing too many things in t/
+[08:56] *** bacek joined
+[09:17] *** TonyC joined
+[09:20] *** abqar joined
+[09:27] *** bacek joined
+[09:29] *** integral joined
+[09:32] *** chromatic joined
+[09:36] <JimmyZ> good morning, chromatic
+[09:40] <JimmyZ> chromatic: I had created some ticket :)
+[09:42] <dukeleto> chromatic: hola
+[09:42] <dalek> parrot: r42869 | fperrad++ | trunk/runtime/parrot/library/distutils.pir:
+[09:42] <dalek> parrot: [distutils] update dependencies doc
+[09:42] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42869/
+[09:46] <chromatic> Very nice.
+[09:47] <JimmyZ> chromatic: If they're correct, I will do the next.
+[09:48] <chromatic> I'll review them in the morning.
+[09:49] <JimmyZ> thanks
+[10:01] *** fperrad joined
+[10:15] *** JimmyZ_ joined
+[10:19] <dalek> TT #1354 created by jimmy++: [patch]removed unused codes from Vtable.pm
+[10:22] *** mikehh joined
+[10:34] <dukeleto> does anybody know why various directories in t/ are svn:ignored?
+[10:36] *** bacek joined
+[11:08] *** fperrad joined
+[11:09] *** fperrad_ joined
+[11:30] <bacek> dukeleto, ping
+[11:31] *** gaz joined
+[11:33] <dalek> parrot: r42870 | bacek++ | branches/cs_csr_merge/src/pmc/callsignature.pmc:
+[11:33] <dalek> parrot: Initialize new fields in CallSignature
+[11:33] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42870/
+[11:37] *** moderator changes topic to: Parrot 1.8.0 Zygodactyly released | cs_csr_merge branch need testing! | Priority: https://trac.parrot.org/parrot/wiki/ClassVtableOverrides | Latest modified TT's: http://icanhaz.com/parrotbugs | Parrot Languages: http://icanhaz.com/parrotlang
+[11:37] <dalek> parrot: r42871 | bacek++ | failed to fetch changeset:
+[11:38] <dalek> parrot: Fix merging CallSignature for tailcall
+[11:38] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42871/
+[11:38] <dalek> parrot: r42872 | bacek++ | branches/cs_csr_merge/t/native_pbc (2 files):
+[11:38] <dalek> parrot: Partially rebuild native PBCs
+[11:38] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42872/
+[11:38] <bacek> trac is almost dead...
+[11:44] <dalek> TT #1355 created by bacek++: tools/dev/mk_native_pbc is broken
+[11:49] <dukeleto> bacek: yo
+[11:50] <bacek> dukeleto, care to test cs_csr_merge?
+[11:51] <dukeleto> bacek: checking out the branch now
+[11:51] <dukeleto> bacek: do you know why various directories in t/ are svn:ignored?
+[11:52] <bacek> dukeleto, no idea. I don't understand why anyone uses svn.
+[11:52] <dukeleto> bacek: good answer
+[11:52] <purl> i guess good answer is "yes, but i guess crysflame is mistaken."
+[11:53] <dukeleto> purl, forget good answer
+[11:53] <purl> dukeleto: I forgot good answer
+[11:53] <dukeleto> purl, good answer is "up your nose, with a rubber hose!"
+[11:53] <purl> OK, dukeleto.
+[11:53] *** payload joined
+[11:54] <dukeleto> trac is so f'ing slow
+[11:54] <bacek> dukeleto, (packfile tests will fail in branch. 'cause of TT#1355)
+[11:54] <dukeleto> and so is this svn checkout
+[11:54] <bacek> svn is always slow
+[11:56] *** payload joined
+[12:06] *** ruoso joined
+[12:08] <dalek> TT #1355 closed by bacek++: tools/dev/mk_native_pbc is broken
+[12:09] <dalek> parrot: r42873 | bacek++ | trunk (3 files):
+[12:09] <dalek> parrot: Made mk_native_pbc self-contained.
+[12:09] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42873/
+[12:10] *** cghene joined
+[12:10] <dukeleto> bacek: compiling and testing cs_csr_merge now
+[12:11] <moritz> dukeleto: could you please also check if rakudo compiles with it?
+[12:13] <pmichaud> good morning, #parrot
+[12:13] <dalek> parrot: r42874 | bacek++ | failed to fetch changeset:
+[12:13] <dalek> parrot: Bring branch up-to-date with trunk.
+[12:13] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42874/
+[12:13] <dalek> parrot: r42875 | bacek++ | branches/cs_csr_merge/MANIFEST:
+[12:13] <dalek> parrot: Update MANIFEST...
+[12:13] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42875/
+[12:16] <dukeleto> moritz: i will try that now
+[12:17] <dalek> parrot: r42876 | bacek++ | branches/cs_csr_merge/src/call/args.c:
+[12:17] <dalek> parrot: Use ASSERT_ARGS in new functions.
+[12:17] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42876/
+[12:17] <dukeleto> moritz: compiling on the cs_merge branch now
+[12:18] <dukeleto> bacek: everything passes other than packfile tests
+[12:18] <dukeleto> bacek: on darwin/x86
+[12:18] <bacek> dukeleto, your branch is outdated :)
+[12:18] <bacek> dukeleto, try r42878
+[12:18] <dukeleto> bacek: http://smolder.plusthree.com/app/public_projects/report_details/30515
+[12:19] <bacek> dukeleto, make test passed on my box
+[12:19] <dukeleto> bacek: i am going to try rakudo on r42872 first
+[12:19] <bacek> dukeleto, ok
+[12:20] <dukeleto> moritz: i see some warnings from "perl6.ops" but "make test" passes on rakudo with r42872
+[12:20] <moritz> ok, great
+[12:21] <dalek> parrot: r42877 | bacek++ | branches/cs_csr_merge/src/call/args.c:
+[12:21] <dalek> parrot: Fix some ARGIN guards to allow NULLs
+[12:21] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42877/
+[12:21] <dalek> parrot: r42878 | bacek++ | branches/cs_csr_merge/t/native_pbc (2 files):
+[12:21] <dalek> parrot: Rebuild native PBCs.
+[12:21] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42878/
+[12:21] <dukeleto> moritz: i am running spectest now
+[12:21] <dukeleto> moritz: that will be a while :)
+[12:21] <bacek> dukeleto, it will take about half an hour.
+[12:21] *** payload joined
+[12:21] <dukeleto> bacek: tell me when you are done committing and i will test more :)
+[12:22] <bacek> dukeleto, I'm done. Running fulltest now
+[12:23] <dukeleto> bacek, moritz: ok, killing my spec test, updating to latest on cs_csr_merge and then testing both parrot and rakudo on that
+[12:23] <bacek> dukeleto, ok.
+[12:24] <dukeleto> bacek: lots of warnings in ./src/pmc/callsignature.pmc: In function ‘Parrot_CallSignature_set_integer_keyed’:
+[12:24] <dukeleto> bacek: that is no good
+[12:24] <bacek> dukeleto, nopaste?
+[12:25] <dukeleto> bacek: http://gist.github.com/248115
+[12:26] <bacek> dukeleto, interesting... I didn't touch this code.
+[12:27] <dukeleto> bacek: i have actually been getting some of those warnings before. not the clone warning though
+[12:27] <dukeleto> bacek: i think they multiplied, tho
+[12:27] <dukeleto> bacek: it is not a blocker, just something to note
+[12:28] <bacek> dukeleto, "clone_cell" was introduced by YOU! :)
+[12:28] <dukeleto> bacek: the file "t/pmc/callsignaturereturns.t" is empty ?
+[12:29] <bacek> dukeleto, no. It should be removed
+[12:29] <dukeleto> bacek: i applied a patch, i guess
+[12:30] <bacek> dukeleto, indeed :)
+[12:30] <bacek> I added "default:".
+[12:30] <bacek> To pacify compiler about switch.
+[12:30] <dukeleto> bacek: thanks
+[12:31] <dukeleto> moritz: "make test" is ok with rakudo on latest cs_csr_merge, running spectest now
+[12:31] <pmichaud> ugh, trac.parrot.org slooooooow
+[12:31] <dukeleto> pmichaud: yes. please kick it.
+[12:32] <dukeleto> moritz: t/spec/S02-lexical-conventions/unicode.rakudo .................. Dubious, test returned 1 (wstat 256, 0x100)
+[12:32] <dukeleto> moritz: Failed 5/31 subtests
+[12:33] *** hercynium joined
+[12:33] <moritz> dukeleto: that's unrelated
+[12:34] <dukeleto> moritz: good to know
+[12:38] <mikehh> I am also getting really slow responses from svn.parrot.org and trac.parrot.org
+[12:38] <purl> okay, mikehh.
+[12:38] <moritz> purl: I?
+[12:38] <purl> you are Moritz Lenz, mailto:moritz@faui2k3.org or very boring or very exciting
+[12:40] <dukeleto> moritz: t/spec/S12-class/basic.rakudo .................................. Failed 1/33 subtests
+[12:40] <dukeleto> purl: I?
+[12:40] <purl> i heard dukeleto was still employeed. i "made the cut" in our CEO's words or pretty close to going to sleep or unaccountably violent.
+[12:41] <moritz> purl: mikehh?
+[12:41] <purl> mikehh is not sure if we just need to consider i386 vs amd64 vs ppc or we need to consider Darwin vs Linux (various flavors), OpenBSD, Windows etc or getting assert args failures with: or getting really slow responses from svn.parrot.org and trac.parrot.org
+[12:41] <dukeleto> moritz: t/spec/S06-other/main-eval.t ................................... Failed 2/3 subtests
+[12:41] <moritz> that one is also expected
+[12:41] <moritz> not sure about S12-class/basic
+[12:43] <mikehh> where on earth did purl get that?
+[12:43] <moritz> mikehh: it records that whenever you say "I am ..."
+[12:43] <dalek> parrot: r42879 | bacek++ | branches/cs_csr_merge/src (2 files):
+[12:43] <dalek> parrot: Pacify codingstd tests about linelength.
+[12:43] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42879/
+[12:43] <dukeleto> moritz: it just "parrots" what people say in the channel
+[12:44] <dukeleto> moritz: http://gist.github.com/248129
+[12:45] <moritz> dukeleto: I'm recompiling master now to test it, but it could very well be unrelated too
+[12:55] *** whiteknight joined
+[12:55] *** payload joined
+[12:58] *** payload1 joined
+[13:02] <Coke> rakudo: say 'what' ?
+[13:02] <Coke> (do we still have our compiler bot?)
+[13:03] <moritz> Coke: on #perl6, yes. If it's of help I can also bring it here
+[13:03] <Coke> moritz: we used to have one here that did everything in languages/
+[13:03] <Coke> ... back when we had one of those.
+[13:04] <moritz> Coke: ah yes, polyglotbot. That suffered from not being taken care of
+[13:25] <Coke> wow, trac is pretty much dead, huh?
+[13:26] * Coke pings OSUOSL
+[13:27] <whiteknight> we got hit pretty good by a weird spambot this morning
+[13:27] <Util> trac is dead from here
+[13:30] <Coke> whiteknight: yes, I already killed his account.
+[13:30] <Coke> some email hadn't made it through, so there are still some comments to delete.
+[13:45] *** bacek joined
+[13:46] <bacek> ~
+[13:46] <bacek> our GC suck big times...
+[13:46] <bacek> cs_csr_merge is only ~5% faster than trunk
+[13:47] <bacek> (on magical fib.nqp)
+[13:48] <bacek> purl: (31593623631-29891188893)/29891188893*100
+[13:48] <purl> 5.69544003115474
+[13:48] <whiteknight> 5% is still good
+[13:48] <bacek> yeah...
+[13:49] <bacek> anyway, branch is ready to merge back into trunk
+[13:49] <bacek> I'm falling asleep. I'll try to merge is tomor^W today.
+[13:49] <bacek> Or anyone else can merge it back
+[13:49] <bacek> It should be pretty easy
+[13:51] <whiteknight> that's good. Easy is good
+[13:53] <bacek> it's up-to-date with trunk. git didn't report any conflicts during merge. I just don't want to dcommit it without more testing.
+[13:53] <bacek> Anyway, bedtime.
+[13:53] <bacek> See you!
+[14:02] * Coke asks if anyone wants to write some NQP! =-)
+[14:03] <whiteknight> what NQP needs writing?
+[14:03] <Coke> tcl builtins in partcl-nqp.
+[14:03] <whiteknight> partcl has it's own NQP flavor?
+[14:03] <Coke> http://github.com/partcl/partcl-nqp
+[14:03] <Coke> (a rewrite in nqp-rx)
+[14:04] <whiteknight> oh, okay
+[14:04] <Coke> http://github.com/partcl/partcl-nqp/blob/master/src/PmTcl/commands/string.pm is in some particular need of love, and 1) it has tests, and 2) it has a PIR version that can be used for inspiration.
+[14:06] <Util> Parrot's Trac and SVN are up again, from here.
+[14:07] *** ruoso joined
+[14:07] <Util> No, back down again
+[14:08] *** JimmyZ joined
+[14:08] *** payload joined
+[14:10] <Coke> talking to admins on freenode, they're on it.
+[14:14] <Coke> seems better now.
+[14:16] <Coke> huh. I think someone else went on spam deletion duty.
+[14:25] *** dalek joined
+[14:26] *** d4l3k_ joined
+[14:26] *** dalek joined
+[14:26] *** d4l3k_ joined
+[14:28] *** dalek joined
+[14:29] <Infinoid> Sorry about the dalek spam, guys.  I fiddled with the daemontools script and hadn't tested it sufficiently
+[14:33] <Coke> 09:25 -!- mode/#parrot [+v dalek] by slavorg
+[14:33] <Coke> ?
+[14:34] <Coke> that's very light on the channel spam. =-)
+[14:34] <szbalint> you probably have join/part hidden
+[14:34] <szbalint> but still it wasn't exactly noticeable
+[14:34] <dalek> parrot: r42880 | fperrad++ | trunk/runtime/parrot/library/distutils.pir:
+[14:34] <dalek> parrot: [distutils] add a step 'patch'
+[14:34] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42880/
+[14:34] <szbalint> I think the ensuing discussion generate[sd] more noise than the even itself :)
+[14:37] <Infinoid> ah.  8-10 copies of the bot were spawned, but only 2 at a time ended up in here
+[14:39] <szbalint> probably due to the ircd connection limits for feather
+[14:48] *** bluescreen joined
+[14:52] *** bluescreen joined
+[15:04] *** shockwave joined
+[15:05] <shockwave> Is there support in any form for class/object destructors? Perhaps some form of finalize method.
+[15:08] <shockwave> BTW, I'm refering to PIR.
+[15:11] <Coke> you can override the destroy VTABLE.
+[15:11] <Coke> something like ".sub destroy :vtable"
+[15:11] <Coke> s/can/should be able to/ =-)
+[15:12] <Coke> (see docs/pdds/*17* for a list of the various vtables available.
+[15:20] <shockwave> Thanks, @Coke
+[15:30] <dalek> parrot-linear-algebra: 7c6b8f1 | Whiteknight++ | PLATFORMS:
+[15:30] <dalek> parrot-linear-algebra: update PLATFORMS with the compiler version
+[15:30] <dalek> parrot-linear-algebra: review: http://github.com/Whiteknight/parrot-linear-algebra/commit/7c6b8f1c3a9945a4883117bb1a634c5af572ee1c
+[15:30] <dalek> parrot-linear-algebra: bc3e0d2 | Whiteknight++ | t/00-sanity.t:
+[15:30] <dalek> parrot-linear-algebra: add a check to our sanity test to verify that we have the linalg_group library available to test with
+[15:30] <dalek> parrot-linear-algebra: review: http://github.com/Whiteknight/parrot-linear-algebra/commit/bc3e0d2457aacd3352bd69743ee63068ba6d8ac7
+[15:32] *** cghene joined
+[15:32] *** patspam joined
+[15:36] *** payload joined
+[15:38] <Coke> http://thedailywtf.com/Articles/Bad-Code-Offsets-An-Update.aspx -- there is a 500 $ grant up for grabs. "Tell us how your free and open source project prevents bad code from being created and show us how $500 would make a real difference in your project"
+[15:46] <particle> cotto: any news on my msdn subscription yet? sadly, november came and went....
+[15:57] *** Psyche^ joined
+[15:58] <cotto_work> Coke, how much do you think we could do with $500?
+[15:59] <Coke> focus a core developer on performance for a few days?
+[16:00] <Coke> (grant hourly rate typically being cheaper than $real rate.)
+[16:00] <cotto_work> True.  That'd give us a meaningful improvement.
+[16:03] <cotto_work> If we got people to look at the right code, we might be able to convince people that we prevent bad code.
+[16:03] <cotto_work> If nothing else, we certainly refactor a lot of it.
+[16:16] <cotto_work> t/pmc/threads.t test 9 fails in cs_csr_merge
+[16:17] <cotto_work> (ubuntu x64 9.04)
+[16:30] *** shockwave left
+[16:34] <dalek> parrot: r42881 | jkeenan++ | trunk (6 files):
+[16:34] <dalek> parrot: Applying patch submitted by kurahaupo++ in https://trac.parrot.org/parrot/ticket/1344:  typographic corrections.
+[16:34] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42881/
+[16:46] <whiteknight> we help prevent bad code by enabling language interoperation, which allows progammers to solve problems using the right tools
+[16:47] *** cotto_w0rk joined
+[16:48] *** theory joined
+[16:54] *** ruoso joined
+[16:55] *** dalek joined
+[17:10] *** payload joined
+[17:14] *** dalek joined
+[17:24] *** darbelo joined
+[17:27] *** dalek joined
+[17:29] <darbelo> Oh, I see someone recently put some sanity into pmc_freeze.c recently. (Whoever did that)++
+[17:30] <cotto_work> plobsing
+[17:30] <purl> somebody said plobsing was trying to create a set of classes which have attributes with a 'label' attribute which can be mapped to and from the attribute name
+[17:30] <cotto_work> no, plobsing is part of our sanity injection framework
+[17:30] <purl> okay, cotto_work.
+[17:32] <darbelo> plobsing++
+[17:32] <darbelo> plobsing++
+[17:32] <darbelo> plobsing++
+[17:32] <darbelo> plobsing++
+[17:33] <darbelo> We need to get him a bit. Cut out the middlemen in the sanity injection framework.
+[17:34] <moritz> what is it blocking on?
+[17:35] <darbelo> I think he doesn't have a CLA. But might be mistaken.
+[17:37] <cotto_work> It looks like nobody's proposed that he be given a bit.
+[17:37] <moritz> then somebody should it on next #ps
+[17:37] <cotto_work> I'm sure somebody will. ;)
+[17:57] <dalek> TT #1356 created by fperrad++: [TODO] add method FixedStringArray.sort()
+[18:01] *** cognominal joined
+[18:03] <pmichaud> trac.parrot.org down again :(
+[18:04] <cotto_work> That's no good.  Has it been down much recently?
+[18:04] <Coke> they're on it.
+[18:05] <Coke> previous downtime was due to a robots.txt issue so we got hammered by <search engine>+
+[18:06] <cotto_work> It's kinda back.
+[18:06] <cotto_work> or all the way back
+[18:06] <japhb> pmichaud, ping
+[18:08] <pmichaud> japhb: pong
+[18:09] <japhb> pmichaud, a couple of days ago a couple of us were discussing making Plumage itself installable.  For most of the generated files, no problem, but
+[18:09] <japhb> Glue.pir and Util.nqp are of more general usage, and don't really belong within the Plumage/ namespace used for the other libs.  Someone suggested
+[18:10] <Coke> back now.
+[18:10] <japhb> NQP/Glue and NQP/Util, because they are in fact generic libraries for people who write in raw NQP-rx.  But I wanted to make sure
+[18:10] <japhb> that you were OK with putting them in "your" namespace
+[18:10] <pmichaud> I'm fine with use creating standard libraries that can be distributed with NQP, yes.
+[18:10] <pmichaud> (and can appear in the NQP namespace)
+[18:10] <pmichaud> s/use/us/
+[18:10] <japhb> OK, cool
+[18:11] <pmichaud> in some ways they probably belong in the nqp-rx repo, then.
+[18:11] <pmichaud> (I'm fine with that also)
+[18:11] <japhb> pmichaud, I'm fine with that as well.  Take your pick.
+[18:11] <pmichaud> how about I take a look at Glue,pir and Util.nqp and cherry pick what I think belongs into NQP?
+[18:11] <japhb> It's all going to get distributed with Parrot eventually, it's just a matter of which git repo gets used
+[18:12] <japhb> pmichaud, sounds great.
+[18:12] <pmichaud> what's the plumage repo, again?
+[18:12] <pmichaud> plumage?
+[18:12] <purl> plumage is, like, the future Parrot module ecosystem.  It will include tools to search metadata, handle dependencies, install modules, and so forth. The repository is at http://gitorious.org/parrot-plumage/parrot-plumage and the design docs are at https://trac.parrot.org/parrot/wiki/ModuleEcosystem
+[18:12] <Coke> I am told that the robots.txt is fixed again, and that there is a new caching mechanism in place that should also help.
+[18:12] <japhb> yay
+[18:17] <pmichaud> instead of Util and Glue, should we instead break those up into smaller modules?
+[18:17] <japhb> pmichaud, no problem, ... (more)
+[18:17] *** joeri joined
+[18:18] <japhb> They were only single files for hysterical raisins.  Well, two files: one for PIR code and one for NQP code.  But like I said, I have no problems breaking them into pieces.
+[18:18] <pmichaud> okay
+[18:18] <pmichaud> wfm
+[18:18] <dalek> markdown: 1bf1ac4 | fperrad++ | setup.pir:
+[18:18] <dalek> markdown: add flag verbose
+[18:18] <dalek> markdown: review: http://github.com/fperrad/markdown/commit/1bf1ac451d7fb026cf266ecab8fc59cff4793007
+[18:19] <japhb> Hmmm, probably want a single convenience file that just load_bytecodes all the pieces, for when you don't need/want to be so selective.
+[18:20] <dalek> wmlscript: 647fbcd | fperrad++ | setup.pir:
+[18:20] <dalek> wmlscript: add flag verbose
+[18:20] <dalek> wmlscript: review: http://github.com/fperrad/wmlscript/commit/647fbcdabed7db2bd1aa07e7780a59ac32d6ef39
+[18:20] <japhb> Or I suppose we could do it at make time ... merging the PIR (hand-coded and NQP-generated) into one PBC
+[18:20] <pmichaud> nah, just have a .pbc that loads the others
+[18:20] <pmichaud> that way we don't have to worry about duplicate loads
+[18:20] <japhb> Good point
+[18:21] <pmichaud> I'll set up the initial structure later today, then people can start populating it as commits
+[18:21] <pmichaud> also, I plan to do nearly all of it in NQP, avoiding the PIR parts
+[18:21] <dalek> winxed: r237 | julian.notfound++ | trunk/winxedst1.winxed:
+[18:21] <dalek> winxed: operator ! in stage 1
+[18:21] <dalek> winxed: review: http://code.google.com/p/winxed/source/detail?r=237
+[18:21] <japhb> Speaking of which, when you load_bytecode something that's already been loaded, what if anything happens?  Does it trigger :load or :init again?
+[18:22] <pmichaud> if the filename is the same, it doesn't load it a second time
+[18:22] <pmichaud> if the filename is different, it does the load and re-triggers any :load subs
+[18:22] <pmichaud> so
+[18:22] <pmichaud> load_bytecode 'xyz.pbc'
+[18:22] <pmichaud> load_bytecode 'xyz.pbc'    # doesn't re-load the pbc
+[18:22] <pmichaud> load_bytecode '/full/path/to/xyz.pbc'   # does re-load the pbc
+[18:22] <japhb> "avoiding the PIR parts"  Do you mean, just not including Glue.pir?  Or do you mean applying your NQP fu to the problem of translating Glue.pir to NQP?
+[18:23] <pmichaud> applying nqp-fu to the pir parts, and/or using inline PIR
+[18:23] <pmichaud> afk for a bit
+[18:24] <japhb> OK, fair enough.  Once upon a time, some of Glue.pir *had* to be done in PIR, because NQP didn't support the right calling semantics.  I think most of those reasons are gone now.  The only thing I'm missing is support for root_new [].  Or did you make that work?
+[18:29] <dalek> lua: bc50bfb | fperrad++ | setup.pir:
+[18:29] <dalek> lua: add flag verbose
+[18:29] <dalek> lua: review: http://github.com/fperrad/lua/commit/bc50bfb89b7aa2e5a910d885db76b56bfe435beb
+[18:30] <dalek> parrot: r42882 | fperrad++ | trunk/runtime/parrot/library/distutils.pir:
+[18:30] <dalek> parrot: [distutils] add option verbose to setenv
+[18:30] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/42882/
+[18:38] <Coke> Infinoid++
+[18:38] <integral> indow 45
+[18:39] <pmichaud> I don't have a good mechanism for root_new, no  (other than Q:PIR or pir::root_new)
+[18:42] <Coke> pir::root_new is better than .pir
+[18:42] <pmichaud> yup.
+[18:47] <japhb> pmichaud, IIRC at least at one time pir::root_new could not work because it wants a key, not normal arguments.  Is that restriction gone now?
+[18:47] <pmichaud> root_new will accept a variety of things
+[18:48] <pmichaud> it can take a class object, or an array, or a namespace, or a constant key
+[18:48] <pmichaud> so   pir::root_new(['parrot';'OS'])  ought to work
+[18:48] <pmichaud> er
+[18:48] <pmichaud> so   pir::root_new(['parrot','OS'])  ought to work
+[18:48] <pmichaud> (it's not the most efficient, but it should work)
+[18:48] <japhb> Oooh!  OK, I had forgotten that.
+[18:49] <japhb> Ah, probably because of the efficiency thing.  I bet I mentally blocked it on account of slow.
+[18:49] <pmichaud> also, looking through Util.pir, I wouldn't use root_new at all
+[18:49] <pmichaud> I'd create a single $*OS object upon load, and re-use it in the individual functions.
+[18:49] <pmichaud> instead of creating a new object in each function
+[18:49] <japhb> Any task using parrot;OS is going to be dominated performance-wise by the actual task, so that's not an issue
+[18:50] <pmichaud> and   root_new ['parrot';'ResizablePMCArray']  is now  just   []   :-)
+[18:50] <japhb> pmichaud, yes, and I was thinking of doing that ... right about the time that the discussion of moving Glue and Util came up yesterday.  ;-)
+[18:51] <pmichaud> well, a nice aspect of having $*OS is that people can get to it directly instead of only through the functions
+[18:51] <japhb> pmichaud, yes, agreed.
+[18:52] <japhb> Still going to want the wrappers in a couple places, because there's annoying boilerplate like for is_dir(), but that can easily be in NQP
+[18:52] <japhb> (now that try/CATCH work, yay Tene!)
+[18:52] <pmichaud> there's also a question about whether it's better as  is_dir()   or  $*OS.is_dir()
+[18:52] <Infinoid> Coke++ # Randomly giving me karma, huh?  Have a taste of your own medicine!
+[18:52] <pmichaud> in some ways I prefer the latter
+[18:53] <japhb> pmichaud, that's fine by me ... just use 'module OS { ... }' trick?
+[18:53] <pmichaud> sure.
+[18:54] <japhb> sounds good
+[18:54] <pmichaud> helps to not pollute the global namespace :)
+[18:55] <japhb> agreed.  That's why I've over the last couple months removed a number of subs from Glue.pir and replaced them with methods elsewhere (some but not all went into Util)
+[18:55] <japhb> :-)
+[18:56] *** mikehh joined
+[18:57] <japhb> pmichaud, so, let me know what parts you plan to do, and I'll start preparing different stuff on my end.
+[18:58] <pmichaud> japhb: I'll just get things started on this end in the nqp directory (and parrot build), then let you exercise your commit bit for the rest :-)
+[18:58] <japhb> heh
+[18:59] <japhb> fair enough
+[18:59] <japhb> pmichaud, what's :load :init in NQP?  INIT { } ?
+[19:00] <pmichaud> yes
+[19:00] <pmichaud> that may change to BEGIN or CHECK or something like that, but for now it's INIT { ... }
+[19:01] *** mikehh joined
+[19:01] <japhb> OK, cool
+[19:06] *** schnee joined
+[19:10] <schnee> Hi folks. I'm just trying to build parrot (as part of rakudo) on windows/cygwin, and although it apparently compiles just fine, I'm running into crashes there. I was wondering if anyone could help me with that?
+[19:10] <dalek> parrot: r42883 | mikehh++ | trunk/MANIFEST:
+[19:10] <dalek> parrot: regenerate manifest
+[19:10] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/42883/
+[19:11] <japhb> schnee, I believe fperrad is our resident Parrot-on-cygwin expert, if he is around
+[19:11] <schnee> Ah, great!
+[19:12] <japhb> fperrad, feel highlighted.  :-)
+[19:12] *** mikehh joined
+[19:12] *** chromatic joined
+[19:12] <PerlJam> schnee: If you just want to play with parrot/rakudo, I believe that there are cygwin packages for both.
+[19:12] <PerlJam> (I could be wrong though)
+[19:13] <japhb> schnee, if fperrad is not around right now, you can also try the packages PerlJam mentioned (which IIRC fperrad made :-), or the parrot-users mailing list.
+[19:13] <schnee> There are, but they're horribly out of date.
+[19:13] <japhb> parrot-users?
+[19:13] <purl> i think parrot-users is http://lists.parrot.org/mailman/listinfo/parrot-users
+[19:14] <schnee> Thanks for the pointer, I may try that, too. :)
+[19:17] <dalek> parrot: r42884 | mikehh++ | trunk/t/native_pbc/testdata (2 files):
+[19:17] <dalek> parrot: set svn properties
+[19:17] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/42884/
+[19:21] <dalek> parrot-linear-algebra: 3659aaf | Whiteknight++ | t/00-sanity.t:
+[19:21] <dalek> parrot-linear-algebra: fix the sanity test
+[19:21] <dalek> parrot-linear-algebra: review: http://github.com/Whiteknight/parrot-linear-algebra/commit/3659aaff74870a87189af2ded695cca625ef8a2a
+[19:21] <dalek> parrot-linear-algebra: 4dc502c | Whiteknight++ | src/pmc/charmatrix2d.pmc:
+[19:21] <dalek> parrot-linear-algebra: fix charmatrix so that we initialize all it's storage on resize, since we use that storage directly to build strings
+[19:21] <dalek> parrot-linear-algebra: review: http://github.com/Whiteknight/parrot-linear-algebra/commit/4dc502c05de50b4907ab3c754fa40cb43cb55d2f
+[19:35] <cotto_work> bacek_at_work, t/pmc/threads.t test 9 fails in cs_csr_merge on ubuntu 9.04 x64, non-optimized
+[19:36] *** schnee left
+[19:36] *** bacek joined
+[19:37] <dalek> parrot: r42885 | mikehh++ | trunk/t/native_pbc/testdata (2 files):
+[19:37] <dalek> parrot: add copyright, Id and coda
+[19:37] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/42885/
+[19:43] *** lucian_ joined
+[19:43] <dalek> matrixy: dcf5c2a | Whiteknight++ | README.NCI.pod:
+[19:43] <dalek> matrixy: remove the NCI readme file, unused now. Parrot-Linear-Algebra handles all these details
+[19:43] <dalek> matrixy: review: http://github.com/Whiteknight/matrixy/commit/dcf5c2a171bf0b90b82a95b3cf42fb48f88e85c9
+[19:43] <dalek> matrixy: 8783099 | Whiteknight++ | README.pod:
+[19:43] <dalek> matrixy: updates to README.pod to make it clean and current
+[19:43] <dalek> matrixy: review: http://github.com/Whiteknight/matrixy/commit/8783099cdb72f5dbbc57acbb84457b2a9e36c7b9
+[19:43] <dalek> matrixy: 3f29530 | Whiteknight++ | t/parrot/parrot_pir.t:
+[19:43] <dalek> matrixy: add tests for the pir() function, since apparently CharMatrix2D didn't work with it until recently
+[19:43] <dalek> matrixy: review: http://github.com/Whiteknight/matrixy/commit/3f29530c7747865a278ff32980caa071fd9563da
+[19:43] <dalek> matrixy: d4c9a30 | Whiteknight++ | t (2 files):
+[19:43] <dalek> matrixy: add an ismatrix() function with tests
+[19:44] <dalek> matrixy: review: http://github.com/Whiteknight/matrixy/commit/d4c9a309b38b52629e83f4ee408ba842fa209324
+[19:44] <dalek> matrixy: b5847f9 | Whiteknight++ | src/builtins/pir.pir:
+[19:44] <dalek> matrixy: fix pir() to take PMC arguments
+[19:44] <dalek> matrixy: review: http://github.com/Whiteknight/matrixy/commit/b5847f9815d9db573a3b923ae30007642f5fe6a8
+[19:44] <dalek> matrixy: 2ab528a | Whiteknight++ | t (2 files):
+[19:44] <dalek> matrixy: add iscell() function and tests
+[19:44] <dalek> matrixy: review: http://github.com/Whiteknight/matrixy/commit/2ab528a5fb9c9226a71e5b13bccd3022890a7f35
+[19:44] <dalek> matrixy: 9799159 | Whiteknight++ | t (2 files):
+[19:44] <dalek> matrixy: add ischar() function and tests
+[19:44] <dalek> matrixy: review: http://github.com/Whiteknight/matrixy/commit/979915939c94195b9fc4fe1f8a7d330646112bbb
+[19:44] <dalek> matrixy: c6ae1d2 | Whiteknight++ | t (2 files):
+[19:44] <dalek> matrixy: add iscomplex() and tests
+[19:44] <dalek> matrixy: review: http://github.com/Whiteknight/matrixy/commit/c6ae1d29f7e722625114568311380fe1553cfc2a
+[19:44] <dalek> matrixy: 6f7b40e | Whiteknight++ | t/functions/ (2 files):
+[19:44] <dalek> matrixy: Merge branch 'master' of github.com:Whiteknight/matrixy
+[19:44] <dalek> matrixy: review: http://github.com/Whiteknight/matrixy/commit/6f7b40e791c7eaafc27801593183149d97a4aee2
+[19:49] <dalek> matrixy: bdbf114 | Whiteknight++ | t/functions/transpose.t:
+[19:49] <dalek> matrixy: remove the ctranspose tests from transpose.t
+[19:49] <dalek> matrixy: review: http://github.com/Whiteknight/matrixy/commit/bdbf1148738c1d6a41751b6835c4bfc922b2879c
+[19:50] <dalek> parrot: r42886 | jkeenan++ | trunk (6 files):
+[19:50] <dalek> parrot: Revert 5 files patched in r42881 to their pre-existing status (cf. TT #1344).
+[19:50] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/42886/
+[19:57] *** iblechbot joined
+[20:00] *** davidfetter joined
+[20:05] *** brrant joined
+[20:06] <tewk> Whats the current best practice module for writing simple to moderate XS code?
+[20:07] <dukeleto> 'ello
+[20:07] <dukeleto> tewk: are you trolling or do you want a real answer? ;)
+[20:08] <Coke> do mean the equivalent in parrot?
+[20:08] <Coke> *do you
+[20:11] <tewk> perl5 XS I just wanted a recommendation of a CPAN module to use or something like that.
+[20:12] <dukeleto> tewk: what do you want to do?
+[20:13] <whiteknight> I tought current best practices involved not writing XS in the first place?
+[20:13] <japhb> tewk, it has been a while for me, but last I recall it really depends on your task -- if you want to wrap a largish but relatively simple API, there are tools for that.  But if you need to deal with a complex API that doesn't quite match Perl 5's model for things, you end up with a lot of hand-written XS.  OpenGL has this issue, for instance.
+[20:13] <dukeleto> ba dump ching!
+[20:13] <tewk> dukeleto, wrap simple c library calls
+[20:14] <dukeleto> tewk: take a look at how Math:GSL wraps the GSL library with SWIG
+[20:14] <japhb> tewk, Inline::, SWIG, and h2xs can all do the simple stuff.
+[20:14] <japhb> afk, lunch
+[20:14] <dukeleto> tewk: how "simple" is your library? how many functions? what is the most complicated function signature? callbacks make things interesting
+[20:22] <tewk> dukeleto, its very very simple, sounds like I should just use raw XP or inline, SWIG is way to complicated for this problem.
+[20:22] <tewk> raw XS I mean
+[20:23] <dukeleto> tewk: SWIG adds complications to the build process, but actually makes you write a lot less code
+[20:23] <dukeleto> tewk: GSL has thousands of functions, so SWIG was the only choice
+[20:23] <dukeleto> tewk: how many functions do you need to wrap?
+[20:24] <dukeleto> tewk: also, you can just use the XS code that SWIG generates as a starting place, to see how it is done. The generated code is not pretty, tho
+[20:25] <dukeleto> tewk: if you want to write raw XS, i don't understand your question about a best practice module. you just need to read perlxs, perlguts and perlapi and then it is just a SMOP
+[20:25] <mikehh> All tests PASS (pre/post-config, smoke (#30543), fulltest) at r42885 - Ubuntu 9.10 amd64 (gcc with --optimize)
+[20:28] <dukeleto> mikehh++
+[20:30] <whiteknight> how do I resolve a merge conflict in git?
+[20:30] <tewk> fix it then git add
+[20:30] <whiteknight> I have done both of those things, but still get an error message
+[20:31] <dukeleto> whiteknight: nopaste
+[20:31] <whiteknight> "fatal: you have not concluded your merge. (MERGE_HEAD exists)"
+[20:31] <whiteknight> dukeleto: what to nopaste?
+[20:31] <dukeleto> whiteknight: entire error output
+[20:31] <dukeleto> whiteknight: did you do git rebase --continue ?
+[20:31] <tewk> whiteknight, are you rebasing?
+[20:31] <dukeleto> whiteknight: were you in a rebase?
+[20:31] <whiteknight> tewk: I don't know what rebasing is, I never do it
+[20:31] <whiteknight> dukeleto: that is the entire error output
+[20:32] <dukeleto> whiteknight: please nopaste all the commands that you are typing
+[20:32] <dukeleto> whiteknight: as well as git status -a
+[20:33] <whiteknight> $> git pull
+[20:33] <whiteknight> fatal: You have not concluded your merge. (MERGE_HEAD exists)
+[20:33] <particle> git mergetool
+[20:33] <whiteknight> urg. "no known merge resolution tool available"
+[20:33] <dukeleto> whiteknight: git status -a, please
+[20:33] <purl> git status -a is my friend, as well as a healthy .gitignore
+[20:34] <dukeleto> purl++
+[20:34] <nopaste> "Whiteknight" at 173.12.37.77 pasted "git status -a for dukeleto++" (32 lines) at http://nopaste.snit.ch/18952
+[20:35] <whiteknight> doesn't show anything as conflicted
+[20:35] <dukeleto> whiteknight: you haven't commited!
+[20:35] <whiteknight> so it's not just fix the conflict and add, like I had been lead to believe?
+[20:35] <particle> git mergetool --tool=<tool>.   Valid merge tools are: kdiff3, tkdiff, meld, xxdiff, emerge, vimdiff, gvimdiff, ecmerge,         diffuse, tortoisemerge, opendiff, p4merge and araxis.
+[20:36] <dukeleto> whiteknight: it is : fix the conflict, git add foo, then commit
+[20:36] <particle> git mergetool walks you through the process
+[20:36] <dukeleto> if you don't commit, all your stuff is just sitting in your working copy, not committed to your index
+[20:36] <particle> s/index/staging area/
+[20:36] <dukeleto> whiteknight: which means you can't pull
+[20:36] <particle> that's the new term iirc
+[20:37] <dukeleto> whiteknight:  you can do: git stash && git pull && git stash pop
+[20:37] <dukeleto> particle: both are used interchangeably
+[20:37] <dukeleto> whiteknight: that will get around your "can't pull before I push" issue
+[20:38] <whiteknight> ok
+[20:38] <dukeleto> whiteknight: i have that aliased to "git up"
+[20:39] <dukeleto> whiteknight: http://github.com/leto/Util/blob/master/config/.gitconfig
+[20:39] <fperrad> japhb, a new one http://trac.parrot.org/languages/browser/ecmascript/trunk/plumage/ecmascript.json
+[20:40] <Infinoid> dukeleto: Do you actually use "praise"?  If so, you're the first person I've ever met who does. :)
+[20:40] <japhb> fperrad, OK, will do
+[20:41] <dalek> matrixy: 7bba118 | Whiteknight++ |  (17 files):
+[20:41] <dalek> matrixy: merge that sucker
+[20:41] <dalek> matrixy: review: http://github.com/Whiteknight/matrixy/commit/7bba11887fcbe51587157832da51c747931f9e1c
+[20:41] <japhb> fperrad, did schnee manage to get in touch with you?
+[20:41] <dukeleto> Infinoid: yes, when i am in a good mood
+[20:41] <whiteknight> dukeleto: by the way, I have some ideas for improvements to nqpTAP. I'll try to monkey around with it later if I can find the tuits
+[20:42] <dukeleto> whiteknight: you mean Tapir?
+[20:43] <dukeleto> tapir?
+[20:43] <purl> somebody said tapir was being written to be testable from the ground up, unlike nqpTAP or http://github.com/leto/tapir
+[20:43] <japhb> dukeleto, is Tapir a complete replacement for nqpTAP?
+[20:43] <dukeleto> japhb: Tapir already does 10x more than nqpTAP ever did. And it has tests to boot.
+[20:43] <whiteknight> Tapi?
+[20:43] <whiteknight> Tapir?
+[20:43] <purl> Tapir is being written to be testable from the ground up, unlike nqpTAP or http://github.com/leto/tapir
+[20:43] <fperrad> japhb, in fact I don't work with cygwin
+[20:44] <whiteknight> dukeleto: I have never heard of Tapir. I'll have to check that out later
+[20:44] <whiteknight> anyway, I have to disappear now. talk to you gentlemen later
+[20:44] <japhb> fperrad, I thought you did, hmmm.  Sorry about that.
+[20:44] <dukeleto> whiteknight: you have a commit bit now :)
+[20:44] <whiteknight> w00t
+[20:44] <whiteknight> dukeleto++
+[20:44] <dukeleto> whiteknight: i just wrote tapir in the last 5 days
+[20:44] <japhb> fperrad++ # Lots of new projects brought into the Plumage fold
+[20:44] <dukeleto> whiteknight: it is MUCH faster than Test::Harness 3.x
+[20:45] <dukeleto> anybody else want a bit for tapir?
+[20:46] * particle does
+[20:46] <dalek> parrot-linear-algebra: c2564ba | Whiteknight++ | PLATFORMS:
+[20:46] <dalek> parrot-linear-algebra: add entry about performance on Ubuntu 9.10 with the newer GCC
+[20:46] <dalek> parrot-linear-algebra: review: http://github.com/Whiteknight/parrot-linear-algebra/commit/c2564ba8e2ad5a3c1b0a65f808ec1f25d63a1fb9
+[20:46] <dukeleto> particle: done
+[20:46] <japhb> dukeleto, please.  # I won't have time to use it for a bit, but will probably eventually
+[20:46] <dukeleto> japhb: you already have one :)
+[20:46] <japhb> oh
+[20:47] <japhb> well
+[20:47] <japhb> then.
+[20:47] <japhb> *cough*
+[20:47] <dukeleto> i have japhb, tene, chromatic, bubaflub, whiteknight, particle, ewilhelm and brianwisti with a commit bit to tapir
+[20:47] <dukeleto> if anybody else wants one, let me know
+[20:48] <dukeleto> the TODO file is extensive, please look for something to work on in there
+[20:49] <dalek> parrot-plumage: 3c8da7d | japhb++ | :
+[20:49] <dalek> parrot-plumage: [METADATA] ecmascript, courtesy fperrad++
+[20:49] <dalek> parrot-plumage: review: http://gitorious.org/parrot-plumage/parrot-plumage/commit/3c8da7d863fe1637349ed9193ac4b61156cfebd2
+[20:49] <fperrad> dukeleto, my requirement for Tapir :
+[20:49] <fperrad> - a single pbc
+[20:49] <fperrad> - a installable executable
+[20:49] <fperrad> - available in Parrot tree (like nqp-rx)
+[20:49] <fperrad> - equivalent of Perl5 prove
+[20:50] <fperrad> - with option --exec
+[20:50] <fperrad> - with option --archive
+[20:50] <fperrad> - with option --env (see https://rt.cpan.org/Public/Bug/Display.html?id=50215)
+[20:50] <japhb> fperrad, I sense that getting Tapir into the Parrot tree will not be terribly hard, since it is excellent dog food, and would kill the last vestiges of perl5 dependency for a bunch of projects.
+[20:51] <japhb> If necessary, it will come in under the auspices of Plumage.
+[20:51] <darbelo> dukeleto: sign me up!
+[20:52] <fperrad> japhb, yes, the goal is kill dependencies, perl5 and others
+[20:52] <dukeleto> darbelo: done!
+[20:52] <dukeleto> fperrad: you have a bit too
+[20:52] * darbelo likes killing dependencies.
+[20:52] <japhb> fperrad, also, it sounds like pmichaud and I have agreement on general course of action to make Plumage installable (which involves moving some code out of Plumage and into NQP-rx)
+[20:52] <dukeleto> fperrad: tapir has --exec already
+[20:53] <dukeleto> fperrad: a single .pbc and installable needs to be written, but it not very hard
+[20:53] <japhb> pmichaud++ is preparing things on the NQP-rx side.
+[20:53] <dukeleto> fperrad: the idea is that tapir will go in ext/ like nqp-rx
+[20:54] <dukeleto> fperrad: re-implementing *every* prove feature is non-trivial
+[20:54] <dukeleto> fperrad: --archive is planned. this basically means writing TAP::Harness::Archive in PIR
+[20:54] <dukeleto> fperrad: can you add these items to the TODO?
+[20:55] <dukeleto> fperrad: i want more details on "equivalent to prove"
+[20:55] <dukeleto> fperrad: you want exactly the same output format?
+[20:56] <dukeleto> japhb: yes, it is planned that Plumage will be the first guinea pig for Tapir, when it is ready
+[20:56] <japhb> dukeleto, excellent.
+[20:56] <dukeleto> japhb: since Plumage does not need --archive, yet.
+[20:56] <japhb> I would have if you hadn't.  ;-)
+[20:57] <dukeleto> fperrad: --env seems like a neat feature
+[20:57] <fperrad> dukeleto, all features of prove are not mandatory, we need only feature that we currently use
+[20:58] <dukeleto> fperrad: yes, like --merge
+[20:59] <dukeleto> fperrad: tapir's TAP parser is very close to being done, then the aggregator needs improvement and then extra features (like --env) need to be added
+[21:00] <japhb> What is --env?  It's not documented in my local 'man prove'
+[21:00] <dukeleto> japhb: new feature
+[21:00] <purl> new feature is, like, X =~ s/A/B/ or http://www.cs.cmu.edu/~infobot/infobot_guide.html
+[21:00] <fperrad> dukeleto, a single pbc is easy, just write an PIR file that includes all other
+[21:00] <dukeleto> japhb: https://rt.cpan.org/Public/Bug/Display.html?id=50215
+[21:00] <dukeleto> fperrad: yes, i just need to fiddle with the build stage
+[21:01] <dukeleto> so Tapir will be invoked like: parrot t/harness.pbc t/*.t
+[21:01] <japhb> Ah, interesting
+[21:01] <dukeleto> currently it is parrot t/harness.pir t/*.t
+[21:03] <japhb> fperrad, I'm about to do a Plumage feature sprint.  Anything on the top of your requests?  (installability is WIP, blocked on pmichaud).
+[21:03] <japhb> I was thinking new/improved stages, so if you've got suggestions there let me know now.
+[21:05] <darbelo> japhb: How about an interactive mode? Activated via a switch on the command line.
+[21:05] <fperrad> japhb, always a stage 'update'
+[21:07] <darbelo> japhb: The "Oops. The project you are trying to install burst into flame while testing. Do you want me to keep going anyway?" mode.
+[21:07] <japhb> darbelo, added to TODO.  Different user interfaces have long been planned, blocked on getting refactors far enough that all model and controller bits were moved off to libraries.  I'm 80% there on those.
+[21:08] <darbelo> japhb: is the remaining 20% listed in TODO?
+[21:08] <japhb> darbelo, (re: keep going after testing fail) Already exists.  See option --ignore-fail in usage
+[21:09] <darbelo> japhb: I meant that as an example of the 'interactive' mode.
+[21:09] <japhb> darbelo, no, mostly because I haven't found all the places that need to be refactored away.  I'm judging 20% mostly as a matter of line count in the relevant areas.
+[21:10] <japhb> darbelo, ah, I see
+[21:10] <japhb> fperrad, right, I remember now.  You wanted an 'update' stage that falls back to 'fetch', right?  And there was another one, too, do you remember?
+[21:11] <Coke> (praise) kid51 also does.
+[21:12] <darbelo> japhb: 'patch'?
+[21:12] <japhb> I'm planning to add a reread_metadata_from key for all stages ... it specifies a file in the build tree to reread the metadata from before going to the next step.  (Or in the case of the install step, before placing in the "final metadata" archive, which feature is also WIP ATM.)
+[21:12] <japhb> darbelo, yes, sure.  I would swear there was another one, but I'm forgetting it now.
+[21:13] <japhb> clean!
+[21:13] <japhb> that's the one
+[21:14] <japhb> and someone had wanted a "show me the README" as well
+[21:15] <darbelo> That's... lazy.
+[21:15] <darbelo> plumage readthedocsforme
+[21:15] <japhb> darbelo, not run by default.  Just reachable.
+[21:16] <fperrad> japhb, we've spoken about :
+[21:16] <fperrad> - a stage 'clean'
+[21:16] <fperrad> - a command purge/remove project
+[21:16] <japhb> I'm almost thinking a "jump to build dir" is more generally useful
+[21:17] <japhb> DAMN UNIX PROCESS MODEL.
+[21:18] <japhb> I can either exec a shell there or display the directory.  Hmmm, latter is probably easier.  Because then people can say 'cd `plumage project-dir foo`' or 'PROJECT_DIR=$(plumage project-dir foo)' or whatever
+[21:21] <fperrad> japhb, before writing metadata requirements, have you study the spec file of RPM package ?
+[21:21] <fperrad> because now with distutils, I can produce source distribution (ie tarball), so the next step is binary distribution : RPM package, Debian package
+[21:23] <japhb> I have experience with both RPM and DEB, but no, I have not studied them in depth yet (more's the shame).  Mostly I'm just trying to keep their general requirements in mind while I work, as well as those of various HLL native installers, like CPAN for Perl 5.
+[21:23] <darbelo> plumage generate-deb projectname would be veeeeery cool to have.
+[21:23] <japhb> Any places I have painted myself into a corner I would REALLY like to know about.
+[21:28] <fperrad> darbelo, with distutils : $ parrot setup.pir bdist
+[21:28] <fperrad> or $ parrot setup.pir bdist_deb
+[21:31] <fperrad> japhb, another stage for Plumage is 'smoke'
+[21:31] <fperrad> currently, distutils know Smolder (see Lua for working example), but not TapTinder
+[21:33] <japhb> fperrad, great, thank you
+[21:33] <darbelo> fperrad: Sold. I'm migrating decnum-dynpmcs to distutils.
+[21:34] <darbelo> Are there any docs? Or do I just RTFS?
+[21:35] <dukeleto> darbelo: basically just copy over setup.pir and a few other files and you are done
+[21:36] <fperrad> darbelo, see runtime/parrot/library/distutils.pir, some doc, and many examples (links)
+[21:36] <darbelo> fperrad: excelent.
+[21:51] <dalek> tapir: 6836fad | fperrad++ | TODO:
+[21:51] <dalek> tapir: add my wishlist
+[21:51] <dalek> tapir: review: http://github.com/leto/tapir/commit/6836fad8173f12271297e0dd57fbb5222e1f1103
+[21:53] <cotto_work> looks like the manifest needs to be regenerated in cs_csr_merge
+[21:53] <cotto_work> (minor nit, but it causes a fulltest failure)
+[21:59] <fperrad> darbelo, currently distutils handles pmc files, but need some hacks for external C files.
+[21:59] <fperrad> I'll work on it, tomorrow
+[22:01] <darbelo> fperrad: Ah, ok. I was looking into that just now. I have to build a lib and link it to the pmc's .so
+[22:02] *** davidfetter joined
+[22:15] <pmichaud> it's interesting that we're moving to something distutils-like, as many of the python folks I talk to continually complain about the problems with distutils in python :)
+[22:15] <darbelo> pmichaud: We're doing it better ;)
+[22:20] <pmichaud> wfm :)
+[22:30] <davidfetter> darbelo, how is this distutils different from all other distutils?
+[22:31] *** payload joined
+[22:32] <darbelo> fperrad wrote this one, but not all others? ;)
+[22:32] <davidfetter> that'd be an important difference
+[22:32] <davidfetter> is there some kind of spec for it?
+[22:32] <lucian_> pmichaud: the concept of distutils isn't bad, that particular implementations is less than perfect
+[22:34] *** brrant joined
+[22:35] <darbelo> davidfetter: AFAIK, there's no spec, and we aren't aiming at 100% compatibility. It's a matter of leveraging parrot's platform knowledge to build stuff that runs on it.
+[22:36] <darbelo> From what I've seen so far it's a pretty sane interface. load_bytecode distutils, put your data in a Hash PMC and let it worry about platform differences for you.
+[22:37] <davidfetter> :)
+[22:38] <dukeleto> distutils.pir is pretty cool
+[22:42] <japhb> Now if we had hash literals in NQP ...  *cough*   ;-)
+[22:43] <pmichaud> "patches welcome!"  *cough*
+[22:43] <particle> cough syrup welcome, too!
+[22:43] <Tene> "I finished being sick two weeks ago, why am I still coughing?" *cough*
+[22:43] <PerlJam> japhb: What do you need hash literals for exactly?
+[22:44] <pmichaud> although it did occur to me that a hash() function might make building hashes a bit easier
+[22:44] <pmichaud> i.e., one could do
+[22:44] <Tene> PerlJam: initializing hashes, of course.
+[22:44] <pmichaud> my %h = hash( :key(value), :key(value),  :key( hash( :key(value), :key(value) ) ), :key(value) );
+[22:45] <pmichaud> not quite as nice as the '{' syntax, but certainly a lot easier to implement
+[22:45] <pmichaud> sub hash(*%h) { %h }
+[22:47] <particle> wouldn't that produce a Bag?
+[22:47] <japhb> bak
+[22:47] <pmichaud> in NQP? no.
+[22:47] <japhb> PerlJam, I do a lot of data-driven programming.  Right now I'm hacking it via JSON.  Which sucks.
+[22:47] <particle> ah, right, nqp. that oughtta work.
+[22:48] <Tene> sucks bad.
+[22:48] <japhb> PerlJam, and because distutils wants to be fed nested hashes.  :-)
+[22:48] <Tene> but clever.
+[22:48] <japhb> OK, I guess that goes in Util, then
+[22:50] <chromatic> I don't like the hash marking algorithm.
+[22:51] <pmichaud> fwiw, I don't like Hash.clone much, either.  :-|
+[22:51] <chromatic> Seems like it should be able to walk the bucket store, rather than following bucket->next.
+[23:01] <dalek> parrot-plumage: 1afb1f4 | japhb++ | :
+[23:01] <dalek> parrot-plumage: [DOCS] Add new docs/ tree, and first doc: adding a new command
+[23:01] <dalek> parrot-plumage: review: http://gitorious.org/parrot-plumage/parrot-plumage/commit/1afb1f4a23d9b75f1f238d5be27233281694ad23
+[23:01] <dalek> parrot-plumage: ea2c0b7 | japhb++ | :
+[23:01] <dalek> parrot-plumage: [META] TODO updates
+[23:01] <dalek> parrot-plumage: review: http://gitorious.org/parrot-plumage/parrot-plumage/commit/ea2c0b7ee3e5773ac427a9edcf579e6bc8e2f8a4
+[23:05] *** Whiteknight joined
+[23:08] *** Coke joined
+[23:08] * Coke has his second power outage in a week or so.
+[23:12] <dalek> parrot-plumage: d768b2d | japhb++ | :
+[23:12] <dalek> parrot-plumage: [LIB] Plumage::Project: Add accessor methods
+[23:12] <dalek> parrot-plumage: review: http://gitorious.org/parrot-plumage/parrot-plumage/commit/d768b2db0e35237e6af0b3cadcf4eef7494ccd8b
+[23:12] <dalek> parrot-plumage: 5ef5de2 | japhb++ | :
+[23:12] <dalek> parrot-plumage: [LIB] Add project-dir command
+[23:12] <dalek> parrot-plumage: review: http://gitorious.org/parrot-plumage/parrot-plumage/commit/5ef5de2ab7415ab37160883441b0ff931e97cb08
+[23:32] <japhb> documenting++  # Forcing junk to be cleaned up rather than having to admit it in the document
+[23:42] *** kid51 joined

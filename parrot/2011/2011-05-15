@@ -1,0 +1,659 @@
+[00:00] <cotto> dukeleto, don't forget about the first 8
+[00:00] <dukeleto> cotto: indeed. that code needs some tests
+[00:01] <dukeleto> cotto: those are *stored* in registers, but I guess I don't quite think of them as registers
+[00:01] <dukeleto> cotto: but that code still needs to grok them :)
+[00:02] <cotto> yes
+[00:15] <pmichaud> cotto: ping
+[00:16] *** lucian left
+[00:18] <dalek> parrot/m0-prototype: f8ae291 | dukeleto++ | src/m0/m0_assembler.pl:
+[00:18] <dalek> parrot/m0-prototype: Teach the M0 assembler about the special register symbols like INTERP, PC and friends
+[00:18] <dalek> parrot/m0-prototype: review: https://github.com/parrot/parrot/commit/f8ae291be5
+[00:18] <dalek> parrot/m0-prototype: 87237a3 | dukeleto++ | src/m0/m0_assembler.pl:
+[00:18] <dalek> parrot/m0-prototype: Add in EX, which was forgotten
+[00:18] <dalek> parrot/m0-prototype: review: https://github.com/parrot/parrot/commit/87237a3052
+[00:19] <dukeleto> cotto: we need to decide more about how the metadata and directory segments work. there are still a bunch of TODO's in the spec
+[00:22] <pmichaud> cotto: when you're available, I have a strong suggestion re: 't'
+[00:23] <pmichaud> (might actually be a bit of a performance win for Parrot overall, too)
+[00:24] <whiteknight> pmichaud: sure, what do you have in mind?
+[00:24] <pmichaud> how hard/undesirable would it be to have each STRING keep track of its own cstring value/memory allocation?
+[00:25] <pmichaud> I'm thinking it's an extra pointer, and maybe a flag.
+[00:25] <whiteknight> that seems like a lot to add for the few cases of 't' NCI signatures
+[00:25] <pmichaud> I think it's much bigger than that
+[00:25] <pmichaud> (more)
+[00:25] <whiteknight> What if there was a custom PMC decorator type that did STRING->cstring conversion?
+[00:26] <pmichaud> I think that's much more work for much less benefit
+[00:26] <pmichaud> let me explain a bit long
+[00:26] <whiteknight> okay
+[00:26] <pmichaud> right now, quite a few Parrot internal functions wrap STRING handling in Parrot_string_to_cstring() and Parrot_string_free_cstr() pairs to be able to pass things to C functions
+[00:27] <pmichaud> this was very necessary when STRING was mutable, because we couldn't just pass the STRING buffer (because it might change)
+[00:27] <pmichaud> but STRING is no longer mutable
+[00:27] <pmichaud> so, as a first step, we can have  Parrot_string_to_cstring() allocate a cstring buffer and store the value there
+[00:28] <pmichaud> and we never have to touch it again until the STRING disappears
+[00:28] <pmichaud> (when it can clean it up as part of its normal allocation)
+[00:28] <pmichaud> this is a huge win for many functions -- e.g.,   Parrot_io_*printf*  that expects and uses STRING as arguments
+[00:28] <pmichaud> but internall converts to cstring buffers and frees
+[00:28] <whiteknight> I have a number of concerns about that approach
+[00:29] <pmichaud> let me add two more items and then I'll hear your concerns, okay?
+[00:29] <whiteknight> if I pass a cstring to a library and the library caches it, then the STRING gets collected, the library is dealing with a freed pointer
+[00:29] <whiteknight> or any of other similar situations
+[00:29] <pmichaud> that's already a problem with the proposed workaround for 't'
+[00:30] <pmichaud> this neither improves nor worsens that situation
+[00:30] <cotto> and back
+[00:31] * cotto needed to go outside for a bit to clear his head after the pds
+[00:31] <pmichaud> beyond that, I'd propose that we have two forms of "get a cstring from STRING" - one where you know the cstring is treated as constant and won't be cached, and another where it's not constant and must be freed
+[00:31] <pmichaud> internall, Parrot can used the "constant" version
+[00:31] <whiteknight> I disaree, with the proposed workarounds, the lifetime of the C string is not tied to the lifetime of the STRING
+[00:31] <pmichaud> I think that's kind of a plus
+[00:32] <whiteknight> the function to free the cstring doesn't require a reference to the original STRING
+[00:32] <pmichaud> I'm not saying we eliminate the ability to get a standalone C string from a STRING
+[00:32] <whiteknight> pmichaud: the suggestion to have two mechanisms for getting a cstring from a STRING is a worthy one to consider
+[00:32] <pmichaud> I'm saying let's give STRINGs the ability to provide a cstring pointer without having to have a separate allocation for it
+[00:32] <pmichaud> and then 't' can use that
+[00:33] <pmichaud> actually, --amend
+[00:33] <whiteknight> what do you mean "without habing to have a separate allocation"? We can't reuse the existing buffer
+[00:33] <pmichaud> let's give STRINGs the abilty to provide a simple managed cstring buffer without the caller having to provide one
+[00:33] <pmichaud> s/provide one/provide the freeing step/
+[00:34] <pmichaud> if you call a C function that caches the pointer, you need to get your own cstring
+[00:34] <pmichaud> if you call a C function that expects to mutate the cstring, you need to get your own cstring
+[00:35] <pmichaud> otherwise, just ask a STRING for a cstring, it'll give you one and retain it for the life time of the string
+[00:35] <pmichaud> of the STRING
+[00:35] <pmichaud> this can be a huge help in the case of constant strings, I think -- such as strings that are frequently passed to things like printf and the like
+[00:35] <dalek> TT #2112 created by whiteknight++: Improved documentation about NCI
+[00:35] <dalek> TT #2112: http://trac.parrot.org/parrot/ticket/2112
+[00:36] <pmichaud> and many times, the STRING might be able to provide the managed cstring without actually having to point to a separate allocation -- i.e., it may be able to simply return str_start or whatever directly
+[00:36] <whiteknight> Okay, I get what you are saying. I'm not quite warmed up to the idea
+[00:36] <whiteknight> but I can be convinced
+[00:37] <pmichaud> again, I'm not saying it solves all cases, nor that it eliminates the need for having other cstring manipulations.  But for the common case of "I need to pass this string value to a C function", it would work (and provides Parrot with some good internal optimization possibilities through a clean API)
+[00:37] <whiteknight> I don't think we are going to get any changes of that magnitude in place before 3.4
+[00:37] <pmichaud> agreed, not likely before tuesday
+[00:37] <whiteknight> and at the moment, I'm very concerned with getting some kind of solution in place by 3.4
+[00:38] <whiteknight> even if it's a crap hack
+[00:38] <pmichaud> Rakudo might be willing to live with one (compiler, not star) release where zavolaj doesn't work.
+[00:39] <pmichaud> OTOH, I've been thinking that there might be a 2011.05 Star release since we're likely to have some significant performance improvements in place by then.
+[00:39] <pmichaud> in which case we'd need zavolaj to work.
+[00:39] <whiteknight> do you still have that link to the codefile with the broken 't' usage?
+[00:39] <whiteknight> I can go hunt for it otherwise
+[00:40] <pmichaud> I'm also not entirely opposed to a hacky solution just to get zavolaj to work for a release, but as a long term solution I think the "oh, just make extra calls to Parrot C functions" is a really poor and unsafe design
+[00:40] <pmichaud> sure, I can get it
+[00:40] <pmichaud> just a sec
+[00:40] <pmichaud> https://github.com/jnthn/zavolaj/blob/master/lib/NativeCall.pm6   # this one?
+[00:40] <whiteknight> no, I'm fully expecting a temporary hack solution for 3.4, but a better long-term one
+[00:41] <pmichaud> Line 63 is the one that results in problems, because zavolaj expects to be able to use a 't' to pass a (constant) string to the C library
+[00:41] <whiteknight> right
+[00:42] <whiteknight> I want to run some valgrind, see how much converting we are doing between STRING and cstring
+[00:42] <pmichaud> that's an excellent idea
+[00:42] <whiteknight> caching a cstring pointer in STRING very well might be a performance win
+[00:43] <whiteknight> of course, it will most certainly be a memory usage fail, so we need to weigh the trade-offs
+[00:43] <pmichaud> I'm not so sure it will
+[00:43] <pmichaud> assuming that the STRING already contains its own cstring equivalent, it doesn't have to allocate anything
+[00:43] <whiteknight> last time we cut a single pointer out of the PMC structure, it was a huge win for Parrot
+[00:43] <pmichaud> ah, that's possible, yes.
+[00:43] <whiteknight> and since STRINGs are immutable now, the churn for STRING headers is much higher
+[00:46] <pmichaud> as a potential test case, I might suggest valgrind on pbc_to_exe
+[00:46] <pmichaud> pbc_to_exe does a variety of I/O and string manipulation thingies
+[00:47] <pmichaud> of course, doing it on an nqp program (e.g. ops2c) is likely to also produce interesting results
+[00:47] <pmichaud> er, opsc, or whatever it is now.  :-)
+[00:48] <pmichaud> anyway, this was just a brainstorm; maybe something good will come of it.
+[00:48] <pmichaud> time for dinner here -- bbl, and thanks for listening
+[00:48] <cotto> I find it interesting where this discussion is going.
+[00:49] <cotto> dukeleto, pong
+[00:49] <cotto> dukeleto, what are your concerns about M0 metadata?
+[01:00] *** contingencyplan joined
+[01:18] *** ShaneC joined
+[01:23] *** autark_ left
+[01:27] *** jsut_ joined
+[01:32] *** jsut left
+[01:33] <cotto> dukeleto, lmk whenever you're back
+[01:37] *** autark joined
+[01:50] *** Coke left
+[01:51] *** Coke joined
+[01:58] *** Coke left
+[01:58] *** Coke joined
+[02:03] *** Coke left
+[02:03] *** Coke__ joined
+[02:05] *** contingencyplan left
+[02:14] *** kid51 joined
+[02:17] *** Coke__ left
+[02:17] *** Coke joined
+[02:21] <kid51> I just got a CPAN testers failure report for a CPAN distro I haven't touched in 7 years!
+[02:21] <kid51> Has anyone used MirBSD?
+[02:26] <cotto> s/used/heard of/ !~ 1
+[02:26] <cotto> Those BSD guys really like their forks.
+[02:27] <cotto> kid51, why?
+[02:27] <cotto> that's where your failure is?
+[02:28] <kid51> This module contains list of strings which are recognized by Perl as Unix-ish OSes.  I had never heard of 'mirbsd' when I wrote this module.
+[02:28] <cotto> wikipedia says it's a thing
+[02:28] <cotto> and they have a website
+[02:29] <kid51> Yes, I went to their website.  Fork of OpenBSD.
+[02:29] * cotto is at 43% battery life and 4 hours remaining. <3
+[02:30] <kid51> My feeling: Too many forks reduce a project's mindshare.
+[02:31] <cotto> I'm glad they exercise their freedom to fork,  but yeah.
+[02:32] <whiteknight> that implies that the *BSD folks had any mindshare to reduce </unnecessary snark>
+[02:32] *** ShaneC left
+[02:33] <whiteknight> no, I jest in good fun. My only complaint with *BSD is that I can't run any of them as VMs
+[02:38] <kid51> Does anyone remember enough Subversion to answer:  If I'm in a checkout directory, how do I locate the path to its repository?
+[02:38] <cotto> svn info
+[02:39] <cotto> I think that's what you're asking.
+[02:39] <kid51> Yes.
+[02:39] <kid51> thx
+[02:45] <cotto> kid51, do you know where I'd get what I'd need to get a ppc darwin VM going
+[02:46] <dalek> Rosella/memoize_cleanup: 3389a90 | Whiteknight++ | VERSION:
+[02:46] <dalek> Rosella/memoize_cleanup: Path is beta. functionality is there. I need to start adding more tests and documentat
+[02:46] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/3389a9015d
+[02:46] <dalek> Rosella/memoize_cleanup: 4d005de | Whiteknight++ | src/path/Path.winxed:
+[02:46] <dalek> Rosella/memoize_cleanup: docs for path
+[02:46] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/4d005de2f8
+[02:46] <dalek> Rosella/memoize_cleanup: e5aaff1 | Whiteknight++ | src/ (2 files):
+[02:46] <dalek> Rosella/memoize_cleanup: Add a function to Rosella.Memoize to automatically create a proxy-based memoizer. Add two prototype functions for installing a memoizer into a class in place of an existing method (untested)
+[02:46] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/e5aaff1e47
+[02:46] <dalek> Rosella/memoize_cleanup: 07171f3 | Whiteknight++ | src/memoize/Memoize.winxed:
+[02:46] <dalek> Rosella/memoize_cleanup: add functions to allow get/set on the proxy target function and cache
+[02:46] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/07171f3757
+[02:46] <dalek> Rosella/memoize_cleanup: 1690e7c | Whiteknight++ | src/memoize/Memoize.winxed:
+[02:46] <dalek> Rosella/memoize_cleanup: +docs
+[02:46] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/1690e7c54b
+[02:46] <dalek> Rosella/memoize_cleanup: 559ce64 | Whiteknight++ | src/memoize/ (5 files):
+[02:46] <dalek> Rosella/memoize_cleanup: +docs throughout the memoize library
+[02:46] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/559ce64c2c
+[02:46] <dalek> Rosella/memoize_cleanup: 720a52c | Whiteknight++ | src/memoize/cache/ (2 files):
+[02:46] <dalek> Rosella/memoize_cleanup: update some stragglers to use new constructors
+[02:46] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/720a52cdd0
+[02:46] <dalek> Rosella/memoize_cleanup: 8cf5375 | Whiteknight++ | src/memoize/Memoize.winxed:
+[02:46] <dalek> Rosella/memoize_cleanup: fix small typo so we build
+[02:46] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/8cf5375407
+[02:46] <dalek> Rosella/memoize_cleanup: 077ec4f | Whiteknight++ | t/memoize/ (4 files):
+[02:46] <dalek> Rosella/memoize_cleanup: Add in a lot of stub tests that we are going to want to fill in before this library becomes stable
+[02:46] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/077ec4f548
+[02:46] <dalek> Rosella/memoize_cleanup: 18aeae4 | Whiteknight++ | / (5 files):
+[02:46] <dalek> Rosella/memoize_cleanup: fix a bug in creating a string cache. Add memoize tests to the harness (and make the two we have pass)
+[02:46] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/18aeae49e4
+[02:46] <dalek> Rosella/memoize_cleanup: 3c5c214 | Whiteknight++ | / (3 files):
+[02:46] <dalek> Rosella/memoize_cleanup: Add a test for memoize_proxy, and fix a bug found by that test
+[02:46] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/3c5c214197
+[02:46] <dalek> Rosella/memoize_cleanup: c95ed6f | Whiteknight++ | t/memoize/Memoize.t:
+[02:47] <dalek> Rosella/memoize_cleanup: implement a few important tests
+[02:47] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/c95ed6f22b
+[02:47] <whiteknight> I wish the threshold for dalek to not flood the channel was much lower
+[02:51] <dalek> Rosella: 3389a90 | Whiteknight++ | VERSION:
+[02:51] <dalek> Rosella: Path is beta. functionality is there. I need to start adding more tests and documentat
+[02:51] <dalek> Rosella: review: https://github.com/Whiteknight/Rosella/commit/3389a9015d
+[02:51] <dalek> Rosella: 4d005de | Whiteknight++ | src/path/Path.winxed:
+[02:51] <dalek> Rosella: docs for path
+[02:51] <dalek> Rosella: review: https://github.com/Whiteknight/Rosella/commit/4d005de2f8
+[02:52] <dalek> Rosella: c5139b2 | Whiteknight++ | src/string/Tokenizer.winxed:
+[02:52] <dalek> Rosella: add in a file I missed
+[02:52] <dalek> Rosella: review: https://github.com/Whiteknight/Rosella/commit/c5139b2893
+[02:59] <dalek> Rosella/gh-pages: e396f17 | Whiteknight++ | libraries/memoize.md:
+[02:59] <dalek> Rosella/gh-pages: add a stub doc file for memoize
+[02:59] <dalek> Rosella/gh-pages: review: https://github.com/Whiteknight/Rosella/commit/e396f17c7b
+[02:59] <kid51> cotto: no, I don't.  I know little about that kind of VM.
+[03:00] <kid51> ... and less about this kind :-)
+[03:00] <cotto> shame.  lots of dead links that way
+[03:01] <kid51> Just did my first CPAN upload of that module in 6-1/2 years!
+[03:01] <kid51> And first time I've used Subversion in about a year and a half.
+[03:03] <cotto> delightful
+[03:06] *** soh_cah_toa left
+[03:13] *** whiteknight left
+[03:26] <cotto> I'm shocked at how easy the debian ppc qemu image I found is to play with.
+[03:31] <cotto> I was expecting to have to fiddle with networking, but it just worked.
+[03:32] <cotto> Let's see how this thing flies.
+[03:33] *** Andy joined
+[03:35] <cotto> "slowly"
+[03:46] *** bubaflub left
+[03:49] *** kid51 left
+[03:53] *** particle1 joined
+[03:57] *** particle left
+[04:05] *** bubaflub joined
+[04:17] <cotto> Emulating a ppc machine with qemu is great.  I can get a 60 second build on my main machine and a 90 minute build in the emulator.
+[04:45] <cotto> dukeleto, ping
+[04:45] <dalek> parrot: 05b9835 | petdance++ | frontend/pbc_merge/main.c:
+[04:45] <dalek> parrot: Remove unused ct argument
+[04:45] <dalek> parrot: review: https://github.com/parrot/parrot/commit/05b9835163
+[04:45] <dalek> parrot/shims: 63df102 | bacek++ | src/gc/gc_gms.c:
+[04:45] <dalek> parrot/shims: Get back some performance of is_(pmc|string)_ptr. This invariant should always hold
+[04:45] <dalek> parrot/shims: review: https://github.com/parrot/parrot/commit/63df102c5e
+[04:46] <dalek> parrot/shims: 2a4dbe2 | petdance++ | / (18 files):
+[04:46] <dalek> parrot/shims: Merge branch 'master' of github.com:parrot/parrot into shims
+[04:46] <dalek> parrot/shims: review: https://github.com/parrot/parrot/commit/2a4dbe2b02
+[04:46] <Andy> ARGH
+[04:47] *** redicaps joined
+[05:14] *** bubaflub left
+[05:23] *** Andy left
+[05:33] *** redicaps left
+[05:44] <dalek> parrot: 0f7d5c8 | petdance++ | src/debug.c:
+[05:44] <dalek> parrot: consting args and localizing vars
+[05:44] <dalek> parrot: review: https://github.com/parrot/parrot/commit/0f7d5c8403
+[05:47] <dalek> parrot: b86721f | cotto++ | tools/build/gen_version.pl:
+[05:47] <dalek> parrot: caching was deleted; no need to override it
+[05:47] <dalek> parrot: review: https://github.com/parrot/parrot/commit/b86721f5ee
+[05:49] *** fperrad joined
+[05:50] <dalek> parrot/shims: 05b9835 | petdance++ | frontend/pbc_merge/main.c:
+[05:50] <dalek> parrot/shims: Remove unused ct argument
+[05:50] <dalek> parrot/shims: review: https://github.com/parrot/parrot/commit/05b9835163
+[05:50] <dalek> parrot/shims: 0f7d5c8 | petdance++ | src/debug.c:
+[05:50] <dalek> parrot/shims: consting args and localizing vars
+[05:50] <dalek> parrot/shims: review: https://github.com/parrot/parrot/commit/0f7d5c8403
+[05:50] <dalek> parrot/shims: f3babdb | petdance++ | / (59 files):
+[05:50] <dalek> parrot/shims: We no longer put SHIMs in the function declarations
+[05:50] <dalek> parrot/shims: review: https://github.com/parrot/parrot/commit/f3babdbaec
+[05:50] <dalek> parrot/shims: 1e3a4b4 | petdance++ | / (4 files):
+[05:50] <dalek> parrot/shims: fix shim arguments
+[05:50] <dalek> parrot/shims: review: https://github.com/parrot/parrot/commit/1e3a4b4696
+[05:50] <dalek> parrot/shims: cfd694d | petdance++ | / (5 files):
+[05:50] <dalek> parrot/shims: fixing function annotations
+[05:50] <dalek> parrot/shims: review: https://github.com/parrot/parrot/commit/cfd694d805
+[05:50] <dalek> parrot/shims: 76a525f | petdance++ | /:
+[05:50] <dalek> parrot/shims: Merge branch 'shims' of github.com:parrot/parrot into shims
+[05:50] <dalek> parrot/shims: review: https://github.com/parrot/parrot/commit/76a525fcab
+[05:54] <cotto> alester, what's that branch?
+[05:56] *** redicaps joined
+[05:56] *** utsl left
+[05:56] *** utsl joined
+[06:09] *** moderator changes topic to: Parrot 3.3.0 released | http://parrot.org | Log: http://irclog.perlgeek.de/parrot/today
+[06:14] *** redicaps left
+[06:29] *** redicaps joined
+[06:52] *** fperrad_ joined
+[06:54] *** fperrad left
+[06:54] *** fperrad_ is now known as fperrad
+[07:09] *** jsut joined
+[07:10] *** baest_ joined
+[07:11] *** dodathome joined
+[07:11] *** baest_ left
+[07:14] *** jsut_ left
+[07:14] *** baest left
+[07:45] *** fperrad_ joined
+[07:47] *** fperrad left
+[07:47] *** fperrad_ is now known as fperrad
+[07:48] *** particle1 left
+[07:49] *** rurban_ joined
+[07:49] *** particle joined
+[07:51] *** rurban left
+[07:51] *** rurban_ is now known as rurban
+[07:52] *** redicaps left
+[07:58] *** redicaps joined
+[08:14] *** redicaps left
+[08:21] *** redicaps joined
+[08:28] *** mj41 joined
+[08:53] *** ShaneC joined
+[08:54] *** ShaneC left
+[08:57] *** redicaps left
+[09:00] *** M_o_C joined
+[09:04] *** redicaps joined
+[09:33] *** mj41 left
+[09:34] <dalek> parrot: b09b1b2 | fperrad++ | MANIFEST.generated:
+[09:34] <dalek> parrot: MANIFEST.generated:444: Duplicate entry tools/dev/ncidef2pir.pl
+[09:34] <dalek> parrot: review: https://github.com/parrot/parrot/commit/b09b1b2c76
+[10:12] *** jsut_ joined
+[10:17] *** contingencyplan joined
+[10:17] *** jsut left
+[10:48] *** redicaps left
+[10:56] <bacek> ~~
+[10:56] <bacek> seen pmichaud
+[10:56] <aloha> pmichaud was last seen in #parrot 10 hours 7 mins ago saying "time for dinner here -- bbl, and thanks for listening".
+[10:56] <bacek> msg pmichaud How hard is to add different parrot's branch to rakbench?
+[10:56] <aloha> OK. I'll deliver the message.
+[11:02] *** Psyche^ joined
+[11:07] *** Patterner left
+[11:07] *** Psyche^ is now known as Patterner
+[11:15] *** woosley joined
+[11:16] *** woosley left
+[11:22] <dalek> parrot: e9222e7 | bacek++ | src/gc/gc_gms.c:
+[11:22] <dalek> parrot: Remove unused functions
+[11:22] <dalek> parrot: review: https://github.com/parrot/parrot/commit/e9222e7242
+[11:36] *** whiteknight joined
+[11:40] <whiteknight> good morning, #parrot
+[11:42] *** mj41 joined
+[11:43] <tadzik> good morning whiteknight
+[11:43] <mikehh> hi whiteknight
+[11:44] <whiteknight> hello tadzik, mikehh. How are you two doing today?
+[11:45] <mikehh> whiteknight: pretty good, lost .parrot.git.describe though, which I used in my testin reports :-{
+[11:48] <tadzik> and I'm good :) Done some GSoC work yesterday, glad about it
+[11:50] <whiteknight> mikehh: oh, that stinks.
+[11:52] <bacek> mikehh, just use "git describe --tags" :)
+[11:54] <mikehh> bacek: thanks - that works :-}
+[12:02] *** woosley joined
+[12:13] *** M_o_C left
+[12:15] <mikehh> git status gives  Untracked files:  runtime/parrot/include/parrot_version.pir
+[12:16] <mikehh> and it is not removed by make realclean
+[12:26] *** ambs joined
+[12:37] *** contingencyplan left
+[13:04] <dalek> cardinal: 4ea63c3 | (Daehyub Kim)++ | / (3 files):
+[13:04] <dalek> cardinal: Integer#chr
+[13:04] <dalek> cardinal: review: https://github.com/parrot/cardinal/commit/4ea63c3958
+[13:04] <dalek> cardinal: a6751a2 | (Daehyub Kim)++ | / (3 files):
+[13:04] <dalek> cardinal: Integer#ord
+[13:04] <dalek> cardinal: review: https://github.com/parrot/cardinal/commit/a6751a2ee4
+[13:04] <dalek> cardinal: c4f6029 | (Daehyub Kim)++ | / (11 files):
+[13:04] <dalek> cardinal: modify src/parser/actions.pm to return CardinalFloat instead Float:
+[13:04] <dalek> cardinal:   to keep ruby class inheritances
+[13:04] <dalek> cardinal: add new classes:
+[13:04] <dalek> cardinal:   CardinalNumeric
+[13:04] <dalek> cardinal:   CardinalFloat
+[13:04] <dalek> cardinal: add new methods:
+[13:04] <dalek> cardinal:   Integer#chr
+[13:04] <dalek> cardinal:   Integer#even
+[13:04] <dalek> cardinal:   Integer#odd
+[13:04] <dalek> cardinal:   Float#to_f
+[13:04] <dalek> cardinal:   Float#zero
+[13:04] <dalek> cardinal: fixme:
+[13:04] <dalek> cardinal:   Cardinal#round
+[13:04] <dalek> cardinal:     round does not return C<self>
+[13:04] <dalek> cardinal:     see ruby-1.9.2-p180/numeric.c:3188
+[13:04] <dalek> cardinal:     also src/classes/Integer.pir:326
+[13:04] <dalek> cardinal: review: https://github.com/parrot/cardinal/commit/c4f6029eda
+[13:04] <dalek> cardinal: d7a30e6 | (Daehyub Kim)++ | src/classes/Integer.pir:
+[13:04] <dalek> cardinal: recover misfixed stuff
+[13:04] <dalek> cardinal:   Integer#ord
+[13:04] <dalek> cardinal: review: https://github.com/parrot/cardinal/commit/d7a30e6f8a
+[13:04] <dalek> cardinal: 5ae2128 | (Daehyub Kim)++ | setup.pir:
+[13:04] <dalek> cardinal: add CardinalNumeric to build
+[13:04] <dalek> cardinal: review: https://github.com/parrot/cardinal/commit/5ae2128635
+[13:04] <dalek> cardinal: 6dc91ec | tadzik++ | / (13 files):
+[13:04] <dalek> cardinal: Merge pull request #7 from lateau/lib191
+[13:04] <dalek> cardinal:
+[13:04] <dalek> cardinal: Lib191
+[13:04] <dalek> cardinal: review: https://github.com/parrot/cardinal/commit/6dc91ecc57
+[13:07] <whiteknight> ...nice
+[13:08] *** jsut joined
+[13:13] *** jsut_ left
+[13:13] *** mj41 left
+[13:16] <pmichaud> whiteknight: ping
+[13:16] <whiteknight> pmichaud: pong
+[13:17] <pmichaud> I have an idea re: 't' hack for Tuesday
+[13:17] <whiteknight> okay
+[13:18] <pmichaud> clone the STRING being passed as an argument, pass that STRING's str_start as the char* pointer to the called library function, let normal GC take care of reclaiming the (cloned) STRING and its buffer
+[13:20] <whiteknight> we can't just clone. STRING buffers aren't null-terminated
+[13:20] <whiteknight> so we would need to concat str + "\\0"
+[13:20] <whiteknight> ad pass that result to the lib
+[13:20] <pmichaud> okay, then clone t..... right
+[13:21] <whiteknight> We have to figure out where to implement that logic. I'm not entirely familiar with the new NCI architecture yet
+[13:21] <pmichaud> me either
+[13:21] <pmichaud> isn't the C function still wrapped by some sort of thunk?
+[13:21] <pmichaud> if so, that's the place to do it
+[13:22] <pmichaud> anyway, pass that along to whoever ends up working on the issue
+[13:23] <pmichaud> bacek: it's not hard at all
+[13:23] <pmichaud> bacek: (to set up multiple branches of rakudo and/or parrot for rakbench to test)
+[13:26] *** kid51 joined
+[13:49] *** benabik left
+[13:52] *** bluescreen left
+[13:53] <dalek> Rosella/memoize_cleanup: 223c7c2 | Whiteknight++ | / (2 files):
+[13:53] <dalek> Rosella/memoize_cleanup: Fix memoize_method and unmemoize_method, and test simple use of both
+[13:53] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/223c7c2c38
+[13:53] <dalek> Rosella/memoize_cleanup: de263f3 | Whiteknight++ | t/memoize/Memoize.t:
+[13:53] <dalek> Rosella/memoize_cleanup: fill out all tests I had for memoize.t, but add two new stubs that I will fill in later once I add functionality to the libary
+[13:53] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/de263f3c13
+[13:54] <dalek> Rosella/memoize_cleanup: 0afc191 | Whiteknight++ | / (2 files):
+[13:54] <dalek> Rosella/memoize_cleanup: +tests for Memoize.Cache.SimpleString
+[13:54] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/0afc1910f7
+[13:54] <dalek> Rosella/memoize_cleanup: 1916dce | Whiteknight++ | t/memoize/cache/Item.t:
+[13:54] <dalek> Rosella/memoize_cleanup: +tests for Memoize.Cache.Item
+[13:54] <dalek> Rosella/memoize_cleanup: review: https://github.com/Whiteknight/Rosella/commit/1916dcea9d
+[13:54] *** benabik joined
+[14:23] <dalek> parrot: df3de71 | cotto++ | / (2 files):
+[14:23] <dalek> parrot: install parrot_version.pir, add to .gitignore
+[14:23] <dalek> parrot: review: https://github.com/parrot/parrot/commit/df3de714ff
+[14:28] <cotto> fperrad++ for noticing that I forgot those
+[14:35] <dalek> parrot: c279c36 | cotto++ | config/gen/makefiles/root.in:
+[14:35] <dalek> parrot: also remove parrot_version.pir during make clean; mikehh++ for noticing
+[14:35] <dalek> parrot: review: https://github.com/parrot/parrot/commit/c279c36425
+[14:37] <dalek> TT #2106 closed by cotto++: git_describe configuration value not correct
+[14:37] <dalek> TT #2106: http://trac.parrot.org/parrot/ticket/2106
+[14:37] * cotto goes back to sleep
+[14:43] *** jsut_ joined
+[14:48] *** jsut left
+[14:52] <dalek> TT #2104 closed by jkeenan++: recent parrot changes broke rakudo
+[14:52] <dalek> TT #2104: http://trac.parrot.org/parrot/ticket/2104
+[15:08] *** whiteknight left
+[15:08] <pmichaud> should I go ahead an post my PDS pre-meeting notes to parrot-dev?  I didn't get a chance to do that before the meeting yesterday
+[15:08] <pmichaud> *and
+[15:10] <pmichaud> I'll ask via email.
+[15:11] <kid51> I just posted a summary to parrot-dev ...
+[15:12] <kid51> ... however, the list is still having the same problems we observed yesterday ...
+[15:12] <kid51> ... i.e., it's receiving and archiving messages, but not mailing them.
+[15:12] <pmichaud> well, the gist I used yesterday isn't likely to be a permanent place for what I wrote, so I'm wondering if it's good to have it in the email archive also.
+[15:13] <kid51> Then please post it to parrot-dev
+[15:13] <pmichaud> will do.  you can ignore the email I just sent :)
+[15:13] <pmichaud> (asking the same question :-)
+[15:15] <pmichaud> (re: mailing list)  in the past when I've had difficulty with Mailman archiving but not delivering messages, I've tended to resolve it by either (1) stop mailman, remove all of the locks in mailman/locks, restart mailman, or (2) restart mail server
+[15:15] <pmichaud> if some people are receiving the emails but not others, that indicates a mailserver issue
+[15:15] <pmichaud> if nobody is receiving the emails, it's a mailman issue
+[15:36] *** bubaflub joined
+[15:39] <tadzik> is there a Cardinal hackathon somewhere I don't know about>?
+[15:42] <dalek> cardinal: cfabfeb | (Hongwe Qiu)++ | src/classes/ (3 files):
+[15:42] <dalek> cardinal: Initializes Range!from_exclusive and Range!to_exclusive as FalseClass instead of CardinalInteger.
+[15:42] <dalek> cardinal: And a few bugs in Array.pir are fixed.
+[15:42] <dalek> cardinal:
+[15:42] <dalek> cardinal: So now, that the failed tests of t/array/assign.t, t/array/values_at.t, t/continuation.t and t/range/infix-exclusive.t
+[15:42] <dalek> cardinal: all pass.
+[15:42] <dalek> cardinal: review: https://github.com/parrot/cardinal/commit/cfabfeb939
+[15:42] <dalek> cardinal: 371cd44 | tadzik++ | src/classes/ (3 files):
+[15:42] <dalek> cardinal: Merge pull request #8 from qiuhw/master
+[15:42] <dalek> cardinal:
+[15:42] <dalek> cardinal: This commit was meant to get all of the tests under t/array pass
+[15:42] <dalek> cardinal: review: https://github.com/parrot/cardinal/commit/371cd4462a
+[15:43] <bubaflub> tadzik: haha. just commented on that.
+[15:43] <tadzik> bubaflub: yeah, I saw that :)
+[15:43] <tadzik> looks like we're missing some fun today, everyone's fixing cardinal
+[15:45] <bubaflub> tadzik: i'll be back in 2 hours or so if ya wanna continue the hacking in #cardinal
+[15:45] *** woosley left
+[15:46] <bubaflub> also, it looks like make with -j is broken, possibly on parrot_version.pir
+[15:47] <tadzik> dunno, I always use setup.pir
+[15:47] <bubaflub> tadzik: sorry, not cardinal but parrot itself
+[15:47] <tadzik> but I feel like migrating that to setup.nqp or setup.winxed for greater justice
+[15:47] <bubaflub> parrot HEAD with make -j makes parrot with multiple jobs
+[15:48] <bubaflub> i think a dependency is missing somewhere
+[15:48] <bubaflub> it's not a big deal though
+[15:48] <tadzik> oh, I see
+[15:49] *** rurban_ joined
+[15:50] <bubaflub> afk
+[15:50] <tadzik> never did that though
+[15:51] *** rurban left
+[15:51] *** rurban_ is now known as rurban
+[16:09] *** davidfetter left
+[16:33] *** lucian joined
+[16:34] *** theory joined
+[16:48] *** davidfetter joined
+[16:52] *** SHODAN joined
+[17:02] <kid51> darwin/PPC: master: commit c279c364257: make test PASS
+[17:21] *** zby_home joined
+[17:59] <dukeleto> ~~
+[18:08] <dukeleto> it is nice to see patches flowing in the direction of cardinal
+[18:10] *** jsut joined
+[18:12] <tadzik> aye
+[18:15] *** jsut_ left
+[18:39] *** sjn joined
+[18:43] <cotto> ~~
+[18:44] <cotto> Is parrot-dev back?
+[18:45] <kid51> I have no reason to think so.
+[18:45] <kid51> When we experience problems like this on the weekend, we generally don't get a fix until Monday.
+[18:46] <cotto> I got a message from parrot-tickets.
+[18:46] <kid51> OTOH, parrot-tickets appears to be working -- but that's not fed by humans
+[18:46] <dalek> TT #64 closed by cotto++: Parrot needs a source of entropy
+[18:46] <dalek> TT #64: http://trac.parrot.org/parrot/ticket/64
+[18:47] * cotto hopes that was the last of our two-digit tickets
+[18:48] <cotto> not even close
+[19:03] *** mj41 joined
+[19:05] <dalek> parrot: dec8a43 | mikehh++ | MANIFEST.SKIP:
+[19:05] <dalek> parrot: re-generate MANIFEST.SKIP
+[19:05] <dalek> parrot: review: https://github.com/parrot/parrot/commit/dec8a43035
+[19:14] <dukeleto> anybody in here can ask people in #osuosl on freenode to help us (i.e. with parrot-dev). I won't always have time to do it.
+[19:14] <dukeleto> send an email to support@osuosl.org and it will automatically create a ticket
+[19:15] <cotto> Has nobody already done that?
+[19:15] <dukeleto> that should be in our docs somewhere
+[19:15] <dukeleto> cotto: not in reference to parrot-dev. go for it :)
+[19:15] <dukeleto> cotto: also, ask when they do to fix it, so we can do it next time
+[19:16] <mikehh> cotto: make: *** No rule to make target `runtime/parrot/include/parrot_version.pir', needed by `runtime/parrot/include/parrotlib.pbc'. Stop.
+[19:17] <cotto> mikehh, I can't win.
+[19:17] <mikehh> cotto: you can but try :-}
+[19:17] <dukeleto> cotto: did you do a "make realclean; make" on your branches before merging them? That will catch stuff like that.
+[19:18] <dukeleto> sometimes, anyway
+[19:19] <KaeseEs> the name 'realclean' gives me shivers from memories of mysql (unfounded, i know)
+[19:20] <mikehh> I usually run manifest_tests and codetest after config, before corevm/coretest
+[19:20] <cotto> fixing now
+[19:21] <mikehh> we probably need a target for codetest without perlcritic (unless perl type files changed)
+[19:22] <dalek> parrot: 7eaaf85 | cotto++ | config/gen/makefiles/root.in:
+[19:22] <dalek> parrot: add dependency for parrot_version.pir, mikehh++ for noticing
+[19:22] <dalek> parrot: review: https://github.com/parrot/parrot/commit/7eaaf85ef3
+[19:49] <bubaflub> just got my parrot-dev mail
+[19:49] <mikehh> just got a bunch of mail from parrot
+[19:50] <mikehh> how;s that for snap :-}
+[19:50] * moritz too
+[19:50] <cotto> Cool.  I didn't even do anything.
+[19:52] <kid51> mikehh: make nocritic_codetest
+[19:52] *** kid51 left
+[19:54] <cotto> nice to have those back
+[20:04] *** SHODAN left
+[20:24] <dalek> parrot: de47670 | mikehh++ | config/gen/makefiles/root.in:
+[20:24] <dalek> parrot: remove trailing space and line up a bit
+[20:24] <dalek> parrot: review: https://github.com/parrot/parrot/commit/de47670acb
+[20:24] <dalek> parrot: 2c653b7 | mikehh++ | MANIFEST.generated:
+[20:24] <dalek> parrot: fix MANIFEST.generated
+[20:24] <dalek> parrot: review: https://github.com/parrot/parrot/commit/2c653b7f57
+[20:26] *** dodathome left
+[20:27] *** perlite_ joined
+[20:31] *** perlite left
+[20:31] *** perlite_ is now known as perlite
+[20:32] <ttbot> Parrot 7eaaf85e MSWin32-x86-multi-thread make error http://tt.taptinder.org/cmdinfo/7350
+[20:39] <ttbot> Parrot 2c653b7f MSWin32-x86-multi-thread make error http://tt.taptinder.org/cmdinfo/7373
+[20:45] <mikehh> ./parrot_nci_thunk_gen has 3 Ignored signature messages in make world (has for a week or so now)
+[20:46] <mikehh> did not on May 5th, did on May 8th
+[20:51] *** contingencyplan joined
+[20:52] <cotto> allison, ping
+[20:53] *** zby_home left
+[20:55] <mikehh> and cotto, taptinder don't seem to like that change
+[20:56] <mikehh> at least on MSWin32-x68
+[20:56] <mikehh> 86
+[20:57] *** ambs left
+[21:00] <mikehh> All tests PASS (pre/post-config, make corevm/make coretest, make world/make test, fulltest) at 3_3_0-268-g2c653b7
+[21:00] <mikehh> Ubuntu 11.04 i386 (g++ --optimize)
+[21:04] <cotto> http://reparrot.blogspot.com/2011/05/thoughts-on-pds.html
+[21:05] <cotto> mikehh, how odd
+[21:08] <plobsing> ~~
+[21:09] <mikehh> plobsing: hi
+[21:10] <plobsing> I've been thinking about the NCI 't' issue. Would it be a reasonable resolution if Parrot were to provide a wrapper functionality in the NCI::Utils library?
+[21:11] <mikehh> plobsing: ./parrot_nci_thunk_gen has 3 Ignored signature messages in make world (has for a week or so now) - any idea what it means?
+[21:12] <plobsing> mikehh: do you have a build log that shows that?
+[21:12] <plobsing> I can rebuild and see if I see it
+[21:13] <cotto> just a sec
+[21:13] <nopaste> "cotto" at 192.168.1.3 pasted ""ignored signature" message from thunk builder" (13 lines) at http://nopaste.snit.ch/45839
+[21:14] <mikehh> yup - I got the same
+[21:14] <plobsing> those are warnings about duplicate signatures
+[21:16] <plobsing> the opengl thunk signature generator is outputing dups. I suspect the template contains some hardcoded signatures which are also auto-generated from the headers.
+[21:16] <plobsing> it is mostly harmless
+[21:17] <plobsing> it would be nice if those signatures were pretty printed.
+[21:19] <plobsing> [28, 29, 4, 7, 7] is void (ptr, PMC, int, int)
+[21:19] <plobsing> [28, 5] is void (char)
+[21:27] *** lucian left
+[21:29] <mikehh> winxed (r1001) builds on parrot 3_3_0-268-g2c653b7, make test/test1/test2 PASS - examples/opengl.winxed ok, examples/fly.winxed - empty display - Ubuntu 11.04 i386 (g++ --optimize)
+[21:30] <plobsing> fly.winxed doesn't work? It worked for NotFound++ and myself last week.
+[21:30] <NotFound> ~~
+[21:31] <NotFound> It worked all times I checked after last fix
+[21:32] <NotFound> The opengl fix, I mean.
+[21:33] <mikehh> probably missed loading some dependency - I re-installed 11.04 i386 a couple of days ago
+[21:33] <mikehh> but opengl.winxed works for me
+[21:34] <NotFound> Updating and checking...
+[21:35] <mikehh> I probably need to check the ATI drivers, I only have the open source ones installed, not the propriety ones
+[21:36] <NotFound> You're right, something fails.
+[21:40] <NotFound> Looks like a parrot fault, it fails with several releases of winxed.
+[21:46] <NotFound> glutCreateWindow does not set the window title
+[21:47] <plobsing> is it being called with the correct signature?
+[21:48] <NotFound> plobsing: define "correct"
+[21:49] <plobsing> however your systems headers define it
+[21:50] *** lucian joined
+[21:51] <plobsing> but not setting the window title is much different from "empty display"
+[21:51] <NotFound> plobsing: that also depends on how you define empty. Only blue sky.
+[21:52] <NotFound> examples/glcube.winxed also fails. It shows squares sometines, back most of the time.
+[21:53] <NotFound> glcubes
+[21:54] <NotFound> The title issue happens with all winxed opengl examples
+[21:54] <plobsing> yeah. that's a string translation problem I missed.
+[21:55] <plobsing> I'm working to fix that now
+[21:56] <plobsing> but the other failures are more troubling
+[21:57] <NotFound> opengl.winxed uses plain functions. fly uses closures and glcubes objects that override vtable invoke.
+[21:58] <NotFound> For the opengl callbacks, I mean.
+[21:58] *** mj41 left
+[21:58] <NotFound> opengl.winxed is the only that displays the objects expected.
+[22:00] <plobsing> but these are multiple failures. I'm interested in isolating single failures.
+[22:00] <plobsing> what is going wrong with fly.winxed to make it so that the display is blank/blue?
+[22:01] <NotFound> Don't know, callbacks are called.
+[22:02] <plobsing> yeah. fly.winxed is blue for me too.
+[22:03] <plobsing> bisecting...
+[22:08] <NotFound> The reshape callback receives correct values.
+[22:10] *** ShaneC joined
+[22:10] <plobsing> wtf. this was working.
+[22:10] <plobsing> need to reboot... nvidia driver update
+[22:10] *** plobsing left
+[22:12] *** plobsing joined
+[22:14] <mikehh> rakudo (be887ad) - builds on parrot (3_3_0-268-g2c653b7) - make test, make stresstest [roast (ef5b438)] PASS
+[22:14] <mikehh> Ubuntu 11.04 i386 (g++ --optimize)
+[22:18] <mikehh> opbots, names
+[22:18] <cotto> dukeleto, you around?
+[22:25] *** ShaneC left
+[22:34] <pmichaud> draft proposal for Rakudo/Parrot relationship managers:  http://pmichaud.com/sandbox/relman-draft.txt
+[22:34] <pmichaud> comments and suggestions welcomed
+[22:35] <pmichaud> (should I send the draft to parrot-dev also, or wait until it's no longer draft?)
+[22:36] * cotto looks
+[22:36] <NotFound> I nominate myself for the position of Winxed/Parrot relationship manager ;)
+[22:37] *** bluescreen joined
+[22:38] <plobsing> fly.winxed works as of RELEASE_3_3_0-216-gdbfe940
+[22:39] <plobsing> NotFound: you'll need for parrot developpers to start committing things to break winxed first ;)
+[22:40] <dukeleto> cotto: occasionally
+[22:41] <cotto> dukeleto, good time for M0?
+[22:41] <cotto> pmichaud, I like it.  How about iterating on parrot-dev?
+[22:41] <pmichaud> okay.  I need some iterations on #perl6, also, if only to determine the identities of <person1> and <person2>.
+[22:45] <cotto> dukeleto, and if not, when will be?
+[22:51] <pmichaud> link to draft sent to parrot-dev (and p6c)
+[23:04] *** fperrad left
+[23:06] <plobsing> NotFound: 17a997ebea6cbe2101f728d94fc773366342206b was the commit that broke fly.winxed
+[23:06] <plobsing> not sure why...
+[23:09] <pmichaud> added:  "A relationship manager is free to answer cross-project lobbying
+[23:09] <pmichaud> requests with "Raise this issue with your project's relationship
+[23:09] <pmichaud> managers."
+[23:17] <cotto> What does having mmapped bytecod imply?
+[23:18] <cotto> (in terms of bytecode format)
+[23:18] <cotto> *bytecode
+[23:18] <dalek> parrot: 2dfc4b7 | plobsing++ | tools/dev/nci_thunk_gen.pir:
+[23:18] <dalek> parrot: fix double/longdouble brain-o
+[23:18] <sorear> on-disk bytecode the same as in-memory bytecode layout
+[23:18] <dalek> parrot: review: https://github.com/parrot/parrot/commit/2dfc4b7e94
+[23:18] <plobsing> NotFound: fly.winxed fixed (I was accidentally generating long double thunks for doubles)
+[23:19] <cotto> so native endianness and type sizes
+[23:19] <plobsing> not sure why the tests didn't pick this up. we have nci doubles tests IIRC
+[23:19] <sorear> if our runcores want each "bytecode" to be an 8-byte little endian integer on Platform X, then we need bytecodes in that format
+[23:19] <sorear> we could do away with the native sizes requirement by changing opcode_t to be uint16_t
+[23:20] <sorear> possibly uint32_t; fullword reads are faster on most CPUs but maybe not enough to offset the cache hit
+[23:20] <plobsing> sorear: that is a good idea, but would require some work rewriting parrot internals that expect opcode_t == UINTVAL
+[23:20] <cotto> I'm thinking about M0.
+[23:21] <cotto> There's no way I'm letting that assumption leak into M0.
+[23:21] <sorear> likewise it would be possible to do away with native endian by using uint8_t opcode_t; M0 could pull that off
+[23:21] <plobsing> I'm not sure M0's ideas about bytecode compression are compatible with mmapping
+[23:21] <sorear> current-Parrot could use uint8_t[2] opcodes, with explicitly coded reassembly
+[23:22] <cotto> plobsing, do tell
+[23:22] <plobsing> well, the point of mmapping the bytecode is that you share the memory with all other processes working with the same bytecode (and that this memory is seen as hot by the OS)
+[23:23] <cotto> sure
+[23:23] <plobsing> if you have to perform transformations of any kind on this bytecode to make it executable (for example performing decompression), then you've lost all advantage
+[23:26] <cotto> byte-centric bytecode has some charm
+[23:26] <ttbot> Parrot 2dfc4b7e MSWin32-x86-multi-thread make error http://tt.taptinder.org/cmdinfo/7463
+[23:27] <plobsing> I don't see why we'd want to have M0 portable between architectures. It isn't the kind of thing you'd want to be flinging around the network.
+[23:30] <plobsing> anyone know what "nen¡ n zvem vnitýn¡ho ani vnØjç¡ho pý¡kazu, spustiteln‚ho programu nebo d vkov‚ho souboru." means?
+[23:30] <cotto> Part of it is that I want to avoid the mess we have with pbc where we need to test a bunch of permutations of endianness, word size, etc
+[23:34] <cotto> I want it to be the case that (1) there's only one M0 binary format and any compliant interpreter can read it or (2) M0 bytecode is only guaranteed to work on the same architecture it was generated on.
+[23:35] <sorear> We *do* want to be flinging M0 bytecode around the network
+[23:35] <plobsing> I'm of the opinion that (2) is easier and (1) is not worth the effort
+[23:35] <sorear> Suppose computer X does not have Parrot installed, and we want to fix that
+[23:35] <sorear> Suppose further that IMCC is bootstrapped and is only available in source and M0 form
+[23:36] <cotto> s/IMCC/PIRATE/, but that's an expected future reality
+[23:36] <cotto> also, s/IMCC/fire/
+[23:36] <plobsing> couldn't you compile that M0 down to C?
+[23:36] <plobsing> isn't that one of the design goals?
+[23:36] <cotto> it is
+[23:37] <plobsing> I would expect IMCC and other core components to be distributed as generated C.
+[23:37] <cotto> me too
+[23:37] <sorear> ok
+[23:38] <cotto> I need to take off, but thanks for some good things to think about.
+[23:49] *** rurban_ joined
+[23:51] *** rurban left
+[23:51] *** rurban_ is now known as rurban
+[23:52] <dukeleto> cotto: i am here for a few mins
+[23:53] *** PacoLinux left
+[23:53] <dukeleto> blarg
+[23:56] *** whiteknight joined

@@ -1,0 +1,286 @@
+[00:00] <jonathan> (See papers on practical lock freedom...)
+[00:00] <chromatic> Or an atomic two pointer swaps, yes.
+[00:01] <allison> At the moment we actually have to register the CallSignature for non-collection, and then explicitly free it for collection, because it isn't attached to any standard GC root-set
+[00:01] <chromatic> We don't have a way of allocating a PMC that we know is short-lived, purely internal, and never referred to after the allocating function returns.
+[00:01] <jonathan> http://www.cl.cam.ac.uk/research/srg/netos/lock-free/ has some great material.
+[00:01] <chromatic> ... although I wonder if... dirty hack... constant_pmc_new() + constant_pmc_free()....
+[00:01] <allison> it may be that part of moving to a generational scheme is adding one small internal-only pool
+[00:02] <chromatic> The problem with adding one small internal-only pool is the same problem with adding a constant pool.
+[00:02] *** ruoso joined
+[00:02] <chromatic> Any aggregate PMC allocated from that pool has to contain only GCable elements from the same or similar pools.
+[00:03] <chromatic> Otherwise, we always have to sweep the aggregates in those pools, which is O(n + c)
+[00:03] <allison> chromatic: which isn't the case here, since CallSignature will contain PMC arguments passed into the call
+[00:04] <allison> another possiblility is to have CallSignature stored in the registers
+[00:04] <chromatic> If we had automatic_pmc_new/automatic_pmc_free, that might work too.
+[00:05] <allison> hmmm... that's possible
+[00:05] <jonathan> allison: so will set_params build a CallSignature?
+[00:05] <chromatic> Saves the easy-to-get-wrong fun of registering/unregistering in the right place.
+[00:06] <allison> anyway, my basic point is just that if we're pouring effort into optimizing GC-able elements, I'd rather see the effort go into improving the overall GC features, than to add yet-another-way of sneaking around the problems in the existing GC
+[00:06] <Croke> NotFound++ patch in my inbox.
+[00:07] <chromatic> Point taken, but if we can get Tcl or Rakudo 20% faster with an hour of work now, we can save lots of people more work later on.
+[00:07] <allison> jonathan: in theory, yes, though at the moment it's only being used as a more efficient replacement for the PCCINVOKE code path
+[00:07] <jonathan> Aha, OK.
+[00:07] <chromatic> Part of the PCCINVOKE caching would mean refactoring the Build Me PMCs code into its own function.
+[00:08] <jonathan> allison: Are you working on those changes at the moment?
+[00:08] <jonathan> Or is it already in?
+[00:08] <allison> jonathan: already in
+[00:08] <jonathan> I need to look at all of the MMD stuff too and see how I need to update the Perl6MultiSub PMC.
+[00:08] <allison> jonathan: see inter_call.c Parrot_pcc_invoke_sub_from_sig_object
+[00:09] <jonathan> OK, will do.
+[00:09] *** bacek joined
+[00:09] *** AndyA joined
+[00:09] <allison> also, calling_conventions branch which is taking it the next step of replacing Parrot_PCCINVOKE
+[00:10] <jonathan> OK.
+[00:12] *** notbenh joined
+[00:12] *** wayland76 joined
+[00:12] <wayland76> tewk++
+[00:13] *** wayland76 left
+[00:13] <Croke> tcl slowwwwwwww
+[00:13] <Croke> speaking of gc, is the GSOC work merged in?
+[00:15] <chromatic> No, WK wants to redo it more incrementally.
+[00:16] <allison> chromatic: agreed on the desirability of speed up (that and easier code maintenance is the core goal of the CallSignature transition), but if it's an hour spent that'll just be ripped out in a few weeks, it doesn't seem like a worthwhile hour
+[00:20] <Croke> I'd feel comfy if there was a plan for speedup, even if we can't speed anything up now.
+[00:20] <Croke> chromatic: (redo it) Since that's not happening, can he write up a plan so that someone else might tackle it?
+[00:21] <chromatic> Seems reasonable.
+[00:21] <chromatic> Or you can whack him in the head when he returns from his honeymoon.
+[00:21] <Croke> chromatic: did you see my note about -t4?
+[00:22] <chromatic> allison, anything over a 5% speed improvement now for an hour's worth of work seems like an improvement if the branch takes more than four weeks to land.
+[00:22] <chromatic> Croke, I did.  Did you find anything further in the infostr() function?
+[00:23] <Croke> have to run now, but have narrowed down the -t4 stuff to Parrot_full_sub_name's invocation of Parrot_ns_get_name
+[00:23] <Croke> (resend)
+[00:24] <Croke> which is probably because it does a PCCINVOKE using the current interpreter.
+[00:25] <chromatic> Ah, I see.
+[00:25] <jonathan> That sounds reasonable.
+[00:25] <jonathan> I had to do some presevation of stuff inside invoke when implementing Perl6MultiSub.
+[00:26] <jonathan> If Parrot_full_sub_name assumes certain things ain't going to change and they are changed by an intervening call, or more likely the profiling code makes that assumption, there's scope for trouble.
+[00:27] <chromatic> That's probably it.
+[00:27] <Croke> jonathan: sounds like you can fix it!
+[00:27] <Croke> =-)
+[00:28] <jonathan> :-P
+[00:29] <jonathan> Not familiar with the profiling code, but I expect the fix would look like the same thing I did in Perl6MultiSub. Can take a look at weekend maybe.
+[00:29] * jonathan is a bit tired for debugging at the moment.
+[00:29] * Croke checks out p6ms
+[00:30] * Croke goes blind.
+[00:32] <jonathan> It's not that bad! :-P
+[00:32] <jonathan> See in the invoke vtable method.
+[00:32] <Croke> IANACP.
+[00:32] <jonathan> Ah.
+[00:33] <Croke> ah. I see where you save off and restore. that looks cultable
+[00:33] <Croke> should I put it in Parrot_ns_get_name? Or around the call in full_sub_name?
+[00:34] <jonathan> I suspect maybe even further out, in the profiling code that calls full_sub_name.
+[00:34] <jonathan> Like, in the profiling code.
+[00:34] <jonathan> Though I suspect in full_sub_name would work.
+[00:34] <jonathan> And woudln't do any harm.
+[00:35] <jonathan> If you put it there, be sure to add a comment about why we're doing it.
+[00:40] <Croke> I put it in full_sub_name for now.
+[00:41] <Croke> seems to work for the -t4 case; trying a make test.
+[00:41] <jonathan> cool
+[00:42] *** dolmen joined
+[00:46] <Croke> jonathan++
+[00:50] <dalek> r32255 | allison++ | pdd22io:
+[00:50] <dalek> : [pdd22io] Converted Windows I/O for filehandles to new architecture.
+[00:50] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32255
+[00:50] *** Ademan joined
+[00:51] <jonathan> Croke++ # fixing stuff
+[00:52] <dalek> r32256 | allison++ | pdd22io:
+[00:52] <dalek> : [pdd22io] Cleaning up local C strings in 'open'.
+[00:52] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32256
+[00:57] <dalek> r32257 | allison++ | pdd22io:
+[00:57] <dalek> : [pdd22io] Partial conversion of Windows I/O for sockets.
+[00:57] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32257
+[01:06] <Croke> jonathan: all I did was copy you.
+[01:06] <Croke> but thanks. =-)
+[01:06] <dalek> r32258 | allison++ | pdd22io:
+[01:06] <dalek> : [pdd22io] Keep revision history of old generic, portable I/O file under new name.
+[01:06] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32258
+[01:06] <Croke> now I can use this to figure out what partcl is invoking.
+[01:12] <jonathan> dobre
+[01:14] <Croke> ... running with -t4 on even the smallest spect test is still several thousand lines of tcl (in the test library itself). zzzzz.
+[01:21] <Croke> $ wc -l join.trace  4590548 join.trace
+[01:22] <Croke> so, that's a lot of trace.
+[01:22] <Croke> but with all that, with my patch, -t4 worked.
+[01:22] <Croke> jonathan++ again for doing all the hard work.
+[01:31] *** bacek joined
+[01:36] <Croke> Not surprisingly I spend all my time in PGE, TGE, and code generated by them.
+[01:38] <Croke> $ wc -l join.trace  4590548 join.trace
+[01:38] <Croke> er, 192044 - # Calling sub 'parrot;PGE;Match;new'
+[01:38] <jonathan> wow
+[01:39] <jonathan> But we know PGE has forthcoming major optimizations.
+[01:39] <Croke> also:
+[01:39] <Croke> 192044 - # Calling sub 'parrot;PGE;Match;new'
+[01:39] <Croke> damnit.
+[01:39] <Croke> 101603 - # Calling sub 'parrot;TGE;Tree;_lookup_id'
+[01:39] <Croke> 103794 - # Calling sub 'parrot;PGE;Match;_failcut'
+[01:39] <jonathan> _failcut - this may be one that gets called less after proto-regexes.
+[01:40] <Croke> ... it is very depressing to be told things are -going- to be faster. =-)
+[01:47] <jonathan> At least there's a concrete plan for how this is going to be faster.
+[01:49] <dalek> r32259 | allison++ | pdd22io:
+[01:49] <dalek> : [pdd22io] Converted generic, portable I/O for filehandles to new architecture.
+[01:49] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32259
+[01:49] <Croke> now if only I had real profiling information. =-)
+[01:59] *** Andy joined
+[02:02] <nopaste> "Croke" at 72.228.52.192 pasted "last N entries when running join.test" (60 lines) at http://nopaste.snit.ch/14440
+[02:07] <dalek> r32260 | allison++ | pdd22io:
+[02:07] <dalek> : [pdd22io] Function name cleanup on flag conversion.
+[02:07] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32260
+[02:08] * jonathan has a ticket to go see Opeth in December. w00t.
+[02:10] *** Aisling joined
+[02:11] *** jq joined
+[02:16] <dalek> r32261 | allison++ | pdd22io:
+[02:16] <dalek> : [pdd22io] Add common I/O functions shared between all I/O function sets.
+[02:16] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32261
+[02:35] *** Theory joined
+[03:42] <bacek> hi there
+[03:52] *** Psyche^ joined
+[04:39] *** gmansi joined
+[05:10] <dalek> r32262 | allison++ | pdd22io:
+[05:10] <dalek> : [pdd22io] Add I/O header files for specific platforms.
+[05:10] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32262
+[05:14] <dalek> r32263 | allison++ | pdd22io:
+[05:14] <dalek> : [pdd22io] Add headerizer block for io/common.c to main I/O header file io.h.
+[05:14] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32263
+[05:17] <dalek> r32264 | allison++ | pdd22io:
+[05:17] <dalek> : [pdd22io] Move one stray remaining socket function to win32_socket.c, add stubs
+[05:17] <dalek> : for 'pipe' and 'peek', and catch a few old-style calls.
+[05:17] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32264
+[05:18] <dalek> r32265 | allison++ | pdd22io:
+[05:18] <dalek> : [pdd22io] Move a stray socket function over from win32.c.
+[05:18] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32265
+[05:20] <dalek> r32266 | allison++ | pdd22io:
+[05:20] <dalek> : [pdd22io] Clean up a few old SHIM arguments, change the name of 'pipe' to
+[05:20] <dalek> : 'open_pipe', and add a stub function for 'peek'.
+[05:20] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32266
+[05:21] <dalek> r32267 | allison++ | pdd22io:
+[05:21] <dalek> : [pdd22io] Add a stub function for 'pipe'.
+[05:21] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32267
+[07:00] *** Bzek joined
+[07:33] *** grim_fandango joined
+[08:21] *** iblechbot joined
+[09:16] *** bacek joined
+[09:16] *** masak joined
+[09:48] <masak> pmichaud: In src/classes/Mapping.pir, there's a TODO listing .exists, but in Hash.pir which extends Mapping.pir, .exists is already implemented. Should the method perhaps be moved to Mapping.pir?
+[09:49] <masak> ...or have all these been superceded by the latest :exists change?
+[10:28] *** mj41 joined
+[10:38] <masak> would it be unreasonable to make autoincrement work on Complex values?
+[10:45] <cognominal> with what semantic?
+[10:45] <cognominal> I can see at least two.
+[10:46] <cognominal> incrementing the real part.
+[10:46] <masak> aye
+[10:46] <masak> that's what I had in mind.
+[10:46] <cognominal> hum, vocabulary lacks me for the second
+[10:46] <masak> :)
+[10:46] <masak> well, I see `++` as sugar for `+= 1`
+[10:47] <cognominal> if you see the complex like a vector, you may want to increment its length by one
+[10:47] <masak> cognominal: I thought you would say that :)
+[10:47] <cognominal> that's the second semantic
+[10:47] <masak> cognominal: don't see how that would be useful
+[10:47] <masak> for one, it can make gaussian integers non-integral
+[10:47] <cognominal> nothing useful, except for the sake of arguing
+[10:48] <masak> I'd say the first semantic won from the outset :)
+[10:48] <masak> I was mainly wondering if there'd be a reason not to DWIM in this case.
+[10:48] <masak> I don't think there is, but I wanted to check.
+[10:55] <cognominal> thx for making me discovering gaussian integers
+[10:56] <masak> hehe
+[10:57] <masak> they are a strange name for an obvious idea
+[10:57] <cognominal> yea, but I did not know of their properties
+[10:59] <cognominal> that makes me discover that a mathematical field translate to corps (body) in French
+[11:07] <masak> sounds reasonable
+[11:07] <masak> it does in Swedish too, IIRC
+[11:51] *** cognominal joined
+[12:20] *** cognominal joined
+[12:45] *** jan joined
+[12:48] *** kid51 joined
+[13:43] *** tetragon joined
+[14:00] <dalek> r32268 | kjs++ | trunk:
+[14:00] <dalek> : [pirc/new] change some data structures, finish linear scan register allocator (needs a lot of testing).
+[14:00] <dalek> : + code needs cleanups.
+[14:00] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32268
+[14:13] *** dmknopp joined
+[14:15] *** justin joined
+[15:13] *** Lorn joined
+[15:17] <dalek> r32269 | kjs++ | trunk:
+[15:17] <dalek> : [pirc/new] forgot to remove cpp comments. codetest didn't scream...
+[15:17] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32269
+[15:26] *** kj joined
+[15:35] *** jq joined
+[16:16] *** iblechbot joined
+[16:30] <dalek> r32270 | julianalbo++ | trunk:
+[16:30] <dalek> : avoid repeating string comparaisons and creation in Parrot_cx_delete_handler_local
+[16:30] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32270
+[16:35] <dalek> r32271 | julianalbo++ | trunk:
+[16:35] <dalek> : fix c++/no c bug in r32270
+[16:35] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32271
+[16:35] <NotFound> Sorry
+[16:45] <dalek> r32272 | coke++ | trunk:
+[16:45] <dalek> : RT#60268 : fix -t4; certain debug information changed the state of the interpreter;
+[16:45] <dalek> : guard in a similar fashion to jonathan++'s perl6's multisub invoke() method.
+[16:45] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32272
+[17:13] *** tetragon joined
+[17:22] <dalek> r32273 | masak++ | trunk:
+[17:22] <dalek> : [rakudo] implemented .end in any-list.pir
+[17:22] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32273
+[17:35] *** tetragon joined
+[17:43] *** allison joined
+[18:24] *** jsut joined
+[18:44] *** chromatic joined
+[18:57] <dalek> r32274 | allison++ | pdd22io:
+[18:57] <dalek> : [pdd22io] Keeping the revision history of the I/O API functions under the new name.
+[18:57] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32274
+[19:08] <NotFound> Someone has tested the opengl examples recently?
+[19:24] <dalek> r32275 | fperrad++ | trunk:
+[19:24] <dalek> : [Lua]
+[19:24] <dalek> : - add a test for RT #60292
+[19:24] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32275
+[19:29] * jonathan has build failure on Win32
+[19:29] <jonathan> src\\sub.c(324) : error C2065: 'returns_signature' : undeclared identifier
+[19:32] <jonathan> ah, found it
+[19:32] <NotFound> Mmmm... that function is violating C90
+[19:33] <NotFound> jonathan: let me fix it
+[19:36] <NotFound> opengl examples are failing for me since the jitted nci commit
+[19:38] <jonathan> NotFound: already fixed
+[19:38] <NotFound> Ok
+[19:39] <dalek> r32276 | jonathan++ | trunk:
+[19:39] <dalek> : [core] Re-order things to fix compilation errors due to C90 violation.
+[19:39] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32276
+[19:53] <NotFound> Building with --jitcapable= 0 works, that confirms is a jit nci fault
+[20:23] *** mberends joined
+[20:34] <tewk> NotFound: what is failing nci jit?
+[20:34] <NotFound> tewk: opengl examples
+[20:36] <NotFound> Not sure, but I think the fail is on passig float args.
+[20:36] <tewk> examples/opengl /?
+[20:36] <NotFound> Yes.
+[20:37] <tewk> I just get blank windows
+[20:37] <NotFound> Black for me.
+[20:37] <tewk> right,
+[20:40] <NotFound> It must not be a double to float conversion in 'f' args? Or is done in emit_fstps?
+[20:54] <tewk> fstps does the conversion
+[20:56] <tewk> I'd expect callbacks to be untested
+[20:57] <chromatic> Good opportunity to add some.
+[20:57] <NotFound> Callbacks seem to work, I put say instructions instead callback functions of the examples, and they are shown.
+[21:01] <chromatic> The NCI tests could use more work.
+[21:02] <tewk> I didn't write them, what would you like to see?
+[21:05] <chromatic> Something similar to the OpenGL code that doesn't work, to see where things go wrong.
+[21:06] <tewk> I'm adding a ttt test to expose the mysql NCI bug we say
+[21:06] <tewk> I have no idea why the OpenGL code isn't working.
+[21:07] <tewk> I'm going to dump all the NCI signatures used during the opengl example
+[21:07] <tewk> then build a test harness for them
+[21:07] <chromatic> Sounds good.
+[21:07] <chromatic> Checking that the values round-trip sounds sensible.
+[21:08] <tewk> Yeah thats what I'm planning on
+[21:25] <dalek> r32277 | tewk++ | trunk:
+[21:25] <dalek> : [NCI] ttt test for double freeing of char* copies
+[21:25] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32277
+[23:26] <japhb> My IRC client pinged me for the OpenGL references ... I'll pull and build, and then I can help if needed.
+[23:34] <dalek> r32278 | julianalbo++ | trunk:
+[23:34] <dalek> : add a nci signature for mysql
+[23:34] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=32278
+[23:34] <japhb> OK, I'm getting the same black window problem with the OpenGL examples.
+[23:34] <NotFound> Back in black
+[23:35] <japhb> pulling and building on x86_64 to make sure the problem is the JIT code
+[23:35] <NotFound> japhb: you just need to build with --jitcapable=0
+[23:37] <japhb> OK, will try that on the ia32
+[23:42] <japhb> Confirmed on ia32 -- turning off JIT makes it work again.
+[23:42] <japhb> x86_64 is still pulling; it's been a while since I synced on that box.  :-)
+[23:44] <japhb> Reading back, it sounds like tewk's on the trail ... tewk, ping me if you need anything from me.
+[23:50] *** purl joined
+[23:59] <japhb> x86_64 confirmed to work normally -- I assume because it's not NCI JIT capable yet.

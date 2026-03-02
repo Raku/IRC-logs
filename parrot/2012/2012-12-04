@@ -1,0 +1,453 @@
+[00:04] <dalek> parrot: 3b6b8a6 | jkeenan++ | MANIFEST:
+[00:04] <dalek> parrot: Update MANIFEST.
+[00:04] <dalek> parrot: review: https://github.com/parrot/parrot/commit/3b6b8a68b6
+[00:10] *** kid51 joined
+[00:40] *** travis-ci joined
+[00:40] <travis-ci> [travis-ci] parrot/parrot#651 (threads - ca52886 : Reini Urban): The build was broken.
+[00:40] <travis-ci> [travis-ci] Change view : https://github.com/parrot/parrot/compare/5190ab1bd5ce...ca528865fea6
+[00:40] <travis-ci> [travis-ci] Build details : http://travis-ci.org/parrot/parrot/builds/3481777
+[00:40] *** travis-ci left
+[01:15] *** Mike-PerlRecruiter_ joined
+[01:17] <kid51> How do I file an attachment for a github issue?
+[01:18] <diakopter> encode it in base64 in a comment?
+[01:22] <Coke> add it to a gist and link to it, is probably the easiest way.
+[01:22] <Coke> (gist.github.com)
+[01:23] <kid51> Also:  It appears that the paste site we have in tools/dev/nopaste.pl is not working
+[01:23] <kid51> perl tools/dev/nopaste.pl -n kid51 -t "Build failure post-threads merge on Darwin/PPC" ~/learn/parrot/make.output/20121203.3b6b8a6.master.txt
+[01:23] <kid51> Error GETing http://nopaste.snit.ch:8001/paste: Can't connect to nopaste.snit.ch:8001 (Bad hostname 'nopaste.snit.ch') at tools/dev/nopaste.pl line 34.
+[01:24] <Coke> yup, looks like snit.ch is dead. I'd kill the script with fire.
+[01:25] <kid51> Some pastebots die with fire, some with ice.
+[01:29] <kid51> Have to run out for a while.
+[01:50] <cotto> Coke, gists would be a workable alternative.
+[01:51] <diakopter> cotto: are you familiar with the threads implementation?
+[01:57] <cotto> somewhat
+[01:57] <cotto> diakopter, what's your question?
+[01:57] <diakopter> I have a bunch
+[01:59] <diakopter> does the GC scan other threads' memory areas for references to its own objects?
+[01:59] <diakopter> (or traverse the other threads' live objects graph or whatever)
+[01:59] *** Khisanth joined
+[02:01] <diakopter> in the thesis pdf, the implied answer is no.
+[02:01] <cotto> That's the impression I got too, but I haven't tested it.
+[02:01] <diakopter> so my question is, what if another thread owns the object that has the only reference to an object?
+[02:02] <diakopter> does this mean the GC can collect objects early/spuriously?
+[02:02] <diakopter> (yes, if it doesn't scan other threads)
+[02:03] <diakopter> but since (as stated in the thesis pdf) other threads can be *running* while one thread's GC runs, that GC could miss an object while its only reference is moved from the area the GC hasn't scanned yet to the area it's already scanned.
+[02:04] <diakopter> (if it actually does try to scan other threads)
+[02:05] <diakopter> (or while the only reference to the object is in another CPU's register *only*)
+[02:06] *** Maddingue joined
+[02:07] <diakopter> (regardless of the scanning technique (traverse or linear scan), the point still holds)
+[02:08] <diakopter> the only reference can be moved on the graph while it's being traversed.
+[02:08] <cotto> let me check something
+[02:09] <diakopter> my point is that either way (whether it scans other threads' stuff or not), it has the potential to miss references if other threads are allowed to run while it runs.
+[02:11] <diakopter> .. and this is one thing the thesis makes very clear: that it is intended for other threads to run concurrently with the GC.
+[02:12] <cotto> The solution seems to  be that the Task holds a reference to shared objects.
+[02:12] <diakopter> right, but what about when there is no Task pending
+[02:12] <diakopter> surely it doesn't keep around all billion Tasks that could have run
+[02:13] <cotto> The reference will exist until the Task is destroyed, even if it's not executing anything at the moment.
+[02:14] <diakopter> so threads cannot hold onto references to objects from other threads between requesting Tasks to be run?
+[02:14] <diakopter> it's implied that, being a queue, Tasks go away after being executed
+[02:15] <diakopter> (where else would they hang around)
+[02:18] <cotto> My impression is that Tasks are more like workers in that they don't get destroyed implicitly and that the parent can reuse them when needed.  Let me see if I can verify that,
+[02:18] <diakopter> Tasks are requests from a child thread to the main thread or from the main thread to one of its child threads to perform a write operation on an object in the other thread
+[02:19] <diakopter> only the main thread can spawn other threads.
+[02:19] <diakopter> child threads cannot access/modify objects in each other.
+[02:22] <diakopter> it doesn't say anything about parents reusing Tasks (what would it use them for?) requests to other threads?
+[02:24] *** kid51 joined
+[02:24] <diakopter> jnthn and I had these questions for rurban earlier, and he recommended to ask on #parrot. :)
+[02:30] <cotto> I'll do some digging on these questions and post to parrot-dev once I have some satisfactory answers.
+[02:31] <diakopter> cool, thanks!
+[02:31] <cotto> Are those all your questions?
+[02:31] <diakopter> well, no
+[02:31] <diakopter> :)
+[02:31] <cotto> Sorry for the latency.
+[02:31] <cotto> If you prefer, you can send them all to parrot-dev.
+[02:33] <diakopter> it says all read access must go through proxies which create read Tasks on the owner thread. If a write operation is occuring, but is preempted by a read operation, can it read the object in an inconsistent state, if the user implemented the data structure in user code (PIR or whatever)?
+[02:35] <diakopter> the only ways I can think to mitigate this are to 1. not implement data structures that expect consistency during reads 2. use C for the write operations (since it only preempts on Branch) 3. use wait-free algorithms to make it fully threadsafe 4. can't use locks because of the potential for deadlock
+[02:37] <diakopter> in any case, preventing the normal case (user implementing a data structure in user code)
+[02:41] <diakopter> two other more specific cases of the "only reference elsewhere" question: if the only reference exists solely in another CPU's *register* 2. if the only reeference exists in the Task queue of another thread, which would require obtaining a lock on *all* the other threads' task queues, to not miss cross-writes)
+[02:41] *** Maddingue joined
+[02:42] *** davidfetter joined
+[02:44] <diakopter> cotto: I emailed these questions and others to nine@starvation.org ; maybe he'll reply
+[02:44] <diakopter> haha
+[02:44] <diakopter> nine@detonation.org I mean
+[02:44] <diakopter> starvation on the mind...
+[02:45] <kid51> Go out to eat.  I hear there are plenty of good restaurants where you are. :-)
+[02:45] <diakopter> actually... I'm in the mid-peninsula; there's basically nothing within 15 miles.
+[02:46] <kid51> Then where do all those rich kids at Google, Apple, Stanford, etc., go to?
+[02:46] <diakopter> they're not in the mid-peninsula; they're in SiVally
+[02:46] <diakopter> SiValley
+[02:47] <diakopter> I live/work in the shadow of the Oracle stacks
+[02:47] <diakopter> literaly
+[02:47] <kid51> Are the Oracle stacks like the stacks on a nuclear power plant?
+[02:48] <diakopter> they look like the Visio diagram for databases: http://en.wikipedia.org/wiki/File:Oracle_Headquarters_Redwood_Shores.jpg
+[02:49] <diakopter> Oracle has big cafeterias in each of the buildings with nice food
+[02:49] <diakopter> most of them are open to the public; they're just quite crowded all the time
+[02:50] <diakopter> and it's impossible to find parking
+[02:52] <diakopter> kid51: but apparently most Googlers eat very many meals at the office
+[02:53] <diakopter> in Cupertino there are a ton of restaurants. Stanford, not so much.
+[02:53] <sorear> how did natural convection condensation towers come to be associated with nuclear plants?  they seem to be universal feature of steam power
+[02:54] <diakopter> sorear: Simpsons?
+[02:56] <kid51> diakopter:  They look like a lot of buildings in Burlington or Missisauga, Ontario, that you see on the QEW while driving to Toronto.
+[02:56] <kid51> But, yeah, Visio.
+[02:58] <kid51> It feels good to have bacek responding on github to my build failure!
+[03:15] <diakopter> why did kjs stop pushing to parrot/m1 5 months ago?
+[03:20] <kid51> Who knows why *anyone* stops (or starts) pushing to some OS project?
+[03:20] <kid51> Life intervenes.
+[03:24] <kid51> Now, sleep must intervene.
+[03:31] *** Maddingue joined
+[04:07] *** Maddingue joined
+[04:36] *** Psyche^ joined
+[04:37] *** Maddingue joined
+[05:07] *** Maddingue joined
+[05:35] *** Maddingue joined
+[05:57] *** Maddingue joined
+[06:23] *** Maddingue joined
+[06:33] *** travis-ci joined
+[06:33] <travis-ci> [travis-ci] parrot/parrot#662 (master - 3b6b8a6 : jkeenan): The build was fixed.
+[06:33] <travis-ci> [travis-ci] Change view : https://github.com/parrot/parrot/compare/c3f5458d929c...3b6b8a68b6ae
+[06:33] <travis-ci> [travis-ci] Build details : http://travis-ci.org/parrot/parrot/builds/3486667
+[06:33] *** travis-ci left
+[06:53] *** Maddingue joined
+[06:54] *** l3l1p joined
+[07:28] *** Maddingue joined
+[07:55] *** bouncy joined
+[07:58] *** Maddingue joined
+[08:04] *** zby_home joined
+[08:24] *** Maddingue joined
+[08:47] *** Maddingue joined
+[08:58] <dalek> parrot: 96fd432 | fperrad++ | t/harness.pir:
+[08:58] <dalek> parrot: [harness.pir] add missing files
+[08:58] <dalek> parrot:
+[08:58] <dalek> parrot: follow lib/Parrot/Harness/TestSets.pm
+[08:58] <dalek> parrot: review: https://github.com/parrot/parrot/commit/96fd43215b
+[09:19] *** Maddingue joined
+[09:19] *** Patterner joined
+[09:19] *** Khisanth joined
+[09:19] *** Mike-PerlRecruiter_ joined
+[09:19] *** diakopter joined
+[09:19] *** schm00ster joined
+[09:19] *** alester joined
+[09:19] *** mtk joined
+[09:19] *** perlite joined
+[09:19] *** sivoais joined
+[09:19] *** pjcj joined
+[09:19] *** arnsholt joined
+[09:19] *** Tene joined
+[09:19] *** sorear joined
+[09:19] *** janus joined
+[09:19] *** elmex joined
+[09:19] *** eternaleye joined
+[09:19] *** moritz joined
+[09:19] *** Infinoid joined
+[09:19] *** he_ joined
+[09:19] *** dukeleto joined
+[09:19] *** cotto joined
+[09:19] *** TonyC joined
+[09:19] *** sri joined
+[09:19] *** p6eval joined
+[09:19] *** simcop2387 joined
+[09:19] *** Timbus joined
+[09:19] *** tokuhirom joined
+[09:19] *** smash joined
+[09:19] *** patspam joined
+[09:19] *** allison joined
+[09:19] *** cxreg joined
+[09:33] *** Maddingue joined
+[09:33] *** Patterner joined
+[09:33] *** Khisanth joined
+[09:33] *** Mike-PerlRecruiter_ joined
+[09:33] *** diakopter joined
+[09:33] *** schm00ster joined
+[09:33] *** alester joined
+[09:33] *** mtk joined
+[09:33] *** perlite joined
+[09:33] *** sivoais joined
+[09:33] *** pjcj joined
+[09:33] *** arnsholt joined
+[09:33] *** Tene joined
+[09:33] *** sorear joined
+[09:33] *** janus joined
+[09:33] *** elmex joined
+[09:33] *** eternaleye joined
+[09:33] *** moritz joined
+[09:33] *** Infinoid joined
+[09:33] *** he_ joined
+[09:33] *** dukeleto joined
+[09:33] *** cotto joined
+[09:33] *** TonyC joined
+[09:33] *** sri joined
+[09:33] *** p6eval joined
+[09:33] *** simcop2387 joined
+[09:33] *** Timbus joined
+[09:33] *** tokuhirom joined
+[09:33] *** smash joined
+[09:33] *** patspam joined
+[09:33] *** allison joined
+[09:33] *** cxreg joined
+[09:34] *** jsut_ joined
+[11:36] *** PacoAir joined
+[13:15] *** Mike-PerlRecruiter_ joined
+[13:58] <Coke> (simpson) I bet 3 mile island.
+[14:14] * PerlJam seconds Coke's bet
+[14:22] <Coke> I raise!
+[14:27] * moritz collects all the winnings
+[14:28] <tadzik> casino always wins :)
+[14:32] *** bluescreen joined
+[14:40] *** aloha joined
+[15:28] *** aloha joined
+[15:36] *** dmalcolm joined
+[16:12] <rurban> seen kid51
+[16:12] <aloha> kid51 was last seen in #parrot 12 hours 48 mins ago saying "Now, sleep must intervene.".
+[16:13] <rurban> msg kid51 did you do make archclean before building threads? You'll get such a conflict if you just pull and configure+build
+[16:13] <aloha> OK. I'll deliver the message.
+[16:22] <rurban> I'm debugging darwin/ppc now. Threads on darwin/ppc worked fine for me the last months.
+[16:40] <rurban> darwin also has the habit to pickup wrong libparrot.dylib's if you installed it. Worse than cygwin
+[16:53] *** benabik joined
+[17:15] <rurban> oops, duplicate symbol problem on darwin/ppc
+[17:39] <rurban> https://github.com/parrot/parrot/issues/873
+[18:33] <dalek> parrot: 540289d | rurban++ | lib/Parrot/Pmc2c/PMC.pm:
+[18:33] <dalek> parrot: [GH #873] Replace PARROT_DYNEXT_EXPORT INTVAL dynpmc_class_ by PARROT_DATA
+[18:33] <dalek> parrot:
+[18:33] <dalek> parrot: Fix duplicate symbols on darwin/ppc linker. And use the right extern mark declaration.
+[18:33] <dalek> parrot: review: https://github.com/parrot/parrot/commit/540289d6d8
+[18:50] <diakopter> rurban: I posted my questions here last night; see the backlog if you're interested
+[18:53] <rurban> Yes, I saw them. Thanks. I believe we have to improve our docs and ask nine for the details
+[18:53] *** benabik joined
+[19:43] *** contingencyplan joined
+[19:48] <diakopter> rurban: I wasn't just asking for details clarification; I was pointing out how there is no way that running a GC while other threads are executing and scanning their memory, or not scanning their memory at all, is totally unworkable and makes the threads implementation less than useful
+[19:48] <diakopter> s/unworkable/workable/
+[19:49] <rurban> nine should answer that questions. I don't believe you are right, as threads are GC-safe.
+[19:50] <diakopter> what does that mean?
+[19:51] <diakopter> my point is that they are not GC-safe.
+[19:51] <dalek> parrot: 7540406 | rurban++ | ext/nqp-rx/t/nqp/67-threads.t:
+[19:51] <dalek> parrot: [test] Stabilize order of threaded execution in nqp/67-threads.t
+[19:51] <dalek> parrot:
+[19:51] <dalek> parrot: Sometimes ok 3 was printed before ok 2. Remove the third step as it is of no guaranteed order
+[19:51] <dalek> parrot: review: https://github.com/parrot/parrot/commit/7540406e68
+[19:51] <rurban> Yes, and our point is the opposite. but nine should explain it to you, as he explained it to me.
+[19:52] <diakopter> is this in the parrot-dev archives or irc logs?
+[19:52] <rurban> http://niner.name/Hybrid_Threads_for_the_Parrot_VM.pdf
+[19:52] <diakopter> uhm.
+[19:53] <diakopter> did you even read my comments in the backlog to cotto? how could you think I didn't read that extremely thoroughly already
+[19:54] <diakopter> I guess I don't see why nine has to be the one to explain it
+[19:54] <rurban> 4.4. explains why our threads are GC safe
+[19:54] <benabik> The main thread spawns new interps per thread.  Each interp does GC in it's own memory space.
+[19:55] <benabik> Cross-thread interactions are managed via proxies.
+[19:55] <rurban> 5.3 explains the GC with threads (via proxies)
+[19:56] <diakopter> pointing to sections I've already read thoroughly without actually responding to my question is not helpful
+[19:57] <diakopter> how does the system know when a proxy is done being used by the thread that created it?
+[19:58] <rurban> We have a GC, so why needs the system need to know it?
+[19:58] <benabik> PMCs with proxies are pinned by referencing them from the Task PMC.
+[19:59] <diakopter> but what if there are no Tasks active that refer to that proxy?
+[19:59] <diakopter> (as I stated in my question in the backlog)
+[20:00] <benabik> I'm not sure if proxies do cross-thread refcounting.  It might be that the PMC gets pinned for the duration of the Task.
+[20:00] <diakopter> that is my understanding from the doc, yes.
+[20:01] <diakopter> but how are cross-thread references maintained in the total absence of any Tasks
+[20:02] <rurban> How can a thread be activated without tasks? only as alarm.
+[20:03] <diakopter> how is that relevant?
+[20:03] <rurban> There's nothing other than Tasks, besides sleep/alarm which handle threads
+[20:04] <rurban> So in the total absence of any Tasks it can only be a sleep
+[20:04] <rurban> So there is no other cross-reference
+[20:05] <diakopter> so a thread's memory can't refer to other thread's memory while it's asleep?
+[20:06] <rurban> Without a Task there are no other threads awake.
+[20:08] <diakopter> right, I wasn't asking about that
+[20:09] <diakopter> can thread A's memory refer to another thread's memory while A is asleep
+[20:10] <rurban> Through proxies, yes
+[20:11] <rurban> reading through proxies, writing through spawning a writer task within the owners task. reading while sleeping is impossible. writing should be because it is done by the write-task.
+[20:12] <rurban> But there is never direct access from one threads memory to another threads memory.
+[20:13] <diakopter> but how does the owner thread know that there are live proxies to its objects
+[20:14] <rurban> I see
+[20:14] <diakopter> (while the thread that has the proxies is asleep)
+[20:14] <benabik> It doesn't.
+[20:15] <diakopter> but rurban just said a thread can hang onto references in another thread using proxies while it's asleep
+[20:15] <benabik> Creating a proxy requires pinning the object to the task.  I'm not sure there's anything to unpin them once there are no proxies.
+[20:15] <diakopter> if the owner thread doesn't know about the alive proxies, how does it know not to collect the object
+[20:16] <rurban> A thread can ask for the owning task to update an variable and put itself into sleep, yes. No problem
+[20:17] <rurban> A proxy is only for read-only, not-owned foreign data
+[20:17] <rurban> The owner thread might collect its own data if he sees fit.
+[20:18] <diakopter> so a proxy from a *finished* Task (that it submitted to the owner thread) in an asleep thread can have a reference to an object that has been collected?
+[20:18] <rurban> Other threads which might want to read from this data will get a proxy violation somehow if the owner is asleep or destroyed its data. Is this your problem?
+[20:19] <diakopter> how does it know the owner has destroyed the data
+[20:19] <rurban> When the proxy->target is not-alive
+[20:20] <diakopter> how does it know when it becomes not-alive
+[20:20] <rurban> When the PROXY_DATA is empty
+[20:21] <diakopter> how does the owner thread know to clear proxy data
+[20:22] <diakopter> if the proxy is created in another thread
+[20:22] <rurban> They are members of the Task PMC
+[20:22] <diakopter> but we're talking about when there are no Tasks active
+[20:23] <rurban> When no Tasks are active what is the problem then?
+[20:24] <diakopter> you said a proxy can be alive while the thread is asleep
+[20:24] <rurban> No, I said that the Task which asked to write a variable in another Task can be asleep
+[20:25] <rurban> But the Task which owns the data cannot be asleep
+[20:26] <rurban> Because it is woken up automatically when it his to change it's data.
+[20:26] <rurban> when it has to
+[20:26] <rurban> That's the Schedulers job
+[20:27] *** tuxit joined
+[20:29] <rurban> The sleeping Task which holds a proxy to the awake Task has a proxy which sleeps. A sleeping Task is still held active within the scheduler, so the Task's GC may not destroy it.
+[20:30] <rurban> src/pmc/task.pmc and src/pmc/schedule.pmc
+[20:30] <benabik> AFAICT, if there is no Task, there is no data to be shared.
+[20:31] <rurban> But sleeping Tasks are still Tasks
+[20:31] <rurban> They are not GC'ed
+[20:35] <diakopter> benabik: does this mean in order for a thread's memory to contain references (excuse me, proxies) to objects in other threads, they all must come through a Task, and then all must leave through that Task?
+[20:36] <diakopter> so a thread cannot hold onto proxies to other threads' objects between Tasks
+[20:37] <benabik> diakopter: To obtain a cross-thread reference, the object would have to be created in a Task and returned/passed to another thread, which pins it in the Task.
+[20:37] <benabik> The thread holds a list of all the tasks it owns, so GC on a thread GCs all tasks on it.
+[20:37] <benabik> (And I think Tasks are N:1 with threads.)
+[20:37] <benabik> (Each task belongs to a single thread)
+[20:43] <diakopter> I must be slow. Thread A spawns another thread. (aside: according to the pdf, only the main thread can spawn other threads).
+[20:46] <diakopter> that task contains a PMC in its *data that has references to other thread A PMCs as attributes
+[20:47] <diakopter> wait, of course this would work if only the main thread can spawn other threads, and child threads can't share data among themselves.
+[20:47] <diakopter> but I don't see how it could work otherwise
+[20:48] <benabik> Any reference to another thread's data is via a proxy.  To do otherwise involves calling evil C code.
+[20:48] <benabik> Any time a PMC tries to cross the thread barrier, it gets proxied.
+[20:49] <diakopter> so.. *all* of rakudo's references in attributes must be proxies if it wants to pass an object to another thread
+[20:49] <benabik> If it passes an object to another thread, _that object_ gets proxies, not all of its attributes.
+[20:50] <benabik> s/ies/ied/
+[20:50] <diakopter> but .. then the child thread has access to thread A's objects without going through a proxy
+[20:50] *** travis-ci joined
+[20:50] <travis-ci> [travis-ci] parrot/parrot#665 (master - 7540406 : Reini Urban): The build was broken.
+[20:50] <travis-ci> [travis-ci] Change view : https://github.com/parrot/parrot/compare/540289d6d8b7...7540406e6882
+[20:50] <travis-ci> [travis-ci] Build details : http://travis-ci.org/parrot/parrot/builds/3500306
+[20:50] *** travis-ci left
+[20:51] <benabik> $object = something-on-another-thread();  assert( $object ~~ Proxy );  Any access to that object's attributes happens only through Proxy.
+[20:52] <diakopter> so if it fetches an attribute through the proxy, the result gets proxied too?
+[20:52] <benabik> I think Proxy returns Proxies for PMC attributes.  Can't see a way to do it sanely otherwise.
+[20:54] <diakopter> how will nqp/rakudo's routines know to return proxies from its methods?
+[20:55] <benabik> $proxy.meth() causes a task to be run on the original object's thread.  The return value from that gets proxied.
+[20:56] <benabik> Although I think Rakudo does custom stuff with their Subs, I'm not sure how that would interact.
+[20:57] <rurban> Why does a thread need to access other threads data anyway? It should not do it manually at all. The owner should pass all its data down to the kids, and if the kids want to change the data, the kids need to call a sub in the owners task.
+[20:57] <benabik> This also highly implies that Tasks and their shared data never get collected.
+[20:57] <diakopter> benabik: right, that was my point
+[20:58] <diakopter> rurban: but I'm saying that *all* rakudo's method change data
+[20:58] <rurban> Yes, but only its own
+[20:59] <rurban> If you need to change lexicals from parents, go through the lexpad.pmc
+[21:02] <rurban> A method cannot change a value from another thread/Task. It must call a method in this task to change this value.
+[21:02] <diakopter> what I'm saying is why spawn a child thread if it's just going to have to call back into the parent thread for everything
+[21:02] <rurban> Because otherwise it will never be safe.
+[21:02] <rurban> And parrot threads are fast
+[21:02] <diakopter> no, I mean, what's the benefit of spawning another thread at all
+[21:03] <rurban> you are now spawing another thread. You call a method of the parents Task.
+[21:03] <rurban> There may only be one writer, but multiple readers
+[21:03] <benabik> ints, nums, and strings are passed without proxies.  Reading non-PMC attributes don't require jumping threads.
+[21:04] <diakopter> strings aren't GC'd; they're copied as value objects everywhere?
+[21:05] *** mj41 joined
+[21:05] <benabik> I don't think they're copied.  Strings are immutable so can be safely shared.
+[21:05] *** ttbot joined
+[21:08] <benabik> I haven't really looked into the implementation mind you.
+[21:10] <diakopter> my point is that once the child thread calls a method that *might* mutate an object, it has to go through the parent thread. but what if that operation *is* the entire operation you wanted the child thread to perform? the call tree will stay entirely within the parent thread anyway. so what's the benefit of spawning a child thread.
+[21:14] <benabik> Hm.  Looks like methods aren't run on the original thread, just writes.
+[21:17] <diakopter> so, back to the earlier situation of thread A spawning a child thread and passing it an object (proxied I guess) in *data, and that object has references to objects in Thread A that *aren't* proxies.
+[21:18] <diakopter> Thread A shuts down. what happens to those references?
+[21:20] <diakopter> this explains my point about why this only works if only the main thread can spawn tasks
+[21:21] <diakopter> and child tasks can't refer to each others' data, through proxies or not
+[21:21] <diakopter> it leads to a situation where no one's data can ever safely be collected if you try to do otherwise
+[21:24] <diakopter> also, how does the parent thread know that a reference returned from the child task will remain alive? if it has to call back to the child to access that data, what happens if the child's method now needs to access data from the parent?  deadlock.
+[21:24] <benabik> The limitation I'm seeing right now is just that threads can never die.  The thread has to stay alive so the tasks stay alive so that the shared data stay alive.
+[21:27] <diakopter> but threads can also never run GC
+[21:27] <benabik> The thread isn't blocked when you call off the thread.  The Task is blocked.
+[21:27] <diakopter> calling a mutate method and not knowing when it finishes isn't helpful
+[21:27] <benabik> Threads are vaguely similar to CPUs, and Tasks similar to threads.
+[21:28] <benabik> The thread can GC, but it won't GC anything that's been proxied.
+[21:28] <diakopter> but it doesn't know what's been proxied
+[21:30] <rurban> Sure it does, See the Task.pmc data
+[21:30] <benabik> Sure it does.  Proxies are created via a task.  The task has a list of all data it shared out.
+[21:33] <diakopter> nqp/rakudo doesn't just store PMCs in attributes. p6opaque stores in them arbitrary memory locations
+[21:35] <benabik> Hm.  Looks like proxies don't auto-create writers...  writes are forbidden and you have to manually do the cross-thread writes as a new task.
+[21:36] <diakopter> so all of p6opaque's getters will need to know about returning proxies, somehow
+[21:37] <benabik> The proxy would do it, I think.  Proxy calls P6Opaque's getattribute, which returns a PMC, which then gets proxies.
+[21:38] <diakopter> I don't know that p6opaque has a getattribute
+[21:39] <diakopter> I wasn't talking about calling parrot's getattribute
+[21:39] <benabik> I'm pretty sure p6opaque responded to the normal vtables.
+[21:41] <diakopter> no, all of its getters (and array/hash) are 6model methods
+[21:43] <benabik> Ah.  6mo sets up it's own vtableish structure.
+[21:45] <diakopter> yes. all of 6model's getters would need to always return proxies.
+[21:45] <rurban> benabik: writes do not create new Tasks, The writes should happen in subs calls of the Tasks which owns the data.
+[21:46] <benabik> diakopter: I think you'd be better off creating some kind of 6model wrapper for proxy that handles things appropriately.
+[21:47] <diakopter> let's say a parent passes an array to a child, and the child sticks PMCs it creates in it. how would the child know to put proxies there?
+[21:47] <benabik> The point of having the proxies is that not every object has to deal with it.
+[21:48] <benabik> How does the child add PMCs to the array?  If it tries to just call "push", it will throw an exception.
+[21:48] <benabik> If it creates writer tasks, the added PMC will get proxies.
+[21:49] <diakopter> how does arbitrary rakudo code know to create write tasks instead of calling push?
+[21:50] <benabik> Calling arbitrary code on another thread will end in tears.
+[21:50] <benabik> Unless it happens to be read-only.
+[21:50] <Coke> my impression of the question is that THREAD A owns object B; Thread C has a proxy for this and wishes to push on it.
+[21:51] <dalek> nqp-rx: c89a5b9 | rurban++ | t/nqp/67-threads.t:
+[21:51] <dalek> nqp-rx: import t/nqp/67-threads.t from parrot.git
+[21:51] <dalek> nqp-rx:
+[21:51] <dalek> nqp-rx: requires a threaded parrot
+[21:51] <dalek> nqp-rx: review: https://github.com/perl6/nqp-rx/commit/c89a5b9f7b
+[21:51] <Coke> wouldn't in that case, the proxy know what to do with the push call?
+[21:52] <diakopter> benabik: back to my question 5 min ago ( to which you replied "The point.."). I'm not talking about parrot "push". I'm talking about 6model push. on 6model array.
+[21:55] <diakopter> this basically means that 6model code can't run in child threads without always returning proxies for everything
+[21:55] <diakopter> er, stashing proxies in things like array, hash, scalar
+[21:55] <benabik> diakopter: You really really want a 6model version of prixy.
+[21:56] <diakopter> okay, then, this.
+[21:57] <diakopter> thread A creates a 6model array and passes its proxy to thread B. thread B creates a 6model array and sticks some P6int 6model objects in it. Then it sticks that array in the array from the parent.  how would the 6model code have known to put proxies in that array
+[21:58] <Coke> because the array from the parent is a proxy.
+[21:58] <diakopter> I'm talking about the array created in thread B
+[21:59] <Coke> so when it calls "push", that invokes a proxy-aware push.
+[21:59] <diakopter> how would push in thread B know to put proxies in the array created in thread B
+[21:59] <Coke> please name all your arrays so I can follow this.
+[21:59] <Coke> why would it need to? if it was created in B, and pushed in B, and not shared, why use the proxy?
+[22:00] <Coke> your cross then bit there comes when the @B is inserted into @A.
+[22:00] <Coke> @A is a proxied object, and DTRT.
+[22:00] <diakopter> thread A creates a 6model array Z and passes its proxy to thread B. thread B creates a 6model array Y and sticks some P6int 6model objects X in it. Then it sticks that array Y in the array Z from the parent.  how would the 6model code have known to put proxies in that array Y, because the parent thread needs to have proxies
+[22:01] <Coke> it didn't need them in Y, it needs them in Z.
+[22:01] <Coke> (Note for the log: I am arguing from a position of "what I've seen here on channel", not "some guy who actually read the code.")
+[22:03] <diakopter> it does need them in Y. When get(0) is called through Z's proxy, it returns the proxied Y. Then get is called on the proxied Y. it *can't* create proxies for those objects because they are not owned by that thread A
+[22:04] <diakopter> it doesn't know from which thread they came
+[22:05] <benabik> Proxy has a reference to the original thread.
+[22:06] <rurban> proxy->target is the owner
+[22:07] <diakopter> anyway, even if it knew which thread, what would it do with that information? it doesn't have proxies for the objects returned from the get() it just called on Y..
+[22:07] <Coke> I would imagine you'd have to "upgrade" Y when you insert it into a proxied object.
+[22:07] <dalek> parrot: b6f8b3f | rurban++ | ext/nqp-rx/t/nqp/ (10 files):
+[22:07] <dalek> parrot: [nqp-rx] import nqp tests from perl6/nqp.git
+[22:07] <dalek> parrot:
+[22:08] <dalek> parrot: fix she-bang also
+[22:08] <dalek> parrot: review: https://github.com/parrot/parrot/commit/b6f8b3fb4f
+[22:08] <dalek> parrot: 53cf923 | rurban++ | MANIFEST:
+[22:08] <dalek> parrot: add new ext/nqp-rx/t/nqp/*. tests to MANIFEST
+[22:08] <dalek> parrot:
+[22:08] <dalek> parrot: All tests pass
+[22:08] <dalek> parrot: review: https://github.com/parrot/parrot/commit/53cf923e27
+[22:08] <dalek> parrot: 4ba7146 | rurban++ | ChangeLog:
+[22:08] <dalek> parrot: add ChangeLog line for ext/nqp-rx tests
+[22:08] <dalek> parrot: review: https://github.com/parrot/parrot/commit/4ba7146b38
+[22:08] <Coke> so that you'd really be inserting Y'
+[22:08] <diakopter> yes I already said Y would be proxied in Z
+[22:11] <rurban> dukeleto++ for pointing me to perl6/nqp-rx.git
+[22:11] <Coke> so if a proxied z is smart enough to work cross threads, why is a proxy'd Y not?
+[22:11] <benabik> The 6model proxy needs to return proxies from appropriate places and throw exceptions else-wise.  (Or arrange for tasks to be scheduled.)
+[22:12] <diakopter> but how does it know when to proxy its returns and when not to
+[22:12] <diakopter> does it just always proxy everything?
+[22:12] <Coke> In any case, this is an excellent question and having someone show some Parrot code that makes this work would be most helpful to the discussion.
+[22:12] <benabik> Basically, yes.
+[22:13] <benabik> It looks like the default proxy errors on anything that's not find_method, which is mildly exciting.
+[22:13] <Coke> before you add it to Z, it doesn't have to proxy anything. After you add it to Z, it might have to proxy everything, yes.
+[22:14] <diakopter> okay. so we can agree that 6Proxy will need to proxy all its returns, in some cases creating proxies *for other threads* but allocated from its own memory
+[22:14] <benabik> Proxies are expected to be created cross-thread.  There's a function for it in C-land.
+[22:15] <benabik> It involves locking the other thread's GC.
+[22:15] <diakopter> ok
+[22:15] <diakopter> I'll take that as a yes :)
+[22:16] <diakopter> or are they allocated from the other thread's memory
+[22:16] <benabik> Proxied PMCs are fairly close to useless.  It looks like they're expected to only be used to find methods to create tasks with.
+[22:18] <diakopter> the problem with this 6Proxy scheme of delayed proxy creation is that the owning thread can never collect any of its objects, because they might be stashed in other proxied objects in other threads
+[22:18] <benabik> Threads as-is is a good starting point.  They have significant limitations.
+[22:18] <benabik> It can't collect anything referenced from anything that's proxied.
+[22:19] <benabik> It can collect anything else.
+[22:19] <diakopter> and it can't just keep track of everything it stashes in proxies
+[22:19] <diakopter> wait, Y isn't proxied when stuff is stashed in it
+[22:20] <diakopter> so it can't know those might be stashed in something proxied later
+[22:20] <diakopter> so again I say, threads can't ever collect anything
+[22:21] <benabik> If Y is proxied, everything it references will be pinned.
+[22:21] <benabik> That doesn't forbid anything else from being GC'd.
+[22:22] <benabik> If Y is a collection and something in it gets proxies, it will be pinned separately from Y and will stay even if Y no longer references it.
+[22:23] <benabik> GTG
+[22:26] <diakopter> "If Y is proxied, everything it references will be pinned." but what code handles this? Will 6model need to add another vtable method to report a list of what's referenced so the proxier knows what to pin?
+[22:27] <diakopter> well, we can at least agree that this can cause far more to be pinned permanently than is needed
+[22:28] <diakopter> no wait, this can't work at all.
+[22:28] <Coke> Do we still need to mark things experimental, or is the general consensus that everything not otherwise specified is experimental?
+[22:29] <diakopter> bbl
+[22:50] *** aloha joined
+[23:48] *** rurban left
+[23:55] *** schmooster joined

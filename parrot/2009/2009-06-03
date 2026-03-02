@@ -1,0 +1,668 @@
+[00:09] <afk_coke> chromatic: one thing that might be relevant is that whenever partcl makes a user-defined proc, it's really a subclass of Sub, not Sub.
+[00:09] <chromatic> afk_coke, I don't see the same problem in Tcl.  It's something specific to Rakudo.
+[00:09] <chromatic> Though there may be a similar leak in Sub invocations.
+[00:11] <Coke> ah. Well, partcl has plenty of leaks. I can post you the whole valgrind output, not just the excerpt in the ticket if you like.
+[00:13] <dalek> parrot: r39348 | allison++ | trunk/docs/pdds/pdd19_pir.pod:
+[00:13] <dalek> parrot: [pdd] Using "flag" to talk about the ':foo' subroutine feature selectors
+[00:13] <dalek> parrot: is vague, changing to the earlier term "modifier".
+[00:13] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39348/
+[00:15] <Coke> the biggest one is in IMCC.
+[00:17] <Whiteknight> allison: ping
+[00:21] *** bacek_ joined
+[00:24] <dalek> TT #733 created by jkeenan++: Branch cleanup:  pdd30install_stage4
+[00:26] <allison> Whiteknighe: yes?
+[00:26] <allison> Whiteknight, that is
+[00:39] *** Zak joined
+[00:42] * Coke sees a big commit from bacek and whips out the test.
+[00:45] * Coke wonders if chromatic's investigation of contexts was not, in fact, inspired by his bug report.
+[00:47] <bacek_> Coke: I've tested tcl before commit. It passed on my box.
+[00:47] <Coke> =-)
+[00:47] * Coke is just teasin' ya.
+[00:48] <bacek_> "test rocks" :)
+[00:48] <Coke> FYI, partcl supports 'make TEST_JOBS=3 test"
+[00:50] <bacek_> o! Good to know
+[00:51] *** Theory joined
+[00:53] <nopaste> "coke" at 72.228.52.192 pasted "memory leak in imcc:" (30 lines) at http://nopaste.snit.ch/16775
+[00:56] *** Limbic_Region joined
+[01:03] <dalek> TT #734 created by jkeenan++: Branch cleanup:  pdd30_install
+[01:08] <Whiteknight> allison: Sorry for disappearing. Are you still there?
+[01:09] <allison> Whiteknight: yup
+[01:09] <Whiteknight> hi. I wanted to run some ideas past you about the io refactors, for sanity
+[01:09] <Whiteknight> don't want to waste what little time I have chasing bad ideas
+[01:10] <allison> okay
+[01:10] <Whiteknight> you can see some of the changes in the io_rewiring branch, in src/io/api.c
+[01:10] <Whiteknight> I changed it so the PMC methods call the API functions, not the other way around
+[01:11] <Whiteknight> and we differentiate PMC types by named roles
+[01:11] <Whiteknight> so only PMCs that does "file" can do seek and peek, and tell, for instance
+[01:12] <Whiteknight> and only PMCs that does "read" can be read from, etc
+[01:12] <allison> swapping the methods to call functions makes sense
+[01:12] <allison> it's how I had it originally
+[01:13] <allison> you should definitely check with jhorwitz to make sure mod_perl still works
+[01:13] <Whiteknight> yeah, I've already seen some performance wins doing it that way, but I need to do more comprehensive profiling
+[01:13] <allison> (mod_perl was the reason I swapped them)
+[01:13] <Whiteknight> okay, I'll definitely get in touch with him then.
+[01:14] <allison> it does mean that FileHandle can't be subclassed or polymorphically substituted
+[01:14] <Whiteknight> what do you mean? I've kept subclassability in mind
+[01:14] <allison> but, on the whole I think we can just tell people to use methods on the alternate object instead of opcodes
+[01:15] <allison> well, the greatest speed gain is by having the opcodes call the functions directly
+[01:15] <allison> so, no method calls
+[01:15] <Whiteknight> it should work transparently with subclassed PMCs, but you're right that it probably can't work with polymorphic substitutes
+[01:15] <Whiteknight> right, methods might be tricky, but the opcodes should Just Work
+[01:15] <allison> it won't work with subclasses either, if they override any of the methods or vtable functions for different behavior
+[01:16] <allison> (which seems like the point of making the subclass)
+[01:16] <Whiteknight> but then again, inheriting methods is buggy for all PMC classes, so that's no issue
+[01:16] <Whiteknight> the IO API functions aren't currently relying on any VTABLEs, only specific ATTRs
+[01:16] <allison> I'm just saying, we are losing a feature, but I think it's a tolerable loss
+[01:16] <Whiteknight> so once all the ATTRs are subclasable types, it should work
+[01:17] <allison> how do the roles enter into it?
+[01:17] <Whiteknight> The roles take over where the method calls were allowing polymorphism
+[01:17] <Whiteknight> so instead of needing a "read" method in order to read, the PMC does the "read" role and can implement it however it needs
+[01:18] <allison> you're checking the role to see if it's safe to call X on the PMC?
+[01:18] <Whiteknight> yes, exactly
+[01:18] <allison> mmmm... but you're still calling a method
+[01:18] <Whiteknight> not a method, the "does" VTABLE
+[01:19] <Whiteknight> I'm absolutely avoiding all PCCINVOKE calls
+[01:19] <allison> but, "does" doesn't do anything
+[01:19] <allison> it only returns an integer value
+[01:19] <allison> so, where does the overridden behavior go?
+[01:20] <allison> you can't override a C function
+[01:20] <Whiteknight> I've updated all the IO PMCs to check capabilities in does and return 1 or 0
+[01:20] <Whiteknight> so FileHandle does("file") returns true
+[01:20] <Whiteknight> and FileHandle.does("read") returns true only if the file is opened in "r" mode
+[01:21] <allison> mmm... that's not really what roles are for
+[01:21] <Whiteknight> it's an early prototype of the idea
+[01:22] <allison> I mean, a FileHandle can always read
+[01:22] <mugwump> I think that depends on whether you consider the mode of a filehandle to be part of its type
+[01:22] <allison> it has that behavior built into it
+[01:22] <allison> so, the "read" role (if there was one) would always be composed into it, whether the read mode was "r" or "w"
+[01:22] <Whiteknight> The idea obviously needs refinement, I won't deny that.
+[01:23] <Whiteknight> maybe the world "role" is not one that I should be using for this concept
+[01:23] <allison> the general idea of providing an easy way to know what mode the filehandle is in is good
+[01:23] <Whiteknight> it's like a named capability that's implementation independent
+[01:24] <Whiteknight> and I couldn't find a VTABLE to use for the purpose that seemed any more appropriate
+[01:25] <allison> it's flags &  PIO_F_READ
+[01:25] <Whiteknight> right
+[01:25] <Whiteknight> let me look up some links for you
+[01:26] <allison> mugwump: yes it does depend on that, and no I wouldn't consider its readmode part of the type
+[01:26] <Whiteknight> https://trac.parrot.org/parrot/browser/branches/io_rewiring/src/pmc/filehandle.pmc#L101
+[01:26] <mugwump> I started once on a VFS role using moose types which considered those things part of the type, that's all
+[01:26] <Whiteknight> that's the does VTABLE in FileHandle that I added, you should see what I'm trying to do, even if I'm not doing it in the rght place
+[01:27] <mugwump> It had a certain elegance... and a complexity at the same time ;)
+[01:27] <Whiteknight> https://trac.parrot.org/parrot/browser/branches/io_rewiring/src/io/api.c#L119
+[01:27] <Whiteknight> That's the Parrot_io_open function, which does a role check to determine behavior
+[01:29] <allison> Whiteknight: mmm... I see. I was just about to say "this doesn't really solve the polymorphism problem", but it does, at least for a limited pre-defined set of classes
+[01:30] <Whiteknight> yeah, it does require that all PMCs be subclasses of a limited set of base types
+[01:30] <Whiteknight> so I'm not entirely happy about that restriction
+[01:30] <allison> the rule of thumb is, the SETATTR calls should never be used outside the .pmc file, or a dedicated supporting .c file
+[01:30] <allison> so, they can be used in src/io/filehandle.c
+[01:31] <Whiteknight> Infinoid suggested that if the PMC was an unknown type we could default back to a PCCINVOKE call
+[01:31] <allison> but not in src/io/api.c
+[01:31] <Whiteknight> and I can't rely on pmc->vtable->base_type == enum_class_FileHandle, because C-based subclasses won't have that relationship
+[01:32] <allison> so, don't try to
+[01:32] <Whiteknight> right, so there aren't a lot of other great options
+[01:32] <allison> just rip out the polymorphism entirely
+[01:32] <allison> the C I/O functions don't have to work with anything other than a FileHandle
+[01:32] <Whiteknight> whoa there killer, isn't that a little bit overboard?
+[01:33] <Whiteknight> I mean, I'll be glad to do that if needed, but how are we going to do IO in subclasses without it?
+[01:33] <allison> :) like I said, it's a feature loss, but a tolerable one
+[01:33] <allison> either we do polymorphism right (with methods), or we don't do it
+[01:34] <Whiteknight> so get rid of my eggregious abuse of roles, and just use the base_type comparisons?
+[01:34] <allison> now, we could take Infinoid's suggestion, but instead of checking a set of types, we just check for FileHandle
+[01:35] <allison> that is, if it's a filehandle, we directly manipulate it, otherwise we call the method
+[01:35] <Whiteknight> so no subtypes of it at all? subclasses would be forced to delegate?
+[01:35] <Whiteknight> oh, i see what you're saying
+[01:35] <allison> but, that might cause some problems internally
+[01:35] <Whiteknight> I'm happy enough with that, and it provides a good way to optimize IO calls still by avoiding methods in most cases
+[01:36] <allison> yes, it's the "fast by default, fancy features may slow it down" approach
+[01:37] <allison> and, yes, base_type comparisons will work fine for this (and be very fast)
+[01:38] <Whiteknight> okay, thanks for all the input!
+[01:51] <Whiteknight> goodnight
+[02:02] *** rhr joined
+[02:12] *** Theory joined
+[02:20] *** Ademan joined
+[02:30] *** darbelo joined
+[02:38] <dalek> tracwiki: v17 | coke++ | BranchDescriptions
+[02:38] <dalek> tracwiki: https://trac.parrot.org/parrot/wiki/BranchDescriptions?version=17&action=diff
+[02:41] *** payload joined
+[02:46] *** Ademan joined
+[02:48] *** janus joined
+[03:20] *** donaldh joined
+[03:25] *** zak_ joined
+[04:20] *** tetragon joined
+[04:24] *** Zak joined
+[05:05] <Coke> do parrot namespaces have the concept of "EXPORT_OK" ?
+[05:06] <Coke> (or the ability to determine the source location of imported subs?)
+[05:19] <Coke> bah. want a macro so I can say import(foo) and have it do .local pmc foo\\nfoo=get_root_global['_tcl'], 'foo'
+[05:35] <dalek> parrot: r39349 | coke++ | trunk/docs/pdds/pdd19_pir.pod:
+[05:35] <dalek> parrot: [docs] spelling error.
+[05:35] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39349/
+[05:37] <Infinoid> OH HAI
+[05:37] <Coke> ~~
+[05:38] <Infinoid> So I'm stuck in Denver.  Which means I have a little extra parrot time
+[05:38] <Infinoid> how are things?
+[05:38] <Coke> partcl's not broken yet. =-)
+[05:40] <Infinoid> I did a nice big NQP profile (from building rakudo's src/parser/actions.pm)
+[05:41] * bacek_ can help with it. I'm pretty good at breaking stuff
+[05:41] <Infinoid> turns out it spends 11% of its time in find_cclass, so I'll see if I can speed that up at all
+[05:41] <bacek_> Infinoid: switch to ucs2
+[05:42] <Infinoid> bacek_: That's in find_cclass itself, not in child functions
+[05:42] <Infinoid> the typetable[] loop iterates around 332 million times
+[05:43] <Infinoid> ... I think.  kcachegrind might be showing me the wrong sourcefile here
+[05:43] <Infinoid> (it says it's just ascii.c)
+[05:44] <Infinoid> s/ascii/fixed_8/
+[05:44] <Infinoid> (inlined)
+[05:45] <Coke> bacek_: want to fix memory leaks? =-)
+[05:48] <bacek_> Coke: easy. Later. (Not in IMCC :)
+[05:48] <Coke> there's plenty.
+[05:49] <Coke> imcc is just the biggest.
+[05:49] <Coke> http://feather.perl6.nl/~coke/valgrind_expr_t.out
+[06:00] <Infinoid> bacek_: (regarding packfile PMCs ticket) The ticket just tracks the "packfile pmcs" milestone, which is basically "get the complete pmc interface implemented, adapt everything else in parrot to use it, move the necessary chunks of code out from src/packfile.c into the pmcs themselves, then delete src/packfile.c" I think
+[06:01] <Infinoid> I'll keep ownership of it for now, figure out where we are and then document the remaining steps explicitly
+[06:01] <Infinoid> I already had this laid out in RT, but it collapsed down to one TT when I converted
+[06:02] <Infinoid> bacek++ for your great work on the packfile stuff, they're quite a bit nicer than the buggy old readonly things I originally written
+[06:02] <bacek_> Infinoid: (packfiles) ok.
+[06:03] <bacek_> They are actually useable to create PBCs from PIR. So we can reimplement IMCC in NQP
+[06:03] *** Maghnus_ joined
+[06:04] <Infinoid> That sounds great
+[06:04] <bacek_> (Instead of another bison-based parser :)
+[06:04] <Infinoid> (is pirc bison-based?)
+[06:04] <Infinoid> once the next step of the PBC milestone is defined, I will start working on implementing it if I have time
+[06:05] <Infinoid> this week is crazy for me tho, and I'm not sure how much time I'll have
+[06:05] * Infinoid <-- z
+[06:09] *** Maghnus_ joined
+[06:14] *** snarkyboojum joined
+[06:15] *** Zak joined
+[06:26] *** Zak joined
+[06:47] *** baest joined
+[07:01] *** iblechbot joined
+[07:03] *** mikehh_ joined
+[07:20] *** donaldh joined
+[07:25] *** Ademan joined
+[07:41] *** mikehh_ joined
+[07:52] <cotto> bacek_, ping
+[07:53] <bacek_> cotto: pong
+[07:54] <cotto> Feel free to take over the vtdumper actions.pm.  I've been banging my head against it without getting anywhere long enough.
+[07:55] <bacek_> ok. I tried to merge with current trunk yesterday. EPIC FAIL...
+[07:56] <cotto> That's surprising, given how few conflicts there should be.
+[07:56] <dalek> parrot: r39350 | cotto++ | branches/pmc_pct/compilers/vtdumper/src/parser/grammar.pg:
+[07:56] <dalek> parrot: [vtdumper] various grammar fixes
+[07:56] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39350/
+[07:56] <cotto> The only ones I remember were in the manifest, and that's generated anyway.
+[07:57] <cotto> I have an actions.pm to go with that grammar, but I suspect that it'll need enough changes that it's easier to start from scratch.
+[07:59] <bacek_> ok, I'll take a look
+[07:59] <cotto> Thanks.
+[08:01] *** barney joined
+[08:03] <cotto> This may be useful:
+[08:03] <nopaste> "cotto" at 96.26.202.243 pasted "notes on what vtable.tbl is used for" (6 lines) at http://nopaste.snit.ch/16776
+[08:03] <cotto> I'm off to bed.  night
+[08:08] <bacek_> cotto: g'night
+[08:16] *** mikehh_ joined
+[08:16] *** snarkyboojum joined
+[08:23] *** viklund joined
+[08:42] *** mikehh_ joined
+[09:06] *** masak joined
+[09:08] *** bacek joined
+[09:14] *** mikehh_ joined
+[09:49] *** mikehh_ joined
+[09:51] *** Maghnus_ joined
+[09:52] <dalek> parrot: r39351 | bacek++ | trunk/src/pmc/string.pmc:
+[09:52] <dalek> parrot: [pmc][cage] Fix memory leak in String.set_string_native.
+[09:52] <dalek> parrot: When we assign to constant string it means that we have to allocate string from
+[09:52] <dalek> parrot: constant pool, not to allocate constant string.
+[09:52] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39351/
+[09:53] <bacek> Coke: see! see! I've fixed one memory leak :)
+[09:58] <dalek> parrot: r39352 | bacek++ | trunk/src/oo.c:
+[09:58] <dalek> parrot: [cage] Remove ARGIN guard for INTVAL arg in get_pmc_proxy.
+[09:58] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39352/
+[10:00] *** pjcj_ joined
+[10:03] <nopaste> "bacek" at 114.73.190.38 pasted "msg Coke Small fix for partcl." (21 lines) at http://nopaste.snit.ch/16777
+[10:18] *** mikehh joined
+[10:50] *** mikehh_ joined
+[11:20] <dalek> parrot: r39353 | bacek++ | branches/tt452_reduce_mmd:
+[11:20] <dalek> parrot: Removing branch from HEAD. It useless now
+[11:20] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39353/
+[11:20] *** donaldh joined
+[11:25] <dalek> tracwiki: v18 | bacek++ | BranchDescriptions
+[11:25] <dalek> tracwiki: Remove tt452_reduce_mmd branch
+[11:25] <dalek> tracwiki: https://trac.parrot.org/parrot/wiki/BranchDescriptions?version=18&action=diff
+[11:35] <rblackwe> !twitter 110 more registrations needed to tie last years YAPC::NA.  Tell others to come to YAPC.  #yapc #perl
+[11:37] <rblackwe> oops
+[11:38] <rblackwe> Parrot Virtual Machine Workshop almost full and could use some sponsorship.
+[12:01] *** Whiteknight joined
+[12:03] <dalek> parrot: r39354 | bacek++ | trunk/lib/Parrot/Pmc2c/PMCEmitter.pm:
+[12:03] <dalek> parrot: [pmc2c][cage] Avoid useless call to VTABLE_type.
+[12:03] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39354/
+[12:09] *** burmas joined
+[12:13] <dalek> parrot: r39355 | bacek++ | branches/pmc_i_ops:
+[12:13] <dalek> parrot: Branch to reduce amount of code by reusing i_op from op
+[12:13] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39355/
+[12:14] *** burmas joined
+[12:16] *** rblackwe joined
+[12:27] *** rblackwe joined
+[12:39] *** rblackwe joined
+[12:44] <Whiteknight> irclogs?
+[12:44] <purl> i guess irclogs is http://irclog.perlgeek.de/parrot/today or see also: infrared clogs
+[13:02] *** gryphon joined
+[13:05] <dalek> TT #735 created by gerd++: path fo installed header files
+[13:17] <dalek> partcl: r415 | coke++ | trunk/runtime/builtin/while.pir:
+[13:17] <dalek> partcl: minor code cleanup
+[13:17] <dalek> partcl: - This used to be a .tmt file; some var names were never updated.
+[13:17] <dalek> partcl: review: http://code.google.com/p/partcl/source/detail?r=415
+[13:17] *** snarkyboojum joined
+[13:23] <dalek> partcl: r416 | coke++ | trunk/src/grammar/expr/past2pir.tg:
+[13:23] <dalek> partcl: use the canonical case for NaN to future proof this code.
+[13:23] <dalek> partcl: review: http://code.google.com/p/partcl/source/detail?r=416
+[13:27] <bacek> Coke: sorry for "nan". I spotted this in your code but forgot to mention in ticket.
+[13:33] *** rblackwe joined
+[13:34] <dalek> parrot: r39356 | bacek++ | trunk/lib/Parrot/Pmc2c/PMCEmitter.pm:
+[13:34] <dalek> parrot: [pmc2c] Fallback to MMD even harder from switch-based MULTI optimiser.
+[13:35] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39356/
+[13:35] <dalek> parrot: r39357 | bacek++ | branches/pmc_i_ops/src/pmc/integer.pmc:
+[13:35] <dalek> parrot: [pmc] Refactor Integer.add and subtract to use i_add and i_subtract.
+[13:35] <dalek> parrot: Also fix bugs of i_add(BigInt) and i_add(Complex).
+[13:35] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39357/
+[13:35] <dalek> parrot: r39358 | bacek++ | branches/pmc_i_ops/src/pmc/integer.pmc:
+[13:35] <dalek> parrot: [pmc] Integer: implement static function upgrade_self_to_complex.
+[13:35] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39358/
+[13:35] <dalek> parrot: r39359 | bacek++ | branches/pmc_i_ops/src/pmc/integer.pmc:
+[13:35] <dalek> parrot: [pmc] Fix Integer.i_add(Complex).
+[13:35] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39359/
+[13:35] <dalek> parrot: r39360 | bacek++ | branches/pmc_i_ops/src/pmc/integer.pmc:
+[13:35] <dalek> parrot: [pmc] Integer.multiply use i_multiply now.
+[13:35] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39360/
+[13:35] <dalek> parrot: r39361 | bacek++ | branches/pmc_i_ops/src/pmc/integer.pmc:
+[13:35] <dalek> parrot: [pmc] Integer.divide use i_divide
+[13:35] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39361/
+[13:38] <bacek> bacek@icering:~/src/parrot$ git diff master --stat
+[13:38] <bacek> src/pmc/integer.pmc |  423 ++++++++++-----------------------------------------
+[13:38] <bacek> 1 files changed, 84 insertions(+), 339 deletions(-)
+[13:38] <dalek> parrot: r39362 | bacek++ | branches/pmc_i_ops/src/pmc/integer.pmc:
+[13:38] <dalek> parrot: [pmc] Integer.floor_divide use i_floor_divide
+[13:38] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39362/
+[13:38] <dalek> parrot: r39363 | bacek++ | branches/pmc_i_ops/src/pmc/integer.pmc:
+[13:38] <dalek> parrot: [pmc] Integer.modulus use i_modulus.
+[13:38] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39363/
+[13:38] <dalek> parrot: r39364 | bacek++ | branches/pmc_i_ops/src/pmc/integer.pmc:
+[13:38] <dalek> parrot: [pmc] Use MULTI instead of handcrafted switch for is_equal
+[13:38] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39364/
+[13:38] <dalek> parrot: r39365 | bacek++ | branches/pmc_i_ops/lib/Parrot/Pmc2c/PMCEmitter.pm:
+[13:38] <dalek> parrot: [pmc2c] Fallback to MMD even harder from switch-based MULTI optimiser.
+[13:38] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39365/
+[13:38] <dalek> parrot: r39366 | bacek++ | branches/pmc_i_ops/src/pmc/integer.pmc:
+[13:38] <dalek> parrot: [pmc][cage] Use "DEFAULT value" instead of "DEFAULT *value" consistently in Integer.
+[13:38] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39366/
+[13:39] *** skids joined
+[13:40] <Whiteknight> karma bacek
+[13:40] <purl> bacek has karma of 562
+[13:40] <bacek> oh...
+[13:41] <bacek> I promise to squash commits next time before dcommit them in svn :)
+[13:44] <Infinoid> squashing them to trunk is nice for branch merges, but I don't have a problem with fine-grained commits to branches
+[13:45] <Infinoid> In fact, I prefer them, it makes them easier to review
+[13:45] <bacek> Deal :)
+[13:45] *** barney joined
+[13:46] <dalek> parrot: r39367 | bacek++ | branches/pmc_i_ops/src/pmc/integer.pmc:
+[13:46] <dalek> parrot: [pmc][cage] Remove misleading comment in Integer about using *dest.
+[13:46] <dalek> parrot: This comments cost me few hours of life. Hope this will not happen to someone else.
+[13:46] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39367/
+[13:47] <bacek> *sigh* If only someone made commit similar to r39367 couple of weeks ago...
+[13:47] <barney> bacek++
+[13:48] *** whoppix joined
+[13:48] <szbalint> trust, but verify :)
+[13:49] <bacek> this behaviour was even used in some PMCs...
+[13:51] <bacek> msg Coke Is it possible to build partcl against non-installed Parrot? It will simplify smoking of my small changes :)
+[13:51] <purl> Message for coke stored.
+[13:51] <Whiteknight> it amazes me that the dest PMC in those VTABLEs would be unue
+[13:52] <Whiteknight> unused
+[13:54] <bacek> this is current semantic...
+[13:59] *** snarkyboojum joined
+[14:01] <dalek> TT #736 created by hv++: [PATCH] icu-config emits prefix with extra newline
+[14:02] *** gryphon joined
+[14:02] <Infinoid> (#736) uh, I thought we already fixed that
+[14:13] <bacek> ok, almost bed time.
+[14:18] <dalek> TT #736 closed by Infinoid++: [PATCH] icu-config emits prefix with extra newline
+[14:19] <dalek> tracwiki: v16 | Infinoid++ | NewParrotDeveloperGuide
+[14:19] <dalek> tracwiki: Link to parrot.org download page, not parrotcode.org.  This page also needs an s/RT/Trac/
+[14:19] <dalek> tracwiki: https://trac.parrot.org/parrot/wiki/NewParrotDeveloperGuide?version=16&action=diff
+[14:31] *** Steve_H joined
+[14:39] *** Austin_Hastings joined
+[14:43] *** Theory joined
+[14:49] *** barney joined
+[14:50] *** Patterner joined
+[14:52] <dalek> partcl: r417 | coke++ | trunk/t/cmd_expr (2 files):
+[14:52] <dalek> partcl: Fold cmd_exprOld.t into cmd_expr.t
+[14:52] <dalek> partcl: - rework some tests to check values instead of STDOUT
+[14:52] <dalek> partcl: - combine some tests into loops
+[14:52] <dalek> partcl: - avoid duplicating effort with existing tests.
+[14:52] <dalek> partcl: old timings: expr.t: 23.5s, exprOld.t: 112s
+[14:52] <dalek> partcl: new timings: expr.t: 25.4s !!
+[14:52] <dalek> partcl: Takeaway: partcl(inc parrot)'s combined startup cost is VERY BIG.
+[14:52] <dalek> partcl: review: http://code.google.com/p/partcl/source/detail?r=417
+[14:59] <dalek> parrot: r39368 | NotFound++ | trunk/src/pmc/sub.pmc:
+[14:59] <dalek> parrot: [pmc] Sub self assignment protection
+[14:59] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39368/
+[15:08] *** ruoso joined
+[15:20] *** donaldh joined
+[15:32] *** Andy joined
+[15:46] *** jan joined
+[15:56] <cotto> It's so nice how GIMP changes its ui with every release.
+[15:59] <Tene> s/changes/improves/
+[16:03] <dalek> rakudo: 304ae9b | jnthn++ | t/spectest.data:
+[16:03] <dalek> rakudo: Add defer-call.t and defer-next.t to spectest.data.
+[16:03] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/304ae9b7b1d5f554b9ae1fffe59b07c111fe8b1a
+[16:03] <dalek> rakudo: 11c1c84 | jnthn++ | :
+[16:03] <dalek> rakudo: Merge branch 'master' of git@github.com:rakudo/rakudo
+[16:03] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/11c1c84f11b0ec39484cd599b9b0220b5088db8e
+[16:03] <dalek> rakudo: e5c8a34 | jnthn++ |  (2 files):
+[16:04] <dalek> rakudo: Add Temporal.pm to the setting. mberends++
+[16:04] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/e5c8a346d3cd9dc8307eccb550dcc4dc04353f4e
+[16:04] <dalek> rakudo: 12a6019 | jnthn++ | t/spectest.data:
+[16:04] <dalek> rakudo: Add temporal.t to spectest.data.
+[16:04] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/12a6019ff15d3c362f976698fd6534c124b0e8d6
+[16:22] *** Steve_H left
+[16:35] *** Psyche^ joined
+[16:39] *** Hunger joined
+[16:45] *** HG` joined
+[17:07] <dalek> parrot: r39369 | NotFound++ | trunk/src/pmc/stringhandle.pmc:
+[17:07] <dalek> parrot: [cage] cleaning and refactoring, no functional changes
+[17:07] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39369/
+[17:09] <dalek> rakudo: 05a4a1c | jnthn++ | src/parser/actions.pm:
+[17:09] <dalek> rakudo: Initial cut of giving methods and submethods a *%_ unless they already have a slurpy hash parameter, to meet Interface Consistency section of S12.
+[17:09] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/05a4a1c1594aaf8b70deea4116157e7f1fd4aabd
+[17:09] <dalek> rakudo: a17b297 | jnthn++ | src/ (2 files):
+[17:09] <dalek> rakudo: Refactor BUILD to be more in line with the spec. This should resolve the most common issues people run into.
+[17:09] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/a17b2974ef24022b58f7efd327418261dc429425
+[17:10] <dalek> partcl: r418 | coke++ | trunk/t/tcl_backslash.t:
+[17:10] <dalek> partcl: Convert test file to tcl instead of perl
+[17:10] <dalek> partcl: - cut another 30s or so from 'make test'
+[17:10] <dalek> partcl: review: http://code.google.com/p/partcl/source/detail?r=418
+[17:14] <dalek> rakudo: 7cfa196 | jnthn++ | t/spectest.data:
+[17:14] <dalek> rakudo: Add S12-construction/BUILD.t to spectest.data; we now pass all of it.
+[17:14] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/7cfa196b5367c34d97a63031c527c6465e8bbd55
+[17:15] <dalek> partcl: r419 | coke++ | trunk/t/cmd_string (2 files):
+[17:15] <dalek> partcl: merge tests (ICU is now implicitly required for partcl)
+[17:15] <dalek> partcl: - shaves another 4.5s or so off 'make test'
+[17:15] <dalek> partcl: review: http://code.google.com/p/partcl/source/detail?r=419
+[17:29] *** darbelo joined
+[17:30] <particle> 15+42+5
+[17:30] <purl> 62
+[17:43] *** estrabd joined
+[18:17] <dalek> TT #715 closed by pmichaud++: [bug] various operations create (incorrect) PMCProxy objects in HLL ...
+[18:23] <dalek> partcl: r420 | coke++ | trunk/ (4 files):
+[18:23] <dalek> partcl: Rename this file;
+[18:23] <dalek> partcl: string to list hasn't been in here for some time.
+[18:23] <dalek> partcl: review: http://code.google.com/p/partcl/source/detail?r=420
+[18:23] <dalek> partcl: r421 | coke++ | trunk/runtime/builtin/expr.pir:
+[18:23] <dalek> partcl: remove unused variables and switch to a .tailcall
+[18:23] <dalek> partcl: review: http://code.google.com/p/partcl/source/detail?r=421
+[18:23] <dalek> partcl: r422 | coke++ | trunk/runtime/builtin/ (4 files):
+[18:23] <dalek> partcl: minor code cleanups
+[18:23] <dalek> partcl: review: http://code.google.com/p/partcl/source/detail?r=422
+[18:28] *** japhb joined
+[18:37] *** iblechbot joined
+[18:48] <dalek> partcl: r423 | coke++ | trunk/runtime/builtin/incr.pir:
+[18:48] <dalek> partcl: remove unneeded clone and .sub invoke to reduce overhead
+[18:48] <dalek> partcl: rename variables and general cleanup
+[18:48] <dalek> partcl: review: http://code.google.com/p/partcl/source/detail?r=423
+[18:57] <dalek> partcl: r424 | coke++ | trunk/runtime/builtin/set.pir:
+[18:57] <dalek> partcl: big simplification, and uneeded clone removal.
+[18:57] <dalek> partcl: review: http://code.google.com/p/partcl/source/detail?r=424
+[19:02] *** Theory joined
+[19:11] *** elmex joined
+[19:13] *** Steve_H joined
+[19:15] *** Ademan joined
+[19:20] <pmichaud> cla?
+[19:20] <purl> rumour has it cla is Contributor License Agreement or http://www.perlfoundation.org/contributor_license_agreement or http://www.parrot.org/foundation/legal or http://www.parrot.org/files/parrot_cla.pdf
+[19:21] *** Austin_Hastings joined
+[19:29] *** rblackwe joined
+[19:37] <dalek> partcl: r425 | coke++ | trunk/runtime/conversions.pir:
+[19:37] <dalek> partcl: fix .sub parameter syntax
+[19:37] <dalek> partcl: (hasn't exploded yet, but that was wrong.)
+[19:37] <dalek> partcl: Courtesy bacek++
+[19:37] <dalek> partcl: review: http://code.google.com/p/partcl/source/detail?r=425
+[19:47] *** rblackwe joined
+[19:48] *** Theory joined
+[19:59] <TimToady> phone
+[20:04] <nopaste> "coke" at 65.91.151.195 pasted "anyone else think this is leaking? (not on IRC)" (43 lines) at http://nopaste.snit.ch/16780
+[20:09] <NotFound> Coke: Probably the code created by the pir compiler call is never freed.
+[20:11] *** gryphon joined
+[20:15] <dalek> markdown: cd19163 | fperrad++ | src/parser/actions.pm:
+[20:15] <dalek> markdown: update actions to use $foo.ast() instead of $($foo)
+[20:15] <dalek> markdown: review: http://github.com/fperrad/markdown/commit/cd1916319cac312f2a689043879a6972d37c1138
+[20:15] <dalek> markdown: 38b5f8f | fperrad++ | src/parser/actions.pm:
+[20:15] <dalek> markdown: clean up actions
+[20:15] <dalek> markdown: review: http://github.com/fperrad/markdown/commit/38b5f8f71e7b2c94fd43919902789f58fe839046
+[20:42] *** silug joined
+[20:46] *** rdice joined
+[20:50] *** faloee joined
+[20:53] *** gryphon joined
+[21:06] <dalek> parrot: r39370 | allison++ | branches/pcc_rewiring (12 files):
+[21:06] <dalek> parrot: [pcc_branch] Committing uncommitted changes so others can take a look
+[21:06] <dalek> parrot: (some may be reverted later).
+[21:06] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39370/
+[21:28] <dalek> rakudo: 77db80c | tene++ | src/ (2 files):
+[21:28] <dalek> rakudo: Fix loading foreign libraries.
+[21:28] <dalek> rakudo: Import the proper namespace for foreign libraries.
+[21:28] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/77db80c3fb3b9ea62b5bea058ee0316c58e87a8a
+[21:36] <nopaste> "tene" at 65.196.126.11 pasted "pmichaud... am i doing something wrong?" (12 lines) at http://nopaste.snit.ch/16781
+[21:37] <Tene> s/PCT/P6object/
+[21:38] <pmichaud> ummmmmmm
+[21:38] <Tene> alternately, can you reproduce?
+[21:38] <pmichaud> yes, I can reproduce.
+[21:39] <pmichaud> I don't know why it fails.
+[21:40] <pmichaud> oh, I know why it fails.  The sub gets run twice.
+[21:40] <pmichaud> once for :load, once for :Main
+[21:41] <pmichaud> er, :main
+[21:41] <nopaste> "tene" at 65.196.126.11 pasted "reproduced without P6object" (8 lines) at http://nopaste.snit.ch/16782
+[21:41] <Tene> ah
+[21:41] <Tene> pmichaud++
+[21:44] *** Theory joined
+[21:44] *** Limbic_Region joined
+[21:50] <jonathan> Tene: Oh! I was watching for the past on #perl6 ;-)
+[21:51] <pmichaud> #perl6 only looks to the future.  No past there.
+[21:52] <jonathan> *post :-P
+[21:52] *** Theory joined
+[22:00] *** bacek joined
+[22:18] *** japhb joined
+[22:23] *** contingencyplan joined
+[22:32] *** rg1 joined
+[22:37] <bacek> OH HAI
+[22:38] <GeJ> G'Day bacek
+[22:38] <bacek> GeJ: G'Day
+[22:38] <dalek> parrot: r39371 | bacek++ | branches/tt24_unicode_numifications (2 files):
+[22:38] <dalek> parrot: [core] Add DEPRECATED handling for non-canonical NaN and Inf.
+[22:38] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39371/
+[22:41] <bacek> Looks like it not so DEPRECATED...
+[22:44] *** snarkyboojum joined
+[22:53] *** Theory joined
+[22:53] <Austin_Hastings> Is there anything like a parrot linker?
+[22:54] <dalek> parrot: r39372 | bacek++ | branches/tt24_unicode_numifications (2 files):
+[22:54] <dalek> parrot: [core] Add support for Infinity in Str_to_num. Fix comments.
+[22:54] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39372/
+[22:56] <cotto> Austin_Hastings, you can use ./parrot -o foo.pbc a.pir b.pir c.pir
+[22:57] <Austin_Hastings> Yeah, that's what I don't want to do.
+[22:57] <pmichaud> used to be a thing called pbc_merge.  I never used it because it was so unreliable at the time (several years ago)
+[22:57] <Austin_Hastings> I found pbc_merge, but docs are a little spotty.
+[22:57] <cotto> insta-reply
+[22:57] <Austin_Hastings> wppt
+[22:57] <Austin_Hastings> *woot
+[22:58] <Austin_Hastings> Okay, new Q: Does the nqp expression PAST::Var.new(...) refer to the "class" PAST::Var or to the "namespace" PAST::Var?
+[22:58] <Austin_Hastings> And,
+[22:59] <pmichaud> at the moment, NQP thinks of PAST::Var as being the protoobject.
+[22:59] <Austin_Hastings> in general, is there an expectation that "class methods" will get a "SELF" type object referring to either the namespace or the class?
+[22:59] <pmichaud> while PAST::Var::Foo  would have PAST::Var as being the namespace containing "Foo"
+[22:59] <pmichaud> there's no expectation of a SELF in class methods.
+[23:00] <Austin_Hastings> Should there be?
+[23:00] <pmichaud> In Perl 6, there's a $?CLASS
+[23:00] <pmichaud> that is available for all methods.
+[23:00] <Austin_Hastings> Yeah, but this is #parrot.
+[23:00] <Austin_Hastings> :)
+[23:00] <pmichaud> in NQP we don't implement things until we need them.  At present, there's no $?CLASS, if we need one, submit a use case.
+[23:00] <Austin_Hastings> I'm thinking about inheritance of class methods.
+[23:00] <pmichaud> for that matter, we don't have class methods in NQP yet either :-P
+[23:01] <Austin_Hastings> (Or protoobject methods, whatever a protoobject is)
+[23:01] <pmichaud> a protoobject is an instance of the class
+[23:01] <Austin_Hastings> Okay.
+[23:01] <pmichaud> for example, with    PAST::Var.foo(...)     "self"  is PAST::Var
+[23:02] <Austin_Hastings> And "typeof self" is ?
+[23:02] <pmichaud> do you mean in PIR, or ...?
+[23:02] <Austin_Hastings> Yeah.
+[23:02] <pmichaud> currently (and this may change),   it's an anonymous class that is a subclass of PAST::Var and P6protoobject
+[23:03] <Austin_Hastings> Yikes.
+[23:03] <Austin_Hastings> I must have missed that in the code. :(
+[23:03] <Austin_Hastings> Or is that some kind of parrot magic?
+[23:03] <pmichaud> it's P6object magic.
+[23:03] <pmichaud> Essentially, a protoobject is just an instance of the class with some extra methods mixed in.
+[23:04] <Austin_Hastings> Let's back up a little bit, here.
+[23:04] *** skids joined
+[23:05] <Austin_Hastings> If I say, in PIR, $P0 = get_???_symbol [ 'PAST' ], 'Var'
+[23:05] <Austin_Hastings> what do I get in $P0?
+[23:06] <Austin_Hastings> oops. Sorry. s/get_???_symbol/get_hll_global/g
+[23:07] <pmichaud> you get the protoobject.
+[23:07] <Austin_Hastings> Okay.
+[23:08] <Austin_Hastings> And that was set up by the p6meta.new_class call?
+[23:08] <pmichaud> Yes.
+[23:09] <Austin_Hastings> So p6meta creates a class called PAST::Var, and then creates a new instance of that class, and stashes the instance in the PAST::Var global name?
+[23:09] <pmichaud> yes.
+[23:09] <pmichaud> and the instance is actually got some other stuff in it.
+[23:10] *** silug joined
+[23:10] <Austin_Hastings> So then every "class" X::Y implies a namespace X::Y. And for perl-ish classes, it implies a global symbol hll:X::Y that is a protoobject, not a class.
+[23:11] <pmichaud> the namespace is also  hll:X::Y, but yes.
+[23:11] <purl> okay, pmichaud.
+[23:12] *** tetragon joined
+[23:12] <Austin_Hastings> Okay.
+[23:12] <Austin_Hastings> Now will the protoobject respond to object method requests?
+[23:12] <pmichaud> Sure.
+[23:13] <Austin_Hastings> Okay.
+[23:13] <Austin_Hastings> By implication, then, "plain objects" will also have methods like "new" and "init" ?
+[23:13] <pmichaud> Perl 6 has "class objects", but they tend to be hidden away.
+[23:14] <pmichaud> The way that P6object is written, the "plain objects" don't get 'new' and 'init' by default.
+[23:14] <pmichaud> Those are the extra things that get mixed-in to the protoobject.
+[23:14] <Austin_Hastings> Okay. So the objects are protoobject minus some stuff.
+[23:14] <pmichaud> er, I should say "composed in" to the protoobject.
+[23:14] <pmichaud> I prefer to think of it as the protoobject being plus some stuff.
+[23:15] <pmichaud> the protoobject is a normal object, but also has 'new' methods and overrides the meaning of 'defined'
+[23:15] <Austin_Hastings> Okay. Where is that happening at object-creation time?
+[23:15] <pmichaud> (and again, that may change -- the Perl 6 meaning continues to evolve even as we speak, and those will likely be reflected in P6object at some point)
+[23:17] *** patspam joined
+[23:19] <Austin_Hastings> I see PCT::Node having 'init' and 'new' and 'clone', and I don't see any indication that "these are not object methods," so I wonder how they are being stripped off?
+[23:19] <pmichaud> They aren't stripped off.
+[23:19] <pmichaud> They're just never added.
+[23:19] <pmichaud> Here's the sequence:
+[23:19] <pmichaud> (1) we create a new PCT::Node class
+[23:19] <pmichaud> (2) we then create an anonymous class that has PCT::Node and P6protoobject as parents
+[23:20] <pmichaud> (3) the P6protoobject contains the 'new' and othe rmethods
+[23:20] <pmichaud> oh, oh oh oh
+[23:20] <pmichaud> my apologies.
+[23:20] <Austin_Hastings> (1) was in PCT::Node's "onload" sub, right?
+[23:20] <pmichaud> You're talking specifically about PCT::Node.
+[23:20] <pmichaud> I thought you were referring to P6objects in general (there was another conversation about this happening on #perl6, and I got confused).
+[23:20] <Austin_Hastings> Well, I was assuming that it was a representative example.
+[23:20] <pmichaud> Let me back up.
+[23:20] <pmichaud> It's not representative of P6object, now.
+[23:21] <pmichaud> It is representative of Perl 6, however.
+[23:21] <Austin_Hastings> Oh. Sorry.
+[23:21] <pmichaud> The methods that are defined in PCT::Node appear for both the normal objects and the protoobject.
+[23:21] <pmichaud> for example, if I have
+[23:21] <pmichaud> my $var := PAST::Var.new(...);
+[23:21] <pmichaud> then $var.new(...)  will also create a new PAST::Var object.
+[23:22] <pmichaud> because both PAST::Var and $var are instances of the PAST::Var class.
+[23:22] <Austin_Hastings> That makes sense.
+[23:22] <pmichaud> the same holds for 'init' and 'clone'
+[23:23] <pmichaud> and any other methods that we define in the PAST::Var class.  The protoobject receives them as well.
+[23:23] <pmichaud> In this case, the protoobject knows that it should accept the class's "new" in preference to its own.
+[23:23] <Austin_Hastings> The implication is that state-of-the-art P6objects won't define their own "new/init/clone" methods?
+[23:24] <pmichaud> actually, P6object does expect that many classes will define their own "new" method.
+[23:24] <pmichaud> It simply provides a "new" method on protoobjects that does the right thing for classes that don't.
+[23:24] <pmichaud> and that default "new" method does little more than create an instance of the class, iirc.  It might also bind attributes, but I don't remember if it does that or not.
+[23:25] <pmichaud> The default 'new' method simply creates a new instance of the class.  Nothing else.
+[23:25] <pmichaud> PCT::Node overrides that 'new' method to be a little more useful.
+[23:25] <Austin_Hastings> Okay.
+[23:27] <Austin_Hastings> Backing away a little bit, should a PAST generator treat PAST::VAR.new() as a function call with a namespace, or as a method call on an object?
+[23:27] <Austin_Hastings> *VAR=Var
+[23:27] <pmichaud> it's a method call, because of the dot.
+[23:27] <pmichaud> A function call would be  PAST::Var::new(....)
+[23:28] <Austin_Hastings> Alright.
+[23:28] <Austin_Hastings> And in terms of PIR, is PAST::Var::new(proto, arg1, arg2) the same as proto.new(arg1, arg2)?
+[23:29] <pmichaud> Yes, that's currently the case.
+[23:29] <pmichaud> With a big exception.
+[23:29] <pmichaud> So, I'll say "no".
+[23:29] <Austin_Hastings> But of course :>
+[23:29] <pmichaud> PAST::Var::new(proto, arg1, arg2)  looks up the subroutine called 'new' in the PAST;Var namespace and calls it.
+[23:29] <pmichaud> There are two major differences
+[23:30] <pmichaud> first, if proto is a subclass of PAST::Var, then proto.new(arg1, arg2) could call the subclass' "new" method instead of the one in PAST::Var
+[23:30] <pmichaud> (i.e., inheritance)
+[23:30] <pmichaud> PAST::Var::new(proto, arg1, arg2) would always use the 'new' that is defined in PAST::Var
+[23:31] <pmichaud> The other major difference is that at some point methods are not supposed to be automatically entered in the namespace.  This is a current parrot bug that should be fixed soon.
+[23:31] <Austin_Hastings> Hmm.
+[23:31] <pmichaud> when that happens,  PAST::Var::new might "disappear" and no longer be available as a normal sub.  In Perl 6 we would expect "is export" to be placed on the method declaration in order to make it appear.
+[23:32] <Austin_Hastings> I've already noticed a dearth of introspection stuff.
+[23:32] <pmichaud> most of that is because we're still defining the interfaces for introspection.
+[23:32] <pmichaud> And P6object, NQP, and PAST tend to work from the "don't add anything until we need it", and "try to match the Perl 6 spec as much as possible".
+[23:32] <pmichaud> Introspection in Perl 6 is very underspecified at the moent.
+[23:32] <pmichaud> *moment
+[23:33] <Austin_Hastings> Understood.
+[23:33] <purl> Understood. are you on schedule?
+[23:33] <Austin_Hastings> I'm trying to come up with some sort of #include/import/use mechanism, and poking around was quite unsatisfying.
+[23:33] <pmichaud> that's what Tene++ and I are working on at the moment.
+[23:34] <Austin_Hastings> For P6?
+[23:34] <pmichaud> We're developing a standard import/use mechanism for Parrot and parrot things that use PCT.
+[23:34] <pmichaud> yes, for P6, but it's intended to be cross-hll
+[23:34] <pmichaud> so that P6 programs could use Ruby libraries, and the like.
+[23:35] <Austin_Hastings> FWIW, I'd like to see the various packfile C functions and data rendered visible in PIR. That'd be enough, I think, to start hacking something together.
+[23:38] <pmichaud> there's a ticket and milestone to support that.
+[23:39] <pmichaud> https://trac.parrot.org/parrot/ticket/504
+[23:39] <Austin_Hastings> Checking lanes slightly, any pointers on how to go about doing #include?
+[23:39] <pmichaud> at the moment, not any good ones.  That question has come up from time to time and I've basically figured we need a preprocessor (if you're talking about doing #include like a C-style #include)
+[23:39] <pmichaud> it doesn't seem to lend itself to a 1-pass-parsing solution.
+[23:39] <bacek> hey. They are good one!
+[23:40] <Austin_Hastings> I know I'd have to boink the match object to have a new source, but is that practicable? Or is there another way?
+[23:40] <pmichaud> ...boink the match object?
+[23:40] <bacek> Packfile PMCs allow to pack/unpack PBC from PIR.
+[23:41] <pmichaud> I'd do a global match for all instances of  '^^#include ...'
+[23:41] <pmichaud> then replace each resulting match object with the text of the included file
+[23:41] <pmichaud> (the match object tells you the .from/.to locations of the original string)
+[23:41] <pmichaud> (so you can do the replacements in the original string)
+[23:42] <Austin_Hastings> Right.
+[23:42] <pmichaud> then once those replacements are done, re-parse that string.
+[23:43] <Austin_Hastings> Until the hysteresis settles..
+[23:43] <pmichaud> although... it might be possible to do one-pass manipulation of the string using action methods... I hadn't thought about that.
+[23:43] <pmichaud> That could be.... very interesting.
+[23:43] <Austin_Hastings> :)
+[23:43] <pmichaud> It might be hard to deal with #include ... that is embedded in a comment or something like that, though.
+[23:44] <Austin_Hastings> That seems a grammar problems.
+[23:44] <Austin_Hastings> *problems=problem.
+[23:44] <pmichaud> not when the two-pass solution is available, it isn't.
+[23:44] <Austin_Hastings> Which makes the "action method" approach attractive.
+[23:44] <pmichaud> I find that more of a characteristic of the language than a deficiency of the grammar.
+[23:44] <pmichaud> In other words, C defines itself in terms of a two-pass parser.  I'm not sure that the grammar should try to overcome that.
+[23:45] <Austin_Hastings> Sure.
+[23:45] <Austin_Hastings> But e.g., php doesn't.
+[23:45] <pmichaud> right, but PHP also doesn't want things like "include" to work even when embedded in comments.
+[23:45] <pmichaud> The difference is that in C
+[23:45] <pmichaud> /*  this is a comment
+[23:46] <pmichaud> #include 'foo.c'
+[23:46] <pmichaud> end of comment */
+[23:46] <pmichaud> still does the include
+[23:46] <pmichaud> (assuming it's at the beginning of the line)
+[23:46] <pmichaud> at least, I'm pretty sure that's the case.
+[23:46] <pmichaud> But in PHP,    include('foo.c')  doesn't do the include if it's embedded in a comment.
+[23:46] <pmichaud> It just ends up being a runtime-include.
+[23:46] <pmichaud> And there, the action method makes more sense.
+[23:47] <pmichaud> Thus my comment about it being a characteristic of the language instead of the grammar.
+[23:47] <pmichaud> I have to leave for dinner -- bbl.
+[23:47] <Austin_Hastings> Actually, no.
+[23:47] <Austin_Hastings> /* #include foo */ is a space after preprocessing.
+[23:47] <pmichaud> even if #include is at the beginning of a line?
+[23:48] <Austin_Hastings> Regardless.
+[23:48] <Austin_Hastings> Comments are first.
+[23:48] <pmichaud> okay, so the C pre-process honors comments.
+[23:48] <pmichaud> Good, then one-pass is no problem.
+[23:48] <Austin_Hastings> Yeah, it knows way too much.
+[23:49] <Austin_Hastings> Is there a particular action method I should look at for how something like this might be done?
+[23:49] <Austin_Hastings> Anybody already messing around with the source?
+[23:50] <pmichaud> not that I'm aware of.  I might be able to crib together an example later or tomorrow.
+[23:50] <Austin_Hastings> If you have the cycles, drop me an email. Otherwise, don't sweat it. I'll get around to it eventually.
+[23:50] <Austin_Hastings> Enjoy your dinner. :)
+[23:50] <pmichaud> I'm definitely short on cycles these days.
+[23:53] <Austin_Hastings> Good morning, Bacek.
+[23:59] * cotto kisses godaddy goodbye (except without kissing anything)

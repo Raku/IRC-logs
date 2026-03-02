@@ -1,0 +1,677 @@
+[00:00] <whiteknight> I think we can abstract the underlying threading model from HLLs pretty well
+[00:00] <whiteknight> that's precisely why I like the idea of a thread pool and dispatchable messages/tasklets
+[00:00] <whiteknight> you make tasks for the things in your program, and don't have to worry how many threads there are, or how they are implemented internally
+[00:01] <whiteknight> I absolutely do not want to expose posix threads directly
+[00:01] <whiteknight> we can build an interface that looks like posix threads on top of our system, but we need an abstraction
+[00:01] <plobsing> I absolutely do not want to care about that discussion.
+[00:02] <whiteknight> okay. shelved
+[00:02] *** _dolmen_ left
+[00:02] <plobsing> the thing about a concurrent GC (as awesome as that sounds), is that we don't have one right now.
+[00:03] <whiteknight> we also don't have threads right now to be safe with
+[00:03] <whiteknight> your zeromq bindings withstanding
+[00:03] <plobsing> and mod_parrot as well?
+[00:03] <whiteknight> do we have mod_parrot
+[00:03] <whiteknight> ?
+[00:03] <whiteknight> we *did* have it
+[00:03] <whiteknight> I can't say we do anymore
+[00:03] <plobsing> it exists in a state of disrepair, true.
+[00:04] <plobsing> but if we were to attempt to recycle or rewrite, it would be mostly pointless without thread-safety.
+[00:04] <whiteknight> as Parrot-Instrument demonstrates, if we don't have it in working order, we don't have it
+[00:05] <whiteknight> Okay. So step one is a first-pass, best effort implementation of thread safety?
+[00:05] <whiteknight> followed by threads, fixes to thread safety, and the great blue yonder?
+[00:05] <plobsing> yes, that sounds about right.
+[00:06] <whiteknight> I can find no fault there. We need to decide what our thread-safety mechanism is
+[00:06] <whiteknight> a big portion of my threading idea was the need to avoid sharing data at the user level. If we go with that, we only need to worry about securing data internally
+[00:07] <whiteknight> and if each thread gets its own read-only proxies and it's own interp/thread, we can avoid sharing data between them without messages
+[00:07] <whiteknight> so what we need is to secure the GC, and have thread-safe message mailboxes
+[00:08] <whiteknight> mailboxes can come from a library, there are plenty to choose from
+[00:08] <whiteknight> which leads us to the GC
+[00:08] <whiteknight> and maybe the solution is for us to start writing a concurrent GC core right now so we have it
+[00:09] <plobsing> we could punt and just throw in a global-allocator-lock for the moment.
+[00:09] <whiteknight> we could, but I really hate that idea
+[00:09] <whiteknight> it's just one step short of a global interpreter lock
+[00:09] *** cosimo joined
+[00:09] <plobsing> but it isn't nearly as bad because it is relinquished much more frequently
+[00:12] <plobsing> and not all of parrot's operations allocate. a fair number of them (the majority?) do, but not all.
+[00:12] <whiteknight> do we implement our own locks, which is going to require at least a CAS on every platform we support, or do we use a locking library?
+[00:13] <plobsing> we already have a lock abstraction
+[00:13] <whiteknight> barely.
+[00:13] <plobsing> and I'm generally against going lower than the platform-provided threading abstraction. requiring CAS rules out SPARC for example
+[00:13] <plobsing> at least according to liblfds
+[00:13] <whiteknight> I know what you're trying to say about how we have stuff and we don't need to start from scratch. I'm of the opinion that what we have is worse than nothing
+[00:16] <whiteknight> I'm not trying to be dismissive or pessimistic about it, I sincerely believe we can do better with a clean slate
+[00:20] <plobsing> I think there are some useful primitives out of which something that isn't quite functional has been built.
+[00:20] <plobsing> for example, the platform (pthread/win32) thread stuff is fairly vanilla.
+[00:20] <whiteknight> is it worth the effort to pick through the rubble looking for the occasional thing of value, then fixing it and applying it consistently?
+[00:21] <plobsing> there is no point rewritting something that will come out nearly identical no matter how many times you delete and rewrite
+[00:22] *** davidfetter left
+[00:23] <plobsing> you mentioned earlier that there were several good thread-safe mailbox libraries available. do you have favorites?
+[00:23] *** kid51_at_dinner is now known as kid51
+[00:23] <whiteknight> not at the moment. I haven't dug into it deeply enough into any of them to pick favorites
+[00:28] <whiteknight> My thinking has all been very preliminary so far. I wasn't expecting to do any serious work on threading until fall at the earliest
+[00:30] <plobsing> that would be an important decision, and one that can be made early-on
+[00:30] <whiteknight> I take it you are more keen to get working on this sooner rather than later?
+[00:30] <plobsing> I'm keen on getting *something* working. It doesn't have to be full, user-visisble threads.
+[00:31] <whiteknight> ok
+[00:33] <plobsing> I'd like to see Parrot useable for web applications for at least one multi-platform webserver. Apache needs threads, mongrel needs zeromq, fastcgi needs concurrency related things like sockets which we've currently implemented piecemeal.
+[00:34] <whiteknight> What I really want to do is avoid complete interp clones for each thread. I really would like to avoid that
+[00:34] <whiteknight> but I feel like breaking the interp up in the way it really needs to be is going to be a hassle
+[00:34] <whiteknight> nd it's going to require a deprecation poin
+[00:34] <whiteknight> point
+[00:34] <plobsing> once we have a coherent base, I think a lot of things will fall out as one-off projects, implementable by individuals when the motivation strikes them because the design is already there
+[00:36] <whiteknight> I like the concept. I'm having trouble getting around my own extreme demotivation to work on our current rotten threads system
+[00:38] <whiteknight> I can definitely start researching libraries
+[00:38] *** bubaflub joined
+[00:38] <whiteknight> I do have 6model pretty high up on my priorities list, but I can interleave this with that
+[00:42] <plobsing> it is important to me (which is why I've brought it up), so I'm willing to do some work on it. But I'm no architect.
+[00:43] <whiteknight> you keep saying that. You either underestimate, or misrepresent yourself, methinks
+[00:44] <whiteknight> okay. if you dust off the lock abstraction, we can find a way to fill it with working code
+[00:45] <whiteknight> apply a handful of locks to critical portions of code, then move forward from there
+[00:45] <whiteknight> sound good?
+[00:45] <plobsing> sounds good
+[00:45] <whiteknight> then we have an accord
+[00:45] <whiteknight> :)
+[00:45] <whiteknight> if we can find a portable library which implements some concurrency primitives and message passing routines, that would be a great start
+[00:46] <kid51> plobsing: Good news: tt1931-nci-parameters-deprecation has built successfully on Darwin/PPC at commit dc68cb00c10315c30fd5a7a0456a7673839e7e3d
+[00:46] <kid51> make test now running
+[00:46] <kid51> msg cotto Your LFNW slides look much better than first draft
+[00:46] <aloha> OK. I'll deliver the message.
+[00:46] <plobsing> kid51: that's great news. if I can get the PPC pass, I can get that thing merged
+[00:47] <cotto_work> kid51: thanks
+[00:47] <cotto_work> I think they're still to wordy.  I also want to try to make it easier to remember what all the various abbreviations are.
+[00:48] <kid51> plobsing: But in view of today's discussion about performance impacts, have you benchmarked this branch+Rakudo vs master+Rakudo?
+[00:49] <plobsing> kid51: I have not. I will do so.
+[00:57] * whiteknight is heading to bed
+[00:57] <whiteknight> goodnight
+[00:58] *** whiteknight left
+[00:59] <cotto_work> That seems to have gone well.
+[01:02] <atrodo> cotto_work> I actually had the pleasure of sitting with Randall Schwartz at the YAPC::NA dinner last year
+[01:05] <cotto_work> I got to hang out with him on Saturday evening too.  He's quite approachable.
+[01:09] <cotto_work> That's one of the things I like most about conferences.
+[01:10] * kid51 could have gone out drinking with Randall Schwartz tonight!
+[01:10] <kid51> But, since we were out with a leading French perlmonger last night, I took a pass.
+[01:10] <kid51> plobsing:  Getting one test failure.
+[01:12] <kid51> Hmm: In 'make test', I got this:
+[01:12] <kid51> t/compilers/pct/complete_workflow.t   Failed tests:  43-44 Non-zero exit status: 2
+[01:12] <kid51> Parse errors: Bad plan.  You planned 54 tests but ran 44
+[01:12] <kid51> But, running the file with 'prove', everything passed.
+[01:13] <kid51> http://smolder.parrot.org/app/projects/report_details/16122
+[01:19] <plobsing> this looks like more of that flaky behaviour we saw earlier when you run things under 'make'
+[01:20] <plobsing> I'm not sure what your make program is doing, but I suspect it is modifying the environment somehow
+[01:20] <kid51> I have never seen that failure before, on either box
+[01:21] <kid51> And I have never had to peek into that particular test file before, either.
+[01:21] <plobsing> src/gc/gc_gms.c:1231: failed assertion '!PObj_on_free_list_TEST(pmc) || !"Resurrecting of dead objects is not supported"'
+[01:22] <plobsing> that's the same failed assertion
+[01:22] <kid51> I'm not sure what earlier flaky behavior you are referring to.  Usually, 'make' gives me less problems than 'prove'
+[01:22] <kid51> Hmm, I didn't look at the smolder directly
+[01:23] <plobsing> the next test fails because of file not found and the whole test bails because of it. I suspect that test 43 is supposed to create a file.
+[01:23] <dalek> parrot/m0-spec: b079ec9 | cotto++ | docs/pdds/draft/pdd32_m0.pod:
+[01:23] <dalek> parrot/m0-spec: add an exception-related TODO to the M0 spec
+[01:23] <dalek> parrot/m0-spec: review: https://github.com/parrot/parrot/commit/b079ec9bf0
+[01:23] <kid51> The file consists of several blocks, and yes, files are to be created.
+[01:24] <plobsing> kid51: the flaky behaviour I was alluding to was your problems building parrot.
+[01:24] <kid51> Ah, yes.  And we've gotten that error in the past as well.
+[01:25] *** Andy joined
+[01:27] <plobsing> kid51: what type of make is it? GNU? custom apple?
+[01:37] * cotto_work decommutes
+[01:37] *** woosley joined
+[01:42] <kid51> GNU Make 3.80
+[01:42] <kid51> Bad news:  When I configure and build with all g++, 'make' fails
+[01:42] <plobsing> with?
+[01:45] <nopaste> "kid51" at 192.168.1.3 pasted "tt1931-nci-parameters-deprecation branch on Darwin/PPC: all g++ build: 'make' fails" (770 lines) at http://nopaste.snit.ch/43359
+[01:45] *** rurban_ joined
+[01:47] <plobsing> again with that failing assertion! can you run the program that failed outside of make to see if it is the make problem again?
+[01:47] *** rurban left
+[01:48] *** rurban_ is now known as rurban
+[01:48] <kid51> ./parrot-nqp --target=pir --output=compilers/opsc/gen/Ops/Compiler/Grammar.pir compilers/opsc/src/Ops/Compiler/Grammar.pm  completed
+[01:49] <kid51> IIRC, when I then called 'make' to resume the build, I got one more similar failure, treated in the same way.
+[01:49] <kid51> Yes this next failed:
+[01:49] <kid51> ./parrot-nqp --target=pir --output=compilers/opsc/gen/Ops/Trans/C.pir compilers/opsc/src/Ops/Trans/C.pm
+[01:50] <kid51> And that command also succeeded when run just on its own.
+[01:50] <kid51> This is the same version of 'make' I have used for 5 years.
+[01:51] <kid51> Configuring here with g++ foreach of cc, link and ld (my normal thing is gcc for cc, g++ for the others)
+[01:51] <kid51> And now make is continuing onward
+[01:52] <kid51> ... but I spoke too soon
+[01:52] <kid51> Failed with same error here:
+[01:52] <kid51> ./ops2c --dynamic src/dynoplibs/obscure.ops --quiet
+[01:52] *** dmalcolm left
+[01:53] <bubaflub> kid51: could it be related to the new GC failing intermittently / or when certain memory conditions are hit?
+[01:54] <kid51> On this machine, 'master' has been building with what is now default GC
+[01:55] <plobsing> bubaflub: that wouldn't explain why it consistently fails when run under make and consistently runs when run individually
+[01:55] <kid51> g++ is finding something it doesn't like that gcc apparently tolerates
+[01:55] <bubaflub> plobsing: true.
+[01:55] <kid51> So, 'make' completed -- after 3 restarts :-(
+[01:55] <bubaflub> kid51: isn't that usually pointer casts and such?  i'm not sure what would cause that assertion failure.  does it always happen in the same file / same place?
+[01:56] <bubaflub> wish i could help test but i don't have access to a PPC machine
+[01:56] <kid51> bubaflub:  Over the past week, depending on which patch plobsing has been asking me to test, we've gotten the same assertion failure in different places -- but apparently consistent re location for any one patch
+[01:57] <bubaflub> kid51: ok.
+[01:57] <kid51> Am now trying to smolder -- but going to bed soon
+[01:58] <KaeseEs> sort of a philosophical question, what's the rationale behind having (rather) high level stuff like print directly as an opcode for m0?
+[01:59] <kid51> KaeseEs: When cotto gets back from cotto_work, he'll probably be able to answer that question
+[01:59] <KaeseEs> okey dokey :)
+[02:04] <plobsing> kid51: probably not a terribly good long-term plan, but you could try commenting out the assertion and crossing your fingers
+[02:10] <dukeleto> ~~
+[02:13] <bubaflub> hola dukeleto
+[02:18] <dukeleto> bubaflub: wazzup
+[02:18] <bubaflub> dukeleto: writing a final paper, listening to the Black Keys.  you?
+[02:29] <kid51> and on this all=g++ attempt, we once again get one file failing in 'make test':
+[02:29] <kid51> http://smolder.parrot.org/app/projects/tap_stream/16127/309
+[02:30] <kid51> different file -- t/compilers/opsc/06-opsfile.t  -- but same reason:  failed assertion '!PObj_on_free_list_TEST(pmc) || !"Resurrecting of dead objects is not supported"'
+[02:30] <kid51> with that, sleep
+[02:30] *** kid51 left
+[02:30] <dukeleto> bubaflub: oooh, Black Keys is good. Trying to backlog from #ps today
+[02:31] <dukeleto> blarg
+[02:31] *** ShaneC joined
+[02:36] <atrodo> KaeseEs> the print op in m0 is suppose to be temporary, meant for bootstrapping
+[02:36] <plobsing> core.pm > core.pir timings (3-run avg) master: 367.73s tt1931: 358.69s
+[02:36] <plobsing> conclusion: no significant impact
+[02:38] <bubaflub> plobsing: you're referring to your NCI deprecations branch?
+[02:38] <plobsing> yes
+[02:38] <bubaflub> ok.
+[02:38] <plobsing> kid51 asked for benchmarking
+[02:39] *** rohit_nsit08 left
+[02:39] * dukeleto => self.nom()
+[02:43] *** ShaneC left
+[02:47] <plobsing> do we have any other PPC developpers in the Parrot community?
+[02:48] *** hudnix left
+[02:49] *** mtk0 left
+[02:51] <bubaflub> plobsing: http://trac.parrot.org/parrot/wiki/ListOfPlatforms lists only dukeleto and kid51
+[02:51] <bubaflub> best bet might be to hit the mailing list
+[02:56] *** mtk0 joined
+[03:00] *** jrt4__ joined
+[03:03] <plobsing> ping dukeleto
+[03:05] *** Andy left
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: 1149c70 | moritz++ | / (2 files):
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: Revert "now that PMCNULL is not NULL, we can update function annotations"
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation:
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: This reverts commit c1f77f7eb90041468c3b13f5b48ae2ca1d1c37a5.
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: It broke several rakudo spectests, see TT #2104
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: review: https://github.com/parrot/parrot/commit/1149c70960
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: dc5f4cf | mikehh++ | src/call/pcc.c:
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: add missing ASSERT_ARGS
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: review: https://github.com/parrot/parrot/commit/dc5f4cf819
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: cccbf37 | mikehh++ | src/debug.c:
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: add missing ASSERT_ARGS
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: review: https://github.com/parrot/parrot/commit/cccbf37e0a
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: 8b0397b | mikehh++ | src/debug.c:
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: add missing documentation
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: review: https://github.com/parrot/parrot/commit/8b0397ba97
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: e3ecaf8 | mikehh++ | src/gc/gc_ms.c:
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: add missing documentation
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: review: https://github.com/parrot/parrot/commit/e3ecaf848a
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: 56d903b | plobsing++ | / (57 files):
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: Merge branch 'master' into tt1931-nci-parameters-deprecation
+[03:09] <dalek> parrot/tt1931-nci-parameters-deprecation: review: https://github.com/parrot/parrot/commit/56d903b31a
+[03:33] *** rohit_nsit08 joined
+[03:34] *** rohit_nsit08 left
+[03:49] <bacek_at_work> seen jnthn__
+[03:49] <aloha> jnthn__ was last seen in #parrot 8 hours 39 mins ago saying "pmichaud: #phasers is on at the moment, btw :)".
+[03:50] <bacek_at_work> msg jnthn__ on which platform are you? (Related to https://gist.github.com/953615 results)
+[03:50] <aloha> OK. I'll deliver the message.
+[04:16] <cotto> ~~
+[04:19] <cotto> KaeseEs, atrodo is correct.  The ops in the "temporary" category only exist to make life easier for implementors.  Once M0 interps start to mature, we'll take them out.
+[04:19] <dukeleto> ~~
+[04:20] <KaeseEs> is it intended they get moved up to m1/m2/mX or to HLLs entirely (with some sort of 'a syscall goes here!' instr presumably left in lower levels)
+[04:21] <cotto> KaeseEs, it'll be done via the ffi ops and calls to Parrot_sprintf or something similar
+[04:22] <KaeseEs> ah-ha.
+[04:23] <cotto> That'll be the primary mechanism for interacting with any C code, wither internal to Parrot or external.
+[04:30] *** bubaflub left
+[04:47] <cotto> seen allison
+[04:47] <aloha> allison was last seen in #parrot 4 days 9 hours ago saying "Andy: sure, Ubuntu brain available for query at any time :)".
+[04:54] <dukeleto> cotto: what are you hacking on?
+[04:54] <cotto> dukeleto, sending out the pds notice
+[04:54] <cotto> followed by looking at the rakudo slowdown, followed by thinking about the structure of the M0 interp
+[04:55] <cotto> y tu?
+[04:55] <dalek> parrot-instrument: fa403a9 | dukeleto++ | LICENSE:
+[04:55] <dalek> parrot-instrument: Add a LICENSE
+[04:55] <dalek> parrot-instrument: review: https://github.com/parrot/parrot-instrument/commit/fa403a9bf7
+[04:55] <dukeleto> cotto: trying to get back on my M0 wagon
+[04:56] <dukeleto> cotto: and dealing with odd git error due to my harddrive wonking out: https://gist.github.com/954763#comments
+[04:57] <dukeleto> benabik: you got any clue how to fix https://gist.github.com/954763 ?
+[04:57] <cotto> ouch
+[04:57] <cotto> dukeleto, ssd?
+[04:57] <dukeleto> cotto: nope
+[04:57] <dukeleto> cotto: wonky normal harddrive
+[04:57] <dukeleto> cotto: but encrypted filesystems could be to blame
+[04:58] <dukeleto> cotto: encrypted filesystems do not fail gracefully when hardware goes to wonkytown
+[04:58] <cotto> you can always bundle any unpushed commits, nuke and reclone
+[04:59] <dukeleto> cotto: yep. but i am crazy enough to want to understand what is going on :)
+[04:59] <cotto> your call
+[04:59] <cotto> not sure why you'd want to try to understand what looks like a hardware failure though
+[05:00] <dukeleto> cotto: well, i feel that there should be a git util to repair this, I guess
+[05:00] <dukeleto> cotto: i want lose too much sleep over it
+[05:00] <cotto> git fsck?
+[05:00] <dukeleto> s/want/won't/
+[05:01] <dukeleto> cotto: good idea
+[05:01] <dukeleto> cotto: that seems to be doing something. genius!
+[05:01] <dukeleto> cotto: almost every other git command was erroring out
+[05:01] <dukeleto> cotto: ooh, it spit out even more mysterious junk
+[05:02] <cotto> sounds like a win
+[05:11] <benabik> dukeleto: It looks like you're missing objects.
+[05:11] <benabik> dukeleto: Did you have to kill a fetch recently?
+[05:12] <benabik> dukeleto: I'd suggest moving the pack object git was complaining about and trying fsck again.  .git/objects/pack/pack-43a2872bd320ca70652c13c47aa933d2cab5cac7.pack might be the corrupt one.
+[05:12] * benabik is going AFK again.
+[05:14] <cotto> aloha, clock?
+[05:14] <aloha> cotto: LAX: Tue, 22:14 PDT / CHI: Wed, 00:14 CDT / NYC: Wed, 01:14 EDT / UTC: Wed, 05:14 UTC / LON: Wed, 06:14 BST / BER: Wed, 07:14 CEST / TOK: Wed, 14:14 JST / SYD: Wed, 15:14 EST
+[05:17] <dukeleto> benabik: yep, tried that. no avail.
+[05:18] <cotto> what's the right rakudo-related list to send the PDS date to, if any?
+[05:21] <dukeleto> cotto: perl6-compiler
+[05:21] <dukeleto> cotto: possibly perl6-users as well
+[05:22] *** woosley1 joined
+[05:23] *** woosley left
+[05:31] *** woosley1 left
+[05:35] *** jsut joined
+[05:40] *** jsut_ left
+[05:40] <benabik> dukeleto: You could try `git prune`
+[05:41] *** birdwindupbird joined
+[05:50] *** jsut left
+[05:54] *** woosley joined
+[05:56] <cotto> dukeleto, is it a good idea to build a backup strategy around bup?
+[05:57] <dukeleto> cotto: that is what i plan to do, but haven't yet
+[05:57] <dukeleto> benabik: git prune gives the same errors :(
+[05:58] <cotto> Apparently SSDs are mostly ticking time bombs that will almost certainly self-destruct within two years or so.
+[06:01] <dukeleto> cotto: why do you say that ?
+[06:01] <dukeleto> cotto: and by self-destruct you mean lose writability and performance?
+[06:01] <dukeleto> cotto: because their failure mode is being write-only, not data loss
+[06:02] <cotto> http://news.ycombinator.com/item?id=2505700
+[06:02] <cotto> ymmv
+[06:02] <dukeleto> it always doess
+[06:02] <dukeleto> does, even
+[06:03] <dukeleto> cotto: lots of noise in that
+[06:03] <dukeleto> cotto: not quite scientific ;)
+[06:04] <cotto> dukeleto, sure.  It's a good motivation to start regular backups, even if it's a very noisy and limited data set.
+[06:04] <dukeleto> cotto: backups are always a good idea
+[06:05] <cotto> dukeleto, exactly
+[06:05] <KaeseEs> i am more skeptical than normal of anything where jeff atwood is the source
+[06:06] <cotto> KaeseEs, yeah.  codinghorror stopped being on my list of rss feeds a while ago
+[06:12] *** Andy joined
+[06:22] *** Andy left
+[06:24] <benabik> dukeleto: Try `git repack -Ad && git prune`.  It should put all "good" objects into a single pack and remove the excess.
+[06:33] *** UltraDM joined
+[06:35] *** fperrad joined
+[06:47] <dalek> parrot/tt1589_library_path: 98a30cc | dukeleto++ | / (3 files):
+[06:47] <dalek> parrot/tt1589_library_path: [t][TT #1589] Apply patch from soh_cah_toa++ with small tweaks and an extra test
+[06:47] <dalek> parrot/tt1589_library_path: review: https://github.com/parrot/parrot/commit/98a30ccf34
+[07:03] <dukeleto> benabik: alas, the same errors
+[07:05] *** theory left
+[07:15] <cotto> dukeleto, what do you think about adding a count of the number of elements in each chunk to the M0 spec?
+[07:23] *** particle1 joined
+[07:26] *** particle left
+[07:35] *** mj41 joined
+[07:44] *** spinclad left
+[07:44] *** spinclad joined
+[07:56] <dalek> parrot/m0-spec: 4b9eb13 | cotto++ | docs/pdds/draft/pdd32_m0.pod:
+[07:56] <dalek> parrot/m0-spec: add element count to all M0 chunk segments
+[07:56] <dalek> parrot/m0-spec: review: https://github.com/parrot/parrot/commit/4b9eb1356f
+[07:56] <dalek> parrot/m0-prototype: 29165dc | cotto++ | src/m0/m0_interp.pl:
+[07:56] <dalek> parrot/m0-prototype: stub out bytecode loading in the M0 interp
+[07:56] <dalek> parrot/m0-prototype: review: https://github.com/parrot/parrot/commit/29165dca7b
+[07:56] <dalek> parrot/m0-prototype: 5aad56f | cotto++ | t/m0/m0bgen.t:
+[07:56] <dalek> parrot/m0-prototype: implement element count in chunks, clean up code a bit
+[07:56] <dalek> parrot/m0-prototype: review: https://github.com/parrot/parrot/commit/5aad56f2ac
+[08:05] <dalek> parrot/m0-spec: b971810 | cotto++ | docs/pdds/draft/pdd32_m0.pod:
+[08:05] <dalek> parrot/m0-spec: specify a proper magic number, taken from PackFile_Header_validate
+[08:05] <dalek> parrot/m0-spec: review: https://github.com/parrot/parrot/commit/b9718101c5
+[08:05] <dalek> parrot/m0-prototype: 72889c0 | cotto++ | t/m0/m0bgen.t:
+[08:05] <dalek> parrot/m0-prototype: switch to new magic number for generated m0b tests
+[08:05] <dalek> parrot/m0-prototype: review: https://github.com/parrot/parrot/commit/72889c0b13
+[08:06] <cotto> definitely time for sleep.  dukeleto, comments appreciated
+[08:07] <cotto> 'night
+[08:13] <dalek> nqp: 625f17d | moritz++ | t/p6regex/rx_backtrack:
+[08:13] <dalek> nqp: [t] fix a simple backtrack test
+[08:13] <dalek> nqp: review: https://github.com/perl6/nqp/commit/625f17da0c
+[08:13] <dalek> nqp: 4b653ba | moritz++ | src/core/testing.pm:
+[08:13] <dalek> nqp: implement todo()
+[08:13] <dalek> nqp: review: https://github.com/perl6/nqp/commit/4b653ba01a
+[08:13] <dalek> nqp: 8fc008a | moritz++ | t/p6regex/01-regex.t:
+[08:13] <dalek> nqp: remove outdated comment from 01-regex.t
+[08:13] <dalek> nqp: review: https://github.com/perl6/nqp/commit/8fc008a376
+[08:16] *** cosimo left
+[08:21] <bacek> ~~
+[08:27] <dalek> nqp: de3220e | moritz++ | t/p6regex/01-regex.t (2 files):
+[08:27] <dalek> nqp: [t/p6regex] disable broken PIR script for now
+[08:27] <dalek> nqp: review: https://github.com/perl6/nqp/commit/de3220ebeb
+[08:27] <dalek> nqp: 48d0448 | moritz++ | t/p6regex/01-regex.t:
+[08:27] <dalek> nqp: [t/p6eregex] add first shot of regex test runner
+[08:27] <dalek> nqp: review: https://github.com/perl6/nqp/commit/48d0448f31
+[08:37] <dalek> nqp: b1d4c13 | moritz++ | t/p6regex/01-regex.t:
+[08:37] <dalek> nqp: [t/p6regex] start to expand backslash escapes
+[08:37] <dalek> nqp: review: https://github.com/perl6/nqp/commit/b1d4c13915
+[08:49] <dalek> nqp: 3d43ac9 | moritz++ | t/p6regex/01-regex.t:
+[08:49] <dalek> nqp: [t/p6regex] also expand \\xBEEF escapes
+[08:49] <dalek> nqp: review: https://github.com/perl6/nqp/commit/3d43ac98e4
+[08:51] *** jrt4__ left
+[09:14] *** birdwindupbird left
+[09:14] *** birdwindupbird joined
+[09:28] <dalek> nqp: 9a5e02f | moritz++ | t/p6regex/ (3 files):
+[09:28] <dalek> nqp: [t/p6regex] update error message wording
+[09:28] <dalek> nqp: review: https://github.com/perl6/nqp/commit/9a5e02fa3d
+[09:35] <dalek> nqp: 221501e | moritz++ | t/p6regex/01-regex.t:
+[09:35] <dalek> nqp: [t/p6regex] skip looping tests for now; emit late plan
+[09:35] <dalek> nqp: review: https://github.com/perl6/nqp/commit/221501e537
+[09:37] *** birdwindupbird left
+[09:38] *** birdwindupbird joined
+[09:38] *** birdwindupbird left
+[09:47] *** rurban_ joined
+[09:49] *** rurban left
+[09:49] *** rurban_ is now known as rurban
+[09:56] <dalek> nqp: f480bab | moritz++ | build/Makefile.in:
+[09:56] <dalek> nqp: [build] run p6regex tests with nqp
+[09:56] <dalek> nqp: review: https://github.com/perl6/nqp/commit/f480bab769
+[10:01] <jnthn__> ^
+[10:02] <jnthn__> msg bacek Test results came from amd64 box with 8 GB RAM, running Linux.
+[10:02] <aloha> OK. I'll deliver the message.
+[10:02] <bacek> jnthn__, aloha!
+[10:02] <jnthn__> o/ bacek :)
+[10:02] <jnthn__> Machine CPU info: Intel(R) Core(TM) i7 CPU 920 @ 2.67GHz, 8 cores
+[10:02] <bacek> jnthn__, :)
+[10:03] <bacek> looks like my investigations were correct:
+[10:03] <bacek> 32-bits: 4G is faster than 2G
+[10:03] <bacek> 64-bits: 8G is faster than 4G
+[10:03] <jnthn__> Ah. :)
+[10:03] <bacek> 4G: 32-bits is faster than 64-bits
+[10:04] * jnthn__ is happy that somebody other than pmichaud managed to get the results he was seeing
+[10:05] <dalek> nqp: 1226591 | moritz++ | build/Makefile.in:
+[10:05] <dalek> nqp: [build] use the current nqp for testing, not the installed one
+[10:05] <dalek> nqp: review: https://github.com/perl6/nqp/commit/12265913da
+[10:07] <bacek> I'm happy that I finally reproduced this slowdown. It's kinda give me ideas where to look for performance
+[10:08] *** woosley left
+[10:17] *** fperrad left
+[10:18] *** fperrad joined
+[10:36] *** mtk0 left
+[10:43] *** mtk0 joined
+[11:14] <dalek> nqp: 6b448c9 | moritz++ | build/Makefile.in:
+[11:14] <dalek> nqp: [build] fix previous commit. Where did I have my mind?
+[11:14] <dalek> nqp: review: https://github.com/perl6/nqp/commit/6b448c90c1
+[11:15] *** woosley joined
+[11:57] *** Patterner left
+[11:57] *** Psyche^ joined
+[11:57] *** Psyche^ is now known as Patterner
+[12:09] *** preflex left
+[12:09] *** Kovensky joined
+[12:12] *** preflex joined
+[12:15] *** darbelo joined
+[12:20] *** davidfetter joined
+[12:23] *** cotto_work left
+[12:31] *** Patterner left
+[12:31] *** Psyche^ joined
+[12:31] *** Psyche^ is now known as Patterner
+[12:38] *** bubaflub joined
+[12:49] *** jsut joined
+[13:17] *** bluescreen joined
+[13:24] *** whiteknight joined
+[13:26] <whiteknight> good morning, #parrot
+[13:27] <pmichaud> (SSDs from backlog)  FWIW, both my SSDs (Intel X25M and X15M) seem to be going strong
+[13:27] <bubaflub> morning dukeleto
+[13:29] <dalek> nqp: 026eb76 | moritz++ | src/HLL/Compiler.pm:
+[13:29] <dalek> nqp: start rewriting HLL::Compiler.parse in nqp
+[13:29] <dalek> nqp: review: https://github.com/perl6/nqp/commit/026eb767a2
+[13:29] <dalek> nqp: d63b1e1 | moritz++ | src/HLL/Compiler.pm:
+[13:29] <dalek> nqp: finish rewriting HLL::Compiler.parse in nqp
+[13:29] <dalek> nqp: review: https://github.com/perl6/nqp/commit/d63b1e1cca
+[13:29] <dalek> nqp: 5359d2b | moritz++ | src/stage0/ (6 files):
+[13:29] <dalek> nqp: update bootstrap
+[13:29] <dalek> nqp: review: https://github.com/perl6/nqp/commit/5359d2b87a
+[13:31] *** hudnix joined
+[13:36] <dalek> nqp: a954a63 | jonathan++ | src/ModuleLoader.pm:
+[13:36] <dalek> nqp: Make global merging slightly less dumb.
+[13:36] <dalek> nqp: review: https://github.com/perl6/nqp/commit/a954a63d18
+[13:36] <dalek> nqp: 4abbac4 | jonathan++ | src/stage0/ (6 files):
+[13:36] <dalek> nqp: Update bootstrap.
+[13:36] <dalek> nqp: review: https://github.com/perl6/nqp/commit/4abbac405e
+[14:07] *** davidfetter left
+[14:08] <tadzik> 'afternoon #parrot
+[14:15] <whiteknight> hello tadzik
+[14:21] <benabik> morning
+[14:37] *** bubaflub left
+[14:42] *** theory joined
+[14:42] *** UltraDM left
+[14:49] *** hercynium joined
+[14:58] *** bubaflub joined
+[15:31] *** dodathome joined
+[15:45] <dalek> nqp: bbd4b88 | jonathan++ | / (4 files):
+[15:45] <dalek> nqp: Factor NQP-specific bits out of HLL::SerializationContextBuilder so that we can use it also in Rakudo.
+[15:45] <dalek> nqp: review: https://github.com/perl6/nqp/commit/bbd4b886e3
+[15:45] <dalek> nqp: 120ff08 | jonathan++ | src/stage0/ (6 files):
+[15:45] <dalek> nqp: Update bootstrap.
+[15:45] <dalek> nqp: review: https://github.com/perl6/nqp/commit/120ff083db
+[16:04] *** woosley left
+[16:12] *** Andy joined
+[16:15] *** Andy left
+[16:16] <dukeleto> bubaflub: mornin'
+[16:17] *** rohit_nsit08 joined
+[16:39] *** rohit_nsit08 left
+[16:39] <dukeleto> self.blarg()
+[17:00] *** rohit_nsit08 joined
+[17:01] <whiteknight> dukeleto: ping (privmsg)
+[17:01] *** mj41 left
+[17:19] *** lucian joined
+[17:31] *** mj41 joined
+[17:31] *** benabik left
+[17:32] *** cotto_work joined
+[17:33] <cotto_work> ~~
+[17:35] <whiteknight> hello cotto_work
+[17:36] <cotto_work> hio whiteknight
+[17:40] <cotto_work> dukeleto: ping
+[17:47] *** rohit_nsit08 left
+[17:48] *** rurban_ joined
+[17:49] *** rurban left
+[17:49] *** rurban_ is now known as rurban
+[17:50] <coke_> obra++
+[17:55] *** Andy joined
+[17:55] *** Andy left
+[17:56] *** Andy joined
+[17:57] *** benabik joined
+[18:00] *** davidfetter joined
+[18:10] *** rohit_nsit08 joined
+[18:11] *** lucian left
+[18:12] *** rohit_nsit08 left
+[18:14] *** bubaflub left
+[18:15] *** lucian joined
+[18:20] *** ShaneC1 joined
+[18:50] *** bubaflub joined
+[18:51] *** lucian left
+[19:02] *** lucian joined
+[19:08] <whiteknight> http://www.modernperlbooks.com/mt/2011/05/when-you-lack-cheap-and-easy-polymorphism.html
+[19:10] <whiteknight> that post could not be more perfectly timed
+[19:11] <cotto_work> how so?
+[19:11] * cotto_work reads
+[19:11] <whiteknight> Because I was planning to write a post about upcoming 6model work where I address several of those same points
+[19:11] <cotto_work> niec
+[19:11] <cotto_work> nice
+[19:11] <whiteknight> er, I have most of a post written, I need to revise and publish it
+[19:11] <cotto_work> (or niece, if you prefer)
+[19:12] <whiteknight> I'm about 99% certain that he isn't talking to a Parrot-centric audience, so much as holding Parrot up as a [bad] example for Perl5 people to learn from
+[19:12] <whiteknight> but, we can learn from ourselves too
+[19:12] <cotto_work> we'd do well to
+[19:13] <whiteknight> the 6model stuff is just the tip of the iceberg. I'm planning a much more grandiose long-term task list for objects and PMCs
+[19:14] <whiteknight> making vtables much less expensive and making subclasses much easier to do for built-ins is a key component
+[19:14] <whiteknight> Lorito will move a long way in that direction, but I think we need to put down some foundations first
+[19:14] <cotto_work> 6model is a foundation.  Deciding what we'll actually do with it will require a lot of planning.
+[19:16] <whiteknight> yes, and there is a lot that we both need and want to do
+[19:16] <whiteknight> Fixing some of the glaring flaws in our current system is high priority
+[19:16] <whiteknight> enabling better flexibility and better features is important too
+[19:16] <cotto_work> whiteknight: one of the things dukeleto++ suggested is that we need a set of glossy brochure-type documents that quickly give people a high-level view of Parrot and its various components and plans.
+[19:16] <whiteknight> our object system has been nothing if not stagnant and disappointing until now
+[19:16] <whiteknight> cotto_work: at one point, I would have suggsted PDDs to fill that role
+[19:17] <whiteknight> I'm still not sure what role PDDs are supposed to fill
+[19:17] <cotto_work> Something like that for 6model will be necessary if we want PMC design to be an accessible process.
+[19:17] <cotto_work> maybe something like docs/glossy
+[19:19] <whiteknight> sounds good to me
+[19:20] <atrodo> I've always thought PDDs should be design documents.  Like, if we lost all our code, with the PDDs we could recreate parrot
+[19:21] <atrodo> But what cotto_work and dukeleto are suggesting is more marketing material
+[19:21] <whiteknight> atrodo: We could recreate parrot as it currently stands if about half those PDDs said nothing besides "Do this as poorly as possible"
+[19:21] <whiteknight> no, that's harsh
+[19:21] <whiteknight> but there are a handful of systems where that is reality
+[19:21] *** kid51 joined
+[19:23] <atrodo> whiteknight> I agree.  But that's reality versus theory
+[19:24] <whiteknight> atrodo: that's as good an idea for PDDs as any. What PDDs really need is a purpose, any purpose. Once we have that we can rewrite them to actually meet that purpose
+[19:24] <whiteknight> because most PDDs are in severe need of a rewrite
+[19:25] <cotto_work> PDD0 says it defines the purpose.
+[19:25] <kid51> at least it indicates that chromatic is still *thinking* about Parrot :-)
+[19:25] <whiteknight> I think we really need to move a handful of PDDs back into draft/ and start serious rewrites on them
+[19:26] <tadzik> did he leave just after the "Rakudo will target multiple VMs" mess?
+[19:26] <whiteknight> PDDs 10, 15, 17, 20, 21, 23, 24 and 25 all come to mind as needing major review/revision in the coming months
+[19:26] <cotto_work> tadzik: I don't think he left as much as got really busy with other things.
+[19:26] <atrodo> my understanding was that he got real busy with a job
+[19:27] <tadzik> I see
+[19:27] <whiteknight> it probably didn't hurt to take some time and blow off some steam
+[19:27] <whiteknight> I would also like to get together with plobsing one day and go over PDDs 13 and 16 with a fine-toothed comb
+[19:28] <kid51> He should link that to planet.parrotcode.org
+[19:28] <whiteknight> If we set up the PDDs as the ideal towards which we are constantly striving, that would be a good step. Because then when PDD did not match reality, we would be able to say conclusively that reality is wrong
+[19:31] <atrodo> chromatic++
+[19:32] <whiteknight> of course, that would require bumping all PDDs back to draft, and only releasing them when they sufficiently describe what we want, not what we have or had or never wanted
+[19:32] <whiteknight> in fact, maybe I'll set up a branch to do just that
+[19:32] <cotto_work> whiteknight++
+[19:32] <atrodo> whiteknight++
+[19:33] <whiteknight> cotto_work: don't ++ me just yet. You're going to be on the hook for a lot of the work too!
+[19:33] <whiteknight> :)
+[19:33] <cotto_work> then cotto++ too
+[19:33] <atrodo> cotto++
+[19:33] <cotto_work> I'm sure he'll be helpful.
+[19:33] <atrodo> he has no choice at this point
+[19:33] <whiteknight> we need an architect astronaut to help hand down the lofty designs
+[19:34] <atrodo> not being around means being volunteered
+[19:34] <cotto_work> atrodo: good point
+[19:34] <atrodo> (which is why there is not atrodo_work)
+[19:34] <whiteknight> let's volunteer atrodo_work for some stuff too
+[19:34] <whiteknight> get his lazy ass in here cleaning things up
+[19:35] <whiteknight> :)
+[19:35] *** atrodo_work joined
+[19:35] * atrodo_work unvolunteers himself
+[19:36] *** atrodo_work left
+[19:36] <cotto_work> I guess that's settled.
+[19:37] <kid51> whiteknight: If we set ourselves an objective of having an East Coast Parrot Developers Gathering, then perhaps plobsing could come down from Ontario to attend
+[19:37] <kid51> afk
+[19:39] <whiteknight> is that where he lives? I wasn't aware of that
+[19:39] *** benabik left
+[19:39] <whiteknight> Where in Ontario?
+[19:40] <cotto_work> whitehorse, yukon iirc
+[19:42] <whiteknight> yeah, that's nowhere near Ontario or the east coast
+[19:42] <cotto_work> or anything, really
+[19:44] <whiteknight> with the first million dollars the PaFo takes in, I say we hold a conference somewhere sunny and fly him in for the week
+[19:44] <whiteknight> with the second million, we can meet bacek in person and buy him a beer
+[19:45] <whiteknight> and with each subsequent million each each get gold-plated laptops
+[19:45] <atrodo> whiteknight++ # Fiscal responsibility
+[19:47] <whiteknight> if watching celebrities and wallstreet executives on the news has taught me nothing, it's that when you have a lot of money you should waste it in frivolous and border-line criminal ways
+[19:47] <whiteknight> and if you can't trust celebrities and wallstreet executives, who can you trust?
+[19:47] <atrodo> hobos?
+[19:50] *** benabik joined
+[19:50] <cotto_work> at lfnw, dukeleto chatted with Bradley Kuhn about getting Parrot into the Software Freedom Conservancy.  It sounded like it'd be a really nice way to let a pro do the mundane work if PaFo can get its 501(c)(3) status back.
+[19:55] <whiteknight> We never were 501(c)(3)
+[19:55] <whiteknight> but yes, it's an option we've been looking at
+[19:55] <cotto_work> I thought we were but lost it.
+[19:56] <whiteknight> there is a grace period between the time when you incorporate and the time when you become 501(c)(3). If you get the status during the grace period, donations prior to that are exempt retroactively
+[19:56] <whiteknight> we missed the grace period, so we are not and never were
+[20:00] *** benabik left
+[20:02] *** darbelo left
+[20:02] *** darbelo joined
+[20:05] *** hercynium left
+[20:05] *** hercynium joined
+[20:08] *** perlite_ joined
+[20:08] *** utsl left
+[20:08] *** utsl joined
+[20:11] *** perlite left
+[20:12] *** perlite_ is now known as perlite
+[20:17] *** hercynium left
+[20:23] <pmichaud> (east-coast parrot gathering):  fwiw, I'm tentatively expecting to attend fosscon in Philadelphia on July 23.  Maybe we could have a meetup then/there.  Also, perhaps there should be a talk about Parrot there.  (http://fosscon.org/)
+[20:23] <pmichaud> I can submit one if nobody else thinks they'll be able to do so.
+[20:24] <whiteknight> I've been on the fence about it
+[20:25] <whiteknight> but if I know other parroteers are heading that way, maybe I'll think harder about it
+[20:25] <pmichaud> where's the doodle poll for PDS?
+[20:26] <whiteknight> cotto took it down. Sent out results in an email
+[20:26] <pmichaud> email says:  "If you're not
+[20:26] <pmichaud> sure what time that is for you, check the following table or look at
+[20:26] <pmichaud> the doodle and set your timezone:
+[20:26] <pmichaud> "
+[20:26] <kid51> (but I think there were some errors in the UTC listed)
+[20:26] <pmichaud> so I was wanting to look at the doodle
+[20:27] <pmichaud> (to try to tease out the actual UTC/time)
+[20:27] <pmichaud> kid51++ for noticing the error :)
+[20:27] * kid51 actually compounded the error in response ... so we need a follow-up from cotto
+[20:29] <kid51> pmichaud: If you attend on Sat July 23, that will be strong incentive for me to attend as well.
+[20:29] <pmichaud> kid51: I'll let you know asap if I'm a confirmed attendee
+[20:29] <pmichaud> I'm also planning to stay a day either side of the conference to be able to meet with others
+[20:29] <pmichaud> (and if nobody's available to meet, it's my first trip to philly so I'll sightsee :)
+[20:30] <Andy> pmichaud: Do you need MX records for rakudo.org?
+[20:30] <kid51> whiteknight lives north of Phila.  former contributors Infinoid and austin_hastings and jhorwitz are in that area; one GSOCer is in northern NJ.
+[20:30] <Andy> Is anybody going to be getting mail at that address?
+[20:30] <pmichaud> Andy: ...I don't think anyone will be getting mail there.
+[20:30] <Andy> I doubt it, too.
+[20:31] <pmichaud> if we decide to set up incoming mail there I'll email you about the mx record
+[20:31] <pmichaud> of course, it doesn't hurt to go ahead and add the mx record if you wish :)
+[20:31] <cotto_work> whiteknight: I didn't take it down.  I marked the date and closed it to further voting.
+[20:32] <cotto_work> kid51: the funny thing is that I spent 10 minute just trying to double-check the dates.
+[20:32] <cotto_work> pmichaud: http://www.doodle.com/nf5cip2yrt6a448d#table
+[20:33] *** jsut_ joined
+[20:33] <pmichaud> cotto_work++ # thanks
+[20:34] <pmichaud> doodle says that's 2100 UTC on the 14th  :-)
+[20:34] *** whiteknight left
+[20:34] <cotto_work> ignore anything I say and go with the doodle
+[20:34] <cotto_work> including this
+[20:35] <cotto_work> I
+[20:35] <cotto_work> I'll send out a clarification in  a few minutes
+[20:35] * pmichaud adds the event to his calendar, in case he can make it.
+[20:36] *** lucian_ joined
+[20:37] *** jsut left
+[20:41] *** lucian left
+[20:41] *** dodathome left
+[20:42] <cotto_work> sent
+[20:42] *** jevin left
+[20:44] *** jevin joined
+[21:05] *** benabik joined
+[21:10] *** benabik left
+[21:12] *** davidfetter left
+[21:21] *** ShaneC1 left
+[21:25] *** fperrad left
+[21:26] *** davidfetter joined
+[21:27] *** kid51 left
+[21:37] *** theory left
+[21:48] <cotto_work> pmichaud: fosscon will look more interesting with you there.  I'll have to look into it more.
+[21:49] *** mj41 left
+[21:51] <cotto_work> I've avoided it so far because the conf's site because they don't have any list of proposed talks so I don't have much idea of who's been applying.
+[21:55] *** bluescreen left
+[21:58] *** whiteknight joined
+[21:59] *** benabik joined
+[22:03] *** darbelo_ joined
+[22:08] *** darbelo left
+[22:11] *** arnsholt_ left
+[22:12] <pmichaud> bacek: ping
+[22:12] <bacek> pmichaud, pong.
+[22:12] <pmichaud> do you want me to patch 3.3 or the current master?
+[22:13] <bacek> 3.3
+[22:13] <pmichaud> okay, will do
+[22:13] <bacek> It should apply clearly
+[22:13] <pmichaud> will let you know when I have results
+[22:13] <bacek> ok, thanks!
+[22:15] *** arnsholt joined
+[22:15] <bacek> afk # $dayjob
+[22:22] <bacek> pmichaud, jfyi looks like ms2 behave much better on "fragmented memory". Hopefully is_ptr.patch can improve gms
+[22:23] * bacek is really afk
+[22:35] *** Andy left
+[22:36] *** lucian_ left
+[22:36] <coke_> Seen Andy?
+[22:36] <aloha> Andy was last seen in #parrot 2 hours 6 mins ago saying "I doubt it, too.".
+[22:37] *** Andy joined
+[22:38] <coke_> seen mj41?
+[22:38] <aloha> mj41 was last seen in #perl6 5 hours 6 mins ago joining the channel.
+[22:39] <coke_> pmichaud: oooh. perhaps I'll ditch yapc and go to fosscon, then.
+[22:40] <coke_> msg mj41 I cannot run my taptinder client anymore. "bad login or password".
+[22:40] <aloha> OK. I'll deliver the message.
+[22:40] <coke_> msg mj41 probably been dead for ages, I haven't checked.
+[22:40] <aloha> OK. I'll deliver the message.
+[22:41] <Coke> Oh, hey, here I am.
+[22:41] *** coke_ left
+[22:41] *** bubaflub left
+[22:59] *** Andy left
+[23:03] *** Coke left
+[23:06] *** Coke joined
+[23:09] *** theory joined
+[23:11] *** Coke left
+[23:14] *** Coke joined
+[23:19] *** Coke left
+[23:22] *** Coke joined
+[23:32] *** theory_ joined
+[23:35] *** theory left
+[23:35] *** theory_ is now known as theory
+[23:48] *** darbelo_ left

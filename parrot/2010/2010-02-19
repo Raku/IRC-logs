@@ -1,0 +1,1504 @@
+[00:00] <chromatic> I made Rakudo use some constant strings where it could and it ran *slower* because of the cost of looking things up in hashes.
+[00:00] <Whiteknight> so it's good enough for PMCs, but not good enough for your precious hashes?
+[00:01] <cotto_work> Is this something that can or should become pluggable?
+[00:01] <chromatic> Imagine a hash with poor hashing properties and a few thousand entries.
+[00:02] <chromatic> 11.15% of the execution time is in parrot_hash_get_bucket() and its calls; 4.78% of that time is the function itself.
+[00:03] <Whiteknight> oi
+[00:03] <chromatic> Yeah, C is not the right language for efficient polymorphism.
+[00:03] <chromatic> I want to find everyone who says "Just write it in C!  That's faster!" and rub their noses in this code.
+[00:04] <dukeleto> chromatic: please do.
+[00:04] <Whiteknight> it can be, if you're willing to jump through discusting loops
+[00:04] <Whiteknight> disgusting*
+[00:04] <chromatic> This code would be faster in C++.
+[00:04] <chromatic> Probably simpler.
+[00:04] <chromatic> And I'm not a fan of C++.
+[00:05] <Whiteknight> C++ would likely be doing it all with indirect fnction calls too
+[00:05] <kthakore> chromatic++
+[00:05] <chromatic> If we had classes of specific hash implementations, C++ could optimize those into known targets.
+[00:05] <Coke> it's not parrot-dev@perl.org
+[00:05] <snarkyboojum> is C++ just short for chromatic++ (sorry couldn't help myself)
+[00:06] <Whiteknight> chromatic: we could do that too with a switch over the known hash types
+[00:06] <Whiteknight> a good compiler would reduce that to a tight jump table with basic bounds-checking
+[00:06] <Whiteknight> no worse than what C++ would do
+[00:06] <cotto_work> chromatic, what code are you running that exhibits this behavior?
+[00:07] <Coke> chromatic: you are just now noticing the time spent in hash? =-)
+[00:07] <Whiteknight> well, minus the bounds checking maybe if the types were known
+[00:07] <chromatic> cotto_work, pretty much anything Rakudo does.
+[00:07] <Coke> I recall complaining about that when partcl was in diapers.
+[00:07] <cotto_work> wfm
+[00:07] <chromatic> Anything that calls a lot of methods by name or accesses object attributes.
+[00:08] <chromatic> Even two new hash types would be fine: PMC keyed by STRING and STRING keyed by STRING.
+[00:08] <chromatic> I'm sure we could at least double their speed.
+[00:08] *** snarkyboojum_ joined
+[00:10] *** payload joined
+[00:10] <chromatic> Though I also ponder a way to make compile-time constant STRINGs available to external libraries somehow at their own compile time.
+[00:12] <Whiteknight> would require completely redoing the way constants are handled at compile time
+[00:13] <Whiteknight> and making the string const'er much smarter
+[00:20] <Coke> can someone upload that tarball?
+[00:20] <cotto_work> yup
+[00:20] <cotto_work> the one you posted a while ago?
+[00:22] <Coke> yup
+[00:23] <Coke> if you have a feather account, ~coke/public_html
+[00:24] <cotto_work> done
+[00:24] <Coke> ok. some kid time, then I'll put the announcement together.
+[00:24] <cotto_work> md5sum fee8e22fad229fdc493431a2b75f038d
+[00:25] <Coke> we should start putting those in the release announcements.
+[00:29] <chromatic> A smarter STRING constant system would be nice.
+[00:30] <chromatic> Even a tree instead of the C string pointer hash.
+[00:43] <dalek> rakudo/master: e4cdb5b | (Martin Berends)++ |  (2 files):
+[00:43] <dalek> rakudo/master: [build/PARROT_REVISION] tentatively set to 44147 2.1.0
+[00:43] <dalek> rakudo/master: review: http://github.com/rakudo/rakudo/commit/e4cdb5b38c98cc820f8f08992ae5d0444547be56
+[00:44] <Whiteknight> how do the CONST_STRINGS work now? I'm not even entirely sure about it
+[00:46] <chromatic> They get stuffed into a table in the interpreter, then they get stored in a cache (C string keyed hash) at startup.
+[00:47] <Whiteknight> where is the CONST_STRING() call converted into a lookup into that hash?
+[00:48] <plobsing> Whiteknight: the macro is defined in every .str file I've seen
+[00:48] <Whiteknight> ah, nevermind. I see that now
+[00:48] <Whiteknight> well, that's shitty McShit
+[00:49] <plobsing> chromatic: It's a hash? I thought it used an array
+[00:49] <plobsing> why does it use all those integer constants?
+[00:52] <cotto_work> The CONST_STRING macro uses the source code line number as an index, plus some perly magic to map between duplicate strings.
+[00:52] *** abqar joined
+[00:52] <cotto_work> maybe
+[00:53] <cotto_work> It's an odd system.
+[00:56] <Whiteknight> extremely odd
+[00:56] <Whiteknight> and wasteful
+[00:56] <cotto_work> I smell a branch.
+[00:57] <plobsing> I don't seen how it is wasteful. It just seems awkward to me.
+[00:57] <Whiteknight> I can't imagine why they would need to be in a hash.
+[00:57] <plobsing> I'm certain it uses an array.
+[00:57] <chromatic> It's both.
+[00:57] <cotto_work> I agree on not seeing the wastefulness, but it's definitely odd enough to be questionable.
+[00:57] <Whiteknight> that's twice as bad
+[00:57] <chromatic> The hash is so that dynpmcs and dynops can access the constant strings with Parrot_str_new_constant().
+[00:58] <chromatic> Also other parts of Parrot that can't build them into the interpreter.
+[00:58] <plobsing> oic that now
+[00:58] <Whiteknight> it's wasteful because you're using a Hash and apparently also an array to hold the strings
+[00:58] <Whiteknight> and you're wasting cycles looking them up
+[00:58] <cotto_work> ok
+[00:58] <Whiteknight> you could put the constants in the data section easily by converting CONST_STRING macros to STRING literal constants
+[00:58] <cotto_work> plus it's an extra step per file in the build process
+[00:59] <Whiteknight> STRING _<FILENAME>_<LINE> = {"whatever", ....}
+[00:59] <chromatic> Right, we can *probably* get away with making them literal constants.
+[00:59] <Whiteknight> more steps during the build isn't a bad thing, if it saves at runtime
+[01:00] <Whiteknight> chromatic: I think we can, and any concessions we need to make would be well worth it in terms of amortized performance costs
+[01:00] <chromatic> The problem is STRING encoding autoconversion and any hashing changes.
+[01:11] <dalek> parrot: r44149 | coke++ | tags/RELEASE_2_1_1:
+[01:12] <dalek> parrot: Tag the 2.1.1 release
+[01:12] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44149/
+[01:12] <dalek> parrot: r44150 | plobsing++ | trunk (14 files):
+[01:12] <dalek> parrot: convert from nativecall.pl to nativecall.pir
+[01:12] <purl> I don't know how to convert from nativecall.pl to nativecall.pir.
+[01:12] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44150/
+[01:14] <shockwave> msg shockwave hi
+[01:14] <purl> Message for shockwave stored.
+[01:14] <Whiteknight> chromatic: solvable by COW references quite easily
+[01:15] <davidfetter> mmmmuuurrrrrr
+[01:15] <shockwave> msg dukeleto Thanks for the float precision tip. The code is working great.
+[01:15] <purl> Message for dukeleto stored.
+[01:15] <davidfetter> wait. what kind of cow?
+[01:16] <cotto_work> not the type you referred to
+[01:16] <plobsing> davidfetter: the very stringy kind
+[01:16] <Coke> hey, crow is still borked.
+[01:16] * davidfetter prefers tender
+[01:17] <Coke> oh, look it's due to the data_json switchover.
+[01:28] <dalek> parrot: r44151 | plobsing++ | trunk (9 files):
+[01:28] <dalek> parrot: remove tools/build/nativecall.pl, associated config step, and tests
+[01:28] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44151/
+[01:33] *** darbelo joined
+[01:34] <cotto_work> chromatic, do we want to have a pluggable hashing algorithm or do we just want to find a better one to replace what we're using now?
+[01:36] <Coke> you don't need it pluggable until you have /2/ good ones. yes?
+[01:36] <Coke> so that's /2/ algorithms we need to find before that's an issue. =-)
+[01:36] * Coke manages to work in a quote from the best movie of all time into the release news.
+[01:38] <Coke> btw, subversion is now an apache project. updating the link in the 2.1.1 release announcement.
+[01:39] * cotto_work looks forward to the movie quote
+[01:42] * kthakore is wondering about the movie quote too!
+[01:45] <Coke> I'm just going to email parrot* and perl* on this one. others are free to spread the joy if they want.
+[01:51] *** darbelo joined
+[01:55] <kthakore> Coke: army of darkness is a good movie?
+[01:55] <Coke> kthakore: ... get off my lawn.
+[01:55] <kthakore> Coke: heheh
+[01:55] <kthakore> Coke: no I didn't mean like that
+[01:55] <Coke> kthakore: This.... IS MY BOOMSTICK.
+[01:55] <kthakore> Coke: um ... oh yeah!!!!
+[01:55] <kthakore> I remember this movie now
+[01:55] <kthakore> heheh
+[01:56] <Coke> Yes. it is awesome schlock.
+[01:56] <kthakore> I love the night of evil though
+[01:56] <kthakore> night of evil?
+[01:56] <Coke> release is done.
+[01:56] <dalek> website: coke++ | Parrot 2.1.1 Released!
+[01:56] <dalek> website: http://www.parrot.org/news/2010/Parrot-2.1.1
+[01:56] <kthakore> which is the one with the hand in the woods?
+[01:57] <kthakore> Night of The Evil Dead
+[02:00] <Coke> I have all 3 on dvd. I'm ashamed to say I only ever watched AoD all the way through.
+[02:01] <dalek> parrot: r44152 | plobsing++ | trunk (8 files):
+[02:01] <dalek> parrot: remove references to now non-existant src/call_list.txt
+[02:01] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44152/
+[02:01] <Coke> plobsing: are you working off a ticket there?
+[02:02] <plobsing> Coke: mostly off of what I put up on the wiki
+[02:03] <plobsing> NCITasklist
+[02:10] *** darbelo joined
+[02:13] <Coke> ok. I saw you rip out a lot of stuff; just wondering if that lost any functionality.
+[02:13] <plobsing> Coke: no, that's a result of a re-write in PIR
+[02:13] <plobsing> and also moving things around so we no longer need it in a configure step
+[02:13] <Coke> ok.
+[02:14] *** particle1 joined
+[02:19] *** pmichaud joined
+[02:19] *** dukeleto_ joined
+[02:19] <plobsing> who should I talk to about dead code in pmc2c?
+[02:20] *** Coke joined
+[02:20] *** dalek joined
+[02:23] <cotto> plobsing, what's dead
+[02:23] <plobsing> cotto: there's code that maps PMC methods to NCI signatures. pmc2c now generates PCC boilerplate itself.
+[02:24] <plobsing> I deleted the code and everything still builds fine
+[02:24] <cotto> Do you feel ok ripping it out?
+[02:24] <cotto> and committing the change?
+[02:24] <plobsing> committing now
+[02:24] <Whiteknight> MURDER DEATH KILL!!!
+[02:24] *** PerlJam joined
+[02:25] *** Util joined
+[02:25] <cotto> Whiteknight, how do you really feel?  There's no need to hold back.
+[02:28] <nopaste> "NotFound" at 213.96.228.50 pasted "Avoid duplicate strings in pbc constant table" (44 lines) at http://nopaste.snit.ch/19703
+[02:29] <NotFound> What do you think? A bit more compiling time, a lot less space.
+[02:30] <Whiteknight> NotFound, if you can turn it off, +1
+[02:31] <Coke> NotFound: what about a way to do it in a separate pass?
+[02:31] <Coke> like a pbc_cleanup or something.
+[02:31] *** moderator changes topic to: Parrot 2.1.1 Released! | http://parrot.org/ | Tasks: PCC deprecations branch, HLL subclassing and MMD branch
+[02:32] <NotFound> Coke: it can be hard to locate all usages in the bytecode, but doable.
+[02:33] <chromatic> cotto, one good hashing algorithm would be nice.  Premature pluggability isn't our friend.
+[02:34] <NotFound> Whiteknight: hard to tell, my imcc ability is limited.
+[02:34] <chromatic> NotFound, can we get that benchmarked?
+[02:34] <Whiteknight> imcc is limited
+[02:35] <NotFound> You know I sucks benchmarking
+[02:36] <Whiteknight> command-line switches to turn on and off various optimizations is common among compilers
+[02:36] <dalek> parrot: r44153 | plobsing++ | trunk/lib/Parrot/Pmc2c (2 files):
+[02:36] <dalek> parrot: remove dead proto methods (unused since at least pcc refactor)
+[02:36] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44153/
+[02:36] <cotto> chromatic, ok
+[02:38] <NotFound> Maybe is better to wait until imcc gets replaced.
+[02:39] <chromatic> Checking size with and without that patch would work.
+[02:39] <NotFound> Thats easy... one moment.
+[02:41] <Whiteknight> depends on the program
+[02:42] <cotto> Whiteknight, I think you'll like this
+[02:42] <NotFound> winxedst2.pbc without the patch: 489536 with the patch: 452496
+[02:43] <Whiteknight> not bad
+[02:43] <chromatic> 7.566%
+[02:43] <purl> 0.07566
+[02:43] <chromatic> Would be nice to see Rakudo with and without.
+[02:44] <NotFound> The pir has 19323 lines
+[02:45] <NotFound> Too much work for me right now, must sleep :O
+[02:45] <chromatic> I'll try it on Rakudo.
+[02:45] <cotto> nice patch
+[02:52] <dalek> parrot: r44154 | plobsing++ | trunk/config/gen/makefiles/root.in:
+[02:52] <dalek> parrot: correctly classify configure-time generated opengl files to be able to build after 'make clean'
+[02:52] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44154/
+[02:52] <dalek> parrot: r44155 | cotto++ | trunk (2 files):
+[02:52] <dalek> parrot: [oplib] add a VTABLE function to oplib, use it in make_hello_pbc instead of magic numbers
+[02:52] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44155/
+[02:52] <dalek> parrot: r44156 | plobsing++ | branches/opengl_dynamic_nci:
+[02:52] <dalek> parrot: branch has been merged into trunk
+[02:52] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44156/
+[03:07] <kid51> FWIW:  I just realized I got this failing smolder last night in the pcc_reorder_results branch at r44129:  http://smolder.plusthree.com/app/projects/report_details/32252
+[03:07] <kid51> trunk okay at r 44156
+[03:07] <chromatic> Looks like a realclean/reconfigure.
+[03:08] *** jsut joined
+[03:08] <chromatic> Unless that branch needs to pull a packfile update from trunk.
+[03:08] <kid51> Perhaps.  I did it in a screen session and went to bed before checking results.
+[03:13] <bacek_at_work> cotto++ # r44155
+[03:13] <dalek> rakudo/master: ab0efea | chromatic++ | src/pmc/p6opaque.pmc:
+[03:13] <dalek> rakudo/master: [PMC] Migrated some constant strings to Parrot-style constants to reduce STRING
+[03:13] <dalek> rakudo/master: header churn.  This improves performance a slight amount.
+[03:13] <dalek> rakudo/master: review: http://github.com/rakudo/rakudo/commit/ab0efeadd2e479a0ca91b0f1c8a1721ec6b32cf5
+[03:13] <dalek> rakudo/master: cfcc1a9 | chromatic++ | src/pmc/p6invocation.pmc:
+[03:13] <dalek> rakudo/master: [PMC] Migrated some constant strings to Parrot-style constants to reduce STRING
+[03:13] <dalek> rakudo/master: header churn.  This improves performance a slight amount.
+[03:13] <dalek> rakudo/master: review: http://github.com/rakudo/rakudo/commit/cfcc1a9bdf09b30e9c655ff15eac39f42d490b42
+[03:13] <dalek> rakudo/master: 8fdc942 | chromatic++ | src/binder/bind.c:
+[03:13] <dalek> rakudo/master: [binder] Migrated some constant strings to Parrot-style constants to reduce
+[03:13] <dalek> rakudo/master: STRING header churn.  This improves performance a slight amount.
+[03:13] <dalek> rakudo/master: review: http://github.com/rakudo/rakudo/commit/8fdc942e3e52edf38b189caff1bfb6e1e890dd7d
+[03:19] <Whiteknight> Those PMCs are already proving to be quite useful
+[03:20] <Whiteknight> I hope they grow to be even more useful still
+[03:20] <chromatic> NotFound, perl6.pbc is 3.426% smaller and the bootstrapped perl6.pbc is 3.715% smaller.
+[03:20] <Whiteknight> not bad, but not huge either
+[03:21] <Whiteknight> compare build times?
+[03:21] <kid51> pcc_reorder_results:  FAIL at r44156:  http://smolder.plusthree.com/app/projects/report_details/32268
+[03:21] * kid51 must sleep
+[03:21] <purl> $kid51->sleep(8 * 3600);
+[03:22] <chromatic> I didn't compare build times.
+[03:25] <dalek> parrot: r44157 | coke++ | branches/release_2_1_1_RC:
+[03:25] <dalek> parrot: This branch has been tagged as 2.1.1.
+[03:25] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44157/
+[03:25] <dalek> parrot: r44158 | jkeenan++ | trunk/examples/pir/make_hello_pbc.pir:
+[03:25] <dalek> parrot: [codingstd] No trailing whitespace.
+[03:25] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44158/
+[03:36] *** janus joined
+[03:37] <dukeleto_> i love the quote for the 2.1.1 release
+[03:44] <dukeleto> darn. i wrote a test for the gc memory leak, but it passes on 2.1.0
+[03:45] <Whiteknight> we need to file a bug report for the test, and write a test to prove that the test is fixed
+[03:45] *** snarkyboojum joined
+[03:47] <dukeleto> Whiteknight: shall I commit my test? it verifies that >=1 GC runs happen after 1,000,000 PMC's have been created, but it passes on 2.1.0
+[03:47] <dukeleto> i think it is still a useful test
+[03:47] <Whiteknight> nopaste it?
+[03:47] <purl> rumour has it nopaste it is See /who is nopaste for the URL
+[03:48] <chromatic> Turn it to 6 GC runs.
+[03:49] <dukeleto> http://gist.github.com/308387
+[03:49] <Whiteknight> you dont want to count GC runs so much as total memory allocated
+[03:49] <dukeleto> chromatic: 6 is the magic number?
+[03:49] <dukeleto> chromatic: please check out that gist
+[03:50] <chromatic> Parrot needs ~4 to start up.
+[03:50] <dukeleto> chromatic: it seems that 4 gc runs happen on both trunk and 2.1.0 for 1,000,000 PMC's being created
+[03:50] <dukeleto> chromatic: that is good to know
+[03:52] <dukeleto> Whiteknight: i agree with you about actually checking memory, but this was a better-than-nothing test that is at least cross-platform
+[03:53] <Whiteknight> ok
+[03:53] <Whiteknight> it is a good test in general, yes
+[03:53] <dukeleto> i am using GC_COLLECT_RUNS, should I be using something else?
+[03:55] <chromatic> That should work, if it gets updated.
+[03:57] <dukeleto> chromatic: my test has 4 gc runs on both trunk and 2.1.0 with both COLLECT_RUNS and MARK_RUNS
+[03:58] <chromatic> Hm.  I'll have to look in more detail.
+[03:59] <dalek> parrot: r44159 | coke++ | branches/rm_cflags (137 files):
+[03:59] <dalek> parrot: merge latest changes from trunk
+[03:59] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44159/
+[04:00] <dukeleto> chromatic: i am going to commit some useful gc tests, but we will need more to correctly test the most recent memory leak
+[04:00] <chromatic> Okay, I can help.
+[04:05] <dukeleto> chromatic: thanks. i have 2 tests incoming
+[04:15] <dalek> parrot: r44160 | dukeleto++ | trunk (3 files):
+[04:15] <dalek> parrot: [t] Add some tests to make sure a GC mark and sweep happens when a large amount of PMC's are created
+[04:15] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44160/
+[04:32] *** theory joined
+[04:40] <dukeleto> 'ello
+[05:37] <shockwave> What in a high level programming language would be the pointer the parent class, base, in Parrot is self, correct?
+[05:37] <shockwave> Oh, and how does one retreive a message from purl?
+[05:39] <chromatic> messages
+[05:40] <shockwave> Actually. Using base makes the pointer to the current class point to it's parent, duh. So how do I do that? All classes derrive from my own 'Object' class, except Object itself.
+[05:41] <shockwave> If I call method 'foo()' that is also in the parent class, how do I make sure the method in the parent class is the one to be called?
+[05:41] <Austin_away> Heh, heh, heh
+[05:41] <shockwave> purl messages
+[05:42] <Austin_away> messages
+[05:42] <shockwave> Thanks chromatic.
+[05:43] <shockwave> Austin, so how are you involved with Parrot?
+[05:45] <Austin> shockwave:  $P0 = <obj> ;  $P1 = class $P0 ; $P2 = inspect $P1, 'all_parents' ; $P3 = iter $P2 ; shift $P3; #skip current class; while $P3 { $P4 = shift $P3 ; if (can $P4, 'methodname') goto WIN; }
+[05:46] <shockwave> Sweet. Thanks Austin.
+[05:47] <Austin> shockwave: I'm not sure how I got involved. I got really drunk one night, and then I saw this kid with rainbow hair. So I walked up to him and asked him if he had ever met his father...
+[05:47] <chromatic> ... and now I ARE ONE
+[05:51] <shockwave> Austin, neat story. Myself, I came acrossed it about 2005 when I was working on my first language; which unfortunately never saw the light of day. The only thing I was able to take away from it was the experience. Luckly, I was able to carry the small knowledge from it and from the first language to the current language I'm developing.
+[05:52] <shockwave> I think I even asked a question on an online list once.
+[05:53] <shockwave> And now it's a central part of what I'm working on.
+[05:53] <Austin> shockwave: What are you working on?
+[05:53] <shockwave> Ultimately, a 3D video game.
+[05:54] <shockwave> For now, a programming language.
+[05:54] <shockwave> I should be able to connect the programming language to the 3D engine very soon.
+[05:55] <shockwave> The worst part of the language, in my opinion, is the semantic analysis. I'm done with that part for the first version.
+[05:55] <shockwave> After that is code generation, and creating a runtime API for the 3D engine to be hooked onto.
+[05:57] <Austin> :)
+[06:00] *** theory joined
+[06:11] <dalek> parrot: r44161 | plobsing++ | trunk (10 files):
+[06:11] <dalek> parrot: rename tools/build/nativecall.pir to tools/dev/nci_thunk_gen.pir
+[06:11] <dalek> parrot: make nci_thunk_gen.pir part of install as parrot_nci_thunk_gen
+[06:11] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44161/
+[06:12] <Austin> Aw, rats. Fperrad's distutils doesn't solve the pir annotation problem
+[06:12] <Austin> I had forgotten about that..
+[06:37] *** nbrown joined
+[06:42] <chromatic> msg bacek We could save allocations in CallContext by using the return_values attribute for storing only one pointer itself... no other allocation needed.
+[06:42] <purl> Message for bacek stored.
+[06:43] <dalek> parrot: r44162 | mikehh++ | trunk/t/op/gc-leaky.t:
+[06:43] <dalek> parrot: add svn properties
+[06:43] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44162/
+[06:54] <Austin> fperrad, ping
+[07:00] <dalek> parrot: r44163 | mikehh++ | trunk/tools/dev/nci_thunk_gen.pir:
+[07:00] <dalek> parrot: remove trailing whitespace
+[07:00] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44163/
+[07:11] <mikehh> All tests PASS (pre/post-config, make corevm/make coretest, smoke (#32269), fulltest) at r44163 - Ubuntu 9.10 amd64 (gcc with --optimize)
+[07:16] *** uniejo joined
+[07:30] *** theory joined
+[07:49] <dukeleto> 'ello again
+[07:49] <dukeleto> mikehh++ for fixing my svn properties. i hate those things
+[07:49] <Austin> Hey dukeleto.
+[07:49] <purl> dukeleto is mentoring a few peeps. can't remember everyone. sure.
+[07:50] * dukeleto should have run fulltest
+[07:50] <dukeleto> Austin: howdy
+[07:50] <purl> hey, dukeleto.
+[07:50] <dukeleto> purl, go play in traffic
+[07:50] * purl wanders off to dent some cars.
+[07:50] <Austin> So now I have setup.nqp implemented for kakapo.
+[07:50] <dukeleto> Austin: cool!
+[07:50] <Austin> Not so much. There's a few rough spots, still.
+[07:52] <Austin> purl, msg fperrad: New request: Can you put the distutils functions into a namespace? NQP doesn't have a good way to call the root namespace from a subnamespace:   module X; sub foo() {   if ::newer() {...} }   <-- :: doesn't work
+[07:52] <purl> Message for fperrad stored.
+[07:53] <Austin> Also, I need to add a sub-phase to strip annotations.
+[07:56] <dukeleto> Austin: so you can't call things in the global root namespace from NQP?
+[07:57] <dukeleto> Austin: you may want to ping pmichaud about that as well
+[07:57] <Austin> You can if you're already in that namespace.
+[07:57] <dukeleto> Austin: it seems like the perl6 guys must have to work around that limitation as well
+[07:57] <Austin> I think the perl6 way is that it always searches backwards.
+[07:57] <dukeleto> Austin: what about dropping into PIR from NQP and doing get_global '' or somesuch?
+[07:57] <Austin> My particular problem was with a multisub - I don't know if that affects it.
+[07:58] <Austin> That's what I mean about not having a *good* way ...
+[07:58] <dukeleto> Austin: touche :)
+[07:59] <dukeleto> so, the errorson opcode seems totally borked. does anybody actually use it, other than cargo-culting?
+[08:01] <nopaste> "Austin" at 68.37.46.53 pasted "trouble with calling global multisub" (20 lines) at http://nopaste.snit.ch/19705
+[08:01] <chromatic> I'm not sure it's even tested.
+[08:02] <chromatic> Certainly not well.
+[08:02] <Austin> Hmm.. I may be mistaken. This may be fperrad's fault
+[08:03] <dukeleto> chromatic: you are correct. no tests. I am writing one now, from perry's example code
+[08:03] <Austin> msg fperrad See my nopaste (http://nopaste.snit.ch/19705) - the problem may come from needing a PMC,PMC variant of the newer multisub.
+[08:03] <purl> Message for fperrad stored.
+[08:03] <dukeleto> chromatic: for instance, find_name never consults the value of errorson. lots of stuff just doesn't care about it
+[08:05] <chromatic> I remember a discussion a couple of years ago about mandatory error checking and giving people time to update their code for it.
+[08:05] <chromatic> That may have been during Chip's calling conventions refactor.
+[08:05] <Austin> Sort of the opposite of "deprecated"
+[08:05] <Austin> "soon-to-be-precated"
+[08:06] <Austin> (aka "imminent")
+[08:07] <dukeleto> chromatic: that sounds like ancient times to my young ears. I am going to write some tests and send an email to the list asking for some decisions
+[08:09] <dalek> tracwiki: v5 | mikehh++ | CFunctionDocs
+[08:09] <dalek> tracwiki: http://trac.parrot.org/parrot/wiki/CFunctionDocs?version=5&action=diff
+[08:22] *** iblechbot joined
+[08:37] *** alin joined
+[08:42] <dalek> tracwiki: v3 | mikehh++ | MissingCFunctionDocs
+[08:42] <dalek> tracwiki: http://trac.parrot.org/parrot/wiki/MissingCFunctionDocs?version=3&action=diff
+[09:08] *** lucian joined
+[09:15] <dalek> tracwiki: v2 | mikehh++ | BoilerplateOnlyDocs
+[09:15] <dalek> tracwiki: http://trac.parrot.org/parrot/wiki/BoilerplateOnlyDocs?version=2&action=diff
+[09:44] <ttbot> Parrot trunk/ r44163 i86pc-solaris-64int make error http://tt.ro.vutbr.cz/file/cmdout/203153.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[09:47] <mj41> sorry, ignore this ttbot report, trying setup opensolaris
+[10:03] <mj41> paste?
+[10:03] <purl> paste is (see: nopaste) or like glue but a little safer to sniff. or http://nopaste.snit.ch:8001/ or http://scsys.co.uk:8001/ anywhere shadowpaste is or mmm, sticky paste or You there! Eating the paste. or <see> 2 girls, 1 paste or App::Nopaste
+[10:03] <nopaste> "mj41" at 147.229.5.176 pasted "Open Solaris and SunStudioExpress" (16 lines) at http://nopaste.snit.ch/19706
+[10:03] <dalek> rakudo/master: 3704a2e | (Solomon Foster)++ | src/core/Any-list.pm:
+[10:03] <dalek> rakudo/master: Get .pick (ported from alpha, plus infinite versions) working.
+[10:03] <dalek> rakudo/master: review: http://github.com/rakudo/rakudo/commit/3704a2e418b1ce8c20b88381f6289a6cc32835e2
+[10:13] *** AndyA_ joined
+[10:16] <dalek> kakapo: 3cf61d9 | austin++ |  (4 files):
+[10:16] <dalek> kakapo: Added Global::inject_root_symbol(). Changed P6meta to create keyword functions 'has', 'extends', 'has_vtable'.
+[10:16] <dalek> kakapo: Signed-off-by: Austin Hastings <Austin_Hastings@Yahoo.com>
+[10:16] <dalek> kakapo: review: http://gitorious.org/kakapo/kakapo/commit/3cf61d94217924113cbcb02cce900105e89b97a7
+[10:16] <dalek> kakapo: dc2f9ea | austin++ |  (6 files):
+[10:16] <dalek> kakapo: Got UnitTest case written for t/Global.nqp.
+[10:17] <dalek> kakapo: Added strip-annotation target for setup.nqp.
+[10:17] <dalek> kakapo: Signed-off-by: Austin Hastings <Austin_Hastings@Yahoo.com>
+[10:17] <dalek> kakapo: review: http://gitorious.org/kakapo/kakapo/commit/dc2f9ea845dbb5a7de2900416306d54ef58a9611
+[10:34] <nopaste> "chromatic" at 173.50.130.127 pasted "This patch caches the hashval in the HashBucket for a *very* modest performance gain. Thoughts?" (209 lines) at http://nopaste.snit.ch/19707
+[10:42] *** contingencyplan joined
+[11:38] <dalek> parrot: r44164 | mikehh++ | trunk (2 files):
+[11:38] <dalek> parrot: correct C function docs and add documentation
+[11:38] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44164/
+[11:38] <dalek> parrot: r44165 | mikehh++ | trunk (2 files):
+[11:38] <dalek> parrot: correct C function docs
+[11:38] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44165/
+[11:41] <nopaste> "mj41" at 147.229.5.176 pasted "After ~# ln -s /opt/SunStudioE" (18 lines) at http://nopaste.snit.ch/19708
+[11:54] <dalek> parrot: r44166 | mikehh++ | trunk (2 files):
+[11:55] <dalek> parrot: correct C function docs
+[11:55] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44166/
+[11:55] <dalek> parrot: r44167 | mikehh++ | trunk/examples/c/pbc_info.c:
+[11:55] <dalek> parrot: correct C function docs
+[11:55] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44167/
+[11:55] <dalek> parrot: r44168 | mikehh++ | trunk/src/atomic/gcc_x86.c:
+[11:55] <dalek> parrot: correct C function docs
+[11:55] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44168/
+[12:11] <dalek> parrot: r44169 | mikehh++ | trunk/include/parrot/atomic/gcc_pcc.h:
+[12:11] <dalek> parrot: add C function documentation
+[12:11] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44169/
+[12:25] *** nbrown_ joined
+[12:27] <dalek> parrot: r44170 | mikehh++ | trunk/t/codingstd/c_function_docs.t:
+[12:27] <dalek> parrot: remove passing TODO tests
+[12:27] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44170/
+[12:28] *** bacek joined
+[12:32] <bacek> o hai
+[12:33] <bacek> msg chromatic return_values will be totally removed after next round of PCC refactor afaiu.
+[12:33] <purl> Message for chromatic stored.
+[12:34] <dalek> tracwiki: v6 | mikehh++ | CFunctionDocs
+[12:34] <dalek> tracwiki: http://trac.parrot.org/parrot/wiki/CFunctionDocs?version=6&action=diff
+[12:34] <dalek> tracwiki: v4 | mikehh++ | MissingCFunctionDocs
+[12:34] <dalek> tracwiki: bring up to date at r44170</a>
+[12:34] <dalek> tracwiki: http://trac.parrot.org/parrot/wiki/MissingCFunctionDocs?version=4&action=diff
+[12:37] *** plobsing joined
+[12:39] *** riffraff joined
+[12:48] *** payload joined
+[13:06] *** KingOfKarlsruhe joined
+[13:33] *** tetragon joined
+[13:33] <dalek> parrot: r44171 | bacek++ | branches/sys_mem_reduce/src/events.c:
+[13:33] <dalek> parrot: Switch event.c to internal allocations. Way too much effort to use GC one...
+[13:33] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44171/
+[13:33] <dalek> parrot: r44172 | bacek++ | branches/sys_mem_reduce/src/pbc_merge.c:
+[13:33] <dalek> parrot: Switch pbc_merge to GC allocations.
+[13:33] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44172/
+[13:33] <dalek> parrot: r44173 | bacek++ | branches/sys_mem_reduce/src/tsq.c:
+[13:33] <dalek> parrot: Switch TSQ to internal allocations.
+[13:33] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44173/
+[13:33] <dalek> parrot: r44174 | bacek++ | branches/sys_mem_reduce/src (2 files):
+[13:33] <dalek> parrot: Replace few mem_sys_free with mem_gc_free
+[13:33] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44174/
+[13:33] <dalek> parrot: r44175 | bacek++ | branches/sys_mem_reduce/src/dynext.c:
+[13:33] <dalek> parrot: Move dynext.c to internal allocations
+[13:34] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44175/
+[13:34] <dalek> parrot: r44176 | bacek++ | branches/sys_mem_reduce (3 files):
+[13:34] <dalek> parrot: Fix some leftovers after renaming gc_mem_foo into mem_gc_foo
+[13:34] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44176/
+[13:34] <dalek> parrot: r44177 | bacek++ | branches/sys_mem_reduce/src/pbc_dump.c:
+[13:34] <dalek> parrot: Switch pbc_dump to GC allocations
+[13:34] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44177/
+[13:34] <dalek> parrot: r44178 | bacek++ | branches/sys_mem_reduce/src (3 files):
+[13:34] <dalek> parrot: Use pointer from mem_gc_realloc
+[13:34] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44178/
+[13:34] <dalek> parrot: r44179 | bacek++ | branches/sys_mem_reduce (8 files):
+[13:34] <dalek> parrot: Pass oldsize to realloc_zeroed
+[13:34] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44179/
+[13:34] <dalek> parrot: r44180 | bacek++ | branches/sys_mem_reduce/src/oo.c:
+[13:34] <dalek> parrot: Use gc_realloc in oo.c
+[13:34] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44180/
+[13:40] *** whiteknight joined
+[13:44] <Austin> Kakapo: Now with its own syntax!
+[13:50] <Austin> Today, we salute you, Mr. Tiny Thong Bikini-wearer!
+[13:51] <Austin> Beach-goers the world over see you coming and say, "Hey! Check out the wooly mammoth in the giant rubber band..."
+[14:00] * Coke blinks.
+[14:05] <Austin> The problem's going to be in tsort.
+[14:05] <Austin> The problem is always in tsort.
+[14:06] <dalek> parrot: r44181 | bacek++ | branches/sys_mem_reduce/src/gc/gc_ms.c:
+[14:06] <dalek> parrot: Split allocation of zeroed/non-zeroed chunks in GC MS.
+[14:06] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44181/
+[14:06] <dalek> parrot: r44182 | bacek++ | branches/sys_mem_reduce/src/gc/gc_ms.c:
+[14:06] <dalek> parrot: Replace couple of mem_sys functions with mem_internal versions.
+[14:06] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44182/
+[14:06] <dalek> parrot: r44183 | bacek++ | branches/sys_mem_reduce/src/pmc/resizablebooleanarray.pmc:
+[14:06] <dalek> parrot: Clear allocated memory in RBA.
+[14:06] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44183/
+[14:06] <dalek> parrot: r44184 | bacek++ | branches/sys_mem_reduce/src/pmc/managedstruct.pmc:
+[14:06] <dalek> parrot: Update ManagedStruct to use GC allocations.
+[14:06] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44184/
+[14:08] *** cognominal joined
+[14:14] <dalek> tracwiki: v157 | coke++ | WikiStart
+[14:14] <dalek> tracwiki: http://trac.parrot.org/parrot/wiki/WikiStart?version=157&action=diff
+[14:15] <Coke> msg chromatic http://www.savagechickens.com/2010/02/tragedy-averted.html ... take that.
+[14:15] <purl> Message for chromatic stored.
+[14:15] <Austin> ARgh. String.does('array')
+[14:16] *** dhg joined
+[14:28] <Coke> is the answer... yes?
+[14:29] <Austin> Sadly, it is.
+[14:30] <Austin> Well, technically it's C< 1 >, but I take your meaning.
+[14:46] <Coke> does is pretty useless. =-)
+[14:46] <Coke> and, String certainly used to act like an array.
+[14:46] <Coke> (not sure if it does anymore.)
+[14:46] <Coke> ... depending on how you define "like an array"
+[14:47] <Austin> Well, it responds to index requests - $P0[1], etc.
+[14:47] <Austin> Which means that my named-parameter that may be an array or may be a single parameter is hard to check ...
+[14:56] *** ruoso joined
+[15:26] <kthakore> NotFound: hi so I sent an email out to parrot-dev
+[15:28] <NotFound> kthakore: just coming home, I've read it right now.
+[15:30] <NotFound> kthakore: do you mean how to use that for development, how and where to install by the users, or both?
+[15:32] <kthakore> NotFound: well it is very early right now. first for developers and then end users?
+[15:32] <NotFound> kthakore: for development you can use -I and -L parrot command line options.
+[15:32] <kthakore> right
+[15:33] <kthakore> that should have been obvious
+[15:34] <NotFound> For users, just let plumage to put them in the standard places.
+[15:34] <kthakore> I still don't understand how to set this plumage thing up
+[15:34] <kthakore> the link darbelo gave me was just a bunch of proposals
+[15:36] <NotFound> kthakore: I think the recommended way right now is to use a setup script. Borrowing from the one in an appropiate module may be the easier way.
+[15:36] <kthakore> NotFound: what is an appropriate moduile?
+[15:36] <kthakore> module?
+[15:36] <purl> i heard module was literally what i pasted above, perhaps with a coercion from Num -> BigNum or somewhat useful as a worked example, of course
+[15:37] <kthakore> NotFound: where can I search for this? Is there a CPAN for parrot?
+[15:38] <NotFound> kthakore: plumage itself contains the data for several.
+[15:38] <Austin> kthakore: What are you writing?
+[15:38] <NotFound> But don't expect a CPAN alike. We need several decades to reach that point ;)
+[15:39] <NotFound> Austin: updating SDL and put it out of core.
+[15:39] *** theory joined
+[15:40] <NotFound> Well, that's the long term goal.
+[15:40] <kthakore> NotFound: oh do I search it then?
+[15:40] <kthakore> NotFound: the Plumage data
+[15:40] <kthakore> or whatever
+[15:40] <NotFound> kthakore: just install plumage
+[15:40] <kthakore> ok
+[15:41] <NotFound> There are some listed in the parrot wiki, but surely the included in plumage are far more up to date.
+[15:41] <kthakore> http://gitorious.net/parrot-plumage is that correct
+[15:41] *** Ryan52 joined
+[15:41] <NotFound> kthakore: aye
+[15:42] <kthakore> NotFound: thanks
+[15:42] <kthakore> NotFound: sorry if I haven't been asking the right questions
+[15:42] <kthakore> NotFound: appreciate your patience
+[15:43] *** lucian joined
+[15:45] <NotFound> kthakore: plumage is an evolving crature, is hard to know what are the right questions or where are the updated answers ;)
+[15:45] <kthakore> NotFound: nonetheless appreciate the patience
+[15:46] <dalek> kakapo: f7672b2 | austin++ |  (6 files):
+[15:46] <dalek> kakapo: Added syntax items 'redo()', 'next()', and 'last()' in Syntax.nqp to base and Full.nqp
+[15:46] <dalek> kakapo: Signed-off-by: Austin Hastings <Austin_Hastings@Yahoo.com>
+[15:47] <dalek> kakapo: review: http://gitorious.org/kakapo/kakapo/commit/f7672b2d1f70c029e80872253ad3b916534ff0e7
+[15:47] <dalek> kakapo: 1487e76 | austin++ | t/bootstrap/UnitTest/Testcase.nqp:
+[15:47] <dalek> kakapo: Got rid of assert_true, _false, in Testcase.nqp
+[15:47] <dalek> kakapo: Signed-off-by: Austin Hastings <Austin_Hastings@Yahoo.com>
+[15:47] <dalek> kakapo: review: http://gitorious.org/kakapo/kakapo/commit/1487e763bb7e867b84fccbe8ef1f7ae90daef816
+[15:47] <dalek> kakapo: d891272 | austin++ | t/ (2 files):
+[15:47] <dalek> kakapo: Deleted t/Parrot, ManagedQueue.nqp
+[15:47] <dalek> kakapo: Signed-off-by: Austin Hastings <Austin_Hastings@Yahoo.com>
+[15:47] <dalek> kakapo: review: http://gitorious.org/kakapo/kakapo/commit/d8912728d396ad97d641a77321e1c4ba12bbe43a
+[15:47] <dalek> kakapo: 1f6eb19 | austin++ |  (8 files):
+[15:47] <dalek> kakapo: First iteration of tests for DepQ. Added `die` to Syntax.nqp. Got rid of src/Test/ dir. Changed harness to _not_ link tests by default.
+[15:47] <dalek> kakapo: review: http://gitorious.org/kakapo/kakapo/commit/1f6eb190b8273d3015870cbbacc8ef2152a98d34
+[15:47] <NotFound> Make SDL work and I'll feel more than rewarded :)
+[15:47] <dalek> kakapo: 03ae2e4 | austin++ | setup.nqp:
+[15:47] <dalek> kakapo: Added krt0.pbc to build targets.
+[15:47] <dalek> kakapo: Signed-off-by: Austin Hastings <Austin_Hastings@Yahoo.com>
+[15:47] <dalek> kakapo: review: http://gitorious.org/kakapo/kakapo/commit/03ae2e498cb822cc10c7d0e14e76663afef1c158
+[15:47] <kthakore> NotFound: will try
+[15:48] <Austin> I feel a SVN-induced reboot coming on...
+[15:49] <kthakore> ??
+[15:52] *** Psyche^ joined
+[15:53] <kthakore> NotFound: I found a similar project
+[15:53] <kthakore> :)
+[15:53] <kthakore> NotFound: tcl-bridge
+[15:53] <kthakore> yay!
+[15:54] <NotFound> kthakore: good
+[15:59] *** riffraff joined
+[16:00] <pmichaud> ...what exactly does a ticket status of "deprecated" mean in Trac?
+[16:00] <kthakore> plumage++ for making this SANE!
+[16:00] <kthakore> NotFound: this awesome!
+[16:00] * kthakore runs away to make his first plume?
+[16:07] <Coke> pmichaud: should correspond to "this in deprecated.pod"
+[16:08] <Coke> "things"
+[16:08] <Coke> was a suggestion from Whiteknight that he made in another ticket; but since that was only in trac and on parrot-tickets, probably not that many people saw it.
+[16:08] <Coke> (there is a corresponding "exerimental" now, also.)
+[16:08] <whiteknight> Coke++
+[16:09] <Coke> actually, only one of those was his and I extrapolated the other.
+[16:09] <Coke> I converted about 50% of the tickets in DEPRECATED.pod before running out of steam.
+[16:09] <Coke> (if someone starts from the bottom and works their way up....)
+[16:10] <pmichaud> okay.  I was looking at TT#1091, and I'd like to see that particular ticket die-die-die  (the ticket, not the feature it proposes to eliminate)  and the "deprecated" tag caught me off-guard.
+[16:10] <Coke> checking...
+[16:11] <Coke> ah, yup. based on your comment, I removed the milestone.
+[16:11] <Coke> Seems like it should have been an RFC first, but it kind of jumped into the deprecated pod.
+[16:12] <Coke> pod/queue.
+[16:12] <pmichaud> same for TT#389 -- the "deprecated" status doesn't seem accurate.
+[16:12] <Coke> it's a change in behavior that people might have been depending on.
+[16:13] <Coke> rather than just a bug fix.
+[16:13] <Coke> (that's supposedly the threshold of marking it as a deprecation; I didn't apply any thought to the ticket changing other than "is it listed in the DEP.pod?"
+[16:13] <Coke> if it shouldn't be marked as one in the first place, that's an issue.
+[16:14] <pmichaud> I just find it confusing (more)
+[16:14] <pmichaud> to me, "deprecated"  is something we can get around to at some point, while "bug" is "this needs to be fixed."
+[16:15] <pmichaud> so "bug" seems more accurate, because Parrot is not behaving according to the agreed-upon-specification.
+[16:15] <pmichaud> fixing the bug may involve a deprecation, but I'm not sure that means it should no longer be classified as a bug.
+[16:16] <pmichaud> (and classifying something as a "bug" feels more important to me than classifying it as a deprecation)
+[16:16] <Coke> pmichaud: importance should be derived from the priority/impact values, IMO.
+[16:16] * cotto_work yawns
+[16:16] <Coke> did the spec change?
+[16:16] <cotto_work> good morning
+[16:16] <purl> What's so good about it?
+[16:16] <pmichaud> the spec was set in 2008.
+[16:16] <cotto_work> forget good morning
+[16:16] <purl> cotto_work: I forgot good morning
+[16:17] <pmichaud> it's just taken more than 18 months to get it implemented
+[16:17] <Coke> right. so I think that still qualifies as a deprecation, since we changed the rules. it's just way overdue.
+[16:18] <pmichaud> okay.  Well, two suggestions
+[16:18] <pmichaud> I think that "type" should be "deprecation" and not "deprecated", because  "deprecated" sounds like something we're doing to the ticket or the feature being described in the ticket
+[16:18] <pmichaud> i.e., when I read
+[16:19] <ttbot> Parrot trunk/ r44185 MSWin32-x86-multi-thread make error http://tt.ro.vutbr.cz/file/cmdout/204055.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[16:19] <pmichaud> Changed 43 hours ago by coke  ¶
+[16:19] <pmichaud> * type changed from bug to deprecated
+[16:19] <pmichaud> I find that realllllllly confusing.
+[16:19] <Coke> changed.
+[16:19] <dalek> parrot: r44185 | plobsing++ | trunk (8 files):
+[16:19] <dalek> parrot: add --dynext option to parrot_nci_thunk_gen to ease building parrot dynext libraries
+[16:19] <dalek> parrot: the existance of dynext nci thunk libraries pushes nci_func init up into global init, but that's fairly cheap now and going to become cheaper once we ditch all the thunks that core doesn't need.
+[16:19] <dalek> parrot: add extra_nci_thunks dynext library to prove the concept
+[16:19] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44185/
+[16:19] <pmichaud> and I think that the fact that something involves a deprecation might be orthogonal to other issues
+[16:20] <pmichaud> or perhaps it's a form of status -- i.e., "we can't act on/resolve this ticket because it involves a deprecation", not that the ticket itself *is* a deprecation.
+[16:20] <Coke> (the change won't affect displayed text on changes for anything that was already changed)
+[16:21] <dalek> winxed: r416 | julian.notfound++ | trunk/examples/packfile.winxed:
+[16:21] <dalek> winxed: less magic numbers and better fixups dump in packfile example
+[16:21] <dalek> winxed: review: http://code.google.com/p/winxed/source/detail?r=416
+[16:21] <pmichaud> anyway, thanks for the explanation.  I'll just note here that I found it mentally jarring to have so many tickets that are of special importance to me being marked as "deprecated"
+[16:21] <Coke> deprecation. =-)
+[16:21] <pmichaud> even then
+[16:21] <pmichaud> but yes, "deprecation" would have been far less jarring :)
+[16:21] <Coke> no, I mean, that's what it is now. =-)
+[16:22] <Coke> but yah.
+[16:23] <Coke> sorry about the confusion. Your tickets are still important.
+[16:23] <pmichaud> it's not just the tickets where I'm asking for a change, it's also the tickets where I'm pleading that something shouldn't change :)
+[16:24] <pmichaud> there seem to be quite a few of those lately as well :-|
+[16:24] <pmichaud> anyway, we now return to our regularly scheduled discussions :)
+[16:24] <plobsing> anyone know why parrot can't find data_json.pbc on windows?
+[16:25] <NotFound> I really like the advances in packfile and opcode PMCs. Now we have full pbc inspection capabilities from HLLs :)
+[16:27] * Coke gets his openvms login and manages to have to kill ssh to stop whatever craziness he got into.
+[16:27] <Coke> plobsing: is this in a strawberry build, not intsalled?
+[16:27] <plobsing> it's strawberry, yes. the ttbot build.
+[16:27] <plobsing> I broke it apparently
+[16:28] <Coke> did you change the makefile? perhaps it's not getting built anymore.
+[16:28] * Coke checks on linux
+[16:28] <plobsing> I added a bunch of stuff that *depends* on it. I didn't touch it directly.
+[16:29] <Coke> ... or, I could just test on strawberry. whoops.
+[16:29] <Coke> what can I run to see the failure?
+[16:29] <plobsing> make
+[16:29] <Coke> ... that's it? ok.
+[16:30] <plobsing> * or whatever ttbot runs
+[16:31] * Coke manages to run bash on vms alpha.
+[16:32] <Coke> ... now what. =-)
+[16:32] <Coke> src/extra_nci_thunks.c
+[16:32] <Coke> src/extra_nci_thunks.c:6197: warning: no previous prototype for 'Parrot_lib_extra_nci_thunks_init'
+[16:32] <cotto_work> run
+[16:32] <Coke> (on linux, btw.)
+[16:33] <Coke> on strawberry, build dies with:
+[16:33] <Coke> .\\parrot.exe -o parrot_nci_thunk_gen.pbc tools\\dev\\nci_thunk_gen.pir
+[16:33] <Coke> Invalid charset number '467200' specified
+[16:33] <Coke> current instr.: 'get_sigtable' pc 1760 (tools\\dev\\nci_thunk_gen.pir:902)
+[16:33] <Coke> mingw32-make: *** [parrot_nci_thunk_gen.pbc] Error 1
+[16:33] <Coke> so, looks like your NCI stuff might need to be reverted and go intoa  branch.
+[16:33] <plobsing> arg
+[16:34] <plobsing> damn my magical box on which even broken stuff works!
+[16:34] <cotto_work> yeah.  The build is a bit explodey here too
+[16:34] <dalek> TT #1470 created by whiteknight++: Create a get_numeric_pmc VTABLE
+[16:34] <plobsing> it's though that your strawberry fails with a different error than ttbot's
+[16:34] <plobsing> ""load_bytecode" couldn't find file 'data_json.pbc'"
+[16:35] <Coke> my strawberry and my linux box don't even build.
+[16:38] <plobsing> I'm going to try with a clean build. If it fails and I can fix it easily, WIN; else I'll have to throw it into a branch
+[16:38] <Coke> yes, please. =-)
+[16:38] <plobsing> s/clean build/clean checkout/
+[16:38] <Coke> right.
+[16:42] <plobsing> wfm :-(
+[16:45] <Coke> is it possible the JSON in there is different?
+[16:46] <Coke> nci_thunk_gen.pir isn't generated, is it?
+[16:46] <plobsing> nope. that's by hand.
+[16:46] <plobsing> although I'm growing increasingly tempted to rewrite it in winxed
+[16:46] <kthakore> NotFound: check it out! New feather in the hat! http://github.com/kthakore/parrotSDL
+[16:46] <Coke> winxed isn't core.
+[16:47] <Coke> nqp-rx might be a better choice.
+[16:47] <plobsing> I tried that. hated it. PIR is better.
+[16:47] <Coke> heh. you clearly haven't done enough pir. =-)
+[16:47] <NotFound> You don't need winxed in core, just ship the generated pir
+[16:48] <NotFound> kthakore: congrats, you've been fast!
+[16:48] <Coke> NotFound: true. or you could put winxed's pir in ext/
+[16:48] <kthakore> NotFound: well it wasn't too hard
+[16:48] <Coke> but your option is probably best.
+[16:48] <kthakore> now to make the json thingie
+[16:49] <NotFound> Coke: not a bad idea, I'll think about that.
+[16:49] <Coke> kthakore: to answer your question from list... -i?
+[16:49] <Coke> er, -I?
+[16:49] <kthakore> Coke: oh thanks
+[16:49] <kthakore> Coke: NotFound suckered me into making plumage for this
+[16:50] <kthakore> Coke: http://github.com/kthakore/parrotSDL
+[16:50] <kthakore> now how do I have it build and install multiple pirs ?
+[16:50] <plobsing> why doesn't svn like this:
+[16:50] * kthakore goes does reading
+[16:50] <plobsing> svn copy https://svn.parrot.org/parrot/trunk https://svn.parrot.org/parrot/branches/dynext_nci
+[16:50] <Coke> plobsing: seems fine to me, except I'd spell it 'svn cp'
+[16:50] <NotFound> And is a good tactic, after two victims... err... volunteers plumage is becoming easier for beginners.
+[16:51] <kthakore> NotFound: well it is more sane way to fall on my own sword
+[16:52] *** AndyA_ joined
+[16:52] <NotFound> kthakore: my previous victim was precisely tcl-bridge, see? X-)
+[16:52] <dalek> parrot: r44186 | fperrad++ | trunk/runtime/parrot/library/distutils.pir:
+[16:52] <kthakore> hehe
+[16:52] <dalek> parrot: [distutils] add a new variant of newer (needed by nqp)
+[16:52] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44186/
+[16:52] <dalek> parrot: r44187 | plobsing++ | branches/dynext_nci:
+[16:52] <dalek> parrot: create branch to work on nci thunk dynext libraries
+[16:52] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44187/
+[16:52] <kthakore> NotFound: you evil geniius guy
+[16:53] <kthakore> NotFound: you made me install plumage when you could have just pointed this tcl-bridge to me
+[16:53] <kthakore> NotFound: I like the cut of your jib
+[16:53] <Coke> tcl-bridge?
+[16:53] <Coke> is that vadim's project?
+[16:53] <NotFound> kthakore: better that you choose it by yourself, IMO
+[16:54] <NotFound> Coke: I think so
+[16:54] <kthakore> heheh
+[16:54] <Coke> ->
+[16:54] <kthakore> Coke: I built my setup after his
+[16:54] <ttbot> Parrot trunk/ r44186 MSWin32-x86-multi-thread make error http://tt.ro.vutbr.cz/file/cmdout/204115.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[16:55] <plobsing> Sorry, I have an appointment. If anyone wants to get the build working, I'm pretty sure reverting all commits by me after r44161 should do it.
+[16:55] <NotFound> I haven't yet finished a plumage setup for Winxed, BTW.
+[16:57] <kthakore> NotFound: so no windows plumage ?
+[16:57] <NotFound> kthakore: winxed, not windows.
+[16:57] <kthakore> what is winxed?
+[16:57] <purl> well, winxed is not javascript, just uses a familiar syntax. or http://code.google.com/p/winxed/
+[16:58] <kthakore> ah ok
+[16:58] <NotFound> http://winxed.org/
+[16:58] <NotFound> purl: winxed is also http://winxed.org/
+[16:58] <purl> okay, NotFound.
+[16:59] <kthakore> full metal alchemist!!!
+[16:59] <kthakore> YAY!
+[17:00] <kthakore> well I gtg to lunch now
+[17:00] <NotFound> The real inspiration is Winx Club, but don't tell anyone X-)
+[17:00] <kthakore> NotFound: are there versions in Plumage?
+[17:01] <NotFound> kthakore: not yet, I need to design and implement a few details first.
+[17:01] <kthakore> ok
+[17:02] <kthakore> also how do I make my own dataypes as datatype.pasm for SDL?
+[17:02] <NotFound> kthakore: just put then in an include file
+[17:02] <kthakore> SDL datatypes need to ckeep trakc fof their threads
+[17:02] <kthakore> NotFound: oh ok
+[17:02] <kthakore> thanks
+[17:02] <kthakore> ok real lunch now
+[17:10] <darbelo> fperrad: ping
+[17:16] <fperrad> pong, darbelo
+[17:17] <darbelo> I'm trying to write a setup.pir at http://gitorious.org/dbm-dynpmcs/dbm-dynpmcs/blobs/master/setup.pir
+[17:17] <darbelo> to build a single dynpmc, but it fails during compilation.
+[17:18] <darbelo> I'm guessing a single dynpmc needs to be handled differently from a dynpmc group.
+[17:18] <darbelo> And I wanted to know how should I handle that with distutils.
+[17:19] <dalek> tracwiki: v10 | darbelo++ | Modules
+[17:19] <dalek> tracwiki: Add dbm-dynpmcs to the Modules page
+[17:19] <dalek> tracwiki: http://trac.parrot.org/parrot/wiki/Modules?version=10&action=diff
+[17:21] <fperrad> darbelo, don't create an array line 43, just :
+[17:21] <fperrad> $P2['gdbmhash'] = 'src/pmc/gdbmhash.pmc'
+[17:22] <fperrad> an array implies a dynpmc group
+[17:24] *** jan joined
+[17:26] <darbelo> Using just a string fails too.
+[17:26] <darbelo> it tries to build a pmc named 's'
+[17:27] <darbelo> I'mg guessing it tried to use the string as an array.
+[17:30] <dalek> winxed: r417 | julian.notfound++ | trunk/examples/packfile.winxed:
+[17:30] <dalek> winxed: more improvement in fixups dump in packfile example
+[17:30] <dalek> winxed: review: http://code.google.com/p/winxed/source/detail?r=417
+[17:31] <darbelo> Yep, it unconditionally does     $P1 = iter srcs
+[17:31] <darbelo> near line 1170 of distutils.pir
+[17:41] *** whiteknight joined
+[17:56] *** kjeldahl joined
+[17:59] <dalek> parrot: r44188 | plobsing++ | trunk (14 files):
+[17:59] <dalek> parrot: revert r44185 and r44161
+[17:59] <dalek> parrot: This should fix the build for everyone else. Sorry.
+[17:59] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44188/
+[18:00] <fperrad> darbelo,
+[18:00] <purl> hmmm... darbelo, is there anything in config_lib.pasm that gives us enough information?
+[18:00] *** nbrown joined
+[18:00] <fperrad> $P3 = split ' ', 'src/pmc/gdbmhash.pmc'
+[18:00] <fperrad> $P2['gdbmhash'] = $P3
+[18:00] <fperrad> the key 'gdbmhash' collides with gdbmhash.pmc
+[18:00] <fperrad> if you use,
+[18:07] *** nbrown_ joined
+[18:08] <darbelo> fperrad++
+[18:09] <darbelo> I'm building a group with just one pmc now and it build fine. Thanks for the help.
+[18:23] <dalek> close: r190 | Austin_Hastings++ | trunk/ (50 files):
+[18:23] <dalek> close: Checkpoint. Resuming after kakapo sidetrack.
+[18:23] <dalek> close: review: http://code.google.com/p/close/source/detail?r=190
+[18:23] <kthakore> fperrad: hi ya
+[18:24] <plobsing> can anyone get the dynext_nci branch to fail during make and nopaste the result?
+[18:24] <plobsing> I can't seem to get it to fail in linux x86 or linux x64
+[18:24] <kthakore> how do I make the .json file for plumage?
+[18:25] <Austin> kthakore: From pir or nqp?
+[18:26] <Austin> Or by hand?
+[18:26] <purl> by hand is just too slow when you're talking industrial production volumes.
+[18:27] <whiteknight> Anybody object if I merge the parrot_call_dep branch in now?
+[18:27] <kthakore> Austin: pir
+[18:27] <kthakore> Austin: I think
+[18:28] <kthakore> Austin: http://github.com/kthakore/parrotSDL see setup.pir
+[18:28] <Austin> If it's setup.pir, then you're in pir
+[18:29] <Austin> It looks like you've got data already. What are you missing?
+[18:29] <kthakore> how to generated the file?
+[18:29] <kthakore> or should I make it by hand?
+[18:30] <Austin> You should look inside $_PARROT/runtime/parrot/library/distutils.pir, where all questions are answered.  >  perldoc  $_PARROT/runtime/parrot/library/distutils.pir
+[18:30] <kthakore> oh nice!
+[18:30] <Austin> In this case, it's "setup.pir plumage"
+[18:30] <kthakore> thank you
+[18:36] * whiteknight hates svn properties
+[18:36] * kthakore hates svn
+[18:36] <kthakore> :p
+[18:36] * kthakore runs and hides
+[18:38] <whiteknight> no, I agree with you. I like SVN less and less each day
+[18:40] <plobsing> anyone here on windows?
+[18:42] <whiteknight> last chance, anybody against the parrot_call_dep branch merge?
+[18:44] <whiteknight> going once ... twice ...
+[18:44] <whiteknight> done.
+[18:44] <NotFound> whiteknight: Come on, let's go!
+[18:44] <whiteknight> NotFound: :)
+[18:44] *** payload joined
+[18:49] <dalek> parrot: r44189 | whiteknight++ | failed to fetch changeset:
+[18:49] <dalek> parrot: merge the parrot_call_dep branch to trunk. Removes mention of the old Parrot_call_* functions from the codebase, replacing most calls with Parrot_ext_call(). Most calls in the repo core have already been updated to not use these functions
+[18:49] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44189/
+[18:51] *** nbrown joined
+[18:51] <tewk> whiteknight, does moving get_results to after the invoke mean that the callee can't inspect what the caller would like to get as returns?
+[18:52] <whiteknight> tewk: as-is, yes.
+[18:52] <whiteknight> tewk: allison mentioned that we could add an "expect_returns" opcode to fill in that purpose
+[18:52] <whiteknight> which strikes me as better encapsulation anyway
+[18:55] <whiteknight> I'm going to merge the pmc_func_cleanup branch to trunk in about 30 minutes unless somebody has objections
+[18:55] <tewk> Also we should have an invoke_with_call_object or invoke_with_frame, so a language can dynamically create a call site.
+[18:55] <whiteknight> tewk: there are lots of options, yes. I would like to see more ways to call and build call frames
+[18:56] <whiteknight> Setting an expectation object should be relatively painless though
+[18:56] <tewk> whiteknight, I think that is what the current opcodes try to do, we should preserve there intent, just make them cleaner and more intuitive.
+[18:57] <tewk> I like your suggestions, I'm just saying that expect_returns and invoke_with_call_object should be part of the overall picture.
+[18:57] <whiteknight> tewk: CallContext is going to be changed so it doesn't have information about returns
+[18:57] <whiteknight> so a call and a return are both treated internally like invoke()
+[18:58] <whiteknight> and both pass "arguments"
+[18:58] <whiteknight> tewk: there really isn't a good way now to get information about expected returns from the callee, so that will be an addtion
+[18:58] <whiteknight> invoke_with_call_object Is basically what set_args/invokecc is going to do after this
+[18:59] *** ash_ joined
+[18:59] <whiteknight> most calls will use a constant, cached CallArguments PMC, but you will be able to build it at runtime too if you want
+[19:01] <whiteknight> plobsing: ping
+[19:02] *** chromatic joined
+[19:02] <cotto_work> morning chromatic
+[19:02] <plobsing> whiteknight: pong
+[19:03] <whiteknight> plobsing: where does nativecall.pir live now?
+[19:03] <chromatic> morning
+[19:03] <plobsing> tools/build/nativecall.pir. I tried to move it but other things in those changes broke the build
+[19:03] <plobsing> for everyone else. I can't seem to reproduce the failure
+[19:04] <plobsing> and if I can't break it, I can't fix it
+[19:04] <plobsing> so it's sitting in branch
+[19:04] <plobsing> short answer - tools/build
+[19:05] <nopaste> "shockwave" at 76.119.137.239 pasted "Base member not found issue." (68 lines) at http://nopaste.snit.ch/19711
+[19:05] <shockwave> I'm trying to code the 'base' keyword in my language.
+[19:06] <shockwave> I'm not sure why the base method is not found.
+[19:07] <shockwave> The error I get is at the bottom.
+[19:08] <shockwave> Basically, it's saying that there is no 'foo' method in class TestXXX;A, but there is.
+[19:09] <Austin> shockwave: I don't know if it matters, but your 'init' sub is not marked :init.
+[19:09] *** nbrown joined
+[19:10] <shockwave> If I add init it says:  Class Array already registered!
+[19:10] <whiteknight> plobsing: I'm not seeing a nativecall.pir in tools/build in trunk
+[19:10] <whiteknight> but some of the generated files swear it is there
+[19:11] <plobsing> which ones?
+[19:11] <purl> which ones are b0rked
+[19:11] <whiteknight> ah, nevermind. I found it. It got borked in the merge
+[19:12] <PerlJam> shockwave: where's your :main?
+[19:13] <nopaste> "shockwave" at 76.119.137.239 pasted ":main sub" (20 lines) at http://nopaste.snit.ch/19712
+[19:13] <dalek> dbm-dynpmcs: 3131650 | darbelo++ | setup.pir:
+[19:13] <shockwave> Perljam ^^^
+[19:13] <dalek> dbm-dynpmcs: Small setup.pir fix, Thanks to fperrad++ for providing it.
+[19:13] <dalek> dbm-dynpmcs: review: http://gitorious.org/dbm-dynpmcs/dbm-dynpmcs/commit/3131650c0d6c832acbc5d3171d457745ef333d23
+[19:13] <dalek> dbm-dynpmcs: 0ac1c16 | darbelo++ | :
+[19:13] <dalek> dbm-dynpmcs: Add an empty .gitignore file to keep the dynext dir around.
+[19:13] <dalek> dbm-dynpmcs: review: http://gitorious.org/dbm-dynpmcs/dbm-dynpmcs/commit/0ac1c16f5b924277cf89b0fce207b5c5aaf42579
+[19:13] <Austin> It looks okay to me, if what you've shown is what's running.
+[19:14] <shockwave> There is other code, but is basically setup.
+[19:15] <shockwave> If there where a temporary interplace place for files, i would place them there.
+[19:15] <Austin> gitorious?
+[19:15] <purl> i guess gitorious is getting a lot of work atm, it seems.
+[19:16] <shockwave> These are just throw away files.
+[19:16] <Austin> Which line is 31?
+[19:16] <Austin> purl, nopaste?
+[19:16] <purl> hmmm... nopaste is at http://nopaste.snit.ch/ (ask TonyC for new channels)  or http://paste.scsys.co.uk/ or App::Nopaste or tools/dev/nopaste.pl or at http://www.extpaste.com/ or http://paste.scsys.co.uk (for #catalyst, #dbix-class, #moose  and others) or http://gist.github.com/ or paste or gtfo or tools/dev/nopaste.pl or https://trac.parrot.org/parrot/browser/trunk/tools/dev/nopaste.pl
+[19:17] <Austin> Man, which one had the good coding features... Jesse something-or-other used it a lot
+[19:17] <shockwave> .sub 'this' :method \t$P30000001 = self.'%get_base'(self) \t$P30000001.'foo'() .end
+[19:17] <shockwave> dang
+[19:17] <shockwave> .sub 'this' :method; \t$P30000001 = self.'%get_base'(self); \t$P30000001.'foo'() ; .end
+[19:17] <shockwave> Line 31 is the call to 'foo'()
+[19:19] <Coke> already registered is also another way to say, use a :main marker.
+[19:19] <shockwave> Coke, the main file that is ran has a :main marker.
+[19:20] <Austin> Ahh
+[19:20] <PerlJam> shockwave: but you've also got :immediate :load and now :init right?
+[19:20] <Austin> Your get_base function returns the class object.
+[19:20] <Austin> I don't think you want that.
+[19:20] <shockwave> PerlJam, no, I don't have :init
+[19:21] <Austin> Or, if you *do* want that, then you need to get the method a little differently.
+[19:21] <shockwave> Austin, I would like to return something that a method can be called upon.
+[19:22] <Austin> Why?
+[19:22] <Austin> What's the eventual use-case?
+[19:22] <shockwave> Because, that's essentially the 'base' keyword.
+[19:22] <shockwave> Which is just like 'this', except for the parent class.
+[19:22] <Austin> I don't know what it does. Sorry.
+[19:22] <Coke> shockwave: yes, but I can't see your other code.
+[19:23] <Austin> You mean base returns "the current object, but cast to an ancestor class?"
+[19:23] <shockwave> Coke, sudjest a place where you would like to see it and I'll place it there. There are 3 files.
+[19:23] <Austin> Can you show me some code (real-world-ish) that uses 'base' ?
+[19:24] <whiteknight> shockwave should make a repo and put the code somewhere public :)
+[19:24] <whiteknight> I'm sure lots of people would like to see it
+[19:25] <shockwave> Austin, you can think of it in the abstract easily: If you have class B, that derrives from class A, and class B overrides method 'foo' on A, then 'base' allows you get at 'A::foo'.
+[19:25] <Austin> But is is something used inside B's methods?
+[19:26] <shockwave> Austin, yes.
+[19:26] <Austin> I think you have to do an mro search (which you've started) but you need to look for the method as well. And then call it with the invocant object, not the class object.
+[19:26] <NotFound> shockwave: wath you can do is to get the Sub PMC of the method in the base class, and invoke it with the current object.
+[19:26] <ash_> whiteknight: you might be interested in this, i am trying, more as a learning experience, re-make nqp (i am calling it nq-nqp), i have a parser thats getting closer to doing most of nqp except grammars right. grammars are going to be um... hard. it doesn't do any code gen yet, but i am working on it. I have it on github:  http://github.com/ashgti/nq-nqp-rx if you want to see it
+[19:27] <NotFound> ...what Austin said
+[19:27] <Austin> $P0 = <what you have now>;  if $P0 can 'xxx' then $P1 = $P0.methods<xxx> ; $P1(self, rest-of-args)
+[19:27] <ash_> s/am trying/am trying to/
+[19:27] <whiteknight> ash_: Awesome! Looks very interesting
+[19:28] <shockwave> Is it possible to return the object on which I would run the method?
+[19:28] <whiteknight> Anybody object to merging in pmc_func_cleanup branch now? It's going to completely nuke trunk, in the bad way
+[19:29] <NotFound> whiteknight: Go, go, go!
+[19:29] * whiteknight has NotFound on his shoulder, but no little angel
+[19:29] <shockwave> Of the top of your head, does anyone know of vecinities of an mro search. Maybe some test.
+[19:29] <whiteknight> okay, I warned everybody!
+[19:30] <shockwave> Windows search caps are not awesome.
+[19:30] <Austin> shockwave: no. sorry.
+[19:30] <shockwave> http://search.cpan.org/~tty/kurila-1.19_0/lib/mro.pm
+[19:30] <Austin> You'll have to treat "base.foo()" as a single case.
+[19:31] <Austin> It's really "base::foo()", not an object.
+[19:31] <NotFound> shockwave: I think that using find_method in the base class object will be enough.
+[19:32] <Austin> Notfound: Only if he doesn't do multiple inheritance.
+[19:32] <darbelo> whiteknight: Nuking is good. It keeps HLL dev on their toes.
+[19:32] <NotFound> Austin: uhh... having a think like 'base' doesn't assume single inheritance?
+[19:32] <shockwave> In the first post, you'll notice that base gets placed in to a temp register.
+[19:32] <darbelo> plobsing: ping
+[19:33] <NotFound> s/think/thing
+[19:33] <shockwave> Yes, is single inheritance.
+[19:33] <Austin> NotFound: I'm reading it like "SUPER". I think it just means "not in this class."
+[19:33] <whiteknight> commit is taking a long time
+[19:33] <whiteknight> is BIG commit
+[19:33] <shockwave> Yes, is just like super keyword in Java.
+[19:34] <darbelo> whiteknight: and svn's merge handling is retarded.
+[19:34] <shockwave> whiteknight, what does pmc_func_cleanup do?
+[19:34] <Austin> shockwave: You found the base class. So now do something like sub = $P0.find_method('xxx') and you've got a sub-ref (or null).
+[19:34] <NotFound> shockwave: kill us all
+[19:34] <whiteknight> shockwave: renames a lot of functions from src/omc.c
+[19:34] <whiteknight> pmc.c
+[19:34] <NotFound> When whiteknight said 'nuke' I don't expect less.
+[19:35] <Austin> Then you'll call self.sub(args)
+[19:35] <darbelo> Other than pmc_new() did you rename anything that gets exported?
+[19:35] <whiteknight> darbelo: pmc_reuse, pmc_new_*, constant_pmc_new, a few others
+[19:36] <shockwave> whiteknight, What does that mean: " shockwave: renames a lot of functions from src/omc.c"?
+[19:36] <whiteknight> I sent the items to the ML
+[19:36] <shockwave> That I should do that or todo that?
+[19:36] <whiteknight> shockwave: thats what i did
+[19:37] <shockwave> The code that comes with the distribution has been a good guide.
+[19:37] <shockwave> Though, you always have to tailor make it for your particular scenario.
+[19:37] <shockwave> That sounds like a good file to keep in mind.
+[19:38] <darbelo> Actually, pmc.c should be, mostly, internal use only.
+[19:38] <shockwave> I'll be looking into the tests files to see if I can return an pointer to 'self' for the base class.
+[19:38] <shockwave> It's probably in there, somewhere.
+[19:39] <shockwave> I appreciate the find_method sudjestion, but that's not what I need.
+[19:39] <chromatic> I don't think you're going to get what you think you need.
+[19:39] <chromatic> Parrot doesn't cast objects.
+[19:39] <kthakore> hi
+[19:40] <NotFound> shockwave: there is not such thing as a parent object. Only pmc proxies for pmc bases.
+[19:40] <kthakore> I am reading about the parrot architecture from allison's talk
+[19:40] <shockwave> chromatic, maybe I'm just not understanding how Parrot's object model works at that level.
+[19:40] <kthakore> why is there a reason for PIR and PASM?
+[19:41] <shockwave> NotFound, oh, I think I understand.
+[19:41] <chromatic> How about you tell us the behavior you want from a language perspective, not from "I need a pointer to a base class"?
+[19:41] <NotFound> kthakore: masochism, maybe
+[19:41] <kthakore> NotFound: oh ok
+[19:41] <chromatic> You have an object, which is an instance of a class.  That class inherits from another class.  Both classes have methods.
+[19:41] <chromatic> Now what?
+[19:41] <purl> rumour has it Now is the time for the Kwisatz Haderach to arise and conquer America on a sandworm army
+[19:41] <kthakore> NotFound: :) my kinda fun
+[19:42] <NotFound> kthakore: currently pasm is only intended for very low level diagnoses of stuff like that.
+[19:42] <shockwave> chromatic, If you have class B, that derrives from class A, and class B overrides method 'foo' on A, then 'base' allows you get at 'A::foo' from B::foo.
+[19:43] <kthakore> NotFound: oh ok
+[19:43] <shockwave> I may just need to use find_method, like these guys have been mentioning.
+[19:43] <chromatic> Exactly.
+[19:43] <shockwave> From what NotFound mentioned, it made me think of it another way.
+[19:43] <whiteknight> urg, my commit keeps hanging
+[19:43] <whiteknight> !@%@%#$% SVN
+[19:43] <shockwave> I was visualizing it as layered classes, and one could kinda peel a certain layer from the bottom-most object.
+[19:45] <whiteknight> goddamn svn
+[19:46] <chromatic> whiteknight, can I tell you the story of how I ruined a merge with Git locally yesterday, then fixed it without losing any data or my mind?
+[19:47] <whiteknight> chromatic: I would love to hear it
+[19:47] <whiteknight> I would also love it if svn would stop timing out and actually commit something
+[19:47] <cotto_work> Oh boy!  I love storytime!
+[19:48] <plobsing> darbelo: pong
+[19:48] <chromatic> Jonathan and I modified the same files!
+[19:48] <chromatic> We went to commit at the same time!
+[19:48] <chromatic> His commit landed first, and the diff hunks overlapped!
+[19:48] <chromatic> "Please fix this merge conflict," Git said.  "I do not understand this code."
+[19:49] <chromatic> KAPOW!  BIFF!  And then I surveyed the bloody wreckage and said "Wow... that really wasn't what I intended."
+[19:49] * cotto_work is scared.
+[19:49] <whiteknight> COMMITTED! Done!
+[19:49] <chromatic> I rewound the commits!  My local copy was four commits earlier!  I made a branch!
+[19:49] <chromatic> Time travel, you see.  I know Brazilians.
+[19:49] <chromatic> I cherry picked my commits!  Hooray!
+[19:49] <whiteknight> yay!
+[19:49] * kthakore bring popcorn
+[19:49] <chromatic> I returned to master.
+[19:49] <chromatic> Now I am its master.
+[19:49] * cotto_work sighs in relief
+[19:49] * kthakore gasps
+[19:50] <davidfetter> hastur. hastur.
+[19:50] <chromatic> I told it to forget everything that had happened since I started working... at least in that universe.
+[19:50] * davidfetter puts on some metallica
+[19:50] <PerlJam> time travel is one of git's best features.
+[19:50] <chromatic> "You've been modifying code?" it asked, incredulity dripping from its voice.
+[19:50] <chromatic> "No," I lied.  "Now tell me what Jonathan has been doing."
+[19:50] <chromatic> He'd made a commit.  ZING!  Now I had his commit.
+[19:51] <chromatic> I returned to the branch.  I am a master of time and space.
+[19:51] <kthakore> WOW!
+[19:51] <chromatic> "You know," I said.  "I don't like this rug.  Let's play what-if.  What if I had started this work *after* Jonathan did?"
+[19:51] <chromatic> The universe shook.  Plaster fell from the walls, which was odd, because they're drywall and spackle.
+[19:51] * kthakore crunches his popcorn
+[19:51] <chromatic> I made one tiny edit for the overlapping hunk, then returned to this universe again.
+[19:52] <chromatic> "Look over there," I said.  "It's a parallel dimension, but I really like the color of the vase on the table."
+[19:52] <chromatic> "I LIKE IT TOO," said the universe, and now there was one universe.
+[19:52] <chromatic> Sadly, I had no pie.
+[19:52] <chromatic> The end.
+[19:52] <purl> it has been said that the end is all messed up
+[19:52] *** mikehh joined
+[19:53] <ttbot> Parrot trunk/ r44190 MSWin32-x86-multi-thread make error http://tt.ro.vutbr.cz/file/cmdout/204291.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[19:54] * kthakore gives chromatic his pie
+[19:54] <mikehh> All tests PASS (pre/post-config, make corevm/make coretest, smoke (#32281), fulltest) at r44189 - Ubuntu 9.10 amd64 (g++ with --optimize)
+[19:55] <chromatic> I eventually had a homemade rice cake.
+[19:55] <whiteknight> almost as good as pie
+[19:56] <chromatic> It'd have been better if I'd used a real blender instead of a stick blender, but I was lazy.
+[19:56] <nopaste> "Austin" at 68.37.46.53 pasted "Syntax changes for NQP from Kakapo (including super)" (53 lines) at http://nopaste.snit.ch/19714
+[19:56] <NotFound> whiteknight: r44190 built with g++, the nuke was not armed.
+[19:56] <darbelo> plobsing: I'm looking at the tt362 branch.
+[19:57] <whiteknight> nice
+[19:57] <dalek> parrot: r44190 | whiteknight++ | failed to fetch changeset:
+[19:57] <Austin> shockwave: see nopaste above
+[19:57] <plobsing> darbelo: any suggestions so far?
+[19:57] <dalek> parrot: merged the pmc_func_cleanup branch renames all the functions in the src/pmc.c file to be called Parrot_pmc_*. Touches almost all files in the repo because these were very common functions.
+[19:57] <shockwave> Austin, ok
+[19:57] <darbelo> Do you think the code that got repeated on both pmcs should move to a header?
+[19:57] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44190/
+[19:57] <dalek> parrot: r44191 | whiteknight++ | branches/parrot_call_dep:
+[19:57] <dalek> parrot: merged to trunk, deleting branch
+[19:57] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44191/
+[19:57] <dalek> parrot: r44192 | whiteknight++ | branches/pmc_func_cleanup:
+[19:57] <dalek> parrot: merged to trunk, deleting branch
+[19:57] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44192/
+[19:57] <whiteknight> I am the master of this domain
+[19:57] <whiteknight> may the entire repo tremble when I approach!
+[19:58] * NotFound sings: I am the eye in the sky...
+[19:58] <cotto_work> whiteknight, it doesn't really take much to make the svn repo tremble
+[19:58] <NotFound> whiteknight: all test pass
+[19:58] <Austin> Ooh, Alan Parsons Project
+[19:58] <purl> rumour has it Alan Parsons Project is more robust than beowulf or doesn't involve matthew broderick although it's been rumored that it involved monkeys and the toupee of kasey kasem
+[19:59] <Austin> Ah! Git gets me again.
+[19:59] <whiteknight> we really need to have an svn mirror set up sometime
+[19:59] <plobsing> darbelo: looking at it again, I think I can take most of the code in imageiosize.pmc away
+[20:00] <plobsing> darbelo: the integers don't have to be the same, we just care that they take up space
+[20:00] <plobsing> gimme a sec
+[20:00] <NotFound> Austin: now you know I'm not very young ;)
+[20:00] <Austin> And conversely.
+[20:00] <dalek> parrot-linear-algebra: 6826ad8 | Whiteknight++ |  (6 files):
+[20:00] <dalek> parrot-linear-algebra: update PARROTREVISION to r44190, the merge of the pmc_func_cleanup branch. rename pmc_new to Parrot_pmc_new
+[20:00] <dalek> parrot-linear-algebra: review: http://github.com/Whiteknight/parrot-linear-algebra/commit/6826ad867e3adf36ecdb84d64bdb2b1da8c524b5
+[20:01] <Austin> I'm thinking of renaming Kakapo. I should call it nqp++
+[20:01] <whiteknight> libnqp
+[20:01] <whiteknight> stdnqp
+[20:02] <Austin> Whiteknight: It's a freaking lifestyle choice at this point.
+[20:02] <whiteknight> Austin: I'm going to have to start playing with it more
+[20:02] <Austin> When I was writing setup.nqp, it was pretty hard to remember "oh, that doesn't work, and this keyword doesn't exist..."
+[20:04] <NotFound> Is much fun writing something in Winxed: "Oh, this keyword doesn't exist, let's create it"
+[20:05] <NotFound> FSV of 'fun'
+[20:08] * whiteknight is heading home. Later
+[20:11] <dalek> parrot: r44193 | mikehh++ | trunk/src/pmc/imageio.pmc:
+[20:11] <dalek> parrot: fix codetest failure - line length
+[20:11] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44193/
+[20:11] <NotFound> Winxed builds and pass tests with r44190. Definitely the nuke was short of neutrons.
+[20:11] <dalek> parrot: r44194 | mikehh++ | trunk/src/scheduler.c:
+[20:11] <dalek> parrot: fix codetest failure - line length
+[20:11] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44194/
+[20:11] <dalek> parrot: r44195 | plobsing++ | branches/tt362/src/pmc/imageiosize.pmc:
+[20:11] <dalek> parrot: remove unnecessary freeze id logic from imageiosize
+[20:11] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44195/
+[20:11] <shockwave> How can I print all the keys of the hash inspect returns?
+[20:12] <Austin> Create an iterator:  $P0 = iter <hash>
+[20:13] <Austin> Or load_bytecode 'dumper.pbc' and then call _dumper($P0)
+[20:13] <Austin> (on the hash, not the iterator)
+[20:13] <shockwave> Austin, I started fooling around with an iterator. I'm glad I'm in the right path. Thanks.
+[20:14] <dalek> parrot-data-structures: 904c13f | Whiteknight++ | benchmarks.sh:
+[20:14] <dalek> parrot-data-structures: make benchmarks.sh executable on systems that support it
+[20:14] <dalek> parrot-data-structures: review: http://github.com/Whiteknight/parrot-data-structures/commit/904c13f182727e350cc321c41f3b16deebcd5639
+[20:14] <dalek> parrot-data-structures: 85ed1be | Whiteknight++ | t/pmc/ (3 files):
+[20:14] <dalek> parrot-data-structures: Merge branch 'master' of git@github.com:Whiteknight/parrot-data-structures
+[20:14] <dalek> parrot-data-structures: review: http://github.com/Whiteknight/parrot-data-structures/commit/85ed1beef6dd7361ce727676e737b0363896c923
+[20:14] <dalek> parrot-data-structures: 759c8f2 | Whiteknight++ |  (8 files):
+[20:14] <dalek> parrot-data-structures: Update to use Parrot_pmc_new instead of pmc_new
+[20:14] <dalek> parrot-data-structures: review: http://github.com/Whiteknight/parrot-data-structures/commit/759c8f25a5f6b8bbcbd1d21a20cba019b357cf3f
+[20:16] <plobsing> darbelo: hows that? is there still too much duplication?
+[20:16] <darbelo> let me svn up...
+[20:18] *** hercynium joined
+[20:18] <Coke> davidfetter: I have a set of fraternity colors with HASTUR printed on the back.
+[20:18] <davidfetter> heh
+[20:19] <Coke> chromatic: I finally caved and followed your style of quoting something in the release message.
+[20:19] <darbelo> plobsing: looks good to me.
+[20:19] * Coke wonders what got merged this time and if trunk works again.
+[20:19] <chromatic> Coke, that was a great quote, especially for that release.
+[20:19] <shockwave> Austin, I was able to get the keys printed. Thanks.
+[20:20] <Coke> AIGH.
+[20:20] <Austin> shockwave: No problem. You should look into using _dumper now, because it does a fine job of displaying the stuff, and when you're neck deep you'll appreciate that.
+[20:20] <Coke> the rakudo release note says, "requires parrot 2.1.0"
+[20:20] <Coke> ... AIGH
+[20:20] <cotto_work> ow
+[20:21] * Coke heads over to perl6.
+[20:21] <darbelo> What they released already?
+[20:21] <darbelo> I thought tha was next week.
+[20:21] <cotto_work> nope
+[20:21] <cotto_work> It's two days after the Parrot release
+[20:21] <darbelo> Ouch.
+[20:23] <kthakore> darbelo: what happenz?
+[20:23] <cotto_work> Coke> the rakudo release note says, "requires parrot 2.1.0"
+[20:23] <Austin> shockwave: Also, take a look at the __dump method in http://gitorious.org/kakapo/kakapo/blobs/master/src/Classes/P6object.nqp -- it works with Data::Dumper to dump the attributes of class instances.
+[20:23] <darbelo> kthakore: What Coke said about the Rakudo release notes.
+[20:24] *** iblechbot joined
+[20:24] <darbelo> They're basically 'requiring' the buggy release, instead of the fixed one we put out for them.
+[20:24] <shockwave> When using the 'inspect' opcode on an object, and printing the keys of the returned hash using an iterator, the printed stuff doesn't seem to include at least one key that could be used on the returned hash: 'all_parents'.
+[20:24] <shockwave> There may be more
+[20:25] <kthakore> darbelo: uh oh
+[20:25] <mikehh> make html - Failed to process tools/build/nativecall.pl
+[20:25] <shockwave> Or the printed keys just don't coincide with the hash names.
+[20:25] <kthakore> darbelo: that might not work out so well
+[20:25] <shockwave> Or I'm just doing it wrong.
+[20:26] <chromatic> We might not expose all_parents to inspect.
+[20:26] <Austin> This is on a class?
+[20:26] <shockwave> Yes.
+[20:26] *** cosimo joined
+[20:27] <Austin> It's worse than chromatic suggests.
+[20:28] *** joeri joined
+[20:28] <Austin> The hash is generated based on code that is maintained by hand - it's not automatic, nor is it automatable as currently coded. You kind of have to read the source code to know the possible things you can pass to inspect
+[20:28] <shockwave> chromatic, all_parents returns something.
+[20:29] <Austin> There are 11 keys that inspect_str answers, but only 7 that inspect populates.
+[20:29] <Austin> Welcome to parrot.
+[20:29] <dalek> parrot: r44196 | mikehh++ | trunk/src/pmc.c:
+[20:29] <dalek> parrot: correct C function docs
+[20:29] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44196/
+[20:30] <shockwave> There is a opcodes page in the docs.
+[20:30] <shockwave> I'm going to start a trac page for placing opcodes there. These are the ones within parrot.
+[20:30] <Austin> Also, there are the source files for the various .pmc types, in $_PARROT/src/pmc. That's where the goodies are hidden.
+[20:30] <shockwave> Is that cool?
+[20:30] *** contingencyplan joined
+[20:31] <Austin> shockwave: There's a dictionary already started. Please, please add to it.
+[20:31] <Austin> "Parrot Dictionary" is the page name
+[20:31] <shockwave> I'll search for it.
+[20:32] <Austin> http://trac.parrot.org/parrot/wiki/Parrot%20Dictionary
+[20:32] <shockwave> Yep, found it.
+[20:32] <darbelo> Say, is there a brave soul willing to translate t/dynpmc/gdbmhash.t to PIR?
+[20:33] * Austin sings "...at the table of your love, I got the brush-off! At the Indianapolis of your heart, I lost the race..."
+[20:33] * Austin sings "... I've been flushed from the bathroom of your heart!"
+[20:34] <kthakore> Austin: um ok ...
+[20:34] * Coke does the picard maneuver on his aperture laboratories shirt.
+[20:34] <Austin> Forget Taylor Swift - THAT's country.
+[20:34] <purl> Austin, I didn't have anything matching taylor swift - that's country
+[20:34] <Coke> (inspect_str) <RANT RANT RANT>
+[20:35] <Coke> that's another place like does where there is a well defined list of what is what.
+[20:35] <Coke> is NOT a ...
+[20:35] <chromatic> What is the what?
+[20:35] <NotFound> darbelo: Why pir? Can't be written in some HLL?
+[20:37] <kthakore> Is this ticket still outstanding? #1192
+[20:37] <kthakore> ticket #1192
+[20:37] <mikehh> All tests PASS (pre/post-config, make corevm/make coretest, smoke (#32282), fulltest) at r44196 - Ubuntu 9.10 amd64 (gcc with --optimize)
+[20:39] <shockwave> Parrot Dictionary contains alot of useful information.
+[20:39] *** lucian_ joined
+[20:41] <shockwave> I volunteer to re-arrange the information there, and organize it in a slightly different format.
+[20:41] <shockwave> Like a reference manual.
+[20:41] <shockwave> To do what that page is current doing, which is catalogin the PMC and opcodes.
+[20:42] <shockwave> I can dedicate to it at least 30mins per day, 5 days per week, for the next 3 months.
+[20:42] <shockwave> Anyone oposes or have a better idea?
+[20:43] <Austin> shockwave: There's a "HLL Resources" page that links to the dictionary. Make sure you look there, and if you add any pages for HLL developers, add them to that page, too, please.
+[20:44] <ttbot> Parrot trunk/ r44196 cygwin-thread-multi-64int make error http://tt.ro.vutbr.cz/file/cmdout/204415.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[20:44] <shockwave> Austin, I'm thinking of something to complement the PIR book. The book should show you the basics of programming parrot, while the reference has the pmc and opcode details.
+[20:44] <Austin> Cool.
+[20:45] <shockwave> This can be kept on trac, for now. Hopefully in the future it can grow to a state which can be placed in docs.parrot.org.
+[20:46] <Austin> You might want to commit changes to the pmc or .ops files directly. The docs are generated from there, so any updates you make will be included directly.
+[20:47] <shockwave> Austin, I'll get someone to Ok that, in the future.
+[20:48] <NotFound> Why is ttbot crying about dynpmc md2.pmc and several like that? Aren't that beasts out of the repo now?
+[20:48] <Austin> It's an open source project. Send in your pafo CLA, and commit the changes directly. :)
+[20:49] <darbelo> NotFound: nope, they'll remain in the repo until 2.4
+[20:49] <darbelo> s/4/3/
+[20:49] <darbelo> NotFound: It's a deprecation matter.
+[20:50] <darbelo> But you can start configuring without them and installing them from plumage if you need them.
+[20:50] *** kjeldahl joined
+[20:51] <NotFound> I don't have it. They are generated from some other directory?
+[20:52] <darbelo> NotFound: those are probed for in the auto::crypto configure step.
+[20:52] <darbelo> auto::crypto -        Does your platform support crypto...................yes.
+[20:53] <NotFound> darbelo: I see, but where are the skeletons or whatever they use?
+[20:54] <chromatic> I think they were part of configure.
+[20:54] <darbelo> NotFound: config/gen/crypto/[nameofthepmc].in
+[20:55] <darbelo> No, actually config/gen/crypto/digest_pmc.in
+[20:55] <darbelo> I misremembered that.
+[20:59] <NotFound> ttbot is right, is broken,
+[21:04] <dalek> parrot: r44197 | mikehh++ | trunk/lib/Parrot/Docs/Section/Tools.pm:
+[21:04] <Coke> Hey, why do we have an empty runtime/parrot/library/Math/Random ?
+[21:05] <dalek> parrot: remove tools/build/nativecall.pl (converted to pir)
+[21:05] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44197/
+[21:05] <dalek> parrot: r44198 | mikehh++ | trunk/t/codingstd/copyright.t:
+[21:05] <dalek> parrot: remove tools/build/nativecall.pl (converted to pir)
+[21:05] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44198/
+[21:05] <Coke> was the one thing in it removed?
+[21:05] <darbelo> The library that lived there moved out.
+[21:05] <darbelo> I think it was fperrad's mersene twisted RNG, but could be wrong.
+[21:06] *** mberends joined
+[21:07] <darbelo> If it was, then I removed it, but forgot to remove the dir. Want me to kill it?
+[21:07] <Coke> got it.
+[21:07] <Coke> (also regen'd manifest.skip, which referred to it.)
+[21:08] <Coke> would anyone mind if I converted one of the PIR files in the library to NQP, as long as the functionality didn't change?
+[21:08] <Coke> nqp-rx, that is.
+[21:09] <darbelo> If I can still use them from PIR, then I don't care what they're written in.
+[21:09] <darbelo> Could be COBOL for all I care.
+[21:09] <Austin> Yeah!
+[21:09] <Austin> cobol on parrotvm
+[21:09] <Austin> Darbelo's next project
+[21:10] <darbelo> Austin: No.
+[21:10] <Austin> Anybody know what PMC I have to ask to get the process id?
+[21:11] <darbelo> I don't think we store that anywhere.
+[21:11] <Austin> Heh.
+[21:11] <NotFound> Austin: you can dlfunc getpid
+[21:12] <mberends> hi, I wanted to thank @you-all for the terrific last minute fixes to Parrot. The release targets r44147, which includes all the patches, but just missed the documentation updates in 44148 and 44149. That's my mistake, and I'm sorry the Parrot version was published as 2.1.0 instead of 2.1.1. The Rakudo --gen-parrot will pick up the patches, however.
+[21:13] <Austin> That wants a library, NotFound, but what do I give it?
+[21:13] <darbelo> libc?
+[21:13] <purl> libc is special.
+[21:13] <NotFound> Austin: pmcnull
+[21:13] <Austin> w00t
+[21:13] *** snarkyboojum joined
+[21:13] <darbelo> mberends: Shouldn't releases target releases?
+[21:14] *** Whiteknight joined
+[21:14] <NotFound> Some day we must improve that part of the dl system.
+[21:14] <darbelo> There is no trunk rev that corresponds to 2.1.1.
+[21:14] <mberends> yes, that's my bad.
+[21:15] <darbelo> Which is bound to be a problem if --gen-parrot pulls from trunk.
+[21:15] <Austin> What's the "signature" for "pid_t getpid(void)" ?
+[21:15] <mberends> darbelo:  it pulls r44147 which tests out very well
+[21:15] <Austin> Is that just "I", or are signatures something else?
+[21:16] <NotFound> Austin: I think i will work everyhwere
+[21:16] <Whiteknight> "I"
+[21:16] <darbelo> "->I"?
+[21:16] <Whiteknight> for NCI it's "I"
+[21:16] <Austin> heh
+[21:16] <Whiteknight> for PCC is "->I"
+[21:16] <Austin> And this is written down, where?
+[21:16] <Whiteknight> NOWHERE
+[21:16] <darbelo> Is there any chance we could unify that?
+[21:17] <plobsing> there's a pdd for that
+[21:17] <Austin> Once I've got &getpid, can I just call it, or do I have to do some other shenanigans?
+[21:17] <NotFound> Austin: just call it.
+[21:18] <darbelo> At this point I want a ticket and an entry in DEPRECATED.pod more than a PDD. But I guess I'll have to live with it.
+[21:19] <plobsing> docs/pdds/draft/pdd16_native_call.pod
+[21:22] <darbelo> The pdd still talks about 'v' signatures, weren't those deprecated?
+[21:23] <NotFound> darbelo: if the return value is the first character, you need something to mean void.
+[21:24] <darbelo> Not if we move to the "->" syntax :)
+[21:25] <plobsing> darbelo: I want to move to the "->" syntax as well, but there's other improvements that can come at the same time
+[21:25] <dalek> parrot: r44199 | coke++ | trunk/runtime/parrot/library/Math/Rand.pir:
+[21:25] <NotFound> darbelo: when that day comes, the if will meet his else ;)
+[21:25] <plobsing> like long double
+[21:25] <darbelo> Yeah, our native type handling sucks.
+[21:26] <Austin> Man, for what is probably the only time in my life, I need to be able to say "   @args .= shift; "
+[21:26] <Austin> Where's *that* in the nqp timeline...
+[21:27] <dalek> parrot: minor PIR cleanup
+[21:27] <dalek> parrot: (rm commented out code, use 'box')
+[21:27] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44199/
+[21:27] <dalek> parrot: r44200 | coke++ | trunk (2 files):
+[21:27] <darbelo> AFAICT we have no way to work with integers/floats wider than INTVAL or NUMVAL.
+[21:27] <dalek> parrot: Remove empty directory.
+[21:27] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44200/
+[21:27] <dalek> parrot: r44201 | NotFound++ | failed to fetch changeset:
+[21:27] <dalek> parrot: rename deprecated and deleted pmc_new_noinit to Parrot_pmc_new_noinit in crypto dynpmcs skeleton
+[21:27] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44201/
+[21:28] <plobsing> darbelo: don't we have bignums somewhere?
+[21:28] <darbelo> Only if you have GMP installed.
+[21:28] <pmichaud> Austin: nqp doesn't have assignment
+[21:29] <pmichaud> Austin: so .= isn't on its timeline at present
+[21:29] <plobsing> well then the decision is easy: use the widest possible values for INTVAL/NUMVAL or use GMP
+[21:29] <Austin> Of course. The really cool opcodes are always in the *next* programming language...
+[21:29] <darbelo> And those are PMCs, the only way to pass *them* data is through VTABLEs, which don't handle native types.
+[21:29] <dalek> tracwiki: v1 | shockwave++ | PIRReference
+[21:29] <dalek> tracwiki: http://trac.parrot.org/parrot/wiki/PIRReference?version=1&action=diff
+[21:30] <pmichaud> (passing rakudo 2.1.0 comments from #perl6 back here)
+[21:30] <pmichaud> fwiw, I'm just fine with Rakudo having gone out listing 2.1.0 as its requirement.  If someone uses --gen-parrot, "2.1.0-devel" is what they will see in the parrot version number.
+[21:32] <Coke> hokay. I just kind of feel that the effort in getting 2.1.1 out the door might have been wasted. =-)
+[21:34] <darbelo> pmichaud: Having a release rakudo pull from parrot trunk feels wrong to me, shouldn't it target a parrot release?
+[21:34] <pmichaud> darbelo: --gen-parrot has to pull from parrot repo
+[21:35] <pmichaud> for people developing rakudo, parrot releases are almost never sufficient
+[21:35] <pmichaud> I think the longest period of time we've been able to develop to a release parrot is about 5 days.
+[21:35] <Coke> darbelo: the release does target the release.
+[21:35] <darbelo> Coke: If the release targets the release why is pulling from trunk?
+[21:36] <Coke> darbelo: their "trunk" pulls from our trunk.
+[21:36] <Coke> (not HEAD, necessarily, but somewhere on trunk.)
+[21:36] <Coke> once they cut the release, the rakudo developers go right back to hacking on the mainline development, just like we do.
+[21:37] <darbelo> Coke: Didn't mberends say a while ago that the *release* pulls (a specific rev of) trunk?
+[21:37] <Coke> ... if I did, I think he's mistaken.
+[21:38] <pmichaud> *sigh*
+[21:38] <Coke> er, if /he/ did.
+[21:38] <pmichaud> someone downloads a copy of Rakudo.  Let's suppose they get the tarball.
+[21:38] <Coke> pmichaud: my summary is correct, neh?
+[21:39] <ttbot> Parrot trunk/ r44199 cygwin-thread-multi-64int make error http://tt.ro.vutbr.cz/file/cmdout/204540.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[21:39] <pmichaud> they unpack the tarball.  If they have parrot already installed, it needs to be at least 2.1.0.
+[21:39] <darbelo> pmichaud: I'm doing that right now, I'll just see If it does what I think it does.
+[21:39] <pmichaud> If they have 2.1.1, that's all the better.  If they go looking for a Parrot tarball, they'll find 2.1.1 (because 2.1.0 is apparently no longer available)
+[21:39] <pmichaud> that's fine -- perhaps a bit of confusion, but shouldn't be too big.
+[21:40] <pmichaud> if they try to build rakudo using --gen-parrot, it will do so using a svn checkout from parrot's trunk.
+[21:41] <darbelo> pmichaud: Yes. That's my point.
+[21:41] <darbelo> svn checkout -r 44147 https://svn.parrot.org/parrot/trunk parrot
+[21:41] <pmichaud> In theory we could do a checkout from the tags/ subdir, or try to download a tarball, but the first option happens incredibly rarely and the second option requires a separate download tool
+[21:42] <pmichaud> in short, I don't see it as being a problem worth even the time we're spending discussing it (more)
+[21:42] <pmichaud> so far I've yet to encounter anyone who has trouble building rakudo/parrot using the --gen-parrot option.
+[21:42] <Coke> the only reason I even raised this was for the people who are also grabbing the parrot tarball.
+[21:42] <pmichaud> perhaps this will be the first occurrence, but based on a year's worth of experience I'm doubting it
+[21:43] *** bacek joined
+[21:43] <pmichaud> (grabbing the parrot tarball)
+[21:43] <pmichaud> This case is much less common (more)
+[21:43] *** lucian joined
+[21:43] <pmichaud> first, we more commonly have the case that someone always grabs the later tarball, even if the release notes specify an earlier one
+[21:44] <Coke> fperrad: ... if you declare target as a string in that, you don't need the $S0. you're doing this the hard way. =-)
+[21:44] <pmichaud> second, parrot itself describes 2.0.0  as being the "stable" release, so the much more common difficulty is that people grab the stable release instead
+[21:45] <dalek> parrot: r44202 | fperrad++ | trunk/runtime/parrot/library/distutils.pir:
+[21:45] <nopaste> "coke" at 65.91.151.194 pasted "fperrad - try this?" (5 lines) at http://nopaste.snit.ch/19715
+[21:45] <dalek> parrot: [distutils] fix r44186
+[21:45] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44202/
+[21:46] <pmichaud> anyway, like mberends and the rest of the rakudo folks, we *really* appreciate the effort to get the 2.1.1 release out quickly.
+[21:47] <Austin> Pmichaud: What's the intended behavior of exceptions inside a catch block?
+[21:47] <pmichaud> imo it improves things for the rakudo community a fair bit.  Had the release not occurred, then Rakudo would have ended up targeting 2.1.0 and the svn revision that didn't include the memory leak fix
+[21:47] <pmichaud> Austin: I'm a little fuzzy on those details still.  Tene++ might know.
+[21:47] <fperrad> Coke: I prefer coherence between :multi & .param
+[21:48] <Austin> Okay. Current nqprx doesn't pop the eh on entry, so I'm doing a lot of CATCH { $exception := $!; } if $exception { ... }
+[21:48] <pmichaud> fperrad: I think that trying to enforce coherence is a mistake
+[21:48] <pmichaud> fperrad: :multi is used to decide which candidate to invoke
+[21:48] <pmichaud> .param is used to determine what the arguments look like inside of the sub that is chosen
+[21:48] <pmichaud> they don't have to correspond exactly.
+[21:49] <dalek> tracwiki: v158 | coke++ | WikiStart
+[21:49] <dalek> tracwiki: http://trac.parrot.org/parrot/wiki/WikiStart?version=158&action=diff
+[21:49] <Tene> Austin: "behavior of exceptions in a catch block"?
+[21:49] <Austin> Tene: Should the eh that caught $! still be active inside the block?
+[21:50] <Tene> AFAIK, yes.
+[21:50] <Tene> That's also how it's implemented in PCT
+[21:50] <Austin> So throwing inside the block lands you back in the block?
+[21:50] <Tene> unless you're filtering the exceptions somehow.
+[21:50] <Tene> handle_types and handle_severity
+[21:51] <Tene> although... those aren't exposed in NQP, really.
+[21:52] <pmichaud> aren't they methods?
+[21:52] <Coke> Austin: I don't remember having to do that in partcl-nqp.
+[21:52] <Tene> pmichaud: they're methods on the exception handler itself.
+[21:52] <Austin> Tene: Maybe not in nqp
+[21:52] <Austin> :)
+[21:52] <Tene> pmichaud: when you say CATCH, you don't have access to the EH object itself.
+[21:52] <Austin> But in nqp++
+[21:52] <pmichaud> Tene: ah.  So one would .... right.
+[21:53] <darbelo> Coke: ping.,
+[21:53] <Tene> Austin: I don't really have any idea what you're trying to do here.
+[21:53] <pmichaud> Tene: maybe we can expose the handler somewhere :)
+[21:53] <Coke> Austin: check out the CATCH in partcl-nqp's "src/Partcl/commands/main.pm"
+[21:53] <Austin> partcl-nqp?
+[21:53] <purl> somebody said partcl-nqp was http://github.com/partcl/partcl-nqp
+[21:53] <fperrad> pmichaud, I dislike a small optimization which causes headache in long term maintenance
+[21:53] <Austin> botsnack
+[21:53] <purl> thanks Austin :)
+[21:54] <pmichaud> fperrad: headache in long term maintenance?  how so?
+[21:54] <Coke> fperrad: my headache is in the implemenation you have, wondering why you're running that extra opcode. =-)
+[21:54] <Coke> (that's twice I've seen that commit and said "??")
+[21:54] <darbelo> Coke: I migh be able to get access to a Solaris box with Sun cc on it next week. Do you still need help with non-gcc compilers in rm_cflags?
+[21:54] <Coke> so, YMMV.
+[21:54] <pmichaud> fwiw, I saw the commit and said "??" also :)
+[21:54] <Coke> darbelo: absolutely.
+[21:54] <Coke> it's probably still broken atm.
+[21:54] <Coke> s/probably/
+[21:54] <purl> Indubitably.
+[21:55] <darbelo> Okay. I'll see if I can do anything to fix it.
+[21:55] <Coke> darbelo: danke.
+[21:56] * darbelo is not making any promises.
+[21:56] <Tene> Austin: what are you doing in the EH that generates exceptions?
+[21:56] <cotto_work> pmichaud, any chance of you taking a look at the ops_pct branch?
+[21:56] <Coke> msg chromatic: I can't even logout from the vms accounts. I had to kill my screen session. been a looong time since I touched vms, so that is probably the extent of my efforts for now.
+[21:56] <purl> Message for chromatic stored.
+[21:56] <pmichaud> cotto_work: will do it shortly.
+[21:56] <pmichaud> (as in, in the next couple of hours, barring interruptions from @family)
+[21:56] <Austin> Tene: I'm catching whatever-exception, and throwing a test-failed exception.
+[21:57] <cotto_work> Great.  Thanks.
+[21:57] <Coke> Austin: ah. that's icky. your way is probably the best, then.
+[21:57] <Tene> Austin: once I get subclassable exceptions merged in, I should have an option for you.
+[21:58] <Austin> Sweet.
+[21:58] <Tene> You could write your own try() function that would catch everything *Except* your Exception::Test or whatever subclass.
+[21:59] <Coke> or you could throw a CONTROL exception.
+[21:59] <Coke> (would that work?)
+[22:02] <Tene> Yeah.
+[22:02] <Austin> Or I could just stash the exception and leave the block. It works just fine.
+[22:03] <nopaste> "Austin" at 68.37.46.53 pasted "Exception stash-n-dash" (21 lines) at http://nopaste.snit.ch/19717
+[22:06] <Coke> Austin: where's your try?
+[22:06] <Austin> Didn't know I needed one.
+[22:07] <Tene> Coke: you don't need one.
+[22:07] <Coke> I'm used to seeing try { ... CATCH {} CONTROL {} }
+[22:07] <Coke> k
+[22:07] <Tene> Coke: try {} just adds a default exception handler.  Any CATCH will override it.
+[22:13] <Coke> ah. it will also limit the scope of your CATCH, which is what I wanted. though presumably I could just say { }
+[22:13] <Coke> (the try makes it slightly more readable, IMO. But only slightly)
+[22:14] <Tene> Right.
+[22:20] <Tene> An afternoon project I've had on my list for a while is writing a simple language for representing PAST, to demonstrate/test PAST a bit more easily.
+[22:20] <Tene> If it happens to be identical to how --target=past currently dumps, even better.
+[22:23] *** dalek joined
+[22:24] <NotFound> Tene: a json'ed version will be trivial to parse and easy to convert to whatever,
+[22:28] <Coke> if anyone other than me cares about cold fusion: http://github.com/denuno/cfml.dictionary/blob/master/dictionary/cf8.xml (and more in that project) gives the XML for the various CF tags, so someone could theoretically make a parser.
+[22:37] <dalek> TT #1471 created by coke++: http://www.parrot.org/dev/examples doesn't use color coding.
+[22:42] <dalek> parrot: r44203 | plobsing++ | branches/tt362 (294 files):
+[22:42] <dalek> parrot: sync branch with latest trunk
+[22:42] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44203/
+[22:42] <dalek> parrot: r44204 | fperrad++ | trunk/runtime/parrot/library/distutils.pir:
+[22:42] <dalek> parrot: [distutils] handles non-group dynpmc (for example gdbmhash)
+[22:42] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44204/
+[22:42] *** bacek joined
+[22:43] <bacek> Morning
+[22:44] <cotto_work> morning bacek
+[22:45] <cotto_work> happy Saturday!
+[22:45] <bacek> cotto_work, work??? Still???
+[22:45] <Coke> it's not even 3pm there.
+[22:45] <cotto_work> It's only 1445 in my timezone
+[22:45] <cotto_work> on Friday
+[22:46] <bacek> yak...
+[22:46] <cotto_work> I see you're your typically busy self.
+[22:46] <bacek> it's 10am Saturday. Nice shiny Saturday :)
+[22:46] <darbelo> Poor us suckers, stuck in the past.
+[22:47] <bacek> cotto_work, just leftover from last nigh hacking
+[22:47] <darbelo> It's a rainy Friday night here.
+[22:47] <darbelo> If this keeps up, I'll have to develop gills...
+[22:48] <bacek> darbelo, get a plain, come to visit Australia :)
+[22:49] <Coke> or the east/North east US. plenty of snow here.
+[22:49] * Coke heads out.
+[22:49] <darbelo> bacek: A plane? What for? My house is about to become a freaking *raft*
+[22:50] <Austin> The nice thing about all this rain we're having in New Jersey is that it's stackable.
+[22:50] <darbelo> I'll just let the tide float me there.
+[22:50] <Austin> We're just piling it up on the sides of roads, rooftops, whereever.
+[22:50] <bacek> darbelo, than kayak to Australia!
+[22:50] <Austin> It's ... rain-caching!
+[22:53] *** theory joined
+[22:58] <dalek> parrot: r44205 | bacek++ | branches/sys_mem_reduce/src/gc/gc_inf.c:
+[22:59] <dalek> parrot: Update GC INF to use internal allocations.
+[22:59] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44205/
+[22:59] <dalek> parrot: r44206 | bacek++ | branches/sys_mem_reduce/src/io (2 files):
+[22:59] <dalek> parrot: Update src/io to use GC allocations
+[22:59] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44206/
+[22:59] <dalek> parrot: r44207 | bacek++ | branches/sys_mem_reduce/src/string/api.c:
+[22:59] <dalek> parrot: Switch string API to use internal allocations. Unfortunately Parrot_str_free_cstring doesn't accept PARROT_INTERP...
+[22:59] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44207/
+[22:59] <dalek> parrot: r44208 | bacek++ | branches/sys_mem_reduce (7 files):
+[22:59] <dalek> parrot: Switch charsets and encodings to use GC allocations
+[22:59] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44208/
+[23:02] <darbelo> bacek: I'm not sure it's a good idea to switch Parrot_str_to_cstring() to internal allocations.
+[23:02] <bacek> darbelo, why?
+[23:03] <bacek> mem_internal_allocate is same as mem_sys_allocate + LINE/FILE reporting on failure.
+[23:04] <darbelo> Embedders/extenders could want a cstring that's not subject to parrot's internal memory policy.
+[23:04] <bacek> darbelo, they have to anyway.
+[23:05] <bacek> Just because allocated cstring belongs to Parrot, not embedders.
+[23:05] <darbelo> Parrot_str_to_cstring() used to return a simple malloc()ed buffer.
+[23:05] <darbelo> They could free() it with impunity.
+[23:06] <bacek> darbelo, it's still simple malloced buffer. But there is str_cstring_free to deallocate it.
+[23:06] <bacek> Otherwise it's breaking contract.
+[23:07] <darbelo> Then I misunderstood what internal allocations meant :)
+[23:07] <darbelo> Sorry.
+[23:07] <bacek> No worries.
+[23:07] <purl> hmmm... No worries. is my smoke harness code public?
+[23:07] <bacek> purl, forget No worries.
+[23:07] <purl> bacek: I forgot no worries
+[23:13] <dalek> rakudo/master: 3b869ce | (Martin Berends)++ | docs/compiler_overview.pod:
+[23:13] <dalek> rakudo/master: [docs/compiler_overview.pod] update for new master branch completed
+[23:14] <dalek> rakudo/master: review: http://github.com/rakudo/rakudo/commit/3b869cee4f986d4c6e590a1bdef8661619acfa72
+[23:16] <dalek> parrot: r44209 | bacek++ | branches/sys_mem_reduce/src/runcore (2 files):
+[23:16] <dalek> parrot: Switch runcores to use GC allocations
+[23:16] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44209/
+[23:16] <dalek> parrot: r44210 | bacek++ | branches/sys_mem_reduce/src/runcore/cores.c:
+[23:16] <dalek> parrot: Remove old commented-out code.
+[23:16] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44210/
+[23:29] <dalek> dbm-dynpmcs: 7daf81b | darbelo++ | src/pmc/gdbmhash.pmc:
+[23:29] <dalek> dbm-dynpmcs: Pull updates from trunk. This fixes the build after the Great pmc.t Function Renaming of 2010.
+[23:29] <dalek> dbm-dynpmcs: review: http://gitorious.org/dbm-dynpmcs/dbm-dynpmcs/commit/7daf81b7ded56debd1ab25159b3e90783eeeaea5
+[23:33] <dalek> parrot: r44211 | plobsing++ | branches/tt362/t/native_pbc (4 files):
+[23:33] <dalek> parrot: mk_native_pbc
+[23:33] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/44211/
+[23:38] <darbelo> Whiteknight: ping
+[23:38] <Whiteknight> darbelo: pong
+[23:39] <darbelo> Did you update pirc acter the Great Renaming?
+[23:39] <darbelo> s/acter/after/
+[23:39] <Whiteknight> darbelo: I renamed all instances that ack found.
+[23:40] <darbelo> compilers/pirc/src/bcgen.c
+[23:40] <darbelo> 1158:            const INTVAL type = pmc_type(bc->interp, classname);
+[23:40] <ttbot> Parrot trunk/ r44200 cygwin-thread-multi-64int make error http://tt.ro.vutbr.cz/file/cmdout/204730.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[23:42] <darbelo> could that be a leftover?
+[23:42] <NotFound> Whiteknight: What do you think about using VTABLE elements in opcode instead od the method op_count, and get_integer_keyed_int for the argument types?
+[23:42] <chromatic> Is that an exported function?
+[23:44] <darbelo> chromatic: Yeah, several PMCs and dynpmcs use it.
+[23:46] <chromatic> Hm.  I'd like to think there are better approaches, but maybe we did miss it.
+[23:46] <Whiteknight> darbelo: could be, but it's an easy fix.
+[23:47] <NotFound> bacek: If I remember well, Parrot_str_to_cstring clearly documents how to free the result. If somenone doesn't, is his fault.
+[23:47] <Whiteknight> NotFound: that seems reasonable to me. But I think VTABLE_elements there should only return the number of args, not op_count
+[23:47] <NotFound> Whiteknight: that was my next question ;)
+[23:47] <darbelo> chromatic: Well, there could be. But this one is the one in use.
+[23:49] <darbelo> Hmm, I see some VTABLE_type() use. Should that be the preferred method?
+[23:51] <kthakore> um hi
+[23:51] <purl> que tal, kthakore.
+[23:52] <kthakore> The new parrot seems to have broken SDL/Surface.pir
+[23:52] <kthakore> I get error:imcc:syntax error, unexpected DOT ('.') in file 'runtime/parrot/library/SDL/Surface.pir' line 148
+[23:52] <kthakore> not sure what the problem is
+[23:52] <kthakore> That line is  set  pixels_layout[ 'array' ], .DATATYPE_INT
+[23:52] <kthakore> isn't that right?
+[23:52] <purl> You're absolutely right!
+[23:53] <NotFound> kthakore: looks like that file lacks an .include
+[23:54] <kthakore> ah ok
+[23:54] <kthakore> .include data types stuff right?
+[23:54] <NotFound> kthakore: yeah
+[23:54] <kthakore> thanks
+[23:55] <NotFound> kthakore: remember that some of the files weren't working for some time, they can have several problems like that.
+[23:55] <kthakore> no problem
+[23:56] *** tetragon joined
+[23:56] <mikehh> All tests PASS (pre/post-config, make corevm/make coretest, smoke (#32283), fulltest) at r44211 - Ubuntu 9.10 amd64 (g++ with --optimize)
+[23:57] <kthakore> NotFound: yay! my first fix!
+[23:58] <kthakore> thanks dude
+[23:58] <kthakore> now I can let it stop bugging me
+[23:58] <kthakore> hehe
+[23:59] <kthakore> NotFound: I was thinking of making a pre redesign release of the code in ParrotCore with the examples working
+[23:59] <kthakore> any who time to go do chores
+[23:59] <NotFound> kthakore: not a bad idea

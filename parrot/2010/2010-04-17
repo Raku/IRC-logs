@@ -1,0 +1,759 @@
+[00:02] <chromatic> Are you open to the idea of registering with your own RPA or Hash only for the case where you take a Perl 5 reference to a Parrot object?
+[00:03] <sorear> Can you elaborate?
+[00:03] <chromatic> The suggestion I mentioned earlier of keeping an RPA around and pushing every new callback onto it.
+[00:03] <chromatic> Limit its use.
+[00:04] <chromatic> Only add a callback to it where you have some magic CV or whatever in Perl 5 pointing to a callback.
+[00:04] <chromatic> When the refcount of that CV/RV/whatever reaches zero, remove the callback from the RPA.
+[00:05] <sorear> That has destruction order issues - what if the RPA dies before the CV does?
+[00:05] <chromatic> Two things.  First, that RPA gets registered with Parrot's GC through Parrot_pmc_gc_register.
+[00:06] <chromatic> Second, we add a "Run this code before this interpreter's global destruction" mechanism by which you can unregister everything in that RPA.
+[00:08] <chromatic> I guess you won't need to unregister everything; only that RPA itself.
+[00:08] <Coke> make a global exit() handler.
+[00:09] <sorear> chromatic: It could work, but I don't think it will go far enough
+[00:09] <kurahaupo> Or make the P5Interpreter object behave like a container for all the references it holds, for the purposes of doing the GC marking?
+[00:09] <sorear> What are you going to do about the dlfree problem?
+[00:10] <chromatic> For that we do need ordered destruction, but I don't want to complicate ordered destruction and GCable registration.
+[00:10] <sorear> I still prefer my simplified ordered destruction proposal from earlier
+[00:10] <Coke> http://github.com/partcl/partcl/blob/master/src/tclsh.pir has a sample handler for dealing with .EXCEPT_EXIT
+[00:10] <sorear> If we have any kind of ordered destruction, this entire problem solves itself.
+[00:10] <chromatic> No, it doesn't.
+[00:11] <sorear> So there's no need for any RPA tricks if I can just get an assurance that the AddrRegistry will be collected after my scalars
+[00:11] <sorear> Why not?
+[00:11] <chromatic> Because I'm going to reject any such patch.
+[00:11] <sorear> I said 'any kind'
+[00:12] <sorear> not 'my kind'
+[00:12] <sorear> you're going to reject any patch which adds ordered destruction to the GC?
+[00:12] <chromatic> I'm going to reject any patch which enforces any order of destruction on AddrRegistry.
+[00:16] <Whiteknight> chromatic: what do you mean by that?
+[00:17] <chromatic> AddrRegistry gets destroyed when it gets destroyed during interpreter global destruction, and if you need to rely on any particular ordering of its destruction relative to anything else, you're doing something wrong.
+[00:18] <chromatic> If you use Parrot_pmc_gc_register(), you're telling Parrot that you're in charge of managing that PMC's lifespan.
+[00:19] <Whiteknight> but during global destruction we walk the pool linearly. All bets at that point are off
+[00:19] <sorear> If a general mechanism for PMCs to depend on other PMCs is added, you say it will have no effect on AddrRegistry targets, or will not be added?
+[00:19] <chromatic> I will reject any patch which makes AddrRegistry a dependency for that graph traversal.
+[00:21] *** tewk joined
+[00:23] <chromatic> sorear, if you had an exit handler, could you call perl_free() on your P5 interpreter to clean up all of the SVs?
+[00:24] <kurahaupo> How much hacking of the "normal" P5 interpreter is reasonable to get P5-in-parrot working?
+[00:24] <kurahaupo> Should we be bending P5, or bending Parrot?
+[00:24] <kurahaupo> I assume the eventual outcome is to get P5 hosted on Parrot?
+[00:24] <sorear> kurahaupo: So far I've had to "bend" neither
+[00:25] <sorear> All the contortions are in the glue layer
+[00:26] <kurahaupo> Basically I'm wondering about walking the P5 heap during the Parrot GC Mark phase...
+[00:26] <sorear> chromatic: Possibly.  It would involve significant reorganization - P5Interpreters are currently objects, and Parrot can instantiate as many or few as it wants
+[00:26] <sorear> s/object/PMC/
+[00:26] <sorear> kurahaupo: that breaks semantics
+[00:27] <sorear> Perl 5 uses a synchronous reference counting system for storage reclamation
+[00:27] <sorear> and a lot of code relies on it
+[00:27] <kurahaupo> Not so it manages the P5 heap, but so it can look for references to Parrot objects (PMCs)
+[00:27] *** GodFather joined
+[00:27] *** GodFather_ joined
+[00:27] <sorear> that can be done, but it would be hell
+[00:27] <kurahaupo> It would still only sweep the Parrot heap, and leave the P5 alone
+[00:28] <chromatic> I really do think the best way to go is to finish one GC scheme completely before starting to finish the other.
+[00:28] <sorear> Perl 5 object layouts change every patchlevel, and are incredibly complicated
+[00:28] <sorear> chromatic: What does "finish" mean here?
+[00:29] <chromatic> Let the embedded P5 interp call mg_free on everything applicable.  After that, let Parrot_exit run.
+[00:32] <sorear> mm
+[00:32] *** mikehh joined
+[00:41] *** plobsing joined
+[00:45] *** ruoso joined
+[00:52] <dalek> parrot: r45728 | mikehh++ | trunk/runtime/parrot/library/distutils.pir:
+[00:52] <dalek> parrot: fix pod syntax - missing =back
+[00:52] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45728/
+[01:01] *** jrtayloriv joined
+[01:24] <Whiteknight> sorear: where are you doing your hacking?
+[01:24] <sorear> Whiteknight: github.com/jnthn/blizkost
+[01:24] <Whiteknight> ah, okay. That's what I thought
+[01:25] <Whiteknight> very cool project, that
+[01:25] <sorear> chromatic: What would you do if a P5Interpreter becomes unreachable and is collected before global destruction?
+[01:26] <sorear> w.r.t. "Don't mix destruction phases"
+[01:26] <Whiteknight> you would have to register it globally to prevent that
+[01:26] <Whiteknight> or, the P5.destroy vtable would free all it's SVs
+[01:26] *** Mokurai1 joined
+[01:26] <chromatic> That all depends on what that P5Interpreter represents.
+[01:27] <sorear> P5Interpreter is a handle to the global aspects of Perl 5
+[01:27] <sorear> it provides the ability to eval strings
+[01:27] <sorear> eventually, it will also provide namespace hooks
+[01:28] *** rt7 joined
+[01:28] <chromatic> Does each one get a separate interpreter, in Perl 5 terms?  MULTIPLICITY?
+[01:29] *** Andy joined
+[01:29] <sorear> yes
+[01:29] <sorear> (however, this is not a critical part of the design - I could make it a singleton if sufficiently persuaded)
+[01:30] <chromatic> I wouldn't use a singletone.  The interp-per-PMC approach seems easiest to manage.
+[01:30] <chromatic> singleton
+[01:30] <purl> somebody said singleton was just a glorified global variable for languages that don't have them
+[01:33] <Andy> A singletone is what Linda McCartney played.
+[01:33] <chromatic> If Parrot drives the process, and if all of the P5 interps clean up before Parrot global destruction, I think everything works out okay.
+[01:38] <sorear> it mostly does
+[01:38] <sorear> just asking if you had any insight
+[01:40] <chromatic> The only problematic case I can see is if anything escaped that collected P5Interp back to Parrot, and if that escapee referred to anything within that interp that went away.
+[01:43] *** brooksbp joined
+[01:47] *** bubaflub joined
+[01:49] <mikehh> All tests PASS (pre/post-config, make corevm/make coretest, smoke (#33235), fulltest) at r45728 - Ubuntu 10.04 beta i386 (g++ with --optimize)
+[01:53] *** Andy joined
+[01:53] <Andy> I am luxuriating by the pool at the Hilton in Columbia, SC
+[01:54] <Andy> spoiled only by the lite jazz playing
+[02:14] <kid51_at_dinner> Have you given your talk yet?
+[02:17] <dukeleto> can I replace all occurences of STRING in t/ with Parrot_String ?
+[02:17] <cotto> why?
+[02:18] <dukeleto> STRING_* functions seem to be getting deprecated
+[02:18] <dukeleto> i am wondering if STRING has the same fate
+[02:19] <chromatic> No, and I'm not sure what you mean about deprecations.
+[02:19] <dukeleto> maybe I misunderstand the difference between STRING and Parrot_String
+[02:19] <cotto> functions named Parrot_string_bar will be changed to Parrot_str_foo.  That's all.
+[02:20] <dukeleto> are STRING and Parrot_String on the same footing, or is one preferred over the other ?
+[02:20] <dukeleto> cotto: STRING_is_null is deprecated in 2.4 and will be changing to Parrot_str_is_null, for example
+[02:21] <dukeleto> also, I am talking from the perspective of the embed/extend interface
+[02:21] <dukeleto> so my question should have s!t/!t/src/(embed|extend)\\.t!
+[02:22] <chromatic> There the answer is yes.
+[02:22] <dukeleto> chromatic: good. So STRING is fine in internals, but Parrot_String is what "outsiders" should use. As I expected.
+[02:23] * dukeleto releases the hounds
+[02:24] <chromatic> Exactly.
+[02:25] <dukeleto> that question was related to me adding a bunch of tests for Parrot_ext_call
+[02:25] <sorear> next question: are dynpmc libraries considered "outsiders"?
+[02:25] <dukeleto> there are only tests for Parrot_ext_call returning integers, but PL/Parrot relies on returning PMCs, so I will write some tests for that
+[02:26] <dukeleto> also, Parrot_compile_string does not populate the error string
+[02:26] <dukeleto> for syntax errors, that is. it populates it if you given an invalid compiler, though
+[02:26] <chromatic> Dynpmcs are outsiders.
+[02:27] <dukeleto> that bug is causing my grief, because it coredumps postgres
+[02:27] <dukeleto> s/my/me/
+[02:37] *** brooksbp joined
+[02:42] *** Mokurai1 joined
+[02:50] <Andy> kid51: yeah, I did, people liked it, it's on slideshare
+[02:53] <kid51> Andy:  This one?  http://www.slideshare.net/petdance/what-schools-should-be-teaching-it-students
+[02:54] <Andy> yup
+[03:00] <Andy> dukeleto: are you driving the immutable strings?
+[03:00] *** hercynium joined
+[03:00] <Andy> and is there a branch on it?
+[03:01] <chromatic> No and yes.
+[03:01] <chromatic> immutable_strings_part1
+[03:02] <Andy> who is driving?
+[03:02] <purl> it has been said that driving is bad! :P
+[03:02] <chromatic> bacek and I worked on it.
+[03:03] <Andy> is there a plan for it I don't see?
+[03:03] <Andy> First i heard of it was on the lists
+[03:03] <Andy> list
+[03:04] <chromatic> We plan to merge after the 2.3 release, then remove a lot of deprecated functions and ops.
+[03:05] <chromatic> Are you looking for more detail?
+[03:05] <Andy> whatever i can do in terms of scutwork
+[03:05] <Andy> I see much consting on the C-level
+[03:06] <chromatic> Barring bacek brilliance on one opcode that may or may not do the right thing, it's technically ready to merge.
+[03:06] <chromatic> Const away as you see fit.
+[03:06] <Andy> at this point it's barfing on some opcodes
+[03:06] <chromatic> Your consting is?
+[03:06] <Andy> no, the fresh checkout
+[03:07] <Andy> dgging a bit
+[03:07] <dukeleto> Andy: i don't think I am driving immutable strings. What do you mean?
+[03:07] <Andy> dukeleto: Nothing, chromatic steered me right.
+[03:07] <dukeleto> Andy: ah, i see, in backlogs there is light
+[03:08] <Andy> chromatic: Are the // comments in the *.ops intentional to break the build?
+[03:08] <cotto> bacek does that on purpose
+[03:08] <Andy> bah
+[03:08] <Andy> breaks my build.
+[03:09] * bacek arrives with flames and smoke
+[03:09] <Andy> and breaking my build!
+[03:09] <Andy> waaaah!
+[03:10] <dukeleto> bacek: which editor do you use ?
+[03:10] *** dalek joined
+[03:10] <bacek> dukeleto, one which require only 10 fingers
+[03:10] <Andy> if you run configure with --cage, the build will barf on //
+[03:11] * dukeleto wonders how easy it is to just make the damn editor replace // with /*
+[03:11] <bacek> Andy, yes. There is some glitches have to be cleaned.
+[03:11] <Andy> Can I change the // to /* */ or will that goof you up?
+[03:11] <Andy> I'd really like to build with --cage
+[03:11] <bacek> dukeleto, :%s/\\/\\/\\(.*\\)/\\/* \\1 *\\//
+[03:12] <bacek> Andy, letme check. Is it in ops?
+[03:12] <Andy> yes
+[03:12] <chromatic> I know it's in the substr_s_i_i_s op which is probably buggy.
+[03:12] <Andy> ack -Q // --cc
+[03:13] <bacek> let just remove this op as part of deprecation
+[03:13] <chromatic> Fine by me.
+[03:13] <chromatic> That was the culprit for the Rakudo failures though.
+[03:13] <chromatic> ... so something's wrong in Parrot_str_replace.
+[03:14] <bacek> It need same approach as substr_s_s_i_i_s
+[03:16] <Andy> but the // in the ops are sad, too.
+[03:16] <bacek> Andy, it was on purpose :)
+[03:19] *** janus joined
+[03:20] <bacek> PGE bailed out without this op...
+[03:23] <bacek> chromatic, I _do_ want introduce op C<replace> which will do replace only...
+[03:23] *** Andy joined
+[03:23] <Andy> I heard you missed us, we're back.
+[03:25] <chromatic> bacek, any objection to making the C++ comments into C comments with a token we can look for?
+[03:25] <chromatic> That'll let him const away, which is a good thing.
+[03:25] <bacek> in case of substr op this comment can go away.
+[03:26] <Andy> I'm already fixin' it
+[03:26] <Andy> oh, ok
+[03:26] <Andy> i'll get rid of the comment
+[03:27] <Andy> committed
+[03:27] <Andy> thanks
+[03:27] <dalek> parrot: r45729 | petdance++ | branches/immutable_strings_part1/src/ops/string.ops:
+[03:27] <dalek> parrot: bacek already checked this, said that the comment can go away
+[03:27] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45729/
+[03:28] <Andy> and the only two bits of functioanlity that are done only on the fly are length and hashval?
+[03:28] <Andy> I'd think it would be practically free at instantiation time to save length, no?
+[03:29] <bacek> Andy, my idea was to pass only const STRING* around. "length" should be saved during creation of string.
+[03:29] <chromatic> Sounds right to me.
+[03:30] <Andy> OK, so the only time you might having a STRING * be non-const would be when figuring its hashval
+[03:30] <chromatic> Right.
+[03:30] <bacek> class String { volatile uint32_t hashval }
+[03:31] <bacek> sigh...
+[03:31] <Andy> So one of the cool things is that I need to change some virt func typedefs
+[03:31] <Andy> VTABLE_exists_keyed_str() for example
+[03:31] <chromatic> I know.  A language with a real object system would be nice at this level.
+[03:31] <bacek> Andy, can you create "part2" branch from "part1"?
+[03:31] <Andy> sure
+[03:32] <Andy> why?
+[03:32] <bacek> Too many changes for single branch (from my point of view).
+[03:33] *** diakopter joined
+[03:33] <Andy> so I create part2 and then what?
+[03:33] <chromatic> The consting represents too many changes?
+[03:33] <bacek> But if everyone is fine with merging such a big branch I will no object.
+[03:34] <bacek> chromatic, yes. I would like to have fully mergeable branch with 4 HLLs fully functional on top of it.
+[03:34] <Andy> It'd gonna be a big branch anyway.
+[03:34] <chromatic> Consting shouldn't hurt this branch.
+[03:34] <bacek> (this is main reason why I didn't remove many ops, etc)
+[03:34] <bacek> chromatic, than go for it.
+[03:34] <chromatic> Yeah, op removal is definitely part2.
+[03:35] <Andy> yes, I'd agree with that.
+[03:36] <Andy> the huge benefit is that any function that takes a STRING * can turn that parm into const STRING *
+[03:36] <Andy> unless it needs hashval. :-(
+[03:37] <chromatic> I *think* only src/hash.c needs writeable hashval, and that already casts from void *.
+[03:38] <bacek> We have to change Parrot_str_length to remove side-effects
+[03:38] <Andy> It casts from void *, but we shouldn't.
+[03:38] <Andy> If we're modifying a const * target, then that's bad
+[03:39] <Andy> because the compiler can make assumptions if it's const * and we're violating that contract
+[03:40] <chromatic> I'd like to have type-safe hashes too, but we don't and aren't going to for a while.
+[03:41] <bacek> template<typename T> hash { ... }
+[03:42] <bacek> ah, sorry... We are implementing it in some kind of macro-assembler.
+[03:42] <cotto> What's keeping us from calculating the hashval when the string is initialed?
+[03:42] <Andy> speed
+[03:42] <Andy> YAGNI
+[03:42] <chromatic> The belief that speed is important.
+[03:42] <chromatic> We haven't profiled it either way.
+[03:42] <cotto> chromatic++
+[03:42] <Andy> Right
+[03:43] <Andy> In the case of length, we know that because we have to allocate memory.
+[03:43] <bacek> Andy, "length" isn't "byte-length". It's "char-length"
+[03:43] <Andy> oh, true
+[03:44] <cotto> Calculating the hashval will be cheaper when the string's still in the CPU's cache.
+[03:44] <chromatic> True.
+[03:45] <Andy> we think.
+[03:45] <cotto> we think.
+[03:45] <chromatic> We know a cache miss is expensive.
+[03:45] <cotto> worth profiling at least
+[03:46] <Andy> ooof, parrot_hash_get_bucket makes me cry
+[03:46] <chromatic> You're not the only one.
+[03:47] <Andy> what is hash->bs
+[03:47] <Andy> ah, found it
+[03:47] <cotto> self-explanatory
+[03:47] <Andy> what else would we key off of in a hash if not a string?
+[03:48] <kurahaupo> Since a string is necessarily in cache when it's created, how much extra would it cost to compute the hash then?
+[03:48] <chromatic> A tight loop and a couple of math ops.
+[03:48] * kurahaupo suspects the answer is "wait for the profiling"
+[03:48] <bacek> string is in cache. But string content isn't...
+[03:48] <kurahaupo> Where to its bytes come from then?
+[03:48] *** diakopter left
+[03:49] <bacek> Andy, "int", "cstring", "pmc"
+[03:49] <bacek> kurahaupo, Memory_Block. It just separate pool for string (and buffer) content.
+[03:49] <dalek> parrot: r45730 | bacek++ | trunk/DEPRECATED.pod:
+[03:49] <dalek> parrot: Add substr_s_i_i_s into deprecated.
+[03:49] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45730/
+[03:49] <dalek> parrot: r45731 | bacek++ | trunk/DEPRECATED.pod:
+[03:49] <dalek> parrot: Add additional deprecation notice for inplace string ops.
+[03:49] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45731/
+[03:49] <dalek> parrot: r45732 | petdance++ | branches/immutable_strings_part1/src/sub.c:
+[03:49] <dalek> parrot: use PMC_IS_NULL to check for null PMC *
+[03:49] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45732/
+[03:50] <Andy> So the hash just somehow knows how to calculate a hash of an obvest that's passed in as a void * ?
+[03:50] <Andy> that seems crazy
+[03:50] <cotto> How often do we have a hash with 4 or fewer elements?
+[03:50] <chromatic> Enough that that gave a measurable speed win for Rakudo.
+[03:51] <cotto> your doing?
+[03:51] <chromatic> About 10% of the time.
+[03:51] <bacek> Andy, "poor man polymorphism"
+[03:51] <cotto> I'll trust it then.
+[03:51] <chromatic> Oh sorry, read the wrong line.
+[03:52] <chromatic> 40% of the time.
+[03:52] <cotto> coverage?
+[03:52] <purl> rumour has it coverage is http://cv.perl6.cz
+[03:53] <cotto> 212127928/109077760
+[03:53] <purl> 1.94474041271108
+[03:53] <cotto> 109077760/212127928
+[03:53] <purl> 0.514207445612725
+[03:55] <Andy> OK, I have much to do.
+[03:55] <Andy> Starting with all the encoding funcs
+[03:56] <Andy> We cant' change encodings in place, right?
+[03:56] <chromatic> Right.
+[03:57] <Andy> Gotta start the bottom and build back up
+[04:01] <Andy> Let's take bets to see if the wifi holds on the way back to my room.
+[04:01] <Andy> ok, but there are these functions called "become_encoding"
+[04:02] <Andy> they're also unimplemented.
+[04:02] <Andy> I think they oughta come out as part of this branch.
+[04:03] <bacek> Andy, also set_byte/set_grapheme. I removed plural versions already.
+[04:03] <chromatic> Sure, we can add them back in as part of NFG if we need them.
+[04:03] <Andy> NFG?
+[04:03] <purl> NFG is No Fscking Good! or grapheme normalization form (see docs/pdds/draft/pdd28_character_sets.pod)
+[04:04] <Andy> brb
+[04:05] <bacek> actually, set_grapheme isn't used and can be removed
+[04:06] <chromatic> Removing unimplemented things is fine for this branch.
+[04:06] <bacek> (it's C<set_codepoint>, not grapheme)
+[04:08] <Andy> yay
+[04:09] <Andy> ok, so become_encoding, set_grapheme and set_byte can go
+[04:10] <bacek> Generally speaking - any "inplace" string update encoding/charset function can go
+[04:10] <Andy> ok
+[04:14] *** mikehh joined
+[04:22] *** brooksbp joined
+[04:22] <dalek> parrot: r45733 | dukeleto++ | trunk/t/src (2 files):
+[04:23] <dalek> parrot: [t][cage] Convert STRING to Parrot_String in the embed/extend interface
+[04:23] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45733/
+[04:23] <dalek> parrot: r45734 | petdance++ | branches/immutable_strings_part1/include/parrot/charset.h:
+[04:23] <dalek> parrot: removed unused macro CHARSET_SET_GRAPHEMES
+[04:23] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45734/
+[04:23] <dalek> parrot: r45735 | petdance++ | branches/immutable_strings_part1 (8 files):
+[04:23] <dalek> parrot: become_encoding() makes no sense in a world of immutable strings
+[04:23] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45735/
+[04:23] <Andy> What about all the unimplemented to_encoding() methods?
+[04:25] <Andy> and actually, if we can't set_byte, we can't set_next, either
+[04:25] <bacek> to_encoding should stay. It creates new converted string
+[04:25] <bacek> (set_next is on chopping block)
+[04:26] <Andy> on chopping block meaning it can go?
+[04:26] <bacek> Erm... set_next???
+[04:26] <bacek> Where did you found it?
+[04:28] <bacek> Ah. iter.set_and_advance. Clean it with fire!
+[04:28] <Andy> src/string/encoding/fixed_8.c
+[04:28] <bacek> :)
+[04:28] <Andy> and the iterator uses it
+[04:28] <Andy> but set_and_advance is used
+[04:29] <bacek> hmm...
+[04:29] <Andy> but maybne you can pull that thread and see what we can kill
+[04:45] <cotto> dukeleto, ping
+[04:59] *** rurban_ joined
+[05:13] <dalek> parrot: r45736 | petdance++ | branches/immutable_strings_part1 (5 files):
+[05:13] <dalek> parrot: consting args in the worker methods
+[05:13] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45736/
+[05:15] <Andy> well, shoot, charset_cvt_ascii_to_binary expects to be able to do it in place
+[05:28] *** iblechbot joined
+[05:38] *** fperrad joined
+[05:46] <dalek> parrot: r45737 | petdance++ | branches/immutable_strings_part1 (2 files):
+[05:46] <dalek> parrot: consting of STRINGs and CHARSETs
+[05:46] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45737/
+[05:50] *** fperrad_ joined
+[06:44] *** theory joined
+[07:01] *** brooksbp joined
+[07:09] *** dalek joined
+[08:33] *** JimmyZ joined
+[09:17] <bacek> msg Andy charset_cvt_* doesn't update string in-place. It clones string and update clone.
+[09:17] <purl> Message for andy stored.
+[09:17] *** lucian joined
+[09:21] *** GodFather joined
+[09:36] *** gerd joined
+[09:39] *** lucian joined
+[10:00] *** moderator changes topic to: Parrot 2.3.0 will be released at 2020-04-20 10:00 UTC | http://parrot.org/ | Channel log: http://irclog.perlgeek.de/parrot/today | Priority: documentation sprint and pre-release testing for 2.3, fix line number annotations | Review and vote GSoC applications 
+[10:11] <dalek> parrot: r45738 | bacek++ | branches/immutable_strings_part1/src/string/encoding/ucs2.c:
+[10:11] <dalek> parrot: Un-consting iterator
+[10:11] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45738/
+[10:11] <dalek> parrot: r45739 | bacek++ | branches/immutable_strings_part1/src/string/charset/ascii.c:
+[10:11] <dalek> parrot: Remove useless string reallocations
+[10:11] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45739/
+[10:43] <dalek> parrot: r45740 | bacek++ | branches/immutable_strings_part1 (2 files):
+[10:43] <dalek> parrot: Get rid of side-effects in Parrot_str_length
+[10:43] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45740/
+[10:43] <dalek> parrot: r45741 | bacek++ | branches/immutable_strings_part1/t/op/string.t:
+[10:43] <dalek> parrot: Remove skipped and outdated tests.
+[10:43] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45741/
+[10:43] <dalek> parrot: r45742 | bacek++ | trunk/DEPRECATED.pod:
+[10:43] <dalek> parrot: Add substr_s_s_i_i_s into deprecation.
+[10:43] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45742/
+[10:51] *** darbelo joined
+[10:57] *** Whiteknight joined
+[10:58] *** rurban joined
+[11:00] <Whiteknight> good morning, #parrot
+[11:00] *** joeri joined
+[11:01] <darbelo> Morning.
+[11:04] *** kurahaupo joined
+[11:05] <bacek> aloha lazybones
+[11:06] <Whiteknight> I have been lazy recently
+[11:07] <darbelo> It's an optimization.
+[11:16] <dalek> parrot: r45743 | chromatic++ | branches/immutable_strings_part1/src/hash.c:
+[11:16] <dalek> parrot: [hash] Tidied code; no functional changes.
+[11:16] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45743/
+[11:16] <dalek> parrot: r45744 | chromatic++ | branches/immutable_strings_part1/src/string/charset/ascii.c:
+[11:16] <dalek> parrot: [charset] Changed ascii_compare() to use memcmp() whenever the encoding of two
+[11:16] <dalek> parrot: STRINGs is the same -- and not only for fixed_8 encoding.  This should be safe,
+[11:16] <dalek> parrot: and faster than iteration.
+[11:16] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45744/
+[11:16] <dalek> parrot: r45745 | chromatic++ | branches/immutable_strings_part1/src/packfile/pf_items.c:
+[11:17] <dalek> parrot: [pf] Made STRINGs thawed from packfiles set their external flags to avoid
+[11:17] <dalek> parrot: allocating memory for them.  They can reuse the buffer thawed into packfiles
+[11:17] <dalek> parrot: themselves as STRINGs are immutable now.  This improves Rakudo's startup time
+[11:17] <dalek> parrot: by 6.167%.
+[11:17] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45745/
+[11:27] *** rurban joined
+[11:45] *** Maddingue joined
+[12:14] *** allison joined
+[12:19] *** Mokurai1 joined
+[12:20] *** JimmyZ joined
+[12:22] <dalek> parrot: r45746 | bacek++ | branches/immutable_strings_part1 (7 files):
+[12:22] <dalek> parrot: Add op replace and rebuild native pbcs
+[12:22] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45746/
+[12:22] <dalek> parrot: r45747 | bacek++ | branches/immutable_strings_part1/t/op/string.t:
+[12:22] <dalek> parrot: Update test for replace op.
+[12:22] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45747/
+[12:22] <dalek> parrot: r45748 | bacek++ | branches/immutable_strings_part1/src/ops (2 files):
+[12:22] <dalek> parrot: Mark deprecated ops with :deprecated attribute
+[12:22] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45748/
+[12:30] <mikehh> All tests PASS (pre/post-config, make corevm/make coretest, smoke (#33242), fulltest) at r45745 - Ubuntu 10.04 beta i386 (gcc with --optimize)
+[12:41] *** kid51 joined
+[12:41] <mikehh> bacek: getting some t/pmc/packfile*.t failures - also g++ does not build after some of the consting
+[12:42] <rurban> just smoking svn on cygwin: t/compilers/pge/03-optable.t .Dubious, test returned 1 (wstat 256, 0x100) Failed 37/37 subtests
+[12:43] <bacek> mikehh, I didn't expect packfile failures...
+[12:43] <rurban> t/op/string_enc.t, t/library/opengl.t fails also (opengl without my pacthes which I normally apply)
+[12:44] <bacek> rurban, is it on win32?
+[12:44] <rurban> cygwin
+[12:45] <mikehh> rurban: good to see you around - welcome back
+[12:45] <rurban> well... just for a short ime :)
+[12:48] <darbelo> rurban: #33244 ?
+[12:48] <rurban> yep
+[12:49] <rurban> oops. google changed its layout???
+[12:51] <darbelo> Hm. The PGE failure looks like you have stal pbcs in your checkout...
+[12:51] <rurban> yes, could be. I just did make clean archclean
+[12:56] <rurban> trying again... t/op/string_enc.t is bogus. too old
+[12:56] <bacek> rurban, yeah. There is no such test in parrot anymore.
+[12:57] <darbelo> We probably need to make PBCs depend on the PBC_COMPAT file.
+[12:58] <bacek> darbelo, which PBCs?
+[12:59] <darbelo> All PBCs, to force a rebuild when we invalidate the format.
+[12:59] *** rurban_ joined
+[13:00] <bacek> darbelo, we can't... Our PBC format is platform-dependant...
+[13:00] <bacek> (speaking of t/native_pbc/*pbc)
+[13:01] <rurban_> but cross-readable
+[13:01] <bacek> rurban_, but not cross-writable...
+[13:01] <darbelo> I meant the rest. If I build parrot, change the packfile format, amd type 'make' I end up with a bunch of stale pbcs.
+[13:02] <darbelo> The C files and PMCs get recompiled as needed, but not the bytecode.
+[13:02] <rurban_> BTW I finally found why we need chmod 755 dynops/*.dll perl5 fault!
+[13:03] <rurban_> http://rt.cpan.org/Public/Bug/Display.html?id=56666
+[13:04] <darbelo> Ugh.
+[13:04] <rurban> ExtUtils::Command::cp strips the -x bit
+[13:04] <bacek> darbelo, TT#361
+[13:04] <bacek> darbelo, feel free to steel it :)
+[13:05] <darbelo> Is there anything a bit more platform-specific that could be put in the hints file to avoid ExtUtils on cygwin?
+[13:05] <rurban> parrot works now fine, just rakudo didnt know that
+[13:05] <rurban> I'll try to fix that upstream to improve our makefiles
+[13:08] <rurban> sure. @cp@ should be /bin/cp
+[13:09] <rurban> in which step is that set?
+[13:11] <darbelo> Right now it's in init::defaults but you can overrid it by setting the same values in your platfomr's hints file.
+[13:12] <darbelo> config/init/hints/cygwin.pm
+[13:12] <darbelo> And the originals are under the "# some utilities in Makefile" comment in config/init/defaults.pm
+[13:17] <rurban> TT#1559
+[13:19] <rurban> bacek: What's the problem with adding cross-writable? Doesnt look too hard.
+[13:20] <bacek> rurban, it's way too much code in parrot already. Maintaining other bits which serve "premature optimization" purpose only is bad.
+[13:21] <rurban> :)
+[13:24] <darbelo> I'd like to have just one portable format. And, maybe, an optimized 'mmap() and execute' non cross-platform version if that one is too slow.
+[13:25] <darbelo> As it is now we have neither.
+[13:25] <bacek> darbelo, indeed...
+[13:28] *** clinton joined
+[13:29] <darbelo> OTOH, everytime I read the code behind our packfiles I remember that there is so much more to do elswhere...
+[13:30] <dalek> parrot: r45749 | bacek++ | trunk/config/gen/makefiles/root.in:
+[13:30] <dalek> parrot: Make pbcverion.h depends on PBC_COMPAT. Resolve TT#361.
+[13:30] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45749/
+[13:31] *** Mokurai joined
+[13:32] <dalek> TT #1559 created by rurban++: ExtUtils::Command::cp broken [cpan #56666]
+[13:32] <dalek> TT #1559: http://trac.parrot.org/parrot/ticket/1559
+[13:32] <dalek> TT #361 closed by bacek++: All .pbc files should make-depend on PBC_COMPAT
+[13:32] <dalek> TT #361: http://trac.parrot.org/parrot/ticket/361
+[13:32] <dalek> TT #1550 closed by fperrad++: lexical lost when cloning a Sub
+[13:32] <dalek> TT #1550: http://trac.parrot.org/parrot/ticket/1550
+[13:33] <darbelo> rurban: Committed r45750
+[13:34] <bacek> fperrad, ping?
+[13:34] <fperrad> pong bacek
+[13:34] <bacek> fperrad, can you remove todoed test for TT#1550 as well?
+[13:35] <fperrad> bacek, thanks for this remember
+[13:36] <bacek> fperrad, cheap karma :)
+[13:37] *** Mokurai joined
+[13:43] <bacek> msg Andy Can we close TT#1543?
+[13:43] <purl> Message for andy stored.
+[13:46] <dalek> parrot: r45750 | darbelo++ | trunk/config/init/hints/cygwin.pm:
+[13:46] <dalek> parrot: Add a platform override for 'cp' on cygwin to avoid cpan RT #56666 for ExtUtils::Command.
+[13:46] <dalek> parrot: Patch submitted by Reini Urban.
+[13:46] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45750/
+[13:46] <dalek> parrot: r45751 | fperrad++ | trunk/t/op/lexicals.t:
+[13:47] <dalek> parrot: revert r45629, TT#1550 is not a bug
+[13:47] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45751/
+[13:49] <dalek> TT #1538 closed by bacek++: Invoking uninitialised continuation causes segfault
+[13:49] <dalek> TT #1538: http://trac.parrot.org/parrot/ticket/1538
+[13:51] <bacek> msg NotFound Can you put summary of TT#1506 into DEPRECATED.pod please?
+[13:51] <purl> Message for notfound stored.
+[13:51] *** gerd joined
+[13:56] <rurban> darbelo++ thanks
+[13:59] *** patspam joined
+[14:00] <rurban> where's tools/util/smokeserv-client.pl gone? Could not upload report to Smolder at http://smolder.plusthree.com
+[14:03] *** Mokurai1 joined
+[14:05] <dalek> TT #1495 closed by bacek++: MacOS and one WinXP TapTinder clients hanging on  t/library/pg.t
+[14:05] <dalek> TT #1495: http://trac.parrot.org/parrot/ticket/1495
+[14:09] *** Andy joined
+[14:10] <rurban> Ah, I remember my doc patch in Parrot::Harness::Smoke.pm. Sent report offline
+[14:19] <dalek> parrot: r45752 | gerd++ | trunk/NEWS:
+[14:19] <dalek> parrot: some news added
+[14:19] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45752/
+[14:24] <darbelo> Hm, the chmod calls are made fro hpux too. I wonder what's the deal there...
+[14:27] <rurban> Probably the very same as for cygwin. I'll look into ExtUtils::Command::cp soon
+[14:35] <dalek> parrot: r45753 | fperrad++ | trunk/runtime/parrot/library/TAP (2 files):
+[14:35] <dalek> parrot: [TAP] refactor iterator with lexical & capture_lex
+[14:35] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45753/
+[14:52] <dalek> parrot: r45754 | petdance++ | branches/immutable_strings_part1/src/string (16 files):
+[14:52] <dalek> parrot: consting underlying charset pointers
+[14:52] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45754/
+[14:52] <darbelo> Andy: ping.
+[14:52] <Andy> yessir
+[14:52] <darbelo> That aws fast.
+[14:53] <darbelo> mikehh mentioned consting-related breakage of teh g++ build.
+[14:54] <darbelo> Do you know if there is any incompatibility in the way gcc and g++ handle const?
+[14:54] <Andy> no
+[14:54] <Andy> details?
+[14:54] <purl> details are important when programming or my program will not do what you thought you told it to
+[14:55] <dalek> TT #1543 closed by petdance++: Create PARROT_HOT and PARROT_COLD function annotations
+[14:55] <dalek> TT #1543: http://trac.parrot.org/parrot/ticket/1543
+[14:56] <fperrad> ping bacek
+[14:57] <bacek> fperrad, pong
+[14:57] <Andy> back in a few
+[14:57] <darbelo> I'm looking in the irclog now.
+[14:57] <Andy> to talk about charset stuff
+[14:57] <fperrad> bacek, could you see TT#1356 ?
+[14:58] <bacek> fperrad, yeah...
+[15:01] <bacek> fperrad, Parrot_quicksort is weird...
+[15:01] <darbelo> purl: msg Andy Hum, the only reference I see to g++ vs const is http://irclog.perlgeek.de/parrot/2010-04-17#i_2237092 which lacks detail.
+[15:01] <purl> Message for andy stored.
+[15:02] <darbelo> We have our own quicksort? I have to see that.
+[15:02] <bacek> msg Andy (it was related to immutable_strings branch. Parrot_str_charset function in particular)
+[15:02] <purl> Message for andy stored.
+[15:03] <bacek> darbelo, remember - what have been seen can not be unseen!!!
+[15:04] <darbelo> I'm a very morbid person, I watch traiwrecks for fun.
+[15:06] *** Andy joined
+[15:06] <Andy> i'm bacik
+[15:07] <Andy> so what about const bummers?
+[15:08] <bacek> Andy, immutable strings branch is broken with c++.
+[15:08] <Andy> ok, more detail please?
+[15:08] <dalek> parrot: r45755 | petdance++ | branches/immutable_strings_part1 (3 files):
+[15:08] <dalek> parrot: fixing some consting
+[15:08] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45755/
+[15:09] *** theory joined
+[15:11] *** Xaero joined
+[15:11] <Andy> bacek: charset_cvt_iso_8859_1_to_ascii does indeed make a copy of the existring string, but it still wnats to modify the new string in place.
+[15:11] <Andy> anything that uses ENCODING_SET_BYTE has to not use it any more
+[15:11] <Andy> because set_byte is going away
+[15:12] *** Xaero left
+[15:13] <bacek> Andy, may be we can keep it.
+[15:13] <bacek> Just after consting every STRINGs around.
+[15:13] <bacek> Including PMCs and CallContext...
+[15:14] <bacek> (keep set_byte)
+[15:14] <mikehh> Andy: I get the following error in the g++ build:
+[15:14] <mikehh> src/string/charset.c: In function ‘void Parrot_charsets_encodings_deinit(parrot_interp_t*)’:
+[15:14] <mikehh> src/string/charset.c:131: error: invalid conversion from ‘const void*’ to ‘void*’
+[15:14] <mikehh> src/string/charset.c:131: error:   initializing argument 2 of ‘void Parrot_gc_free_memory_chunk(parrot_interp_t*, void*)’
+[15:15] <Andy> ok
+[15:15] <mikehh> it does not object to line 130 which is similar
+[15:16] <mikehh> ver 4.4.3
+[15:17] <bacek> msg chromatic Can we add test to parrot to make http://github.com/rakudo/rakudo/commit/cde35077f6bf1bb3f70b4fbd15da1bfdc82f3383 redundant?
+[15:17] <purl> Message for chromatic stored.
+[15:17] <Andy> ok, i'm leaving the set_byte stuff for now but throwing away the set_codepoints
+[15:17] <mikehh> I do get a warning on that line in the gcc build
+[15:18] <Andy> I think I fixed that last night
+[15:18] <Andy> the const void * bummer
+[15:18] <mikehh> I dont think earlier versions of g++ object to it
+[15:18] <Andy> yes, but I have since fixed it
+[15:19] <mikehh> ok let me check again
+[15:24] <bacek> Coke, ping?
+[15:26] <mikehh> nope still fails at r45755 - also errors in src/ops/string.ops (I used make -j corevm)
+[15:27] <mikehh> that relates to const STRING* to STRING*
+[15:28] *** tetragon joined
+[15:28] <Andy> well that's something different
+[15:28] <Andy> details please
+[15:28] <purl> details are important when programming or my program will not do what you thought you told it to
+[15:29] <mikehh> src/ops/string.ops: In function ‘opcode_t* switch_core(opcode_t*, parrot_interp_t*)’:
+[15:29] <mikehh> src/ops/string.ops:539: error: invalid conversion from ‘const STRING*’ to ‘STRING*’
+[15:29] <mikehh> src/ops/string.ops:539: error: invalid conversion from ‘const STRING*’ to ‘STRING*’
+[15:29] <mikehh> src/ops/string.ops: In function ‘opcode_t* Parrot_charsetname_s_i(opcode_t*, parrot_interp_t*)’:
+[15:29] <mikehh> src/ops/string.ops:539: error: invalid conversion from ‘const STRING*’ to ‘STRING*’
+[15:29] <mikehh> src/ops/string.ops: In function ‘opcode_t* Parrot_charsetname_s_ic(opcode_t*, parrot_interp_t*)’:
+[15:29] <mikehh> src/ops/string.ops:539: error: invalid conversion from ‘const STRING*’ to ‘STRING*’
+[15:29] <mikehh> make: *** [src/ops/core_ops.o] Error 1
+[15:29] <Andy> thanks
+[15:34] <mikehh> back when I used to do a lot of c++ programming you could pass const to non-const, It don't seem to like it now
+[15:35] <mikehh> or maybe it was vice-versa
+[15:36] *** JimmyZ_ joined
+[15:36] <bacek> mikehh, you still can pass non-const value as const arg in C++.
+[15:37] <bacek> but passing const value as non-const arg is strictly prohibited. (and always be afair)
+[15:37] <Andy> i'm workin' on it, really.
+[15:37] <mikehh> yeah, probably was not thinking correctly
+[15:38] <Andy> the opcodes have to be able to handle const STRING *
+[15:38] <Andy> but right now they can't/
+[15:40] <mikehh> as I said I haven't done any serious c++ programming for a couple of years
+[15:41] <bacek> Andy, there is problem with const vs pin/unpin ops...
+[15:41] <Andy> go on, bacek
+[15:41] <bacek> mikehh, I didn't touch C++ in last few years :)
+[15:41] <Andy> are you guys just using g++ as the compiler instead of gcc?
+[15:41] <bacek> Andy, pin/unpin actually change STRING guts...
+[15:42] <Andy> So what do you mean "is problem"?  Is there currently broken code?  Or wil it be a problem in the future?
+[15:42] <bacek> So we can't "blindly" replace "STRING*" with "const STRING*" in handling ops.
+[15:42] <Andy> ok
+[15:43] <Andy> i'm more interested in PMCs anyway
+[15:43] <mikehh> Andy: I test with both gcc and g++, with and without --optimize
+[15:43] <bacek> PMCs are fine
+[15:43] <Andy> mikehh: but gcc is fine, and g++ is what's failing, right?
+[15:45] <mikehh> Andy: yes, gcc seems ok - though it does warn
+[15:45] <Andy> so I will start using g++ as my compiler to get more stringent whining.
+[15:46] <mikehh> that's the main reason I use it :-}
+[15:47] <mikehh> actually it was NotFound who pushed me in that direction
+[15:47] <Andy> I had no idea. ;_0
+[15:49] <Andy> I love more errors!
+[15:50] <moritz> Andy: then you should hack rakudo - that's pretty good at finding parrot errors
+[15:51] * bacek would like to rewrite parrot in C++. Many things will be so easy...
+[15:52] <Andy> moritz: But I don't understand Parrot or Perl 6
+[15:53] <Andy> I would love to know why my checkout keeps wanting to rebuild imcparser.c :-(
+[15:53] <Andy> I'm not running with --maintainer
+[15:55] <mikehh> Andy: talking about errors I still get an error when running make cagecritic
+[15:55] <mikehh> Fatal error while critiquing "lib/Parrot/Install.pm": Can't call method "isa" without a package or object reference at /usr/local/lib/perl5/site_perl/5.12.0/Perl/Critic/Policy/Bangs/ProhibitRefProtoOrProto.pm line 25.
+[15:56] <Andy> that sounds like a Perl ::Critic problem
+[15:56] *** TiMBuS joined
+[15:56] <Andy> albeit in my Perl::Critic polidy
+[15:56] <mikehh> Perl::Critic::Bangs I think which AFAIK is yours
+[15:56] <Andy> it is
+[15:56] <Andy> ticket it
+[15:57] <Andy> in trac and assign it
+[15:57] <Andy> to me
+[15:57] <mikehh> ok - will check it out and see if there are any other problems
+[15:59] <dalek> parrot: r45756 | petdance++ | branches/immutable_strings_part1 (8 files):
+[15:59] <dalek> parrot: fixing some sad consts.  Removed all the set_codepoint functions in the encodings
+[15:59] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45756/
+[16:09] <Andy> mikehh: do I create you as Michael Hind or Mike Hind?
+[16:09] <Andy> s/ate/dit/
+[16:10] <mikehh> I usually use Michael but mikehh is fine
+[16:10] <Andy> Michael it is.
+[16:10] <Andy> I'm gonna release a new Bangs
+[16:13] <mikehh> Andy: I removed lib/Parrot/Install.pm and it went through (reported make: *** [cagecritic] Error 3)
+[16:14] <mikehh> that's on trunk
+[16:14] <Andy> yeah, I know
+[16:14] <Andy> I'm about to release a new Bangs
+[16:15] <dalek> parrot: r45757 | petdance++ | branches/immutable_strings_part1 (4 files):
+[16:15] <dalek> parrot: squashing some const problems
+[16:15] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45757/
+[16:21] <bacek> msg chromatic I fixed workaround http://github.com/rakudo/rakudo/commit/cde35077f6bf1bb3f70b4fbd15da1bfdc82f3383 in r45758
+[16:21] <purl> Message for chromatic stored.
+[16:21] <Andy> just uploaded Perl::Critic::Bangs 1.04 to CPAN
+[16:26] <mikehh> ok will check it out
+[16:26] <mikehh> got to go out for a bit - bbl
+[16:31] <dalek> parrot: r45758 | bacek++ | branches/immutable_strings_part1 (3 files):
+[16:31] <dalek> parrot: Ensure that str_replace update string's hashval
+[16:31] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45758/
+[16:32] <dalek> parrot: r45759 | fperrad++ | trunk/runtime/parrot/library/distutils.pir:
+[16:32] <dalek> parrot: [distutils] sort files before test
+[16:32] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45759/
+[16:32] <dalek> parrot: r45760 | petdance++ | branches/immutable_strings_part1/lib/Parrot (2 files):
+[16:32] <dalek> parrot: quiet some Critic warnings
+[16:32] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45760/
+[16:49] *** Whiteknight joined
+[17:00] *** Mokurai joined
+[17:04] <dalek> parrot: r45761 | fperrad++ | trunk/runtime/parrot/library/osutils.pir:
+[17:04] <dalek> parrot: [osutils] fix mkpath with Windows drive
+[17:04] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45761/
+[17:04] <dalek> parrot: r45762 | petdance++ | branches/immutable_strings_part1/config/gen/makefiles/root.in:
+[17:04] <dalek> parrot: Add a check to Perl::Critic::Bangs version for cagecritic target
+[17:04] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45762/
+[17:14] *** lucian joined
+[17:20] <Whiteknight> all tests pass on Ubunut 9.04 x64
+[17:20] <Whiteknight> and Ubuntu 8.04 x86
+[17:20] <dalek> parrot: r45763 | petdance++ | branches/immutable_strings_part1 (2 files):
+[17:20] <dalek> parrot: consted the STRING into string_unescape_one
+[17:20] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45763/
+[17:32] *** ruoso joined
+[17:47] <Whiteknight> all tests pass on Ubuntu 9.04 x64 with ICC
+[17:51] <Andy> yay ICC
+[17:51] <Andy> come on, why isn't anyone else committing?  Let's go!
+[17:52] <Andy> I'm in a Rails talk that I am not interested in.
+[17:52] <darbelo> I can break trunk if you're willing to debug it.
+[18:08] <rurban> Anyone knows which platforms needs exe bits for shared libs? (cygwin+hpux so far)
+[18:08] <rurban> I need to persuade #p5p to change File::Copy for certain platforms
+[18:08] <rurban> mpeix also I guess. aix I'm not sure
+[18:42] *** Andy joined
+[18:42] <dalek> parrot: r45764 | mikehh++ | branches/immutable_strings_part1/src/string/encoding/ucs2.c:
+[18:42] <dalek> parrot: fix a const to get g++ to build
+[18:42] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45764/
+[18:57] *** KingOfKarlsruhe joined
+[18:58] *** iblechbot joined
+[19:10] *** chromatic joined
+[19:12] *** davidfetter joined
+[19:14] *** theory joined
+[19:21] *** rt7 joined
+[19:49] <dalek> parrot: r45765 | fperrad++ | trunk/tools/dev/tapir.pir:
+[19:49] <dalek> parrot: [tapir] add options --reverse, --shuffle
+[19:49] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45765/
+[19:52] <nopaste> "chromatic" at 192.168.1.3 pasted "plobsing: PackFile memory leaks, as seen from Rakudo Hello, world" (252 lines) at http://nopaste.snit.ch/20290
+[20:05] <dalek> parrot: r45766 | fperrad++ | trunk (2 files):
+[20:05] <dalek> parrot: [osutils] add tests (basename, dirname)
+[20:05] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45766/
+[20:31] *** brooksbp joined
+[20:38] <dalek> parrot: r45767 | chromatic++ | trunk/compilers/imcc/pbc.c:
+[20:38] <dalek> parrot: [IMCC] Fixed a memory leak of :subid names when removing quotes.  This should
+[20:38] <dalek> parrot: help Rakudo.
+[20:38] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45767/
+[20:38] <dalek> parrot: r45768 | fperrad++ | trunk/runtime/parrot/library/distutils.pir:
+[20:38] <dalek> parrot: [distutils] fix _clean_smoke
+[20:38] <dalek> parrot: review: http://trac.parrot.org/parrot/changeset/45768/
+[21:00] *** rurban_ joined
+[21:23] <japhb> Anyone here from PaFo grants committee?
+[21:32] *** Mokurai1 joined
+[21:36] *** s1n1 joined
+[21:37] *** jan_ joined
+[21:37] *** kid51 joined
+[21:40] <Whiteknight> PaFo has a grants committee?
+[21:42] <japhb> Whiteknight, well, if I'm supposed to submit my proposal, I have to assume there's someone there to receive it.
+[21:43] <japhb> Maybe the committee is in fact the entire board?
+[21:43] <Whiteknight> thats what I would do
+[21:44] <japhb> Well, in any case, I needed someone from there to look over the draft of my first proposal and let me know what needs tweaking.  Allison appears not around, so ....
+[21:53] *** s1n1 left
+[21:54] *** alexn_org joined
+[22:04] <mikehh> japhb: IIRC alison said she would pass your proposal around our sponsers
+[22:05] <mikehh> allison
+[22:05] <japhb> mikehh: ackpth.  That was supposed to be just a draft.  Ah well, I guess we'll find out what they think sooner rather than later ....
+[22:06] <japhb> mikehh, Or did you mean "that's what will happen when I submit, as opposed to a formal grants committee process?"
+[22:07] <mikehh> japhb: the latter I think, although you would have to establiosh that with allison
+[22:09] <japhb> mikehh, OK.  Well, I sent her my draft last night, so I guess now I just wait.
+[22:09] <japhb> *Jeopardy Theme*
+[22:09] <japhb> :-)
+[22:12] <mikehh> japhb: been there, done that, got the tee shirt rtc.
+[22:12] <mikehh> bah my typing is missing out again
+[22:23] <moritz> somebody could bisect http://trac.parrot.org/parrot/ticket/1560, I'm too tired right now
+[22:24] <chromatic> It's probably one of the STRINGNULL changes.
+[22:25] *** theory joined
+[22:26] <chromatic> Something passes STRINGNULL to Parrot_str_substr, probably from an op.
+[22:27] <chromatic> That's as much as I can dig at the moment.
+[22:28] <chromatic> It should be fixable before the 2.3 release though.
+[22:36] *** rt7 joined
+[22:37] <dalek> TT #1560 created by moritz++: Regression between r45386 and r45768 causes Rakudo failure in ...
+[22:37] <dalek> TT #1560: http://trac.parrot.org/parrot/ticket/1560
+[22:44] *** lucian joined
+[22:51] *** rt7 joined
+[22:51] <mikehh> t/src/extend.t -  Failed tests:  12-15, 17 at r45768
+[22:54] <chromatic> I can't reproduce that.
+[22:58] *** lucian joined
+[23:03] <mikehh> it happens with the g++ build but not the gcc build - let me investigate further
+[23:06] <kid51> t/src/extend.t:  modified by dukeleto earlier today; last previous modification was Feb 19.
+[23:19] <mikehh> the test fails - t/src/extend.t -  Failed tests:  12-15, 17 at r45768 on g++ builds (with and without --optimize) but passes gcc builds (with and without --optimize)
+[23:20] <kid51> mikehh:  That combination of successes and failures sounds very much like test results you were reporting on other files several months back.
+[23:22] <chromatic> C++ errors?
+[23:29] *** jan_ joined
+[23:29] <mikehh> with g++ it builds and passes at r45732 and fails at r43733
+[23:31] <mikehh> I know I have done g++ tests today and I tend to alternate, but looking back all my g++ tests were in the immutable_strings_part1 branch
+[23:32] <mikehh> until now that is
+[23:33] *** jan joined
+[23:33] <chromatic> Can you provide the error messages or test diagnostics?
+[23:36] <mikehh> the change was from STRING *  to Parrot_String *
+[23:36] <mikehh> # Failed to build 't/src/extend_12.o': t/src/extend_12.c: In function ‘opcode_t* the_test(parrot_interp_t*, opcode_t*, opcode_t*)’:
+[23:36] <mikehh> # t/src/extend_12.c:28: error: cannot convert ‘STRING*’ to ‘parrot_string_t**’ in initialization
+[23:36] <mikehh> # t/src/extend_12.c:32: error: cannot convert ‘parrot_string_t**’ to ‘STRING*’ for argument ‘2’ to ‘PMC* Parrot_find_global_cur(parrot_interp_t*, STRING*)’
+[23:36] <mikehh> # t/src/extend_12.c:39: error: cannot convert ‘STRING*’ to ‘parrot_string_t**’ in assignment
+[23:36] <mikehh> # t/src/extend_12.c:40: error: cannot convert ‘parrot_string_t**’ to ‘STRING*’ for argument ‘2’ to ‘PMC* Parrot_find_global_cur(parrot_interp_t*, STRING*)’
+[23:36] <mikehh> #   Failed test 'call a parrot sub'
+[23:36] <mikehh> the others failures seem the same
+[23:38] <mikehh> g++ erors in the test build
+[23:44] <mikehh> similar changes were made in t/src/embed.t at r45733 but that passes
+[23:50] <mikehh> which is more important - using Parrot_String * and casting or reverting to STRING *
+[23:55] <chromatic> Interesting.

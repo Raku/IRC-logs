@@ -1,0 +1,1128 @@
+[00:00] <pmichaud> so, is the NQP version creating 10x PMCs during execution as the PIR version?
+[00:00] <chromatic> No.
+[00:00] <chromatic> The GC is an order of magnitude more efficient with NQP.
+[00:01] <pmichaud> sounds to me like it's doing redundant work somehow
+[00:01] <chromatic> I agree.
+[00:01] <pmichaud> when we do a gc run, do we not reclaim all of the garbage pmcs?
+[00:03] <tewk> conservative collectors can mistake bit patterns for actual references, do you spawn a subbordinate run loop that points to a bunch of garbage that isn't being collected in the pir case?
+[00:03] <pmichaud> I mean, if the nqp version is reclaiming 10x PMCs on each run, then either there have to be 10X PMCs being generated between runs, or we're "collecting" the same PMCs over and over
+[00:04] <pmichaud> this is all fairly straightforward PIR -- the main way we'd be getting subordinate runloops would be via exception handlers
+[00:04] <tewk> or lots of PMCS are marked as live when they really aren't in the pir case
+[00:04] <tewk> IMCC launches subordinate runloops right?
+[00:04] <pmichaud> but the load_bytecode example demonstrates that it's not likely due to subordinate runloops
+[00:05] <pmichaud> in the load_bytecode example, there's no invocation of imcc, and there aren't any exceptions
+[00:05] <pmichaud> yet it takes significantly longer.
+[00:08] <tewk> It be interesting to see the number of live PMCS at each GC as well as the number reclaimed.
+[00:09] <chromatic> Aha.
+[00:09] <Coke> I like it when chromatic says that.
+[00:10] <chromatic> It's the replenish level.
+[00:11] <chromatic> In the PIR code, the number of objects per arena in the PMC pool eventually grows from 2048 to 3584.
+[00:11] <chromatic> In the NQP code, it eventually grows from 10976 to 19208.
+[00:12] <chromatic> The PIR code can reclaim just enough headers that it never bumps up the pool size.
+[00:13] <chromatic> The NQP code apparently keeps enough headers alive between GC runs that it needs to bump up the pool size and allocate more headers.
+[00:13] <chromatic> Thus, the NQP code has larger pools and needs to run the GC much less.
+[00:13] <pmichaud> and so each run reclaims more PMCs
+[00:13] <pmichaud> ?
+[00:14] <chromatic> Right.
+[00:14] <chromatic> More garbage accumulates between runs.
+[00:15] <pmichaud> that leaves me with two questions then
+[00:15] <tewk> Less runs of the garbage collector, less time spent marking.
+[00:16] <pmichaud> (1)  what about the load_bytecode case -- what do the arena sizes look like then?
+[00:16] *** lucian joined
+[00:16] <pmichaud> (2)  does "more garbage accumulation" explain the increased execution time?
+[00:17] <pmichaud> tewk: but what we're seeing is really the opposite (isn't it?).  If NQP is doing fewer gc runs, why do the fewer GC runs translate into significantly slower execution?
+[00:17] <chromatic> In the PIR code with load_bytecode, the number of objects per arena in the PMC pool eventually grows from 10976 to 19208.
+[00:17] <japhb> pmichaud, O() > O(n)?
+[00:17] <chromatic> NQP doesn't run slower for me.
+[00:17] <pmichaud> it does for me, though.
+[00:17] <chromatic> I also don't care about wallclock time.  It's not accurate enough.
+[00:18] <pmichaud> chromatic: these numbers are incredibly repeatable on my system though
+[00:18] <pmichaud> every time I run the nqp version, it's 20.5 seconds +/- 0.2
+[00:18] <pmichaud> every time I run the PIR version, it's 9.8 seconds +/- 0.2
+[00:20] <pmichaud> (this for the case of $N == 28)
+[00:20] <darbelo> repeatable != accurate, says the guy that's consistently wrong ;)
+[00:24] <chromatic> I changed the replenish threshold to 50%, and now the PIR and NQP versions are very close in speed.
+[00:24] <pmichaud> what was it previously?
+[00:25] *** plobsing joined
+[00:25] <pmichaud> ...and you're not seeing a 2x difference between the two, right?
+[00:25] <cotto_work> What code did you change?
+[00:25] <chromatic> It was 30%.
+[00:25] <pmichaud> has anyone else been able to duplicate the results I'm seeing on my system?
+[00:26] <pmichaud> (i.e., the NQP version takes 2x longer to run than the PIR version ?)
+[00:26] <chromatic> cotto_work, src/gc/gc_private.h line 42
+[00:26] <japhb> pmichaud, repeat the exact commands you want us to try, and I'll run it on this box (32-bit Linux)
+[00:26] *** payload joined
+[00:26] <pmichaud> japhb:  nopasting
+[00:26] <japhb> pmichaud, thx
+[00:28] <pmichaud> (takes me 60 seconds to run :-)
+[00:28] <japhb> :-)
+[00:29] <nopaste> "pmichaud" at 66.25.4.52 pasted "nqp benchmark for others to try" (36 lines) at http://nopaste.snit.ch/18918
+[00:32] *** jsut_ joined
+[00:33] <japhb> fib-6.nqp takes 10.977s user time, and fib-6-nqp.pir takes 11.077s user;  the pir compile alone takes 0.176s user.
+[00:33] <japhb> This is with parrot r42822
+[00:33] <pmichaud> weird.  so your results match chromatic's
+[00:33] <nopaste> "darbelo" at 190.136.175.208 pasted "OpenBSD i386 results" (13 lines) at http://nopaste.snit.ch/18919
+[00:33] <japhb> Worth it to update to HEAD and try again?
+[00:34] <pmichaud> I think I'm on head, yes.
+[00:34] <pmichaud> or pretty close to it
+[00:34] <japhb> OK, the compile will take a while
+[00:34] <pmichaud> r42834
+[00:34] <darbelo> http://nopaste.snit.ch/18919 is for r42840
+[00:34] <chromatic> The only other possibilities I can imagine are a difference for 64-bit machines (plausible, with regard to arena sizes) and uncommitted changes in pmichaud's copy (possible, but less likely).
+[00:35] <japhb> HEAD appears to be r42840
+[00:35] <pmichaud> the only uncommitted change in my copy is the parrotinterpreter.pmc change that chromatic++ suggested earlier
+[00:35] <pmichaud> otherwise this is really a brand-new checkout
+[00:35] <japhb> chromatic, you said you were on 64-bit like pmichaud was ... and I'm on 32-bit (original Core Duo)
+[00:36] <chromatic> I'm on 32 bit.
+[00:36] <japhb> Ah, I misread you earlier then.
+[00:36] <pmichaud> in fact, it's mostly a brand new system, as I reinstalled kubuntu yesterday and started with fresh checkouts of everything
+[00:37] <japhb> .oO( Now would be a good time for my 64-bit system to be not dead )
+[00:37] <pmichaud> I could try it on feather.... wall clock time is very unreliable there, but we should be able to see a 2x difference
+[00:39] <japhb> chromatic, do arena sizes make any attempt to account for change in word size?
+[00:39] <pmichaud> I'll also try it on my notebook (also 64-bit, but a different machine nontheless)
+[00:39] <pmichaud> *nonetheless
+[00:41] <japhb> At HEAD, the results are essentially the same (delta both the NQP and PIR cases being a few dozen milliseconds faster, we must have had some tiny optimizations lately)
+[00:41] *** jsut joined
+[00:41] <chromatic> Not really.
+[00:41] * japhb shrugs
+[00:41] <pmichaud> milliseconds aren't significant in wall clock time
+[00:41] <japhb> Could have been simple variance
+[00:41] <pmichaud> even full seconds aren't always significant
+[00:42] <japhb> I wasn't using wall time, but rather user time.  But yes, I know that varies too.
+[00:42] <pmichaud> right.... my user times vary as well.
+[00:42] <pmichaud> er, I should say, my user times show 2x differences
+[00:43] <chromatic> Let's see how these minor tweaks help.
+[00:45] <nopaste> "pmichaud" at 66.25.4.52 pasted "results on my 64-bit notebook (also kubuntu 9.10)" (25 lines) at http://nopaste.snit.ch/18920
+[00:46] <dalek> parrot: r42841 | chromatic++ | trunk/src/gc/gc_private.h:
+[00:46] <dalek> parrot: [GC] Increased replenish threshold to 50%, in hopes of making arenas grow to
+[00:46] <dalek> parrot: larger sizes before stabilizing.
+[00:46] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42841/
+[00:46] <dalek> parrot: r42842 | chromatic++ | trunk/src/gc/gc_ms.c:
+[00:46] <dalek> parrot: [GC] Reversed the free_list check condition in gc_ms_more_traceable_objects()
+[00:46] <dalek> parrot: for minor clarity and speed improvements.
+[00:46] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42842/
+[00:46] <dalek> parrot: r42843 | chromatic++ | trunk/src/pmc/sub.pmc:
+[00:46] <dalek> parrot: [PMC] Explicitly set some Sub attributes to PMCNULL to avoid spurious marking.
+[00:46] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42843/
+[00:47] <chromatic> pmichaud, can you time it without the fakecutable?
+[00:47] <pmichaud> sure
+[00:48] <nopaste> "pmichaud" at 66.25.4.52 pasted "fakecutable versus .pbc (notebook, 64-bit)" (17 lines) at http://nopaste.snit.ch/18921
+[00:50] <nopaste> "pmichaud" at 66.25.4.52 pasted "fakecutable versus nqp-rx.pbc versus .pir (notebook, 64-bit)" (25 lines) at http://nopaste.snit.ch/18922
+[00:50] <chromatic> How about after r42843?
+[00:50] <pmichaud> haven't tried that yet
+[00:51] * japhb starting recompile as well
+[00:52] <pmichaud> (recompiling now)
+[00:52] *** abqar joined
+[00:52] <chromatic> Looks like a 13.763% performance improvement on the NQP version.
+[00:53] <chromatic> 13.984% on the PIR version.
+[00:54] <nopaste> "pmichaud" at 66.25.4.52 pasted "r42483 fakecutable versus nqp-rx.pbc versus .pir (notebook, 64-bit)" (32 lines) at http://nopaste.snit.ch/18923
+[00:54] <pmichaud> r42483 definitely helps the nqp version a lot, doesn't help the PIR version as much
+[00:55] <pmichaud> there's still a 40% difference between the two, though.
+[00:55] <japhb> Yeah, closed the gap considerably
+[00:56] <chromatic> GC arena sizes in the 64-bit world then.
+[00:56] <japhb> Oh this is interesting
+[00:56] <pmichaud> I can confirm that on 32-bit (feather)   I also see that the NQP and PIR versions have similar execution profiles.
+[00:56] <japhb> Suddenly, my PIR version got faster (and the NQP stayed the same)
+[00:57] <pmichaud> so it's something about the 64-bit world that causes the slowdown
+[00:57] <japhb> Now fib-6.nqp is 10.741 user time, fib-6-nqp.pir is 8.233 user
+[00:57] <chromatic> Pointer sizes and the objects-per-pool calculation.
+[00:58] <japhb> So my NQP time dropped by about .2s, and the PIR version dropped from 11.077 to 8.233
+[00:58] <chromatic> Whiteknight mentioned that a while back.  We need to get that sizeof (PMC *) out of there.
+[00:59] <chromatic> msg whiteknight It's time to fix the number of initial headers created in the GC -- no more relying on pointer sizes.
+[00:59] <purl> Message for whiteknight stored.
+[01:00] <pmichaud> the load_bytecode still causes the execution profile to slow down significantly, though
+[01:00] <pmichaud> I guess because it increases the objects-per-arena
+[01:01] <pmichaud> I can turn this into a PIR program that we can use for more profiling tests
+[01:02] <chromatic> That'd be handy.
+[01:05] <pmichaud> I wonder if I should go back to 32-bit on my desktop, though.
+[01:06] <pmichaud> I suppose I could install 32-bit on an empty partition just to see how it compares to 64 bit
+[01:08] * Coke hurls http://www.childsplaycharity.org/ in case anyone here is a gamer and doesn't know about it.
+[01:09] <japhb> They're doing quite well this year, I see.
+[01:10] * chromatic vanishes for a bit
+[01:12] <nopaste> "pmichaud" at 66.25.4.52 pasted "fib-6 benchmarks and timing, 64-bit desktop (for pmichaud)" (37 lines) at http://nopaste.snit.ch/18924
+[01:13] <pmichaud> time to do a 32-bit install
+[01:30] *** kid51 joined
+[01:37] <Coke> kid51: hey
+[01:37] *** brrant joined
+[01:38] <dalek> partcl-nqp: f5f5537 | (Will Coleda)++ | TODO:
+[01:38] <dalek> partcl-nqp: add to pile
+[01:38] <dalek> partcl-nqp: review: http://github.com/partcl/partcl-nqp/commit/f5f5537339538ca940c06778b5a929fb2e4796f1
+[01:38] <dalek> partcl-nqp: 03b8836 | (Will Coleda)++ | src/PmTcl/commands/info.pm:
+[01:38] <dalek> partcl-nqp: Add basic [info commands]
+[01:38] <dalek> partcl-nqp: review: http://github.com/partcl/partcl-nqp/commit/03b88366538663833d023f572b7310dfca161b1a
+[01:38] <dalek> partcl-nqp: 78524e7 | (Will Coleda)++ |  (3 files):
+[01:38] <dalek> partcl-nqp: add stubs for [package]
+[01:38] <dalek> partcl-nqp: review: http://github.com/partcl/partcl-nqp/commit/78524e7f751e2ada78d6177a9ce3fed5ffaa89d7
+[01:45] * Coke wonders how to implement an op that isn't a :pirop
+[01:47] * cotto ponders the koan of the op which isn't an op
+[01:49] *** JimmyZ joined
+[01:58] *** Limbic_Region joined
+[02:13] *** mikehh joined
+[02:13] <Coke> pmichaud: hurm. running the N tests we can run, partcl is taking 7.77s, partcl-nqp is taking 10.2s (using -q on partcl to stop the load of the stdlib to make it a fair fight.)
+[02:15] <japhb> That seems not too bad considering you went up a level in implementation language
+[02:18] <Tene> Coke: explain what you want to implement?
+[02:18] <Coke> Tene: I want to have == call a function in NQP, not be directly mapped to a pirop.
+[02:19] *** mikehh joined
+[02:19] <Tene> PAST::Op.new( :pasttype('call'), :name('function'), ... ); ?
+[02:20] <Coke> token infix:sym<==> { <sym> <O('%equality_numeric, :pirop<iseq Inn>')> }
+[02:21] *** Andy joined
+[02:22] <Coke> japhb: it's also doing a hell of a lot less. it's only going to get slower, I fear.
+[02:24] <Tene> Oh, the .O stuff... I don't understand that part yet.
+[02:24] <Tene> Coke: I'll keep a watch for that and get back to you after I've converted abc and squaak.
+[02:35] <Coke> Tene: danke.
+[03:16] *** JimmyZ joined
+[03:45] *** allison joined
+[03:51] <dukeleto> msg japhb what is up with this? http://gist.github.com/246915
+[03:51] <purl> Message for japhb stored.
+[03:52] <japhb> dukeleto, that's ... odd
+[03:54] <dukeleto> japhb: my luck
+[03:55] <japhb> I don't know if it matters, but I'm up at Parrot r42843 now
+[03:55] <japhb> Actually, let me recompile and make sure nothing broke recently
+[03:55] <dukeleto> japhb: sounds good
+[03:55] <japhb> Yep, looks good, and all tests passing
+[03:55] <japhb> (not that we have nearly enough tests, mind you ....)
+[03:56] <dukeleto> japhb: how do you feel about getting a faster test harness for plumage, written in PIR instead of NQP?
+[03:57] <japhb> Sounds fine with me ... but remember, it either has to ship with Parrot or Plumage.  No external project dependencies.  :-)
+[03:57] <dukeleto> japhb: this faster one also has tests, which currently our harness does not have
+[03:57] <japhb> nodnod
+[03:57] <dukeleto> japhb: no external deps other than parrot :)
+[03:57] <dalek> parrot-plumage: 939edf9 | leto++ | :
+[03:57] <dalek> parrot-plumage: [cage] Get rid of useless slurp()'ing of the test file in t/harness
+[03:57] <dalek> parrot-plumage: review: http://gitorious.org/parrot-plumage/parrot-plumage/commit/939edf94830025c319e0dda0606f60391459d211
+[03:57] <dukeleto> japhb: http://github.com/leto/tapir
+[03:57] <dukeleto> tapir?
+[03:57] <purl> somebody said tapir was being written to be testable from the ground up, unlike nqpTAP
+[03:57] <japhb> I assume you mean Tapir.  Which means you ought to get Tapir snapshotted into Parrot RSN.  ;-)
+[03:58] <dukeleto> japhb: i think it is easier to get tapir into plumage first. plumage has simpler needs
+[03:58] <japhb> So ... I can't replicate your Plumage build fail right now.
+[03:58] <japhb> make realclean and start over?
+[03:58] <japhb> I'm fine with copying Tapir in
+[03:58] <dukeleto> japhb: yep. i was using an installed parrot and that is probably the issue
+[03:59] <dukeleto> japhb: sweet. it is very close to being ready
+[03:59] <japhb> Since you're a Plumage committer, the copyright issue should go away
+[03:59] <japhb> I always use an installed parrot.
+[03:59] <dukeleto> japhb: you don't use --parrot_config=... ?
+[03:59] <japhb> never
+[04:00] <japhb> On the short list of Plumage features: upgrade parrot, upgrade itself, and then upgrade all the installed projects.
+[04:00] * japhb short on tuits ATM
+[04:01] <dukeleto> japhb: yes, tapir is artistic 2.0, but snapshots can go into parrot or plumage since I am a parrot committer, correct?
+[04:01] *** allison joined
+[04:01] <japhb> Right.  If the license is the same, and you've done a PaFo CLA (which you must have, to get your Plumage commitbit), there's no issue.
+[04:02] <dukeleto> japhb: sounds good, just checking. it is the same setup as nqp-rx
+[04:02] <japhb> nodnod
+[04:02] <dukeleto> japhb: what do you need help with on plumage that i can actually do?
+[04:03] <japhb> #1 is write tests
+[04:03] <dukeleto> purl, tapir is also http://github.com/leto/tapir
+[04:03] <purl> okay, dukeleto.
+[04:04] <dukeleto> japhb: i have a general idea of writing tests for nqp-rx and plumage. which are most useful to you in nqp-rx?
+[04:04] <japhb> You should be able to write tests for Glue.pir, Util.nqp, and Plumage/Metadata.nqp at the very least.  Possibly the other Plumage/*.nqp as well, but I haven't worked hard on testability of those yet.
+[04:04] <japhb> Wait, tests *of* nqp-rx?
+[04:04] <dukeleto> japhb: yes, tests in the nqp-rx repo
+[04:04] <dukeleto> japhb: i have a commit bit for that as well ;)
+[04:05] <dukeleto> japhb: does Glue.pir get installed anywhere?
+[04:06] <dukeleto> japhb: i basically have a copy of qx() in tapir and it would be nice if some library provided that instead. but then dependencies/etc....
+[04:06] <japhb> Oh, I dunno.  I mean, if you want to do forward-looking tests for NQP-rx (meaning, tests of stuff we *want* as opposed to already there), look at http://wiki.github.com/perl6/nqp-rx/plumage-requests
+[04:06] <japhb> #1 request there is Full hash literals / constructors
+[04:07] <japhb> Right now, ironically enough, nothing in Plumage installs anywhere.  It is on my list for Parrot 2.0 to make Plumage installable and snapshot it into Parrot just as NQP-rx is.
+[04:07] <japhb> I don't think I can make it by 1.9, but I suppose hope springs eternal.
+[04:07] <dukeleto> also known as http://icanhaz.com/plumage-requests
+[04:08] <japhb> dukeleto, well OK then.
+[04:08] <japhb> Do you own icanhaz.com?
+[04:08] <dukeleto> japhb: no.
+[04:08] <dukeleto> japhb: just a random url shortener
+[04:09] <japhb> Oh, I see the credits at the bottom, got it.  I just figured one of the #parrot crew had to be an owner, because we keep using that site, when other url shorteners are much ... well ... shorter.
+[04:10] <dukeleto> japhb: you can use whatever site you want. I just end up making short url's first and that is what i use :)
+[04:10] <japhb> :-)
+[04:11] <dukeleto> japhb: feel free to optimize the length of our short urls >;)
+[04:11] <japhb> heh
+[04:11] <japhb> When I need really, really short I use j.mp
+[04:11] <dukeleto> wowzers
+[04:12] <dukeleto> owned by twitter, though
+[04:12] <dukeleto> i defer from the big url shorteners because i don't want to be their link juice
+[04:13] <japhb> nodnod
+[04:13] <dukeleto> i call shenanigans on our priority this week
+[04:13] <dukeleto> i went to the wiki page, and i have no idea how to help
+[04:13] <japhb> I wish there was a url that short owned by the good guys
+[04:13] <dukeleto> ENEEDMOREDIRECTIONS
+[04:14] <japhb> And in truth, the real priority seems to be "Make GC & PCC performance suck less"
+[04:14] <dukeleto> japhb: xrl.us is run by a perl hacker
+[04:15] <dukeleto> why the junk is this weeks priority classvtableoverrides then?
+[04:16] <japhb> Might have been set prior to pmichaud & chromatic's discoveries today
+[04:16] <japhb> (and never updated)
+[04:19] <dukeleto> interesting, i haven't backlogged
+[04:20] <japhb> dukeleto, also check email, the whole thread starts there
+[04:25] *** JimmyZ_ joined
+[04:26] <dukeleto> japhb: yeah, i took a break from email for a few hours :)
+[04:27] <japhb> silly boy
+[04:28] <cotto> The priorities discovered earlier today don't really apply to people not interested in gc hacking.
+[04:28] <cotto> though I'm sure this would be an excellent time to dive into writing a new gc if anyone were interested
+[04:29] *** JimmyZ_ joined
+[04:29] <japhb> cotto: or PCC hacking, or profiling analysis, ...
+[04:31] <cotto> or those
+[04:33] <dalek> TT #1090 closed by dukeleto++: Convert t/pmc/exporter.t to PIR
+[04:33] *** JimmyZ__ joined
+[04:34] <Tene> dukeleto: getting plumage installable would be great.  japhb has expressed concern over getting that done before 1.9
+[04:34] <dukeleto> Tene: yes, it would be
+[04:35] <Tene> If you're looking for a priority. >.>
+[04:36] <dalek> TT #1114 closed by dukeleto++: [patch] Converted some tests from perl to pir
+[04:42] <dukeleto> parrot compiles warn with ./src/pmc/callsignature.pmc: In function ‘Parrot_CallSignature_set_integer_keyed’:
+[04:43] <japhb> dukeleto, Tene: One task would be to get consensus on which directory Glue.pbc and Util.pbc ought to be installed into.  I suppose we could just put them into Plumage/ in the lib dir, but they are more general than just for Plumage (any remaining vestiges of Plumage-only-functions can be easily pulled out and moved elsewhere)
+[04:44] <japhb> But if not within Plumage/, they need better names.
+[04:44] <Tene> I still vote for Plumage/
+[04:44] <Tene> Other tools can still load Plumage::Glue
+[04:45] <japhb> Fine by me, I don't really care ... but others might
+[04:45] <Tene> What objections do you imagine others might have?
+[04:45] <dukeleto> the code began as glue for Plumage, seems about right
+[04:45] * japhb tries to pick his battles ... but the first step is knowing what might be a battle in the first place
+[04:45] <dukeleto> we could call it HLL::Glue
+[04:46] <japhb> dukeleto, yes, but it is way more than that now.  I've implemented grep, map, reduce, ...
+[04:46] <japhb> Then again, any real HLL would have their own version of same
+[04:46] <dukeleto> japhb: what have you done in PIR and what is in NQP?
+[04:46] <Tene> japhb: so maybe Bootstrap/Utils?
+[04:46] <dukeleto> yes, but what about qx() ?
+[04:47] <japhb> I've tried to make Glue.pir only contain stuff that is a pain to write directly in NQP.  Everything else has been moved to Util.nqp at this point.
+[04:48] <japhb> (And if NQP-rx ever implements a wrapper around root_new, another big chunk of Glue.pir can go away.)
+[04:48] <japhb> Maybe NQP/Glue and NQP/Util ?
+[04:49] <japhb> Actually, that feels decent as a namespace.
+[04:49] <japhb> Says what it's for, and all that.
+[04:50] <dukeleto> japhb: i like it
+[04:50] <japhb> (BTW, the comment about root_new above is because root_new wants a key, but is not a keyed aggregate)
+[04:50] <japhb> OK, that I can do in a bit.
+[04:50] <japhb> $day_job still going for a little longer
+[04:51] <dukeleto> japhb: same error after 'realclean'
+[04:51] <japhb> WTF?
+[04:52] <japhb> OK, what was that nopaste link again?
+[04:52] <dukeleto> japhb: http://gist.github.com/246915
+[04:53] <japhb> And you've got a recent pull of plumage?
+[04:54] <dukeleto> japhb: 939edf9, the latest
+[04:55] <japhb> OK, what if you realclean and configure with parrot-nqp instead of nqp ?
+[04:55] <dukeleto> japhb: i am recompiling nqp-rx again after nuking my installed parrot. i will try that next
+[04:56] <japhb> OK
+[05:00] <plobsing> does parrot have fork?
+[05:02] <japhb> plobsing, I doubt it.  spawn and pipe open, but probably not fork, since it's not easily portable
+[05:02] <dukeleto> plobsing: docs/pdds/pdd25_concurrency.pod
+[05:03] <dukeleto> config/gen/platform/generic/exec.c
+[05:03] <dukeleto> 42:    child = fork();
+[05:03] <dukeleto> looks like we use fork() in exec() but don't expose a fork() opcode
+[05:03] <dukeleto> plobsing: what do you need to do?
+[05:04] <plobsing> well i was hoping to spawn off 2 children and pass a frozen PMC between them.
+[05:04] <plobsing> the important part is the thawing side not to have the packfiles of the freezing side
+[05:05] <plobsing> also I'd been thinking it would be nifty to fork and run independant tests (within the same file) in different processes
+[05:05] <plobsing> that way when I crash the interpreter, I still see all the test results
+[05:06] <plobsing> for PIR tests
+[05:06] <dukeleto> plobsing: funny you should ask about that :)
+[05:06] <dukeleto> tapir?
+[05:06] <purl> tapir is probably being written to be testable from the ground up, unlike nqpTAP or http://github.com/leto/tapir
+[05:07] <plobsing> thats a harness no?
+[05:07] <dukeleto> plobsing: yes. so it is maybe not exactly what you are talking about, but i need the same stuff
+[05:07] <plobsing> my problem is test files that have an interpreter panic halfway through
+[05:07] <plobsing> and I want to work around that
+[05:07] <dukeleto> plobsing: spawnw() is probably what you want
+[05:08] <dukeleto> plobsing: then what you want *is* on the tapir TODO list
+[05:10] <dukeleto> plobsing: it won't be easy, but it will be worthwhile, if you want to work on it
+[05:10] <plobsing> which item in the TODO list does that fit under? and more importantly, how can the harness uncrash the tester?
+[05:11] <dukeleto> plobsing: so if i hear you, you want each test in each test file to be run in a seperate parrot process, such that if a test causes a segfault, only one test dies and not the rest of the file
+[05:11] <dukeleto> plobsing: correct?
+[05:11] <plobsing> more or less. some tests should run in the same process if they are tightly coupled
+[05:12] <dukeleto> plobsing: now you might be asking for too much ;)
+[05:12] <dukeleto> plobsing: then those should be put in the same test
+[05:12] <plobsing> I didn't expect it to be possible
+[05:12] <plobsing> its more of a wishlist item
+[05:13] <dukeleto> plobsing: it is a wishlist item for tapir. it is much easier and a bigger return on investment to get parallelizing on files working, though
+[05:13] <plobsing> depends on who measures those returns ;-)
+[05:13] <dukeleto> plobsing: but that doesn't solve your issue, it just makes the test suite a shit ton faster
+[05:13] <dukeleto> plobsing: yes, i agree. the speed increase doesn't matter in your situation, other than you can run+crash the suite much faster ;)
+[05:14] <plobsing> dukeleto: my test suite already runs a shit ton faster than yours, because half the files crash 1/3 of the way through
+[05:14] <dukeleto> plobsing: nice!
+[05:15] <dukeleto> plobsing: are you using coretest?
+[05:15] <plobsing> coretest doesn't work
+[05:15] <dukeleto> plobsing: in which way does it not work?
+[05:15] <plobsing> some tests in coretest use like() which depends on PGE, which isn't build by corevm
+[05:16] <plobsing> so make realclean; perl Configure.pl; make -j3 coretest = FAIL
+[05:16] *** TonyC joined
+[05:17] <dukeleto> plobsing: tell me which ones and i will fix that
+[05:17] <dukeleto> plobsing: i think some people that are translating tests do not know that tests in coretest can only use a subset of test_more.pir . that is not really written down anywhere
+[05:18] *** nopaste joined
+[05:19] <dukeleto> we a flag in test files that are in 'coretest' so that devs know they can only use a subset of test_more.pir, and that subset should be written down somewhere
+[05:19] <plobsing> not sure if it's warranted, but what about a 'test_core.pir'
+[05:19] <dukeleto> s/we a/we need a/
+[05:19] <dukeleto> plobsing: that could actually work
+[05:20] <dukeleto> japhb: same stupid error. i will try parrot-nqp next
+[05:20] <japhb> nod
+[05:24] *** TonyC joined
+[05:26] *** TonyC joined
+[05:27] <plobsing> nopaste?
+[05:27] <purl> nopaste is at http://nopaste.snit.ch/ (ask TonyC for new channels)  or http://paste.scsys.co.uk/ or App::Nopaste or tools/dev/nopaste.pl or at http://www.extpaste.com/ or http://paste.scsys.co.uk (for #catalyst, #dbix-class, #moose  and others) or http://gist.github.com/ or paste or gtfo or tools/dev/nopaste.pl or https://trac.parrot.org/parrot/browser/trunk/tools/dev/nopaste.pl
+[05:27] *** nopaste joined
+[05:28] <plobsing> dukeleto: here's the stderr from 'make coretest' http://nopaste.snit.ch/18929
+[05:29] <plobsing> it contains the backtraces that show all the places PGE is used in core tests
+[05:45] <dukeleto> i get a passing TODO in t/pmc/complex.t on darwin/x86, i think someone was asking about that
+[05:47] <dukeleto> japhb: it got a lot farther with parrot-nqp http://gist.github.com/246979
+[05:48] <dukeleto> japhb: and that is my fault
+[05:48] <japhb> dukeleto, well, that's good and bad.
+[05:48] <japhb> Yeah, something is really goofy that config.fpmc is not there
+[05:48] <dukeleto> japhb: because i am not using an installed parrot, just the compiled binary in the repo directory.
+[05:49] <japhb> NAUGHTY
+[05:49] * dukeleto is naughty
+[05:49] <japhb> Just set --prefix during parrot configure, and then you can easily install to a nice safe place.
+[05:49] <japhb> I use --prefix=/usr/local/parrot
+[05:51] <dukeleto> japhb: ok, back on track. got the latest nqp-rx and the latest plumage working and passing their test suites
+[05:51] <japhb> yay ....
+[05:52] <plobsing> fpmc?
+[05:52] <japhb> "frozen pmc"
+[05:53] * dukeleto shudders from a cool wind across the nape of his neck
+[05:53] <plobsing> oh. good. I was wondering what to call those. I've been calling them x.freeze, but it didn't seem right.
+[06:03] <dukeleto> how do I /bin/sh -c foo.t without foo.t having to be executable?
+[06:03] <dukeleto> i need a way to run tests in any language, via the shebang line
+[06:07] <plobsing> perl handles shebang detection itself
+[06:07] <plobsing> and automatically dispatches
+[06:07] <plobsing> perl foo.t
+[06:07] <dukeleto> plobsing: oy vey
+[06:07] <dukeleto> plobsing: but you are right, i have seen that trick
+[06:12] <dukeleto> plobsing: it doesn't seem to work, for a different reason. it can't find parrot-nqp, even though it is in my path
+[06:12] <japhb> I've run out of steam.  dukeleto, feel free to ping me tomorrow about moving Glue/Util and seeing if we can get to installable Plumage
+[06:12] <dukeleto> PATH=/usr/local/bin perl t/01-sanity.t
+[06:12] <dukeleto> Can't exec parrot-nqp at t/01-sanity.t line 1.
+[06:12] <dukeleto> japhb: sounds good
+[07:13] *** JimmyZ joined
+[07:14] <JimmyZ> hello cotto.
+[07:17] *** uniejo joined
+[07:21] *** chromatic joined
+[07:21] *** theory joined
+[07:22] <JimmyZ> I want to hack all PMCs, to unify them into using the same way to get PMC class attr. ie. hash.pmc one way in PMC its self is by using PARROT_HASH(SELF) and another by using GET_ATTR_Hash, which way should I take?
+[07:23] <JimmyZ> Did I describe clearly?
+[07:25] <chromatic> GET_ATTR_Hash
+[07:28] <JimmyZ> chromatic: I saw the codes, the difference is that the former doesn't use PObj_is_object_TEST to avoid Attributes of type being subclassed from a high-level PMC
+[07:31] <chromatic> Right; the latter is more subclassable.
+[07:34] <JimmyZ> chromatic: So I am confused, if we should always check atrrs for subclassable in hash.pmc its self, or just use GET_ATRR when get attr from other pmcs? and the former seems to be more agile
+[07:34] <JimmyZ> s/if/do/
+[07:35] <dalek> TT #1342 created by dukeleto++: [RFC] make a test_core.pir that tests which are part of coretest use, ...
+[07:42] <chromatic> Within PMCs, the GET_ATTR syntax is the best approach.
+[07:47] <JimmyZ> yes, but GET_ATTR losts a bit performance.;)
+[07:48] <chromatic> If that's our worst performance problem, we're in good shape.
+[07:50] <JimmyZ> thanks, I will try change them to use GET_ATTR
+[07:51] <JimmyZ> s/try/try to/
+[07:56] *** bacek joined
+[07:56] <bacek> o hai
+[07:58] <dukeleto> bacek: hola
+[07:58] <bacek> aloha dukeleto
+[07:59] <dukeleto> bacek: are you working hard in the merge mine?
+[07:59] <bacek> dukeleto, not yet. But I'll start pretty soon
+[08:00] <dalek> lazy-k: 0df29e5 | bernhard++ |  (2 files):
+[08:00] <dalek> lazy-k: Configure.pl and t/harness are no longer needed.
+[08:00] <dalek> lazy-k: review: http://github.com/bschmalhofer/lazy-k/commit/0df29e5097f4be7bb141c45c549058bbc6238442
+[08:01] <dukeleto> bacek: music to my ears. what do you think of this? https://trac.parrot.org/parrot/ticket/1148
+[08:01] <dukeleto> bacek: should I attempt to push that in before the merge? it is useful?
+[08:01] *** iblechbot joined
+[08:02] <bacek> dukeleto, it makes sense.
+[08:02] <dukeleto> bacek: seems like those bugs will exists after the merge, might as well apply a patch that fixes them while it still applies, right ?
+[08:02] <bacek> yes, of course
+[08:02] <dukeleto> bacek: ok, i will apply now and see if the test suite passes
+[08:03] <bacek> ok
+[08:04] <dalek> unlambda: cec1e90 | bernhard++ | t/harness:
+[08:04] <dalek> unlambda: t/harness and Makefile are no longer needed.
+[08:04] <dalek> unlambda: review: http://github.com/bschmalhofer/unlambda/commit/cec1e90d0fb8ea71d55d3631b1a16db44cbd368b
+[08:06] <dalek> lazy-k: 8846a21 | bernhard++ | MAINTAINER:
+[08:06] <dalek> lazy-k: Updated MAINTAINER.
+[08:06] <dalek> lazy-k: review: http://github.com/bschmalhofer/lazy-k/commit/8846a21197cc5dcb38433e3e7a05899ebeb5bb9a
+[08:08] *** cotto_w0rk joined
+[08:10] <dalek> unlambda: 952393c | bernhard++ | MAINTAINER:
+[08:10] <dalek> unlambda: Updated MAINTAINER.
+[08:10] <dalek> unlambda: review: http://github.com/bschmalhofer/unlambda/commit/952393ce426a12bc4b2ab56678fcae71aff33f13
+[08:10] <dalek> unlambda: 6a4daae | bernhard++ | .gitignore:
+[08:10] <dalek> unlambda: Makefile is no longer generated.
+[08:10] <dalek> unlambda: review: http://github.com/bschmalhofer/unlambda/commit/6a4daae2329d812724291001704b43986fc50e04
+[08:11] *** fperrad joined
+[08:13] <dukeleto> bacek: coretest passed. i am running fulltest now
+[08:21] *** fperrad_ joined
+[08:29] <JimmyZ> chromatic: then when do pmcs need to use PARROT_HASH?
+[08:30] <chromatic> That was a convenience macro for the Hash PMC that was a little bit more typesafe than PMC_data(SELF).
+[08:30] <chromatic> It predates the new PMC attributes.
+[08:30] <JimmyZ> chromatic: should I repalce it by using GET_ATTR syntax ?
+[08:31] <chromatic> Yes.
+[08:32] <JimmyZ> chromatic: then I think I can remove PARROT_$pmcname syntax  entirely .
+[08:32] <bacek> dukeleto, any luck with fulltest?
+[08:33] <JimmyZ> chromatic: another quesiont is: when getting attrs, should all pmcs always to use PObj_is_object_TEST for checking ?
+[08:34] <dukeleto> bacek: yep, just finished :) will commit now
+[08:34] <bacek> dukeleto, ok
+[08:34] <JimmyZ> s/quesiont/question/
+[08:35] <chromatic> Within the PMC, you can use the macro directly.  It gets translated appropriately.
+[08:35] <JimmyZ> chromatic: I think it's the last question about it for me . ;)
+[08:36] <dalek> parrot: r42844 | dukeleto++ | trunk (2 files):
+[08:36] <dalek> parrot: [TT #1148] Implement 'clone' method for CallSignature, flh++
+[08:36] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42844/
+[08:36] <JimmyZ> chromatic: which macro? PARROT_$pmcname or GET_ATTR?
+[08:37] <chromatic> GET_ATTR
+[08:37] <dukeleto> bacek: ok, callsig is all yours :)
+[08:38] <bacek> dukeleto, branching now :)
+[08:38] <chromatic> You don't have to do any checks.  The PMC translator will add them for you.
+[08:38] <chromatic> Is this the new Context/CallSig merge branch?
+[08:38] <JimmyZ> chromatic: so I can remove PARROT_$pmcname syntax within PMCs?
+[08:38] <chromatic> Yes.
+[08:39] <dalek> TT #1148 closed by dukeleto++: Implement "clone" method for CallSignature
+[08:39] <dalek> parrot: r42845 | bacek++ | branches/cs_csr_merge:
+[08:39] <dalek> parrot: Branch for merging CallSignature and CallSignatureReturns
+[08:39] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42845/
+[08:39] <JimmyZ> chromatic: and So I can remove the PARROT_$pmcname macro from the source codes, I think.
+[08:39] <chromatic> Yes.
+[08:40] <JimmyZ> chromatic: thanks, I will do it.
+[08:40] <chromatic> Excellent.
+[08:40] * JimmyZ hopes that'is the correct way.
+[08:42] <chromatic> I'll review the patch to make sure.
+[08:42] <JimmyZ> chromatic++
+[08:43] *** payload joined
+[08:52] *** cognominal joined
+[08:52] <dalek> parrot: r42846 | dukeleto++ | trunk/NEWS:
+[08:53] <dalek> parrot: [cage] Make a skeleton for the news for 1.9.0 and start filling in what I know
+[08:53] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42846/
+[08:53] <dalek> parrot: r42847 | bacek++ | branches/cs_csr_merge/src/pmc/callsignature.pmc:
+[08:53] <dalek> parrot: Copy CSR attributes into CS.
+[08:53] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42847/
+[08:53] <dalek> parrot: r42848 | bacek++ | branches/cs_csr_merge/src/pmc/callsignature.pmc:
+[08:53] <dalek> parrot: Reorder CS.mark and .destroy to be closer to .init.
+[08:53] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42848/
+[08:53] <dalek> parrot: r42849 | bacek++ | branches/cs_csr_merge/src/pmc/callsignature.pmc:
+[08:53] <dalek> parrot: Destroy CS.returns_values
+[08:53] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42849/
+[08:53] <dukeleto> bacek++
+[09:19] <dalek> parrot: r42850 | bacek++ | branches/cs_csr_merge/src/call/args.c:
+[09:19] <dalek> parrot: Copy CSR VTABLEs into src/call/args.c prepending csr_ prefix.
+[09:19] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42850/
+[09:39] *** payload joined
+[09:43] <dalek> parrot: r42851 | bacek++ | branches/cs_csr_merge/src/call/args.c:
+[09:43] <dalek> parrot: Make headerized happy again in src/call/args.c
+[09:43] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42851/
+[09:43] <dalek> parrot: r42852 | bacek++ | branches/cs_csr_merge/src/call/args.c:
+[09:43] <dalek> parrot: csr_set_string_keyed_int can accept NULLs.
+[09:43] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42852/
+[09:43] <dalek> parrot: r42853 | bacek++ | branches/cs_csr_merge/src/call/args.c:
+[09:43] <dalek> parrot: Switch from CSR to CS in building returns.
+[09:43] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42853/
+[09:44] *** bacek joined
+[09:46] <dalek> parrot: r42854 | bacek++ | branches/cs_csr_merge (2 files):
+[09:46] <dalek> parrot: Remove CallSignatureReturns
+[09:46] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42854/
+[09:53] <dalek> parrot: r42855 | bacek++ | branches/cs_csr_merge/MANIFEST:
+[09:53] <dalek> parrot: Update MANIFEST...
+[09:53] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42855/
+[10:03] <dalek> parrot: r42856 | dukeleto++ | trunk/t/op/inf_nan.t:
+[10:03] <dalek> parrot: [t][cage] Remove PGE-dependence from t/op/inf_nan.t since it is part of 'make coretest'
+[10:04] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42856/
+[10:04] <dalek> parrot: r42857 | bacek++ | branches/cs_csr_merge/src/pmc/callsignature.pmc:
+[10:04] <dalek> parrot: Pacify compiler about default case in CallSignature.clone
+[10:04] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42857/
+[10:04] <dalek> parrot: r42858 | bacek++ | branches/cs_csr_merge/src/pmc/callsignature.pmc:
+[10:04] <dalek> parrot: Remove old results storage from CallSignature
+[10:04] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42858/
+[10:10] <dalek> parrot: r42859 | dukeleto++ | trunk/t/op/number.t:
+[10:10] <dalek> parrot: [t][cage] Remove PGE-dependence from t/op/number.t since it is part of 'make coretest'
+[10:10] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42859/
+[10:37] <JimmyZ> Improved Algorithms for String Searching Problems: http://lib.tkk.fi/Diss/2009/isbn9789512298884/
+[10:38] <JimmyZ> diakopter++ for share
+[10:42] *** mikehh joined
+[10:51] *** bacek joined
+[11:34] *** riffraff joined
+[11:40] *** payload joined
+[11:57] <mikehh> All tests PASS (pre/post-config, smoke (#30407), fulltest) at r42859 - Ubuntu 9.10 amd64 (g++ with --optimize)
+[12:11] *** JimmyZ joined
+[12:25] *** bluescreen joined
+[12:39] *** jsut joined
+[12:42] *** whiteknight joined
+[12:42] *** bluescreen joined
+[12:48] *** JimmyZ joined
+[12:59] <dalek> parrot: r42860 | bacek++ | branches/cs_csr_merge (4 files):
+[12:59] <dalek> parrot: Move append_result function from src/extend.c into src/call/args.c
+[12:59] <dalek> parrot: We need direct access to CallSignature guts.
+[12:59] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42860/
+[12:59] <dalek> parrot: r42861 | bacek++ | branches/cs_csr_merge/t/pmc/callsignaturereturns.t:
+[12:59] <dalek> parrot: Remove test for CallSignatureReturns
+[12:59] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42861/
+[12:59] <dalek> parrot: r42862 | bacek++ | branches/cs_csr_merge/t/pmc/callsignature.t:
+[12:59] <dalek> parrot: Remove test for C<returns> attribute in callsignature.t
+[12:59] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42862/
+[13:01] *** bluescreen joined
+[13:04] <bacek> anyone alive here?
+[13:05] <moritz> no, I'm undead
+[13:05] <sjn> we are all bots
+[13:05] <pmichaud> (barely alive)
+[13:06] <moritz> barely alive, barely kicking :-)
+[13:06] <bacek> heh :)
+[13:06] <sjn> "anyone alive here?" should be the first question of any turing test
+[13:07] <bacek> cs_csr_merge branch need some love
+[13:07] <bacek> Parrot_pcc_merge_signature_for_tailcall is badly broken
+[13:07] <whiteknight> good morning bacek
+[13:07] *** lucian joined
+[13:08] <bacek> because we share same pointer between different CallSignature
+[13:08] <bacek> (and I'm falling asleep...)
+[13:10] <pmichaud> ...it's snowing here.
+[13:10] <szbalint> lucky :S
+[13:10] <bacek> pmichaud, no way! It's second day of summer!
+[13:10] <szbalint> I want to have snow too, but alas there is none
+[13:11] <pmichaud> This is Dallas.  Dallas, Texas.   We don't normally get snow here in December.
+[13:15] <szbalint> this is Wien, Austria
+[13:18] <bacek> snow... Is it some problem with "Dihydrogen monoxide"?
+[13:25] <szbalint> the silent killer.
+[13:26] *** ruoso joined
+[13:26] *** iblechbot joined
+[13:26] <moritz> in the course of human history, more people have died from Dihydrogen monoxide than from car accidents
+[13:27] <Coke> msg dukeleto those test_atan changes look wrong. You should probably use the .fp_eq macro instead.
+[13:27] <purl> Message for dukeleto stored.
+[13:28] *** bluescreen joined
+[13:35] <whiteknight> purl msg chromatic: We need to figure out how many headers are used for startup, and how much are used for common applications (NQP startup)
+[13:35] <purl> Message for chromatic stored.
+[13:36] <pmichaud> ...noting of course that nqp itself isn't a "common application"  :)
+[13:36] <JimmyZ> common languages :)
+[13:40] <moritz> re PIR and __END__
+[13:40] <moritz> iirc there's an include mechanism for PIR files
+[13:40] <Coke> .include '', yes.
+[13:41] *** payload joined
+[13:41] <moritz> what would happen if you include a PIR which contains an __END__ marker?
+[13:41] <Coke> in the current scheme of .include, it would affecting the including file as well.
+[13:41] <Coke> *affect
+[13:41] <moritz> which would be rather bad, IMHO
+[13:41] <Coke> but I imagine you could redefine it.
+[13:42] <moritz> anyway, I don't want to argue any way, I don't use PIR enough for that. I just want to point out that these things should be thought of
+[13:45] <dalek> parrot: r42863 | mikehh++ | trunk/t/pmc/complex.t:
+[13:45] <dalek> parrot: correct a failing test that indicated a TODO pass - t/pmc/complex.t
+[13:45] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42863/
+[13:57] <Coke> hurm. particle commented but didn't vote.
+[13:58] <particle> my vote depends on the answers, but is likely -1.  pir is an assembly language, funky text blocks don't belong
+[13:59] <Coke> see, my vote depends on the fact that we have to expend energy /thinking/ about those answers. =-)
+[14:01] <particle> i like the 'split subroutine body over two files' edge case.  that grabs people.
+[14:02] *** JimmyZ_ joined
+[14:05] *** lucian joined
+[14:19] *** whiteknight joined
+[14:20] <whiteknight> I like the idea of __END__ because I like thinking we could use the extra space to store additional data and metadata about a file
+[14:21] <pmichaud> I'd rather have a start/stop marker for that, rather than just __END__
+[14:21] <pmichaud> something like:   "=data" ... "=cut"
+[14:22] <moritz> we could also ask ourselves if evolving PIR is the right direction to move
+[14:28] <PerlJam> good morning
+[14:28] <PerlJam> someone wants to add __END__ to PIR?
+[14:28] <JimmyZ> yes, there is a ticket.
+[14:28] <PerlJam> weird.
+[14:30] <whiteknight> when you think about *real* assembly languages, they usually give you the ability to specify where things go, like the data section, text section, code section, etc
+[14:31] <whiteknight> pmichaud: yes, I do like the idea of stop/start markers for it
+[14:32] <whiteknight> Having a literal section in PIR code that contains the HLL code that was compiled would be great for producing meaningful annotations, for instance
+[14:32] <pmichaud> oh.  I figured that would just be   .annotate "source", "....source here..."
+[14:32] <whiteknight> places where we could specify lists of literal strings would be great for i18n among other uses
+[14:32] <PerlJam> I'd bet that most PIR is machine generated rather than human generated.  If that's true, what would the machines use something like __END__ for?  Just a place to store static data?  And then how would that data be accessed?
+[14:33] <whiteknight> I still hold out for ways to specify PMC aggregate literals, and a separate section (and therefore possibly a separate parser) would be ideal for that
+[14:33] *** mikehh joined
+[14:34] <PerlJam> whiteknight: aggregate literals sounds useful, but it also doesn't sound like __END__  :)
+[14:34] <Coke> whiteknight: that belongs in the PBC, not the PIR.
+[14:34] <whiteknight> PerlJam: I'm past __END__ now, looking more at specific file "sections" with start/stop markers
+[14:35] <whiteknight> Coke: But how does it get into the PBC? Need a way to specify the literal in PIR to be compiled into PBC
+[14:35] *** lucian joined
+[14:35] <Coke> which portion of the PBC doesn't have a way to get that information into it?
+[14:35] <whiteknight> Coke: I think we're talking about different things
+[14:36] <Coke> whiteknight: you want to add something to the PIR; I'm saying that the ultimate place for that sort of thing is in the bytecode; what good is it if it's just in the pir?
+[14:36] <Coke> and if it's ok just inthe pir, why not just put it in pod?
+[14:36] <whiteknight> Coke: We need PIR syntax to specify the kinds of things we want to add to PBC
+[14:36] <Coke> what specifically are you trying to add?
+[14:36] <whiteknight> PBC has ways to hold that kind of stuff
+[14:37] <Coke> ok. which section of the pbc do we need pir syntax for?
+[14:37] <particle> if it's in pbc, it must be in pasm
+[14:37] <whiteknight> Coke: you're misunderstanding me
+[14:37] <Coke> whiteknight: not on purpose.
+[14:37] <Coke> 09:37 <@whiteknight> PBC has ways to hold that kind of stuff
+[14:37] <Coke> which stuff?
+[14:37] <Coke> which stuff that is not specifiable via pir?
+[14:38] <whiteknight> I'm not talking about PBC. no talking about PBC
+[14:38] <particle> come up with the pasm solution first, then address pir
+[14:38] <whiteknight> forget PBC
+[14:38] <purl> whiteknight: I forgot pbc
+[14:38] <whiteknight> thanks, purl
+[14:38] <purl> pas de quoi whiteknight
+[14:38] <Coke> storing stuff in pir only is not a good idea.
+[14:38] <Coke> it's just comments at that point.
+[14:38] <whiteknight> nobody is talking about that either
+[14:38] <Coke> ok. then I have no idea what you're talking about. =-)
+[14:38] <particle> pbc is an acronym for the parrot bytecode format
+[14:39] <whiteknight> I'm thinking about a system similar to __END__ but without the problems created by file inclusions
+[14:39] <Coke> Ok. what data would go in end other than comments?
+[14:40] <whiteknight> the ability to specify data and metadata in the PIR file (in a similar way to how DATA and TEXT sections in x86 assembly work), which would then be stored in the compiled bytecode and accessible from the program
+[14:40] <Coke> ok. we can already store data (via .const subs) and metadata (via .annotate). is there /new/ data/metadata you wish to store?
+[14:41] <whiteknight> no, not necessarily. Just looking for better ways
+[14:41] <whiteknight> just a thought experiment
+[14:41] <particle> leave the experimentation until you get the basics down :P
+[14:41] <Coke> ok. I vote against new syntax. if it's a new feature, that's something else.
+[14:43] <whiteknight> why the blanket disapproval of new PIR syntax? It's hardly a language that's above improvement
+[14:44] <whiteknight> better syntax could provide natural pathways to increase features while at the same time improving parsing and compilation performance
+[14:45] <particle> i'd rather concentrate on making our bytecode human-readable, by supporting all pbc concepts in pasm
+[14:45] <whiteknight> it's not either/or.
+[14:45] <particle> no, it's not, except for time.
+[14:45] <whiteknight> if we say we want to focus on that, maybe 10% of our develpment team will take that task
+[14:45] *** bluescreen joined
+[14:45] <particle> and for me, it's likely neither
+[14:46] <whiteknight> always better to put out a unified vision and an  array of tasks.
+[14:46] *** payload1 joined
+[14:47] <Coke> (why against) because timtoady isn't something we need at this level?
+[14:50] <Coke> I'm not saying this is the best implementation, mind you, but it's functional. There are other things that are not functional; I'd like to prioritize those (more)
+[14:51] <Coke> ... so, yes, if there's a better syntax/format/something to replace something we already have, yes, that should be on the table. but do we really want our core committers working on that when we have HLL features that are currently impossible to implement with core parrot?
+[14:52] *** patspam joined
+[14:53] <Coke> (yes,  people will work on whatever they want to anyway, which is fine and expected, but as you say, we should have a unified vision; our array of tasks should reflect our best understanding of our user's needs.)
+[14:54] *** patspam1 joined
+[14:55] <whiteknight> We don't decide what our core committers are going to work on. This isn't a business or some sort of authoritarianism
+[14:55] <whiteknight> people work on what they want to work on, they vote for features with their tuits
+[14:56] <whiteknight> you can say "you must not do X", but you can never say "you must do Y"
+[14:56] <particle> that's not how roadmaps work.
+[14:56] <Coke> ... did you read my sends? yes, I understand.
+[14:57] <whiteknight> particle: and our roadmaps obviously don't work the way our development team works
+[14:57] <whiteknight> otherwise we might actually meet some of our deadlines eventually
+[14:57] <particle> you speak with the devil's tongue. OUT DEMONS, OUT!!!
+[14:58] <whiteknight> if a developer comes to us and says "I want to improve PIR syntax, I will do that or I will do nothing", it's not a matter of saying "we would prefer something else"
+[14:58] <Coke> whiteknight: no one is saying that.
+[14:58] <whiteknight> Coke: implicitly, all open source devs are saying exactly that
+[14:59] <whiteknight> people work on what they want to work on, or they don't work at all
+[14:59] <Coke> whiteknight: so why even ask if we want this feature?
+[14:59] <whiteknight> Coke: because it's not a free-for-all either. There are plans and goals
+[14:59] <Coke> whiteknight: right.
+[14:59] <whiteknight> if the needs of the developers match the needs of our project, development gets done
+[14:59] <Coke> so I don't really know, again, what you're arguing about.
+[15:01] <Coke> I'm not saying that a developer cannot work on that feature if they feel it is crucial. I am explaining why I do not feel that is crucial, and that I would rather prioritize other things higher.
+[15:01] <Coke> Obviously every developer is not going to agree on all the priorities.
+[15:01] <Coke> but where there is overlap, there is our roadmap.
+[15:01] <whiteknight> I'm saying that it's nonsensical and even wrong to say "X would be nice, but table it because Y is higher priority"
+[15:02] <whiteknight> if PIR improvements are nice, greenlight them and people will do the work
+[15:02] <whiteknight> you can't prioritize somebody elses tuits
+[15:02] <Coke> I feel it is crucial as me as a HLL implementor to prioritize.
+[15:02] <Tene> In general, it seems that new PIR development has been discouraged until we get a replacement for pirc.
+[15:02] <Coke> crucial /to/ me.
+[15:03] <whiteknight> Coke: right. And you can prioritize your tuits accordingly
+[15:03] <whiteknight> and you can even provide incentives (begging, kudos, karma) to try and nudge others in that direction
+[15:04] <Coke> whiteknight: so, again, I don't understand what we're arguing about.
+[15:04] <whiteknight> I'm mostly arguing against what particle said earlier
+[15:04] <whiteknight> and saying that if a feature is something we would like eventually, we should greenlight it
+[15:05] <whiteknight> and also you can't worry about dividing developer effort, it divides itself and disappears if you don't utilize it
+[15:06] * Coke shuts up since whiteknight isn't arguing with him.
+[15:09] <Coke> whoops, argument coming:
+[15:13] <Coke> bah. six line argument typed out and deleted. I don't have the energy.
+[15:13] * Coke tries to sum up.
+[15:14] <Coke> we /can/ divide developer effort, and have done so in the past. We should endeavor to use that power for the good of the users where it does work, and when we say "please don't bother", please hear "please prioritize that at the bottom of the collective queue."
+[15:15] <Coke> (division example: "let's move off rt.perl.org")
+[15:18] * Coke likes how his summary was 5 lines. Oy.
+[15:22] <whiteknight> it's certainly not a perfect world of "never" and "always"
+[15:22] *** lucian joined
+[15:22] <whiteknight> There are plenty of projects that I am certainly not ever going to work on regardless of the priority level. I know there are other combinations of projects and people where that holds true as well
+[15:23] <whiteknight> and when the entire list of ongoing projects falls on a person's "I'm not ever going to do that" list, we've lost that person forever
+[15:23] <Coke> whiteknight: is that a bad thing?
+[15:23] <Coke> people leave the project all the time.
+[15:24] <Coke> if their goals don't mesh with the project, that seems reasonable to me.
+[15:24] <whiteknight> maybe, yes. Especially if we've artificially shortened the list of projects to try and avoid dividing effort
+[15:24] <whiteknight> I would rather have a person working on a low priority task then to have that person not working with us at all
+[15:25] <Coke> whiteknight: that depends on the project. if it's merely "low priority" and not "actively harmful", sure.
+[15:25] <Coke> I am not suggesting new pir syntax is actively harmful.
+[15:25] <whiteknight> as people become more integrated into the community, it becomes easier to manipulate them into doing things for the good of the project
+[15:25] <whiteknight> where manipulate was probably the wrong word choice
+[15:25] <Coke> subdue?
+[15:25] <Coke> hurm.
+[15:26] <moritz> one roadmap to bind them, and in the darkness to grind them
+[15:26] <whiteknight> for instance, I'm pretty well integrated and I'm willing to do certain tasks for the good of the project that I wouldn't do as more of an outsider
+[15:27] <whiteknight> moritz++
+[15:29] *** bubaflub joined
+[15:41] *** bluescreen joined
+[15:54] *** Psyche^ joined
+[15:55] <Coke> whiteknight: there were a lot of those roadmap items that were theoretically documented at the PDC (but never on the wiki)
+[15:55] <Coke> in re TT#604; Thanks for following up on those.
+[15:56] <whiteknight> the tasks on the "roadmap" really form a comical subset of tasks we should be looking at
+[15:56] <whiteknight> I really wish we could have a new general meeting to get priorities in order again
+[15:58] <Coke> (meeting) - in person meetings aren't going to cut it.
+[15:58] <whiteknight> right, a good dedicated online meeting would be good for this purpose
+[15:58] <Coke> +1 from me.
+[15:58] <whiteknight> like #ps, only different in scope and time commitment
+[15:58] <Coke> (unless of course, the meeting is in Albany, NY. =-)
+[15:59] <Coke> whiteknight: we should probably have one of those just after each stable release.
+[15:59] <whiteknight> I like that idea
+[15:59] <Tene> We could have one right now!  In this channel!
+[15:59] <whiteknight> what bothers me is that these releases all have taglines, but we don't do anything in the large sense to acheive them besides following the small set of ragtag items on the roadmap
+[16:01] <pmichaud> whiteknight:  do you mean the "production ready",  "stable platform for HLL developers", etc. taglines?
+[16:01] <whiteknight> pmichaud: exactly
+[16:01] <pmichaud> whiteknight: those were our best guesses of progress as of PDS 2008
+[16:01] <whiteknight> there are a lot of things we should focus on, and should have been focusing on to make 2.0 "production ready"
+[16:01] <whiteknight> but the roadmap only shows "testing sprint" and something vague about PGE
+[16:01] <pmichaud> what really hurts is that we haven't revised our notion of priority since then
+[16:01] <whiteknight> pmichaud: exactly! We need to revise
+[16:02] <pmichaud> you're preaching to the choir here :-)
+[16:02] <whiteknight> our roadmap is uninformative at best right now, absolutely useless and totally misleading more likely
+[16:02] <Coke> Infinoid: ping. estimated release of svn-bisect so I can advertise?
+[16:02] <whiteknight> to think that the only thing we need to acheive production readiness is "testing sprint" is assinine
+[16:02] <pmichaud> I've long complained that there's a parrot-process problem in that there doesn't seem to be a process or mechanism to update the roadmap
+[16:03] <pmichaud> (I've complained about this since march)
+[16:03] <Coke> here's my suggestion: just after each stable release to plan out the next six months, plus one in place of next week's parrotsketch.
+[16:03] <Coke> all in favor? =-)
+[16:03] <pmichaud> -1
+[16:03] <purl> -1
+[16:03] <Tene> I like how agreeable purl is. :)
+[16:04] <pmichaud> because in this case, "just after each stable release" will mean after January
+[16:04] <pmichaud> and I think we need to be updating our roadmap _now_
+[16:04] <Coke> pmichaud: ... please reread my send?
+[16:04] <whiteknight> pmichaud: no meeting we have before january will affect our trajectory for the 2.0 release
+[16:04] <pmichaud> Coke: okay, mis-applied the "plus one" comment
+[16:05] <Coke> so, long term, just after the release to set the plan, but we need one right now to figure out what we can do before january.
+[16:05] <moritz> whiteknight: but for example the deprecation items in the 2.0 release
+[16:05] <pmichaud> whiteknight: false.  While it might not affect the contents of the 2.0 release, it can certainly affect our activities between now and then.
+[16:05] <pmichaud> and as moritz++ says, it might change what we choose to deprecate
+[16:05] <whiteknight> pmichaud: that may be true. I don' want to be entirely pesimistic
+[16:05] <whiteknight> the net end deliverable can't be changed much at this point
+[16:06] <pmichaud> right now most of what I hear about the "2.0 release" is that it's a convenient excuse to postpone hard decisions until after January.
+[16:06] <whiteknight> but if we can improve our process, 2.6 could be dramatically affected
+[16:06] <pmichaud> when in reality we need to be making those hard decisions *before* the January release.  Even if it doesn't affect the code, it may affect what we're telling others about the next stable release.
+[16:07] <whiteknight> agreed
+[16:07] <pmichaud> Also, given the number of issues that (imo) keep us from being truly "production ready", I'd like to resurrect the idea that we create another "supported release" in April.
+[16:07] <whiteknight> for instance, I do want to start planning the next GC now, not after 2.0
+[16:07] <pmichaud> because I think that waiting until July for that is unrealistic.
+[16:07] <whiteknight> pmichaud: that only helps us if we can achieve the necessary improvements by April
+[16:08] <whiteknight> a lame-duck april release does nothing to help us
+[16:08] <pmichaud> I think July may end up being too late for Parrot.
+[16:08] <Tene> echo EVERYTHING >> DEPRECATED.pod
+[16:08] <whiteknight> this is the problem with time-based releases, you can't say that any given release will contain any given feature set
+[16:08] <whiteknight> pmichaud: in what sense?
+[16:08] <Coke> whiteknight: but if you go the other way, you can never say when it's going to be released.
+[16:09] <whiteknight> Coke: neither is perfect, just pointing out the issues
+[16:09] <Coke> so either way, you can never say. =-)
+[16:09] <Coke> right.
+[16:09] <whiteknight> I certainly don't advocate for a change
+[16:09] <whiteknight> but time-based releases are the reality, and we need to understand the pros and cons of that
+[16:09] <pmichaud> time-based releases are the reality, but the 6-month cycle is our own doing.
+[16:10] <pmichaud> imo, a 6-month cycle assumes far more stability (and progress) than we've achieved in Parrot.
+[16:21] *** ilbot2 joined
+[16:21] *** moderator changes topic to: Parrot 1.8.0 Zygodactyly released | Priority: https://trac.parrot.org/parrot/wiki/ClassVtableOverrides | Latest modified TT's: http://icanhaz.com/parrotbugs | Parrot Languages: http://icanhaz.com/parrotlang
+[16:22] *** Util joined
+[16:22] <whiteknight> that is, the only things covered by the policy are things we've deemed to be stable
+[16:22] <whiteknight> not cover everything until we've deprecated the trash
+[16:22] <PerlJam> whiteknight++
+[16:23] <whiteknight> pmichaud: I think people will use the standard darkPAN defense: "We don't know what our users are relying on, and we can't just pull the rug out from under them"
+[16:23] <szbalint_> real or not, Darkpan is still a _wrong_ argument. Taking into account the needs of people who by definition won't express their views is bending over backwards so much as to fall backwards.
+[16:23] *** slavorg joined
+[16:23] <PerlJam> szbalint_++
+[16:23] <szbalint_> Besides, people needing a feature can a.) fix code b.) not upgrade.
+[16:23] <whiteknight> I think it's also going to be used as "and it hurts Parrot adoption if we remove things our users rely on without warning"
+[16:23] <whiteknight> szbalint_++
+[16:24] <PerlJam> Does anyone have a handle on the current parrot user base?
+[16:24] <pmichaud> I guarantee that Parrot-lack-of-features-and-performance will hurt its adoption far more than a moving API :)
+[16:24] <PerlJam> (non-#parrot user base)
+[16:24] <whiteknight> it's the current Parrot devs and maybe a handful of other people
+[16:24] <pmichaud> whiteknight: okay, thanks for the answer -- that's essentially what I was looking for.
+[16:24] *** tewk joined
+[16:25] <whiteknight> pmichaud: no problem. I have plenty to say on the issue (I know you do too)
+[16:25] <pmichaud> whiteknight: yes, I have plenty to say also, but for the most part it appears to be screaming against the wind.  I'm weary of it and so will likely stop.
+[16:26] <whiteknight> Anything worth having is worth fighting for
+[16:26] <pmichaud> fighting indefinitely?  with no results?
+[16:26] <whiteknight> if we fight properly, there will be results
+[16:26] <dukeleto> pmichaud: i hear what you are saying
+[16:26] <PerlJam> There's always the fork option.
+[16:27] <Coke> PerlJam: aka. "the nuclear option".
+[16:27] * dukeleto occasionally uses a spoon as well
+[16:27] <whiteknight> I don't think a fork will generate critical mass
+[16:27] <whiteknight> and I think it's a huge waste to fork the project over an incomplete roadmap and lousy deprecation policy. like pmichaud says, policy can be changed
+[16:27] <pmichaud> the more common outcome is that people "vote with their feet"
+[16:27] <dukeleto> Coke: why should i juse .fp_eq instead?
+[16:28] <whiteknight> pmichaud: true
+[16:28] <Coke> dukeleto: because comparing equality on FP's is wrong?
+[16:28] <pmichaud> which is somewhat why I say that "July may be too late for Parrot"
+[16:28] <dukeleto> Coke: is() takes a 4th argument, of precision
+[16:28] <whiteknight> so maybe the first act of business is to draft a new support policy and vet it on the list
+[16:28] <dukeleto> whiteknight++
+[16:29] <PerlJam> whiteknight++ sounds like a plan.
+[16:29] *** workbench joined
+[16:30] <Coke> dukeleto: ah, that's relatively new. +1; (-1 that if it's present, it should be used instead of doing an iseq check first. =-)
+[16:30] *** PacoLinux joined
+[16:30] *** brrant joined
+[16:30] <moritz> wouldn't that be a good candidate for a named argument?
+[16:30] <Coke> thanks for pointing that out.
+[16:33] *** davidfetter joined
+[16:33] *** jsut joined
+[16:34] <Coke> email about #ps sent.
+[16:35] *** HG` joined
+[16:40] *** hachi joined
+[16:45] <kthakore> /win 12
+[16:48] <dalek> TT #1343 created by coke++: parrot's Test::More's is(Float,Float), with precision
+[16:50] *** lucian joined
+[16:54] <dalek> TT #662 closed by doughera++: [PATCH] Add more dependencies on parrot.h
+[17:02] <dukeleto> Coke: i don't quite understand the -1 part of what you said
+[17:03] <dukeleto> coke++ for tt 1343, i considered writing them, but just wrote 2 extra lines instead
+[17:03] <Coke> dukeleto: you pass in a precision to alter the comparison - it's potentially ignored.
+[17:03] <Coke> $dayjob
+[17:04] <pmichaud> $lunch
+[17:04] <pmichaud> or perhaps that's &lunch
+[17:04] <dukeleto> self.'lunch'(food)
+[17:06] <pmichaud> $Pm <== &lunch
+[17:06] <pmichaud> (hey, it is called the "feed" operator :-)
+[17:20] *** theory joined
+[17:21] <dalek> parrot: r42864 | fperrad++ | trunk/runtime/parrot/library/distutils.pir:
+[17:21] <dalek> parrot: [distutils] add a PIR implementation of 'glob' based on 'PGE::Glob'
+[17:21] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42864/
+[17:24] <cotto_w0rk> good morning
+[17:25] <whiteknight> hello cotto_w0rk
+[17:28] * cotto_w0rk ponders the difference between working and w0rking
+[17:35] <whiteknight> down that path lies danger
+[17:35] <whiteknight> next thing you know, you're getting fired for w0rking when you should be working
+[17:36] <Tene> If IRC is too time-constrained, what about holding the discussion in email and/or wiki?
+[17:39] <mj41_> /msg dukeleto Do you have permanent IP?
+[17:39] <mj41_> \\msg dukeleto Do you have permanent IP?
+[17:39] <moritz> /msg should work
+[17:40] <moritz> if you don't have leading spaces
+[17:40] <moritz> and a decent IRC client :-)
+[17:44] *** payload joined
+[17:45] <whiteknight> urg, I can't get TAP::Harness::Archive to build on OpenSolaris
+[17:45] <Coke> Tene: (mailing list) that's what I said!
+[17:45] <whiteknight> which means I can't submit smolder reports there
+[17:46] <Coke> whiteknight: is THA using xs?
+[17:46] <whiteknight> Coke: no idea. Build.PL gives me crap about the wrong arguments
+[17:47] <Coke> ... should you be using Makefile.PL ?
+[17:47] <Coke> (are you building it via cpan or manually?)
+[17:47] <whiteknight> it doesn't have a Makefile.PL
+[17:47] <whiteknight> I am trying to do it via cpan, yes
+[17:47] <Coke> do you have an old version of Moudle::Build?
+[17:47] <Coke> Module::Build
+[17:47] <purl> Module::Build is at http://sourceforge.net/projects/module-build or We preference you, the author, yay! or Making it even easier to create packages that the users can't install! or in soviet russia, module builds you or obsoleted by Module::Install, which is easy -and- produces distribution that install
+[17:48] <whiteknight> I just installed Module::Build in this session
+[17:51] * Coke vaguely wants :multi(Float,Float)|(*,Float)|(Float,*)
+[17:52] <whiteknight> ah, nevermind. Figured it out
+[17:52] <whiteknight> "perl Build.PL Build && perl Build Install"
+[17:59] <mj41_> please try it and set your passwd
+[17:59] <mj41_> to dukeleto :-)
+[18:02] *** xenoterracide joined
+[18:10] <Coke> whiteknight: wasn't cpan doing that for you?
+[18:10] <whiteknight> Coke: nope
+[18:10] <whiteknight> tried to write it's own makefile
+[18:11] <whiteknight> hilarity ensued
+[18:14] <Coke> were you doing anything other than 'cpan Module::Build' ?
+[18:14] <Coke> er, s/Module::Build/that other thing./
+[18:15] <whiteknight> I opened cpan, and typed "install TAP::Harness::Archive"
+[18:15] <whiteknight> (after I installed a few prereqs)
+[18:15] <Coke> I would definitely report that over in #toolchain.
+[18:16] <whiteknight> will do. Thanks
+[18:17] <Infinoid> Coke: pong.  weekendish.  still want to get "svn-bisect run sh -c 'foo bar'" working
+[18:18] *** nopaste joined
+[18:24] <dalek> parrot: r42865 | fperrad++ | trunk/runtime/parrot/library/distutils.pir:
+[18:24] <dalek> parrot: [distutils] add a named parameter 'verbose' to some OS utilities
+[18:24] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42865/
+[18:30] <whiteknight> for all it's hype, the cpan utility is remarkably unuser-friendly.
+[18:30] <whiteknight> and I'm having a huge number of issues involving missing dependencies not getting loaded
+[18:31] *** chromatic joined
+[18:34] <whiteknight> I don't know if that's a problem with cpan or a problem with the metadata from the various modules
+[18:36] <bubaflub> whiteknight: could it be both?
+[18:39] <dukeleto> whiteknight: also email module-authors, if #toolchain doesn't help
+[18:41] <whiteknight> success!
+[18:41] <purl> hmmm... success is finding king size papers
+[18:42] <whiteknight> http://smolder.plusthree.com/app/public_projects/report_details/30475
+[18:46] *** nopaste joined
+[18:46] *** hachi joined
+[18:46] *** brrant joined
+[18:46] *** workbench joined
+[18:46] *** rhr_ joined
+[18:46] *** |Ryan52 joined
+[18:46] *** leto_ joined
+[18:46] *** bluescreen joined
+[18:46] *** whiteknight joined
+[18:46] *** KatrinaTheLamia joined
+[18:46] *** DrForr joined
+[18:46] *** jjore joined
+[18:46] *** cxreg joined
+[18:46] *** he_ joined
+[18:46] *** jan joined
+[18:46] *** estrabd_ joined
+[18:46] *** frodwith_ joined
+[18:46] *** Tene joined
+[18:46] *** treed joined
+[18:46] *** purl joined
+[18:46] *** Essobi joined
+[18:46] *** NotFound joined
+[18:46] *** preflex joined
+[18:46] *** sjn joined
+[18:46] *** Maddingue joined
+[18:46] *** integral joined
+[18:46] *** PerlJam joined
+[18:46] *** eiro_ joined
+[18:46] *** baest joined
+[18:46] *** ttbot joined
+[18:46] *** athomason joined
+[18:46] *** spinclad joined
+[18:46] *** silug joined
+[18:47] *** joeri joined
+[18:47] *** payload joined
+[18:47] *** PacoLinux joined
+[18:47] *** slavorg joined
+[18:47] *** cosimo_ joined
+[18:47] *** sri_ joined
+[18:47] *** mj41_ joined
+[18:47] *** mikehh joined
+[18:47] *** ruoso joined
+[18:47] *** cognominal joined
+[18:47] *** fperrad joined
+[18:47] *** redbrain joined
+[18:47] *** GeJ joined
+[18:47] *** slavorgn joined
+[18:47] <dukeleto> wilkommen!
+[18:52] <dalek> nqp-rx: 4633d19 | pmichaud++ |  (3 files):
+[18:52] <dalek> nqp-rx: Allow leading & on subroutine declarations.
+[18:52] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/4633d196983239acbb38465161475181d079da72
+[18:52] <dalek> nqp-rx: 3173f73 | pmichaud++ | src/NQP/Grammar.pm:
+[18:52] <dalek> nqp-rx: Add bare circumfix to colonpair.
+[18:52] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/3173f732380ef238d4640e31ae94426be9bb5133
+[18:52] <dalek> nqp-rx: 530da42 | pmichaud++ | src/NQP/ (2 files):
+[18:52] <dalek> nqp-rx: Improve longname handling for routine and regexes, allow "infix:<...>" names.
+[18:52] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/530da42fbb8983f671931aaa66be73abafd854e2
+[18:52] <dalek> nqp-rx: eab37ff | pmichaud++ | src/stage0/ (3 files):
+[18:52] <dalek> nqp-rx: Update bootstrap.
+[18:52] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/eab37ff10e0c81faa98caa5806ae53e0b08feb30
+[18:52] <dalek> nqp-rx: 588f6a7 | pmichaud++ | src/NQP/Actions.pm:
+[18:52] <dalek> nqp-rx: Merge branch 'master' of git@github.com:perl6/nqp-rx
+[18:52] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/588f6a7cdb1cf7bb83f1edf198a71890076598ff
+[18:52] <dalek> nqp-rx: 2d32e30 | pmichaud++ | src/stage0/ (3 files):
+[18:52] <dalek> nqp-rx: Re-update bootstrap with latest pull from github.
+[18:52] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/2d32e308277b00d00349d9e9563578b8513d0ce3
+[18:53] <Coke> Infinoid: ok. I eagerly await the ability to delete my cpan module!
+[18:53] <Coke> Infinoid++
+[18:55] <Coke> whee, parrot-users-nyc gets its first spam.
+[18:56] <dukeleto> joy to the world
+[18:56] <cotto_w0rk> It's a big day.
+[18:56] <cotto_w0rk> I'd better get back to work.
+[18:56] <dukeleto> why does nyc think they are so cool?
+[18:56] <dukeleto> i might have to start parrot-users-the-rest-of-the-universe
+[18:57] *** theory joined
+[18:57] <cotto_work> anyone want to be purl?  now's your chance
+[18:58] <dalek> parrot: r42866 | pmichaud++ | failed to fetch changeset:
+[18:58] <dalek> parrot: [nqp]:  Latest updates to nqp-rx, ability to declare &category:<xyz> subs.
+[18:58] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42866/
+[18:59] *** nopaste joined
+[18:59] *** hachi joined
+[18:59] *** brrant joined
+[18:59] *** workbench joined
+[18:59] *** rhr_ joined
+[18:59] *** |Ryan52 joined
+[18:59] *** leto_ joined
+[18:59] *** bluescreen joined
+[18:59] *** whiteknight joined
+[18:59] *** KatrinaTheLamia joined
+[18:59] *** silug joined
+[18:59] *** spinclad joined
+[18:59] *** athomason joined
+[18:59] *** ttbot joined
+[18:59] *** baest joined
+[18:59] *** eiro_ joined
+[18:59] *** PerlJam joined
+[18:59] *** integral joined
+[18:59] *** Maddingue joined
+[18:59] *** sjn joined
+[18:59] *** preflex joined
+[18:59] *** NotFound joined
+[18:59] *** Essobi joined
+[18:59] *** purl joined
+[18:59] *** treed joined
+[18:59] *** Tene joined
+[18:59] *** frodwith_ joined
+[18:59] *** estrabd_ joined
+[18:59] *** jan joined
+[18:59] *** he_ joined
+[18:59] *** cxreg joined
+[18:59] *** jjore joined
+[18:59] *** DrForr joined
+[19:00] <pmichaud> If I became purl, I'd have to kill myself.
+[19:08] <whiteknight> yay! no more netsplit
+[19:09] <whiteknight> internet is dragging ass though'
+[19:10] <whiteknight> purl: kill yourself
+[19:10] <purl> whiteknight: huh?
+[19:10] <whiteknight> purl kill yourself is <reply>Okay, I'll try dividing by zero while dereferencing a null pointer. Wish me luck!
+[19:10] <purl> ...but kill yourself is <reply>Goodbye... cruel... world.......
+[19:11] <dalek> partcl-nqp: ae81e91 | pmichaud++ |  (3 files):
+[19:11] <whiteknight> purl no, kill yourself is <reply>Okay, I'll try dividing by zero while dereferencing a null pointer. Wish me luck!
+[19:11] <purl> okay, whiteknight.
+[19:11] <dalek> partcl-nqp: Refactor %GLOBALS initialization.
+[19:11] <dalek> partcl-nqp: review: http://github.com/partcl/partcl-nqp/commit/ae81e918c915953f8531b3f1b6921d4db39d0332
+[19:11] <dalek> parrot-linear-algebra: 9ebe089 | Whiteknight++ | PLATFORMS:
+[19:11] <dalek> parrot-linear-algebra: starting a more verbose file explaining platform compatibility
+[19:11] <dalek> parrot-linear-algebra: review: http://github.com/Whiteknight/parrot-linear-algebra/commit/9ebe089463ac311cde86c66344ed722bc6c0fb95
+[19:14] <bubaflub> karma purl
+[19:14] <purl> purl has karma of 8799
+[19:14] <bubaflub> huh.  i was expecting a negative number.
+[19:15] <cotto_work> purl cheats
+[19:15] <purl> cheats are fun.
+[19:15] <cotto_work> purl--
+[19:15] <purl> cotto_work: sorry...
+[19:15] <cotto_work> karma purl
+[19:15] <purl> purl has karma of 8799
+[19:15] <bubaflub> oh, i see
+[19:22] <dukeleto> bubaflub: purl is a cheater!
+[19:29] <Tene> purl++
+[19:29] <Tene> karma purl
+[19:29] <purl> purl has karma of 8800
+[19:29] <Tene> foo bar purl--
+[19:29] <Tene> foo bar purl--
+[19:29] <Tene> karma purl
+[19:29] <purl> purl has karma of 8798
+[19:29] <bubaflub> bahhaahaha
+[19:29] <Coke> pmichaud++
+[19:30] <Coke> pmichaud: that is easier to read, thanks. =-)
+[19:31] *** jhorwitz joined
+[19:32] *** dngor joined
+[19:46] <Coke> PerlJam: if you make a perl is undead t-shirt and sell it on cafepress or something and it doesn't suck, i will buy it.
+[19:59] <TimToady> phone
+[20:01] *** confound joined
+[20:01] <Coke> seen chromatic?
+[20:01] <purl> chromatic was last seen on #parrot 11 hours, 19 minutes and 29 seconds ago, saying: I'll review the patch to make sure.
+[20:10] *** nopaste joined
+[20:13] *** HG` joined
+[20:14] * Coke is vaguely surprised no one has migrated pugs to git.
+[20:14] <whiteknight> I was under the impression that pugs was mostly dead in the water, except the P6 tests
+[20:14] <whiteknight> and are the tests even still in that repo?
+[20:15] <pmichaud> it's been discussed from time to time
+[20:15] <pmichaud> (moving pugs, or portions of pugs, into a separate repo and/or git)
+[20:19] <whiteknight> that's still the repo where the spectest suite is?
+[20:19] <pmichaud> yes
+[20:19] <whiteknight> okay
+[20:19] <pmichaud> I'll be glad to move it to the perl6 github account someday, though :-)
+[20:20] <Coke> I think pull out the spec and the tests into a separate repo would be boss.
+[20:20] <Coke> "pulling"
+[20:20] *** Andy joined
+[20:36] <PacoLinux> whiteknight: can you take a look to http://pkgsrc.se/math/blas ? seems to be a BLAS package for solaris
+[20:36] <whiteknight> PacoLinux: were you reading my mind?
+[20:36] <PacoLinux> :)
+[20:39] <dalek> hq9plus: c5871ee | bernhard++ |  (2 files):
+[20:39] <dalek> hq9plus: Use setup.pir instead of Configure.pir.
+[20:39] <dalek> hq9plus: Courtesy of Fran�ois Perrad.
+[20:39] <dalek> hq9plus: review: http://github.com/bschmalhofer/hq9plus/commit/c5871eef6bbf68cb188b3b90516fe8f0708a0f03
+[20:43] <PerlJam> I think it would be wise to get TimToady's opinion before pulling the spec out of the pugs repo.
+[20:43] <whiteknight> PacoLinux: doesn't seem like there are any pre-built packages. I'm going to have to do the build myself
+[20:43] <whiteknight> and I've heard this particular build can be a huge PITA
+[20:45] <dalek> hq9plus: 342570b | bernhard++ | setup.pir:
+[20:45] <dalek> hq9plus: Forgot to add setup.pir.
+[20:45] <dalek> hq9plus: review: http://github.com/bschmalhofer/hq9plus/commit/342570bb3aa8e8288e40e642241cf04cd5d9f350
+[20:45] <whiteknight> doesn't help that I need the C bindings, not the Fortran ones
+[20:49] <PacoLinux> Required to run: [lang/f2c] <--- fortran is translated to C
+[20:49] *** jsut joined
+[20:50] *** naypalm joined
+[20:50] <dalek> hq9plus: 3f83e0a | bernhard++ | Makefile:
+[20:50] <dalek> hq9plus: Makefile is no longer generated.
+[20:50] <dalek> hq9plus: review: http://github.com/bschmalhofer/hq9plus/commit/3f83e0ace8f8a87ec1ff905c530bd0c18cda634c
+[21:08] *** theory joined
+[21:14] <Coke> PerlJam: done and done. (don't touch for now.)
+[21:15] *** payload joined
+[21:18] *** dngor joined
+[21:18] *** kthakore left
+[21:19] *** bacek joined
+[21:26] *** joeri left
+[21:32] *** hercynium joined
+[21:35] *** HG` joined
+[21:42] *** japhb joined
+[21:49] * Coke is forced to upgrade parrot again!
+[21:49] <Coke> pmichaud++
+[21:51] *** TonyC joined
+[22:02] <mikehh> All tests PASS (pre/post-config, smoke (#30485), fulltest) at r42866 - Ubuntu 9.10 amd64 (gcc with --optimize)
+[22:03] <mikehh> messages
+[22:16] <dukeleto> mikehh++
+[22:24] *** HG` joined
+[22:24] *** mmcleric joined
+[22:29] <GeJ> Good morning everyone
+[22:30] *** mmcleric joined
+[22:36] *** AndyA joined
+[22:46] <dukeleto> GeJ: glorious localtime() to you as well
+[22:47] <dukeleto> GeJ: what are you working on lately?
+[22:58] *** bacek joined
+[23:23] *** particle joined
+[23:26] <GeJ> dukeleto: sadly nothing parrot-related. Currently $job is taking all brain cycles. And I don't expect any changes before January.
+[23:28] <GeJ> dukeleto: Although, when I really need a break, I'm trying to submit patches here and there.
+[23:34] <GeJ> win 2
+[23:34] <GeJ> damn
+[23:50] <dukeleto> meh

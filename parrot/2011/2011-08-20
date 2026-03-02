@@ -1,0 +1,712 @@
+[00:00] <whiteknight> I'm not sure what you mean
+[00:01] <plobsing> how would you go about looking up the return continuation, or the current HLL, or the current sub, or other attributes of CallContext.pmc?
+[00:01] <plobsing> they have accessors, but why aren't they just registers?
+[00:01] <plobsing> but the idea does not end there
+[00:01] <whiteknight> oh, I see what you mean
+[00:02] <plobsing> I then realized, that every register accessing opcode has to do many pointer follows to even get at the register frame
+[00:02] <plobsing> it follows interp->ctx->data->bp
+[00:02] <plobsing> why isn't that just interp->bp
+[00:03] <plobsing> with ctx falling into the register frame somewhere?
+[00:03] <plobsing> turn callcontexts inside out
+[00:04] <whiteknight> so the interp points to a register frame, the first element in that frame is the CallContext?
+[00:04] <whiteknight> second is the Sub, third is the lexpad, etc
+[00:04] <plobsing> yes, that's the general idea
+[00:04] <whiteknight> then in PIR, we could have special symbolic names like $Pcc, $Psub, $Plex, etc
+[00:04] <whiteknight> I like this
+[00:05] <plobsing> the immediate win is the reduction in complexity of *every* op in parrot (on x86_64 by 2 instructions or 8 bytes)
+[00:05] <plobsing> and it also lets us have those cool accessors
+[00:05] <whiteknight> how is that? I mean, to get the register frame we would still need to pull it out of the CallContext
+[00:06] <plobsing> no, we'd pull the callcontext out of the interp
+[00:06] <plobsing> s/callcontext/register frame/
+[00:06] <whiteknight> right, but where do we get it from in the first place? And where do we store it when we're recursing, or saving an outer context for a lexically nested closure?
+[00:07] <whiteknight> basically, we would need some kind of circular reference
+[00:07] <plobsing> we still need to shove it in a callcontext when we're not using it
+[00:07] <whiteknight> ctx->data->bp[0] == ctx, etc
+[00:07] <plobsing> what's wrong with circular references?
+[00:08] <whiteknight> nothing. It's necessary here
+[00:08] <whiteknight> so CallContext.get_pointer would return the register frame for easy access. get_integer might return a packed count
+[00:08] <whiteknight> cache those in the interp at the beginning of the sub call
+[00:08] <whiteknight> i like the idea
+[00:08] <plobsing> ok, I'll prototype something
+[00:09] <whiteknight> plobsing++
+[00:09] <plobsing> I didn't want to invest the amount of time just to find out it was madness
+[00:09] <plobsing> but now I know it doesn't *sound* crazy...
+[00:10] <whiteknight> I suspect it could be an easier idea than it appears, especially since much of the op code and other accessor code is generated or macroize
+[00:10] <whiteknight> macroized
+[00:11] <whiteknight> we need to teach IMCC to add like 5 extra slots to the beginning of each register frame
+[00:11] <whiteknight> maybe [interp, callcontext (self), sub, lexpad, current namespace]?
+[00:12] <whiteknight> although, maybe we don't need interp in there. That's a lot of data duplication for something that's very easy to fetch
+[00:13] <plobsing> the IMCC part should actually be pretty easy. the register allocator, as dumb as it is, could easily be told to start allocating at a higher value.
+[00:13] <benabik> Do we ever have more than one interp?
+[00:13] <plobsing> benabik: when we have threads or sandboxes
+[00:13] <whiteknight> plobsing: also need to update IMCCompiler and other places that call into IMCC, because those are responsible for allocating register frames
+[00:14] <plobsing> right
+[00:17] <whiteknight> although those places are fewer than they once were
+[00:18] <whiteknight> we can cut several attributes out of the call context too, so we aren't wasting more space
+[00:20] <plobsing> exactly, it works out roughly even
+[00:21] <whiteknight> I tried merging Sub->namespace_name and Sub->namespace_stash yesterday on the train, and the results were disasterous
+[00:21] <plobsing> those do different things
+[00:21] <whiteknight> I was hoping that particular cleanup would go more smoothly, because that would mean I had a good grasp of it
+[00:21] <whiteknight> ->namespace_name isn't really used after the packfile is loaded
+[00:21] <plobsing> true, I guess
+[00:21] <whiteknight> once the NameSpace is loaded, we should be able to overwrite namespace_name with it, but that is the major fail
+[00:23] <whiteknight> I really can't wait to get all this crap cleaned up. CallContext, Sub, NameSpace, etc. They're all rotten on the inside
+[00:35] <dalek> Rosella: 56fe283 | Whiteknight++ | / (2 files):
+[00:35] <dalek> Rosella: Comment out the Function routines I'm not ready for yet. Add some tests
+[00:35] <dalek> Rosella: review: https://github.com/Whiteknight/Rosella/commit/56fe283d84
+[00:35] <dalek> Rosella: a0d29a1 | Whiteknight++ | / (2 files):
+[00:35] <dalek> Rosella: Change Asserter.is_true and Asserter.is_false to use the istrue and isfalse opcodes
+[00:35] <dalek> Rosella: review: https://github.com/Whiteknight/Rosella/commit/a0d29a1a7e
+[00:37] <dalek> parrot-gmp: 6c1c59e | bubaflub++ | / (2 files):
+[00:37] <dalek> parrot-gmp: more docs
+[00:37] <dalek> parrot-gmp: review: https://github.com/bubaflub/parrot-gmp/commit/6c1c59e9cd
+[00:38] <bubaflub> plobsing: do you know where i should install custom thunks to?  where does Parrot install it's extra thunks?
+[00:42] <plobsing> bubaflub: I'm not sure exactly. they're just a dynext, so wherever parrot installs those
+[00:43] <bubaflub> plobsing: ok, i'll take a look into it
+[00:46] <bubaflub> plobsing: looks like on my system /usr/local/lib/parrot/3.6.0-devel/dynext
+[00:47] <bubaflub> or $PConfig{libdir} . $PConfig{versiondir} . "/dynext"
+[00:49] <plobsing> sounds about right
+[00:55] <dalek> winxed/multi_opt_flag: 6f516b1 | NotFound++ | / (3 files):
+[00:55] <dalek> winxed/multi_opt_flag: Merge pull request #4 from Whiteknight/multi_syntax
+[00:55] <dalek> winxed/multi_opt_flag:
+[00:55] <dalek> winxed/multi_opt_flag: Multi functions and methods
+[00:55] <dalek> winxed/multi_opt_flag: review: https://github.com/Whiteknight/winxed/commit/6f516b1e68
+[00:55] <dalek> winxed/multi_opt_flag: c6ac75c | NotFound++ | winxedst1.winxed:
+[00:55] <dalek> winxed/multi_opt_flag: work around stage 1 limitations to allow multi tests pass with make test1
+[00:55] <dalek> winxed/multi_opt_flag: review: https://github.com/Whiteknight/winxed/commit/c6ac75c79d
+[00:55] <dalek> winxed/multi_opt_flag: 8f25134 | NotFound++ | winxedst1.winxed:
+[00:55] <dalek> winxed/multi_opt_flag: use separate methods to get and set the is_multi flag, and recognize multi declarations on reopened namespaces
+[00:55] <dalek> winxed/multi_opt_flag: review: https://github.com/Whiteknight/winxed/commit/8f25134dee
+[00:55] <dalek> winxed/multi_opt_flag: 2cd7e1a | NotFound++ | t/advanced/10multi.t:
+[00:55] <dalek> winxed/multi_opt_flag: tests for multi in reopened namespace
+[00:55] <dalek> winxed/multi_opt_flag: review: https://github.com/Whiteknight/winxed/commit/2cd7e1a001
+[00:55] <dalek> winxed/multi_opt_flag: 747b557 | NotFound++ | / (2 files):
+[00:55] <dalek> winxed/multi_opt_flag: update NEWS and set version to 1.1.0
+[00:55] <dalek> winxed/multi_opt_flag: review: https://github.com/Whiteknight/winxed/commit/747b557e6b
+[00:55] <dalek> winxed/multi_opt_flag: 2a5ac47 | NotFound++ | / (2 files):
+[00:55] <dalek> winxed/multi_opt_flag: optimize a bit handling of the is_multi flag
+[00:55] <dalek> winxed/multi_opt_flag: review: https://github.com/Whiteknight/winxed/commit/2a5ac47693
+[00:55] <dalek> winxed/multi_opt_flag: ba8694a | NotFound++ | pir/winxed_compiler.pir:
+[00:55] <dalek> winxed/multi_opt_flag: update installable compiler
+[00:55] <dalek> winxed/multi_opt_flag: review: https://github.com/Whiteknight/winxed/commit/ba8694ae27
+[00:55] <dalek> winxed/multi_opt_flag: 13b1371 | NotFound++ | winxedst1.winxed:
+[00:55] <dalek> winxed/multi_opt_flag: unify scope search methods
+[00:55] <dalek> winxed/multi_opt_flag: review: https://github.com/Whiteknight/winxed/commit/13b1371dce
+[00:55] <dalek> winxed/multi_opt_flag: 81bbfb2 | Whiteknight++ | winxedst1.winxed:
+[00:55] <dalek> winxed/multi_opt_flag: fix multi to work with optional/opt_flag
+[00:55] <dalek> winxed/multi_opt_flag: review: https://github.com/Whiteknight/winxed/commit/81bbfb230f
+[01:01] <whiteknight> you don't realize how messy some of this crap is until you have to reimplement some of it
+[01:03] <whiteknight> docs/multidispatch.pod is so far out of date, it's absolutely unusable
+[01:03] *** bubaflub joined
+[01:06] <whiteknight> i didn't think we did, and I don't see evidence to the contrary, have any way to tell MMD that a parameter is :optional or :slurpy
+[01:08] <whiteknight> we don't have any way to dispatch based on value, only type
+[01:08] <plobsing> couldn't you associate multiple signatures with the same sub?
+[01:08] <plobsing> one with the option and one without?
+[01:08] <whiteknight> we don't have any way to dispatch based on the types of named parameters
+[01:08] <plobsing> slurpy is harder
+[01:08] <whiteknight> plobsing: no. Sub has a multi_sig parameter. Only one
+[01:08] <whiteknight> can't have more than that right now
+[01:09] <plobsing> yet another instance of a sub owning something that should really own the sub
+[01:09] <whiteknight> exactly
+[01:09] <whiteknight> all this shit needs to die in a fire
+[01:11] <benabik> whiteknight's favorite refactoring tool: http://acecombat.wikia.com/index.php?title=Flamethrower&image=Flamethrower-jpg
+[01:14] <whiteknight> I don't tolerate bad code very well
+[01:15] <plobsing> how I imagine whiteknight most of the time: http://emotibot.net/pix/444.gif
+[01:15] <whiteknight> :)
+[01:16] <benabik> plobsing++
+[01:21] <whiteknight> what annoys me the most is that Parrot has so many problems. Instead of fixing them, we put together a deprecation policy and codified all of them forever
+[01:21] <whiteknight> two and a half years later, all our developers and all our users complain about the deprecation policy, but we magically can't change it
+[01:23] <plobsing> you're missing a part. everyone complains about the cruft in parrot, but everyone thinks a different part is crufty
+[01:24] <whiteknight> even the parts that have been refactored well and recently are relying on things that suck
+[01:25] <whiteknight> GC alone might be good, because it doesn't depend on much
+[01:25] <plobsing> nah, GC's design needs work.
+[01:26] <plobsing> why does it call into all the objects to mark? no other VM does that and it is inefficient
+[01:26] <benabik> compacting would be nice.
+[01:26] <whiteknight> compared to some other subsystem, it's a shining gem
+[01:26] <whiteknight> compacting is a pain in the ass
+[01:26] <plobsing> stack-walking is part of GC. are you calling that shiny?
+[01:27] <plobsing> it explicitly makes use of undefined (per C std) behaviour
+[01:27] <whiteknight> comparatively
+[01:28] <whiteknight> it does work, there are no obvious limitations. It isn't filled with evil hacks and code that nobody understands
+[01:28] <whiteknight> compared to, say src/oo.c, it's the most beautiful code ever
+[01:28] <whiteknight> although, that's hardly a fair comparison
+[01:34] *** bubaflub joined
+[01:35] <plobsing> speaking of stack-walking, how would you feel about something more like obstacks that are explicitly registered with the GC?
+[01:35] <whiteknight> how would that work?
+[01:35] <plobsing> as a replacement for stack-walking
+[01:37] <whiteknight> I'm not familiar with obstacks
+[01:37] <plobsing> for any frame that contains references to GCables, you are no longer allowed to hold it in a variable (that the C compiler might play with). in steady, you create a region of memory (either heap or stack) for all GCable variables you want to work with, and push it onto a stack maintained by GC
+[01:37] <plobsing> obstacks are like malloc/free but with a LIFO limitation
+[01:37] <plobsing> IIUC
+[01:38] <plobsing> libiberty provides an implementation http://gcc.gnu.org/onlinedocs/libiberty/Obstacks.html
+[01:38] <plobsing> basically, maintain a side-stack of GCable references in native code
+[01:38] <whiteknight> what if we just provided some scratch space in a register frame?
+[01:38] <plobsing> and who holds a reference to the register frame?
+[01:39] <plobsing> it needs to root somewhere
+[01:39] <whiteknight> the current register frame is rooted in the interp
+[01:39] <plobsing> hmmm
+[01:41] <whiteknight> you would be limited in how many you could store, and you wouldn't have guarantee that it would be preserved across calls, unless you set up a separate frame
+[01:42] <plobsing> I see the need to prevent users from holding direct references to parrot gcables on the stack
+[01:43] <plobsing> saying "manage your gcables by putting them in a register frame" doesn't solve that problem
+[01:43] <whiteknight> I do too, but it isn't a pressing need
+[01:43] <whiteknight> compared to some of the other big cleanups and projects we've got scheduled
+[01:43] <plobsing> it does (if users use it correctly) solve the problem of rooting stack GCables somewhere GC can find them
+[01:43] <plobsing> whiteknight: stack walking is a barrier to thread safety
+[01:44] <whiteknight> is it? even if we walk all stacks in all threads?
+[01:44] <plobsing> multiple threads => multiple stacks => how does GC know where to walk?
+[01:44] <plobsing> how do you determine the stacktop of a stack that isn't the stack of the thread you are executing?
+[01:45] <whiteknight> if each thread has its own GC, the GC just walks it's current stack
+[01:45] <plobsing> I thought we were considering multiple threads managed by a single GC
+[01:45] <whiteknight> if we have a system with relatively many greenlets dispatched over relatively many OS threads, they can afford to be a little heavyweight
+[01:45] <whiteknight> we're considering everything
+[01:46] <whiteknight> if we go the single GC route, which is fine, we need a thread-safe GC
+[01:46] <whiteknight> if not, we don't
+[01:47] <whiteknight> we are missing two things right now: thread-safe code and a comprehensive design for a new threading sysem
+[01:47] <plobsing> if we don't do single GC, am I to assume messaging between kthreads will be expensive?
+[01:47] <plobsing> and will that lead to unpredictable cost of messaging between vmthreads (because they might be mapped to different kthreads)?
+[01:48] <whiteknight> that's where my idea of read-only proxies comes in. Make cross-thread reads delayed. Forbid cross-thread writes
+[01:48] <plobsing> thread safety is a big reason why I want stack walking to go the way of the dodo
+[01:49] <plobsing> and then there's the whole precice GC thing
+[01:49] <whiteknight> if we go single GC, we still want to forbid or severely restrict by default, cross-thread writes
+[01:49] <plobsing> why?
+[01:49] <whiteknight> otherwise we need a data contention mechanism like STM
+[01:50] <plobsing> don't the guys at azul have a solution for this?
+[01:50] <whiteknight> not that I am aware of
+[01:51] <whiteknight> you either need to make  items read-only, or use STM, or use transactions of some other variety, or use locks
+[01:51] <whiteknight> I like the idea of read-only, because that only matters between kthreads. vmthreads on the same kthread see no penalty
+[01:51] <plobsing> they use java, so their decision is made. locks via synchronised and friends.
+[01:51] <whiteknight> right, and I hate locks and want to avoid them as much as possible
+[01:52] <plobsing> locks as a user interface suck, but locks are how most platforms choose to expose their concurrency control
+[01:53] <whiteknight> I'm convinced that we can avoid it in most cases
+[01:54] <whiteknight> message queues, a small amount of global data, and GC
+[01:54] <whiteknight> most everything else can either be read-only, used on a single thread, or shared with messages
+[01:54] <whiteknight> if each item has a single kthread owner, and we have a cheap operation to change the current owner, that will go a long way
+[01:56] <whiteknight> we have a nice advantage that we can bundle up an execution context in a tuple of objects, and move it around as a group
+[01:57] <whiteknight> the Sub, CallContext graph and Interp can be moved around as a group, and invocations make clean barriers where we can do tricky things
+[01:58] <bubaflub> whiteknight: i've got a distutils question for ya, if you've got a moment.
+[01:58] <whiteknight> bubaflub: precious few. What's the question?
+[01:58] <bubaflub> whiteknight: can i do a register_step_before or register_step_after install?
+[01:59] <bubaflub> i've seen them used for build or clean
+[01:59] <whiteknight> yeah, I don't see why not
+[01:59] <bubaflub> ok, cool.
+[02:00] <whiteknight> anything else? It's about my bed time
+[02:02] <bubaflub> nope.
+[02:02] <whiteknight> okay then, I'm out. Goodnight
+[02:42] *** preflex joined
+[02:44] <dalek> parrot-gmp: 4d9acd0 | bubaflub++ | setup. (2 files):
+[02:44] <dalek> parrot-gmp: changes for NCI thunks:
+[02:44] <dalek> parrot-gmp:
+[02:44] <dalek> parrot-gmp: only build NCI thunks when libffi isn't present
+[02:44] <dalek> parrot-gmp: copy thunks to a place where parrot can find them
+[02:44] <dalek> parrot-gmp: review: https://github.com/bubaflub/parrot-gmp/commit/4d9acd0a8c
+[03:10] <bubaflub> ping plobsing
+[03:14] <plobsing> bubaflub: present
+[03:15] <bubaflub> plobsing: i'm thinking about modifying tools/dev/ncidef2pir.pl to use NCI::Utils and the dlfancy function when an NCI def has 't' in the return type or the parameters.  any thoughts?
+[03:16] <plobsing> dlfancy doesn't support pass-by-ref currently. you'd be reducing functionality elsewhere
+[03:17] <bubaflub> plobsing: i'm only modifying it in the case that there is a 't' signature - would that still reduce functionality?
+[03:18] <plobsing> ah. probably not then. just document that pass-by-ref and 't' are currently incompatbile
+[03:20] <bubaflub> plobsing: now i'm doubting if i should do that at all - it was to make some Parrot-GMP stuff easier, but i really only have a 3 or 4 functions that used string stuff
+[03:20] <bubaflub> and i'm doing just manual parrot_cstring type stuff
+[03:20] <plobsing> I'll admit, manually mangling strings sucks.
+[03:21] <bubaflub> plobsing: yeah, the whole string NCI stuff is just bothersome right now.
+[03:21] <plobsing> you could output an equivalent wrapping as dlfancy when working with cstrings but directly use the dlfunc interface (not the string sig interface)
+[03:22] <plobsing> then you could have your strings and pass-by-ref too
+[03:22] <plobsing> bubaflub: raw nci will always be bothersome. the trick is comming up with a decent wrapper so that we don't have to think about it most of the time.
+[03:23] <bubaflub> plobsing: yeah.  i think as we get more and more people doing lib bindings we'll figure out something
+[03:23] <plobsing> dlfancy is more for back-compat and appeasing the immediate needs of rakudo than it is a decent wrapper
+[03:23] <plobsing> I like the direction zavolaj took
+[03:23] <bubaflub> plobsing: another nice part about having a decent wrapper is that we can change the underlying subsystem and just fix the wrapper rather than a hundred different libs
+[03:24] <plobsing> bubaflub: that assumes you'd want to change the underlying subsystem for no good reason
+[03:24] <bubaflub> hah.  not exactly what i was suggesting - i meant if we'd ever need to make a small but possibly breaking change we'd only have one place to check / fix.
+[03:25] <plobsing> most of the time, when a change is being made, it is because the old way was buggy somehow. unfortunately, IME, that usually pokes through as behaviour in the interface which gets deleted.
+[03:28] <bubaflub> understood.  ok, thanks for your help.
+[03:28] *** rdesfo joined
+[03:29] *** rdesfo left
+[03:36] <dalek> parrot-gmp: cac2763 | bubaflub++ | docs/tutorial.md:
+[03:36] <dalek> parrot-gmp: more docs
+[03:36] <dalek> parrot-gmp: review: https://github.com/bubaflub/parrot-gmp/commit/cac27634b1
+[03:42] <dalek> website: bubaflub++ | Parrot-GMP: Almost done
+[03:42] <dalek> website: http://www.parrot.org/content/parrot-gmp-almost-done
+[04:45] <dalek> parrot/inside-out-ctx: 136f201 | plobsing++ | / (4 files):
+[04:45] <dalek> parrot/inside-out-ctx: disambiguate bp as bp_ni - it is the $Nx and $Ix bp only
+[04:45] <dalek> parrot/inside-out-ctx: review: https://github.com/parrot/parrot/commit/136f201265
+[04:45] <dalek> parrot/inside-out-ctx: eec74ea | plobsing++ | / (3 files):
+[04:45] <dalek> parrot/inside-out-ctx: encapsulate base pointers in struct
+[04:45] <dalek> parrot/inside-out-ctx: review: https://github.com/parrot/parrot/commit/eec74eada3
+[04:45] <dalek> parrot/inside-out-ctx: c1e6a45 | plobsing++ | include/parrot/interpreter.h:
+[04:45] <dalek> parrot/inside-out-ctx: kill unused struct
+[04:45] <dalek> parrot/inside-out-ctx: review: https://github.com/parrot/parrot/commit/c1e6a45233
+[04:45] <dalek> parrot/inside-out-ctx: 60adcc4 | plobsing++ | / (3 files):
+[04:45] <dalek> parrot/inside-out-ctx: duplicate bp directly in interp since it is accessed so frequently
+[04:45] <dalek> parrot/inside-out-ctx: review: https://github.com/parrot/parrot/commit/60adcc440d
+[04:45] <dalek> parrot/inside-out-ctx: 3026a03 | plobsing++ | / (2 files):
+[04:45] <dalek> parrot/inside-out-ctx: kill unused, dangerously encapsulation-breaking function
+[04:45] <dalek> parrot/inside-out-ctx: review: https://github.com/parrot/parrot/commit/3026a0310a
+[04:45] <dalek> parrot/inside-out-ctx: 64438ce | plobsing++ | include/parrot/context.h:
+[04:45] <dalek> parrot/inside-out-ctx: use interp bp reference in optimized build register accessors
+[04:45] <dalek> parrot/inside-out-ctx: review: https://github.com/parrot/parrot/commit/64438ce44c
+[04:45] <dalek> parrot/inside-out-ctx: 2ef966f | plobsing++ | src/pmc/ (2 files):
+[04:45] <dalek> parrot/inside-out-ctx: only set a context *after* it has its registers allocated
+[04:45] <dalek> parrot/inside-out-ctx: review: https://github.com/parrot/parrot/commit/2ef966fbed
+[04:50] *** logie joined
+[05:05] *** bubaflub joined
+[05:29] *** theory joined
+[06:31] *** Kulag joined
+[06:47] *** dalek joined
+[06:47] *** SHODAN joined
+[06:58] *** bubaflub joined
+[07:04] *** jsut_ joined
+[07:39] *** zby_home joined
+[07:53] *** mj41 joined
+[08:12] *** ajish joined
+[08:12] *** ajish left
+[08:12] *** ajish joined
+[08:13] *** rohit_nsit08 joined
+[08:13] *** ajish left
+[08:38] *** rfw joined
+[08:43] *** cotto joined
+[08:57] <cotto> ~~
+[09:01] *** Eclesia joined
+[09:01] <Eclesia> hi
+[09:04] *** jsut joined
+[09:09] *** jsut_ joined
+[09:12] *** Kulag joined
+[09:20] *** Kulag joined
+[09:22] *** not_gerd joined
+[09:22] <not_gerd> good morning, #parrot
+[09:23] <cotto> hi not_gerd
+[09:23] <cotto> seen soh_cah_toa
+[09:23] <aloha> soh_cah_toa was last seen in msg 1 days 4 hours ago <private message>.
+[09:25] *** lucian joined
+[09:28] <not_gerd> I started to fix the test failures on msys, and a lot of them are path issues
+[09:28] <not_gerd> for now, I just added special cases to the test files
+[09:28] <not_gerd> however, that's somewhat brittle
+[09:28] <not_gerd> a saner approach would be to provide our own implementation of 'use Cwd;'
+[09:28] <not_gerd> I don't know if that's overkill for just a single, somewhat obscure platform...
+[09:29] *** rohit_nsit08 joined
+[09:38] <cotto> Is Cwd not core?
+[09:38] <dalek> rakudo/nom: b2c2669 | moritz++ | t/spectest.data:
+[09:38] <dalek> rakudo/nom: run pointy-rw.t
+[09:38] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/b2c2669225
+[09:38] <tadzik> Cwd was first released with perl 5
+[09:39] <tadzik> seems like it is
+[09:39] <cotto> lyup
+[09:39] <cotto> *yup
+[09:39] <cotto> not_gerd, would using Cwd be sufficient?
+[09:40] *** gaz joined
+[09:42] <not_gerd> cotto: the problem is that msys-perl uses unix-style virtual paths, whereas Parrot needs windows-style paths
+[09:42] <not_gerd> thus, you can't compare paths returned by cwd with paths coming from parrot
+[09:47] <cotto> how much work would reimplementing be?
+[09:52] <cotto> If it's not too much code and if the code is straightforward, I'd be happy to go that route.
+[09:53] <not_gerd> cotto: it would probably be less code as I won't have to repeat myself in every test file
+[09:54] <cotto> not_gerd, can you hack it up and submit a pull request?
+[09:55] <cotto> not_gerd++ #for working on this
+[09:56] <not_gerd> sure, will work on it later today
+[09:57] <not_gerd> I'll have to take another look at the test files to see if providing a decicated function for path comparisons might be a better approach, though
+[09:57] <not_gerd> not all paths might go through the Cwd::* subs...
+[09:57] <moritz> why do so many tests compare paths anyway?
+[10:10] *** cotto joined
+[10:13] *** whiteknight joined
+[10:15] <cotto> hio whiteknight
+[10:23] <whiteknight> good morning cotto
+[10:23] <whiteknight> it's funny seeing you online so early
+[10:25] <cotto> funny seeing you online so late
+[10:25] <cotto> so there :]
+[10:25] <whiteknight> :)
+[10:26] * cotto will be back to "normal" soonish
+[10:27] <cotto> whiteknight++ whiteknight++ whiteknight++ for prt0.winxed
+[10:28] <cotto> so much nicer
+[10:37] <whiteknight> unfortunately, I don't think there is any reasonable way to integrate it into the build
+[10:37] <whiteknight> but it's good to get the ideas straight
+[10:39] <cotto> really?
+[10:39] <cotto> you could chech in the generated pir
+[10:39] <cotto> *check
+[10:40] <whiteknight> yeah, that might be what I do eventually
+[10:40] <cotto> like with ops2c
+[10:41] *** PacoLinux_ joined
+[10:44] <whiteknight> I haven't even tested this winxed code yet. I'm going to give it a spin now
+[10:45] *** ssqq joined
+[10:47] <ssqq> hello
+[10:47] <ssqq> how i log this irc with mIRC?
+[10:48] <ssqq> How to config the server name?
+[10:49] <whiteknight> ssqq this channel is already logged
+[10:49] <whiteknight> http://irclog.perlgeek.de/parrot/today
+[10:53] *** cotto joined
+[10:53] <ssqq> I used firefox to log this , I want log here with mIRC to config the background and font
+[10:56] <moritz> then ask the mIRC folks for help
+[10:59] *** hernan joined
+[11:05] <dalek> parrot/whiteknight/frontend_parrot2: 0f113c0 | Whiteknight++ | frontend/parrot2/prt0 (3 files):
+[11:05] <dalek> parrot/whiteknight/frontend_parrot2: Use prt0.winxed to build the frontend. check in the generated .pir file. cotto++ for the suggestion
+[11:05] <dalek> parrot/whiteknight/frontend_parrot2: review: https://github.com/parrot/parrot/commit/0f113c028e
+[11:13] *** cotto joined
+[11:38] *** gaz joined
+[11:39] *** zby_home joined
+[11:40] <dalek> parrot/whiteknight/frontend_parrot2: 416b1d6 | Whiteknight++ | / (2 files):
+[11:40] <dalek> parrot/whiteknight/frontend_parrot2: fix backtraces. Fixes several tests
+[11:40] <dalek> parrot/whiteknight/frontend_parrot2: review: https://github.com/parrot/parrot/commit/416b1d6108
+[11:50] *** whiteknight joined
+[12:12] *** rohit_nsit08 joined
+[12:42] *** JimmyZ joined
+[12:48] *** jsut joined
+[13:09] *** kid51 joined
+[13:10] *** not_gerd joined
+[13:12] <Eclesia> and here it is : http://sourceforge.net/p/eria
+[14:00] <whiteknight> Eclesia++
+[14:18] *** rohit_nsit08 joined
+[14:27] <dalek> website: rohit_nsit08++ | corellaScript : Functions and Objects
+[14:27] <dalek> website: http://www.parrot.org/content/corellascript-functions-and-objects
+[14:48] *** Eclesia joined
+[14:50] <dalek> Rosella: 6f99502 | Whiteknight++ | src/query/ (5 files):
+[14:50] <dalek> Rosella: Big cleanups to the provider API, and expose more functionality through Queryable
+[14:50] <dalek> Rosella: review: https://github.com/Whiteknight/Rosella/commit/6f9950216c
+[14:50] <dalek> Rosella: de24c04 | Whiteknight++ | t/query/Queryable.t:
+[14:51] <dalek> Rosella: +stub tests for some of the new Queryable methods
+[14:51] <dalek> Rosella: review: https://github.com/Whiteknight/Rosella/commit/de24c04611
+[14:51] <dalek> Rosella: 407cc1b | Whiteknight++ | src/query/ (4 files):
+[14:51] <dalek> Rosella: +some comments for new functions
+[14:51] <dalek> Rosella: review: https://github.com/Whiteknight/Rosella/commit/407cc1bc96
+[15:02] *** lateau joined
+[15:10] *** lateau joined
+[15:14] *** lateau left
+[15:15] *** lateau joined
+[15:25] *** JimmyZ joined
+[15:30] <dukeleto> ~~
+[15:51] *** lateau joined
+[15:52] *** lateau left
+[15:52] *** lateau joined
+[15:53] *** theory joined
+[15:57] <whiteknight> hello dukeleto
+[16:00] *** contingencyplan joined
+[16:01] <dukeleto> whiteknight: howdy.
+[16:01] <dukeleto> can anybody get to the github web interface?
+[16:01] <tadzik> yes
+[16:01] *** lateau left
+[16:09] <whiteknight> yeah, github loaded right up
+[16:09] <plobsing> whiteknight: I've started implementing the ideas I was talking about last night on the inside-out-ctx branch. it is already 15% better on the mops_intval benchmark
+[16:11] <dukeleto> i think firefox was having a bad day. restarting seemed to fix everything.
+[16:12] <dukeleto> plobsing: can you explain what the inside-out-ctx branch is about, to mere mortals? looks interesting.
+[16:14] <plobsing> dukeleto: it turns contexts, or at least the current one, on their head
+[16:15] <plobsing> instead of containing the register frame in a context PMC (takes 3 pointer follows to get from interp to the register frame), keep the register frame in the interp and keep the context in the register frame
+[16:15] <plobsing> this means we have 1 pointer follow to get the register frame
+[16:16] *** silug joined
+[16:16] <plobsing> now considering nearly every op accesses the register frame, this is potentially a huge win for code that spends a lot of time in ops (as opposed to in the runtime system)
+[16:16] <plobsing> s/runtime system/other parts of the runtime system/
+[16:19] <plobsing> mops_intval is pretty much a flat out ops execution benchmark
+[16:21] <whiteknight> dukeleto: and if we keep values in the register frame by default, we can access some important values directly in registers, instead of special-purpose ops
+[16:22] <whiteknight> $Psub would be the current sub, instead of having to do $P0 = getinterp, $P1 = interp["sub"] or whatever the incantation is
+[16:22] <whiteknight> plobsing: yes, I saw the commits this morning and am following along avidly
+[16:39] <Eclesia> does someone has an exemple on how I can attach properties on a function or class ? I remember it was something like setProp ...
+[16:42] <Eclesia> ha found it : setprop $P0, 'BUILD', $P1
+[16:43] <dukeleto> Eclesia: setprop and getprop
+[16:43] <Eclesia> dukeleto: thanks ^^
+[16:45] *** lateau joined
+[16:50] *** lateau left
+[16:56] <dukeleto> Eclesia: https://github.com/parrot/parrot/blob/master/t/pmc/prop.t
+[16:57] <Eclesia> dukeleto: can I set a property on a function argument ?
+[16:58] <dukeleto> Eclesia: you can set it on the think you pass in as an argument, if it is a PMC
+[16:58] <dukeleto> s/think/thing/
+[16:59] <whiteknight> the mother @#%@!* hinge on my laptop screen broke again
+[16:59] <Eclesia> dukeleto: but I don't have the 'thing' yet. I only have the class. not any instance yet
+[17:00] <dukeleto> Eclesia: not sure
+[17:01] <dukeleto> Eclesia: i think you can only set props on instantiated PMCs, but I could be wrong
+[17:02] <Eclesia> dukeleto: argument already have properties (I think) to store stuffs like 'optional' or 'slurp' ...
+[17:02] <Eclesia> or am I wrong ?
+[17:03] <plobsing> Eclesia: those go into a "signature" that parrot reads
+[17:03] <plobsing> those are not meaningfully extensible
+[17:04] <Eclesia> plobsing: using reflexion we can get a PMC for the function. so I guess I could acces the list of it's arguments ? and them set properties on them ?
+[17:05] <plobsing> the arguments aren't objects. it is a list of integer flags, and messing with them is not supported.
+[17:05] <plobsing> but yes, you could get that list
+[17:07] <Eclesia> so my best option is to set the arguments properties in the function property list using some kind of numbering
+[17:08] <Eclesia> plobsing: can I set any kind of object in the properties ? like a Hash ?
+[17:08] <plobsing> sure. or an array, which might be more what you're looking for.
+[17:09] <Eclesia> plobsing: thanks
+[17:12] <plobsing> whiteknight: is there a way to lookup a PackfileView PMC from a PackFile*?
+[17:13] <plobsing> I may just have the solution to the t/pmc/packfileview.t segfault in parrot2
+[17:14] <dalek> Rosella: c9f5873 | Whiteknight++ | / (2 files):
+[17:14] <dalek> Rosella: Make sure to wrap queryable results. Add several tests for hash and array behaviors in Queryable
+[17:14] <dalek> Rosella: review: https://github.com/Whiteknight/Rosella/commit/c9f5873cdb
+[17:14] <dalek> Rosella: ff49cd6 | Whiteknight++ | src/query/Queryable.winxed:
+[17:14] <dalek> Rosella: start prototyping some vtable accessors for Queryable
+[17:14] <dalek> Rosella: review: https://github.com/Whiteknight/Rosella/commit/ff49cd6b82
+[17:14] <dalek> Rosella: 6fe6cd6 | Whiteknight++ | / (6 files):
+[17:14] <dalek> Rosella: refactor provider selection logic into a Factory class. Make a global default provider factory
+[17:14] <dalek> Rosella: review: https://github.com/Whiteknight/Rosella/commit/6fe6cd6092
+[17:14] <dalek> Rosella: 80dc59c | Whiteknight++ | src/query/provider/Factory.winxed:
+[17:14] <dalek> Rosella: Add in a method to set a specific provider for a given role
+[17:14] <dalek> Rosella: review: https://github.com/Whiteknight/Rosella/commit/80dc59c46d
+[17:14] <whiteknight> plobsing: what do you mean?
+[17:14] <whiteknight> plobsing: I thought I fixed that failure already
+[17:15] <plobsing> you did it with a hack IIRC.
+[17:16] <plobsing> ideally, interp->packfile should always point to the currently executing packfile no?
+[17:16] <plobsing> if we could lookup the packfile pmc from the packfile struct, we could set it when we switch_to_cs
+[17:17] <whiteknight> Sub->eval_pmc is the packfile owner of the Sub. At least, it should be
+[17:17] <whiteknight> so you can set it on Sub.invoke
+[17:18] <whiteknight> I don't think we currently cache the PackfileView wrapper in the PackFile* struct, but we can
+[17:18] <whiteknight> src/packfile/api.c:Parrot_pf_get_packfile_pmc is the place where we wrap it
+[17:19] <plobsing> is there a way we can reuse existing PMCs? if we're switching between segments a lot, with no cached mechanism, we're going to be creating more PMCs than necessary
+[17:19] <plobsing> perhaps we'll just cross that bridge when we come to it
+[17:20] <bubaflub> ~
+[17:22] <plobsing> wow, no, not acceptable after all. PackfileView PMCs are eternal?
+[17:22] <plobsing> do we really need to always register them?
+[17:24] <whiteknight> they're eternal now, to replicate previous behavior
+[17:24] <whiteknight> I want to stop GC registering them, but when we do, errors
+[17:26] <plobsing> well, allocating a new eternal pfv pmc on every cs switch is completely unacceptable.
+[17:27] <whiteknight> why would we be doing it for every switch? When we create the PackFile* we almost always wrap it in a PackfileView
+[17:27] <whiteknight> all we need to do is keep a reference to the one that exists, and switch to it
+[17:27] <plobsing> exactly, that's cacheing
+[17:27] *** ajish joined
+[17:28] <plobsing> and we need to either cache or eliminate the registration before interp->current_pf can be properly kept in sync
+[17:28] <whiteknight> like I said, it should already be cached in each Sub
+[17:28] <whiteknight> so we have it, we just need to switch to it
+[17:28] *** rohit_nsit08 joined
+[17:28] <plobsing> why is it cached in the sub, but not the Packfile*?
+[17:28] *** ajish left
+[17:29] <whiteknight> for GC
+[17:29] <whiteknight> when we mark the Sub, we need to mark the PackfileView that owns it
+[17:29] <plobsing> ah
+[17:29] <whiteknight> we can cache it in both places
+[17:30] <rohit_nsit08> hello #parrot
+[17:30] <whiteknight> or, we can move it so Sub->seg->pf->pmc is the PackfileView
+[17:30] <benabik> o/
+[17:30] <whiteknight> hello rohit_nsit08
+[17:30] <rohit_nsit08> whiteknight : hello
+[17:31] <whiteknight> rohit_nsit08++ on the blog post
+[17:31] <plobsing> whiteknight: I prefer the latter
+[17:31] <whiteknight> rohit_nsit08: I haven't been able to test CorellaScript much, yet
+[17:31] <whiteknight> plobsing: let's do it
+[17:31] <whiteknight> damn the torpedos, full speed ahead
+[17:31] <whiteknight> gets rid of an attr in Sub, anyway, and gets rid of most of the last uses of do_sub_pragmas
+[17:32] <plobsing> OK. I'm doing a lot of (what I consider to be) fixes on the inside-out-ctx branch. I'll commit that there after I get rid of these segfaults.
+[17:32] <whiteknight> awesome
+[17:32] <whiteknight> let me know if you need a second pair of hands/eyes
+[17:33] <rohit_nsit08> whiteknight: thanks, I'm fixing some loose bugs,  but it is still not able to compile itself as I have told in the blog post, will try to wind up as much as possible before 22
+[17:33] <rohit_nsit08> whiteknight: I wanted to ask about the documentation
+[17:34] <whiteknight> rohit_nsit08: sure. What do you need?
+[17:34] <rohit_nsit08> how should I submit it, and it is in html format
+[17:34] <plobsing> whiteknight: I likely won't have anything until sunday evening (eastern).
+[17:34] <whiteknight> plobsing: no rush. So much awesomeness takes time
+[17:35] <whiteknight> rohit_nsit08: add it to your repo. Create a docs/ folder
+[17:36] <whiteknight> rohit_nsit08: you can create a website on github pages too. But we can do that later
+[17:37] <rohit_nsit08> whiteknight: ohh yes, I once created that . Okay I can get it done.
+[17:37] *** kid51 joined
+[17:45] *** bubaflub joined
+[17:46] <pmichaud> does commit 416b1d6 change the order strings appear in Exception.backtrace_strings ?
+[17:47] <pmichaud> (it switches an unshift to a push)
+[17:48] <pmichaud> oh, it's in a branch, so nm, unless that branch merges with master at some point.
+[17:50] <whiteknight> pmichaud: the order in master is wrong
+[17:50] <whiteknight> but yes, it does change the order
+[17:50] <pmichaud> why is the order in master wrong?
+[17:53] <whiteknight> if you have 5 rethrows, it would have the backtraces in the order 2, 3, 4, 5, 1
+[17:53] <whiteknight> clearly, the feature is under-tested
+[17:53] <dalek> rakudo/nom: 484052a | tadzik++ | / (4 files):
+[17:53] <dalek> rakudo/nom: Fix implicit code blocks detection
+[17:53] <dalek> rakudo/nom:
+[17:53] <dalek> rakudo/nom: Paragraph and abbreviated blocks set VMARGIN not only for their
+[17:53] <dalek> rakudo/nom: contents, but for all the upcoming Pod as well. This fixes the behaviour
+[17:53] <dalek> rakudo/nom: and tests, and also adds a new test taken straight from S26.
+[17:53] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/484052a3bf
+[17:53] <whiteknight> that ordering is only for rethrows. Frames from a single throw are unaffected
+[17:54] <pmichaud> okay.  when it merges to master, be sure to check with me or someone so that we can make sure nqp's use of it is unaffected.
+[17:54] <pmichaud> (or that we can patch nqp to match)
+[17:55] <pmichaud> it's possible we were only ever using/seeing the single throw case.
+[18:13] <bubaflub> ping dukeleto
+[18:18] <plobsing> I'd argue that rethrow shouldn't add another backtrace
+[18:18] <plobsing> rethrow basically means (to me, as a heavy user of rethrow in Ωη) that the handler shouldn't have caught but did
+[18:18] <plobsing> and so to pass up the chain
+[18:19] <plobsing> I use rethrow because type-based handler dispatch is insufficiently general
+[18:26] *** schmooster joined
+[18:40] <not_gerd> msg cotto just sent the pull request with my msys fixes
+[18:40] <aloha> OK. I'll deliver the message.
+[18:40] <dalek> parrot/nqp_pct: f74f55f | benabik++ | docs/pct/bytecode.pod:
+[18:40] <dalek> parrot/nqp_pct: [docs] Document bytecode generation for PCT
+[18:40] <dalek> parrot/nqp_pct:
+[18:40] <dalek> parrot/nqp_pct: This adds a simple document that gives the bare bones about how to use
+[18:40] <dalek> parrot/nqp_pct: newPOST and what to expect if you do.  The list of known issues is
+[18:40] <dalek> parrot/nqp_pct: very short, mostly because I haven't found a good way to generate a
+[18:40] <dalek> parrot/nqp_pct: comprehensive list.
+[18:40] <dalek> parrot/nqp_pct: review: https://github.com/parrot/parrot/commit/f74f55fd9e
+[18:45] *** mj41 joined
+[18:51] <dukeleto> bubaflub: pong
+[18:51] <dalek> parrot/nqp_pct: 7769a36 | benabik++ | docs/pct/bytecode.pod:
+[18:51] <dalek> parrot/nqp_pct: Fix POD syntax in bytecode.pod
+[18:51] <dalek> parrot/nqp_pct:
+[18:51] <dalek> parrot/nqp_pct: I'm not used to writing POD, and I used =cut where I should have used
+[18:51] <dalek> parrot/nqp_pct: =back
+[18:51] <dalek> parrot/nqp_pct: review: https://github.com/parrot/parrot/commit/7769a3651f
+[18:51] <bubaflub> dukeleto: i blogged recently - i've fixed most of the remaining issues.  any thing else you'd like me to put together before Monday?
+[18:52] <dukeleto> bubaflub: is there anything left on your gsoc roadmap that is only partially done?
+[18:53] <dalek> website: benabik++ | GSOC 12: Coming to an end
+[18:53] <dalek> website: http://www.parrot.org/content/gsoc-12-coming-end
+[18:53] <dukeleto> bubaflub: reading your blarg toast now
+[18:53] <bubaflub> dukeleto: i have some areas to fill out on the docs and could do a few more examples, but i think what i have is sufficient to illustrate how to use parrot-gmp
+[18:54] <dukeleto> bubaflub: i think you have accomplished what you set out to do. Congrats! Also, congrats on finishing your masters(!) and the new house.
+[18:55] <bubaflub> dukeleto: yup.  level up.
+[18:55] <dukeleto> bubaflub: if you want a change of pace, feel free to hack on parrot-libgit2. I haven't had any tuits for it lately.
+[18:55] <bubaflub> dukeleto: Eclesia++ asked for some benchmarks; i could throw some of that together.
+[18:55] <bubaflub> dukeleto: definitely, i'll take a look at libgit2.  last time i looked there was some oddities loading a function.
+[18:56] <dukeleto> benabik: nice docs
+[18:56] <dukeleto> bubaflub: there are some passing PIR tests, but I have some winxed tests that blow up
+[18:56] <dukeleto> bubaflub: https://github.com/letolabs/parrot-libgit2/issues/2
+[18:57] *** fperrad joined
+[18:57] <benabik> dukeleto: I tried to spend some time figuring out what isn't working, but the answer appears to be "a lot"…  But I think it's at a reasonable point for other people to take pokes at it.  Right now it's a lot of "find something broken, figure out how to get newPOST to do it".  (Although I'm somewhat afraid that there are several large gaps in the newPOST->PBC portion too, which requires deeper knowledge.)
+[19:01] <bubaflub> dukeleto: ok, i'm taking a look at it now.
+[19:01] <bubaflub> dukeleto: i can also help generate the NCI thunks that you need so you won't need libffi
+[19:02] <dukeleto> bubaflub: that would be awesome
+[19:03] <bubaflub> dukeleto: https://github.com/bubaflub/parrot-gmp/blob/master/setup.winxed#L39 - basically, if they have libffi don't build and install the thunks.  if they don't have it, build custom thunks and copy them to a place where parrot can find them
+[19:03] <bubaflub> dukeleto: i'll look at issue #2 first though
+[19:21] <dukeleto> bubaflub: sweet
+[19:21] <dukeleto> bubaflub: please add any info relevant to debugging that to the gh issue
+[19:21] <bubaflub> dukeleto: will do
+[19:30] <dalek> rakudo/nom: 2d2ff44 | tadzik++ | src/core/IO.pm:
+[19:30] <dalek> rakudo/nom: Implement cwd()
+[19:30] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/2d2ff441da
+[19:30] <kid51> dukeleto: ping
+[19:38] *** Eclesia joined
+[19:38] * Eclesia back
+[19:51] *** ambs joined
+[20:10] <dalek> nqp: 9ba57ef | benabik++ | tools/build/Makefile.in:
+[20:10] <dalek> nqp: Makefile: use MKPATH to make all needed paths
+[20:10] <dalek> nqp:
+[20:10] <dalek> nqp: While PARROT_LIBRARY_DIR may exist, it may not exist inside DESTDIR.
+[20:10] <dalek> nqp: For example when building for a package manager (even one so simple as
+[20:10] <dalek> nqp: stow).
+[20:10] <dalek> nqp:
+[20:10] <dalek> nqp: This commit adds the missing MKPATH for PARROT_LIBRARY_DIR and also
+[20:10] <dalek> nqp: moves the one for NQP_LANG_DIR/lib to immediately before the files
+[20:10] <dalek> nqp: installed into it.
+[20:10] <dalek> nqp: review: https://github.com/perl6/nqp/commit/9ba57efaa2
+[20:10] <dalek> nqp: babcf34 | moritz++ | tools/build/Makefile.in:
+[20:10] <dalek> nqp: Merge pull request #21 from Benabik/master
+[20:10] <dalek> nqp:
+[20:10] <dalek> nqp: use MKPATH for PARROT_LIBRARY_DIR
+[20:10] <dalek> nqp: review: https://github.com/perl6/nqp/commit/babcf3415d
+[20:11] <moritz> benabik: I've now given you commit access to the nqp repo. Have fun!
+[20:13] *** preflex joined
+[20:17] <benabik> moritz: Thanks.  Haven't been poking at nqp/rakudo much during GSoC, but I'll feel free to push the fixes I make.
+[20:20] <moritz> benabik: sure
+[20:21] <moritz> benabik: I'm too lazy to merge pull requests, so I throw out commit bits instead :-)
+[20:21] <benabik> lazy++
+[20:25] <Eclesia> NotFound:    is it possible to have a more compact syntaxe of : namespace ns1  { namespace ns2 { ...   ?
+[20:25] <Eclesia> namespace ns1.ns2.ns3 would be nice
+[20:28] <whiteknight> plobsing: if you don't care about the backtrace of an exception prior to a backtrace, you don't have to look at it. Each is stored separately in an array, and you only nedd to look at what you want
+[20:30] <whiteknight> pmichaud: Don't worry, the whiteknight/frontend_parrot2 branch is sufficiently invasive. It won't merge silently
+[20:33] <whiteknight> Eclesia: I've asked for the same thing before! I'll try to put together a patch
+[20:34] <Eclesia> whiteknight: I think you already have enough stuffs to do more important :D
+[20:35] <whiteknight> Eclesia: I like to play with winxed :)
+[20:35] *** lucian joined
+[20:38] * Eclesia just navigate between 3 and 6 levels of namespace. a shorter syntax would be appreciate
+[20:40] *** logie joined
+[20:45] <whiteknight> this might actually be a very easy patch
+[20:49] *** mj41 joined
+[20:57] <dalek> winxed/dotted_namespace: 7583768 | Whiteknight++ | winxedst1.winxed:
+[20:57] <dalek> winxed/dotted_namespace: Enable Foo.Bar.Baz syntax for nested namespaces
+[20:57] <dalek> winxed/dotted_namespace: review: https://github.com/Whiteknight/winxed/commit/7583768dcd
+[20:58] <whiteknight> Eclesia++ for the idea
+[20:58] <Eclesia> ^^ that was fast
+[20:58] <Eclesia> whiteknight++ for the hard work :p
+[21:00] <whiteknight> I told you it was easy
+[21:01] <Eclesia> whiteknight: is the commit directly on parrot ?
+[21:03] * Eclesia remember winxed has a separate repo, don't know if it's still the case
+[21:03] <benabik> Eclesia: That appeared to be a branch on whiteknight's fork of winxed.
+[21:06] <benabik> Arg!  I hate that packfiles aren't compatible across parrot versions.
+[21:06] <whiteknight> Yeah, thats in my fork. I need to talk to NotFound about merging it, and then he has to push it into Parrot repo
+[21:15] <dalek> winxed/dotted_namespace: 604cdd0 | Whiteknight++ | winxedst1.winxed:
+[21:15] <dalek> winxed/dotted_namespace: Remove debugging statement
+[21:15] <dalek> winxed/dotted_namespace: review: https://github.com/Whiteknight/winxed/commit/604cdd074d
+[21:15] <dalek> winxed/dotted_namespace: 5a0f4ec | Whiteknight++ | t/advanced/10namespace.t:
+[21:15] <dalek> winxed/dotted_namespace: +tests for dotted namespace syntax
+[21:15] <dalek> winxed/dotted_namespace: review: https://github.com/Whiteknight/winxed/commit/5a0f4ec091
+[21:17] <whiteknight> msg NotFound I just opened a pull request to add a dotted namespace syntax "namespace Foo.Bar.Baz { }". It is a pretty small patch. Let me know if it needs to be changed
+[21:17] <aloha> OK. I'll deliver the message.
+[21:17] <dalek> parrot/nqp_pct: 03152fb | benabik++ | compilers/pct/src/POST/PBCCompiler.p (2 files):
+[21:17] <dalek> parrot/nqp_pct: POST::PBCCompiler - fix calling init subs
+[21:17] <dalek> parrot/nqp_pct:
+[21:17] <dalek> parrot/nqp_pct: 1) Since we're about to call main, we should only use init instead of
+[21:17] <dalek> parrot/nqp_pct: init and load.
+[21:17] <dalek> parrot/nqp_pct:
+[21:17] <dalek> parrot/nqp_pct: 2) PackfileView.subs_by_flag is now called subs_by_tag
+[21:17] <dalek> parrot/nqp_pct: review: https://github.com/parrot/parrot/commit/03152fb151
+[21:18] <Eclesia> whiteknight: while you are on it, think about declaring complex id namespace, like : namespace 'org:eria'.'paradygm','0.156-SNAPSHOT' {
+[21:18] <whiteknight> wowsers
+[21:19] <benabik> The fact that parrot namespaces and variables can be any string makes writing a language to get at all parrot features… interesting.
+[21:19] <Eclesia> whiteknight: winxed does  not handle complex names in namespace. at least if we can declare then but still not use them is better then nothing ^^
+[21:22] <whiteknight> let me see what I can do
+[21:28] <Eclesia> getting nice : ftp://ftp-developpez.com/jsorel/temp2/target.png   . 2months sumarize in 10 files :)
+[21:29] <whiteknight> nice
+[21:32] <dalek> winxed/complex_namespace: f350d3f | Whiteknight++ | winxedst1.winxed:
+[21:32] <dalek> winxed/complex_namespace: Allow strings as namespace identifiers. Can now parse the example namespace 'org:eria'.'paradygm'.'0.156-SNAPSHOT' from Eclesia++
+[21:32] <dalek> winxed/complex_namespace: review: https://github.com/Whiteknight/winxed/commit/f350d3f3b1
+[21:33] <benabik> So, I get an odd error when compiling rakudo nom…  When it's compiling perl6-grammar.pir to a .pbc, it says "Lossy conversion to single byte encoding".  Anyone have any idea why Parrot would throw that?  https://gist.github.com/1159684
+[21:34] <Eclesia> benabik: I seen this one when you write a string with utf characters but read it as ascii
+[21:34] <whiteknight> Eclesia: We can parse your example now, in this branch. No real way to use it
+[21:37] <whiteknight> well, no pretty way to use it
+[21:37] <benabik> Eclesia: So the file is UTF-8 but IMCC is reading it as ASCII?
+[21:38] <Eclesia> benabik: just what I think. I have plenty of strange character in my langage so I encounter this error before
+[21:39] <Eclesia> I think it's just a missing : filehandle.encoding("utf8");
+[21:39] <benabik> Hm.  It looks like everything's been escaped, but I be there's a string that hasn't been.
+[21:45] *** Psyche^ joined
+[21:46] *** Hunger joined
+[21:51] <benabik> I'm not finding any non-ASCII in the file.  Grump.
+[21:52] <Eclesia> benabik: I'm no expert. it was just my thinking :x (I'm still a newbie : 2 month old)
+[21:52] <benabik> Eclesia: It was a good idea.
+[21:54] <dalek> parrot/nqp_pct: 9da949d | benabik++ | compilers/pct/src/POST/PBCCompiler.p (2 files):
+[21:54] <dalek> parrot/nqp_pct: POST::PBCCompiler - fix calling init subs
+[21:54] <dalek> parrot/nqp_pct:
+[21:54] <dalek> parrot/nqp_pct: 1) Since we're about to call main, we should only use init instead of
+[21:54] <dalek> parrot/nqp_pct: init and load.
+[21:54] <dalek> parrot/nqp_pct:
+[21:54] <dalek> parrot/nqp_pct: 2) PackfileView.subs_by_flag is now called subs_by_tag
+[21:54] <dalek> parrot/nqp_pct: review: https://github.com/parrot/parrot/commit/9da949db6b
+[21:54] <benabik> (Pushed wrong version of commit…)
+[21:54] <benabik> benabik--
+[21:55] *** Hunger joined
+[22:03] <benabik> Huh.  The error went away when I switched off my branch.  Curious.
+[22:37] *** soh_cah_toa joined
+[22:44] <tadzik> oh hi soh_cah_toa
+[22:45] <soh_cah_toa> tadzik: howdy
+[22:54] *** Psyche^ joined
+[22:54] *** jsut_ joined
+[23:02] *** bluescreen joined
+[23:05] <dalek> rakudo/nom: c05ba3a | tadzik++ | src/Perl6/Actions.pm:
+[23:05] <dalek> rakudo/nom: Fix MAIN regression
+[23:05] <dalek> rakudo/nom: review: https://github.com/rakudo/rakudo/commit/c05ba3a469
+[23:09] *** TiMBuS joined
+[23:09] *** theory joined
+[23:15] <dalek> parrot/nqp_pct: a613ae8 | benabik++ | compilers/pct/src/PAST/Compiler.p (2 files):
+[23:15] <dalek> parrot/nqp_pct: PAST::Compiler - fix tempregs
+[23:15] <dalek> parrot/nqp_pct:
+[23:15] <dalek> parrot/nqp_pct: 1) I stored the "constant" TEMPREG_BASE in the tempreg frames.  This
+[23:15] <dalek> parrot/nqp_pct: meant that there was only one tempreg counter for all types that never
+[23:15] <dalek> parrot/nqp_pct: decremented.  Fix by cloning the Integer PMC.
+[23:15] <dalek> parrot/nqp_pct:
+[23:15] <dalek> parrot/nqp_pct: 2) The PIR code for tempreg() used the value before incrementing to
+[23:15] <dalek> parrot/nqp_pct: generate the register value.  Do this in NQP too, so that the
+[23:15] <dalek> parrot/nqp_pct: generated PIR is identical.
+[23:15] <dalek> parrot/nqp_pct: review: https://github.com/parrot/parrot/commit/a613ae8c99
+[23:21] *** TiMBuS joined
+[23:27] *** coke_ joined
+[23:28] <coke_> anyone dealing with teh inode shortage on parrotvm?
+[23:30] <whiteknight> not I
+[23:31] <benabik> ARG.  Stupid inline PIR eating % signs.
+[23:32] <benabik> I need to find a better solution for this.
+[23:36] *** TiMBuS joined
+[23:36] <whiteknight> the solution is simple. we must kill the inline PIR
+[23:37] <benabik> That's a HUGE problem.  And the fact that I can't get a literal % from the format argument to the final text indicates deeper problems.
+[23:37] <benabik> I think StringBuilder has no way of escaping a %.
+[23:37] <benabik> Huh. It seems that it's supposed to...
+[23:38] <benabik> Nevermind...
+[23:38] <benabik> grump grump grump.  I thought I had tried %% already.
+[23:39] <coke_> seen mpeters?
+[23:39] <aloha> Sorry, I haven't seen mpeters.
+[23:39] <coke_> yah, no one has.
+[23:40] <coke_> so smolder is supposed to be cleaning up and only saving 250 reports. (just bumped it to 256 in case it needed to be changed to fire off). looks like have 995 report.html's sitting around.
+[23:40] * coke_ wonders if we can just delete the report directories, or if this will screw up the DB.
+[23:42] * coke_ wonders how many of those reports are for other projects...
+[23:42] * coke_ just rips the old reports out for now and sees what happens.
+[23:48] <benabik> Diffing generated PIR is fun because I have go change all the timestamp based subids and whatnot.
+[23:49] <benabik> Now this is as simple as two quick :%s///g calls in Vim, but finding the new number after each little change to the file...
+[23:51] <benabik> My branch dropped the unicode: prefix off some strings.  Interesting.
+[23:52] <benabik> Ah.  There's a difference between > and >=
+[23:54] <benabik> vim++ # gvimdiff
+[23:56] <benabik> I have now gotten my branch to generate identical PIR as master again.  benabik-- for not noticing the differences earlier.
+[23:58] <whiteknight> benabik++ for perseverance

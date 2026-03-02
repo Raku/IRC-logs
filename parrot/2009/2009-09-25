@@ -1,0 +1,893 @@
+[00:00] *** Whiteknight joined
+[00:02] <darbelo> I have a STRING with {flags = 128335236, _bufstart = 0x3, _buflen = 0, strstart = 0x87cc8bdc "", bufused = 18416,  strlen = 581689504, hashval = 3485389480, encoding = 0x2ab7d7e, charset = 0x22abfa54
+[00:02] <darbelo> }
+[00:02] <darbelo> does that make sense?
+[00:02] <darbelo> _bufstart = 0x3 looks wrong to me.
+[00:12] <Whiteknight> is wrong
+[00:13] <darbelo> Okay, then something's wonky in the parrot strings subsystem.
+[00:14] <darbelo> ... and it's interactions with the io subsystem.
+[00:16] <dalek> parrot: r41458 | jkeenan++ | branches/library_files:
+[00:16] <dalek> parrot: Create a branch to explore solutions for https://trac.parrot.org/parrot/ticket/1061.
+[00:16] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41458/
+[00:28] <darbelo> Am I correct that a well-formed strin will have (Buffer_bufstart(s) ==  s->strstart) ?
+[00:28] <darbelo> s/strin/STRING/
+[00:33] <dalek> rakudo: 729722a | (Solomon Foster)++ | src/setting/Complex.pm:
+[00:33] <dalek> rakudo: Add Complex trig functions not currently shadowed by Parrot complex functions.
+[00:33] <dalek> rakudo: In particular, add Complex.cosec, Complex.cosech, Complex.acosec, Complex.cotan, Complex.cotanh, Complex.acotan, Complex.acosec, and Complex.acotanh.  Comment out implementations of Complex.sin and Complex.cos, as these are currently shadowed by Parrot functions.
+[00:34] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/729722a9c0b260032ecc914f4cd6495dc22b422c
+[00:34] <dalek> rakudo: 3afb78d | (Solomon Foster)++ | src/setting/ (2 files):
+[00:34] <dalek> rakudo: Change from-radians to work on self rather than a passed parameter.
+[00:34] <purl> dalek: that doesn't look right
+[00:34] <dalek> rakudo: For some reason Any.from-radians ignored self completely and did its work on a passed parameter.  This patch changes from-radians to work on self instead (like Any.to-radians does).  Note as well that no conversion to Num is done, it just does the math, so it works fine for Complex too.
+[00:34] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/3afb78dc47737a08fd061b9a7f81087da6d0f004
+[00:34] <dalek> rakudo: 7a33068 | (Solomon Foster)++ | src/setting/Any-num.pm:
+[00:34] <dalek> rakudo: Add Any.atan2.
+[00:34] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/7a3306864270c38561c303d2afceaf4d09d84184
+[00:39] <chromatic> Hm, making PMC- and STRING- specific marking functions has the potential to improve branch prediction dramatically.
+[00:39] <Whiteknight> getting rid of all those if(PMC_IS_NULL()) calls?
+[00:39] <Whiteknight> no, i guess he didn't get rid of them, just moved them. nevermind
+[00:39] <chromatic> Getting rid of the PObj_is_PMC_TESTs.
+[00:40] <Austin> Why is that wonky?
+[00:40] <Whiteknight> wonky?
+[00:40] <chromatic> It's not wonky, but it confuses the processor's branch predictor.
+[00:40] <chromatic> It also causes a huge number of I1 cache misses.
+[00:41] <chromatic> I cut out 3/4 of the I1 cache misses for the oofib.pir benchmark by exploiting the two marking functions instead of one.
+[00:43] <chromatic> Try this patch with an optimized build.
+[00:44] <nopaste> "chromatic" at 72.87.39.97 pasted "Icache Optimizations in Marking" (57 lines) at http://nopaste.snit.ch/18053
+[00:47] <Whiteknight> just avoiding the extra *mark_PObj_alive calls on all strings would be a huge benefit
+[00:47] *** Austin joined
+[00:47] <Whiteknight> forget cache optimizations
+[00:47] <purl> Whiteknight, I didn't have anything matching cache optimizations
+[00:47] <Whiteknight> that's cause you're retarded, purl
+[00:47] <purl> Whiteknight: huh?
+[00:48] <chromatic> The fun part is realizing that you can *always* remark a STRING as alive.  Doing the check and avoiding the remark is silly.
+[00:48] <chromatic> (with respect to cache writes and COW and... yes, but we don't take advantage of those now)
+[00:49] <Whiteknight> chromatic: so just commit that patch. looks sane to me
+[00:50] <Whiteknight> not necessarily, checking whether the flag is set first prevents a writethrough to main memory
+[00:51] <chromatic> Sure, but we're very likely triggering a cache miss even reading it.
+[00:53] <chromatic> I'd also like to hide the PMC_metadata branch in Parrot_gc_mark_PMC_alive_fun behind the PObj_is_special_PMC_TEST flag and move the marking into mark_special.
+[00:54] <chromatic> One fewer unlikely test and branch....
+[00:54] *** TiMBuS joined
+[00:55] <Whiteknight> I would like to merge mark_special into Parrot_gc_mark_PMC_alive_fun. Creates opportunity to simplify things and prevents an extra function call
+[00:55] *** darbelo left
+[00:55] <Whiteknight> combine that with removing all the next_for_GC stuff and do the marking immediately while we have the PMC in the cache already to examine it
+[00:56] <chromatic> mark_special can be static and inline.
+[00:57] <Whiteknight> once we get rid of all the priority marking nonsense, there isn't a lot left of that function to keep
+[00:58] <chromatic> Agreed.
+[00:58] <Whiteknight> and all PMCs are "special" now, so that whole branch can really be flattened out
+[00:58] <Whiteknight> at least, that I am aware
+[00:58] <dalek> parrot: r41459 | chromatic++ | trunk/src/debug.c:
+[00:58] <dalek> parrot: [PDB] Moved two assignments to remove stack variables that give warnings about
+[00:58] <dalek> parrot: persistence across longjmp calls.  I believe this is a safe change.
+[00:58] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41459/
+[00:58] <dalek> parrot: r41460 | chromatic++ | trunk (2 files):
+[00:58] <dalek> parrot: [GC] Improved Parrot_gc_mark_PMC_alive() and Parrot_gc_mark_STRING_alive() such
+[00:58] <dalek> parrot: that their backing functions now do all of the necessary work on their own,
+[00:58] <dalek> parrot: which means avoiding costly branch prediction misses in
+[00:58] <dalek> parrot: Parrot_gc_mark_PObj_alive().  As well, in the -DNDEBUG case, these macros can
+[00:58] <dalek> parrot: prevent unnecessary calls for live PMCs and *inline* the STRING marking
+[00:58] <dalek> parrot: directly, avoiding the need for function calls.
+[00:58] <dalek> parrot: This produced 71.749% fewer icache misses in the oofib.pir benchmark.
+[00:59] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41460/
+[01:02] <ttbot> Parrot trunk/ r41460 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/104513.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[01:02] <chromatic> Well that's a downer.
+[01:03] <Whiteknight> what's a downer?
+[01:03] <purl> a downer is probably at http://hyperarchive.lcs.mit.edu/HyperArchive/Archive/cmp/downer.hqx OR ftp://ftp.amug.org//pub/info-mac/cmp/downer.hqx
+[01:03] <chromatic> The ttbot report.
+[01:05] <Whiteknight> I wonder if some compilers are going to handle the "do if() x; while(0); syntax correctly"
+[01:13] *** s1n joined
+[01:14] *** Whiteknight joined
+[01:14] <Whiteknight> okay, that GC fix froze up miniparrot so hard that is crashed my entire computer
+[01:15] <Whiteknight> so...that's a downer
+[01:16] <chromatic> Yep, here too.
+[01:16] <chromatic> It's the normal case.
+[01:16] <chromatic> Infinite recursion?
+[01:16] <purl> Infinite recursion is probably not TorgoX's friend NOT TorgoX's FRIEND!!!
+[01:22] <chromatic> I think I found it.
+[01:25] <Whiteknight> w00t
+[01:25] <Whiteknight> finding it is fundamental
+[01:26] <chromatic> Yep, that's it.
+[01:26] <chromatic> Testing the right fix now.
+[01:29] <chromatic> Committing.
+[01:30] <dalek> parrot: r41461 | chromatic++ | trunk (2 files):
+[01:30] <dalek> parrot: [GC] Fixed PMC marking in debugging builds by unilaterally moving the
+[01:30] <dalek> parrot: recursion-stopping "Is this PMC already live?" check back into
+[01:30] <dalek> parrot: Parrot_gc_mark_PMC_alive_fun().
+[01:30] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41461/
+[01:37] <Whiteknight> my coretest time is up significantly
+[01:38] <Whiteknight> I don't remember when was the last time I tried it, probably a few days ago
+[01:38] <chromatic> Faster or slower?
+[01:38] <Whiteknight> but I was at 37s consistently last time, and 44s consistently right now
+[01:38] <Whiteknight> no idea why
+[01:39] <Whiteknight> that's like 20% worse
+[01:39] <chromatic> It'd be nice to bisect that a bit.
+[01:39] <Whiteknight> yeah, would be
+[01:40] <chromatic> Whoa, Rakudo's "Hello, world!" is some 30.28% faster since my most recent profile.
+[01:41] <chromatic> Oh, I remember why.  I was benchmarking GC tunings.
+[01:41] <chromatic> It's about 4.26% faster than my best one now.
+[01:42] <Whiteknight> r41451 and r41452 don't look like they should have affected trunk
+[01:42] <chromatic> How about r41441?
+[01:47] <Whiteknight> urg, it's going to take forever to get back there
+[01:55] *** rhr joined
+[02:03] <Whiteknight> r41440 was same speed: ~44s
+[02:03] <Whiteknight> 41441 was same
+[02:04] <chromatic> Okay, good.
+[02:04] <chromatic> Hm, not so good actually.  That should have improved things.
+[02:04] <chromatic> 32 or 64 bit?
+[02:05] <Whiteknight> 64
+[02:05] <chromatic> Okay.
+[02:05] <chromatic> Double the size of the initial pools in the patch for r41441.
+[02:07] <Whiteknight> those pool sizes should not be calculated using the sizeof() anything
+[02:07] <chromatic> I want to align them to page sizes.
+[02:07] <Whiteknight> right, so just make it x*pagesize
+[02:07] <Whiteknight> not x*pagesize/sizeof(bullshit)
+[02:08] <chromatic> I can't think of a downside to that.  Agreed.
+[02:12] <Whiteknight> it's getting past my bedtime though, so I'll have to try it tomorrow
+[02:12] <Whiteknight> goodnight
+[02:24] *** japhb joined
+[02:25] <dalek> close: r153 | Austin++ | wiki/Cian (2 files):
+[02:25] <dalek> close: Wiki updates
+[02:25] <dalek> close: review: http://code.google.com/p/close/source/detail?r=153
+[02:35] *** janus joined
+[02:35] <dalek> close: r154 | Austin++ | wiki/CianLanguageBasics.wiki:
+[02:36] <dalek> close: Edited wiki page through web user interface.
+[02:36] <dalek> close: review: http://code.google.com/p/close/source/detail?r=154
+[02:53] *** Andy joined
+[02:54] *** rg1 joined
+[03:00] *** rhr joined
+[03:05] *** tetragon joined
+[03:51] <dalek> parrot: r41462 | chromatic++ | trunk/examples/benchmarks/oofib.pir:
+[03:51] <dalek> parrot: [examples] Sped up oofib benchmark by 28.957%.
+[03:51] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41462/
+[03:51] <dalek> parrot: r41463 | chromatic++ | trunk/src/pmc/fixedstringarray.pmc:
+[03:51] <dalek> parrot: [PMC] Optimized FixedStringArray's set_number_keyed_int() and
+[03:51] <dalek> parrot: set_integer_keyed_int() VTABLE entries to avoid unnecessary PMC and COW STRING
+[03:51] <dalek> parrot: creation; this improves the array_access.pir benchmark performance by 13.28%.
+[03:51] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41463/
+[03:54] <dalek> parrot: r41464 | chromatic++ | trunk/src/pmc/fixedstringarray.pmc:
+[03:54] <dalek> parrot: [PMC] Optimized FixedStringArray to avoid expensive conversions to and from
+[03:54] <dalek> parrot: String PMCs by using STRING API functions instead.  This improves the
+[03:54] <dalek> parrot: array_access.pir benchmark by a further 30.235%.
+[03:54] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41464/
+[03:56] <mikehh> messages
+[04:11] *** Andy joined
+[04:45] <dalek> close: r155 | Austin++ | trunk/ (36 files):
+[04:45] <dalek> close: Moved utility classes to library root dir
+[04:45] <dalek> close: review: http://code.google.com/p/close/source/detail?r=155
+[04:56] <dalek> parrot: r41465 | mikehh++ | trunk/include/parrot/gc_api.h:
+[04:56] <dalek> parrot: codetest failures - indented preprocessor directives and space between parens
+[04:56] <dalek> parrot: I am not all that happy with the changed indentation but it was needed to pass the test
+[04:56] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41465/
+[05:20] *** kyle_l5l left
+[05:20] *** kyle_l5l_ joined
+[05:54] <mikehh> All tests PASS (pre/post-config, smoke, fulltest) at r41465 - Ubuntu 9.04 amd64
+[05:55] <mikehh> partcl r744 builds on parrot r41465 - make test PASS (smolder #28048) - ubuntu 9.04 amd64
+[05:55] <mikehh> rakudo (729722a) builds on parrot r41465 - make test / make spectest (up to 28400) PASS - Ubuntu 9.04 amd64
+[06:05] *** uniejo joined
+[06:16] <dalek> parrot: r41466 | mikehh++ | trunk/config/gen/makefiles/root.in:
+[06:16] <dalek> parrot: additional test for make fulltest (and make cover) and fix comment
+[06:16] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41466/
+[06:29] *** iblechbot joined
+[06:59] <treed> Does anybody here remember Vera Lynn?
+[07:02] <chromatic> Does anybody here hate the implementation of the Class PMC?
+[07:04] <treed> I'm not a big fan.
+[07:04] <treed> But... mostly because I can't subclass it from PIR.
+[07:05] <chromatic> It's fairly ugly.
+[07:06] <chromatic> It's also inefficient.
+[07:06] <treed> Inefficient is the Object Model as I've created it in Cardinal, largely because I can't subclass the PMC.
+[07:06] <treed> Each class has a parrot class and a metaclass.
+[07:06] <treed> And the metaclass also has a parrot class.
+[07:06] <treed> And each of those has a parent class.
+[07:07] <treed> I haven't even begun on eigenclasses.
+[07:07] <treed> Shit's *nasty*.
+[07:07] <szbalint> does anyone hate it? I bet it's not hard to find devs to gang up on old and lonely facets of code :)
+[07:07] <chromatic> At least Ruby is cleaner than Perl... okay, sorry.  I can't keep a straight face here.
+[07:08] <moritz> ;-)
+[07:08] <treed> Cleaner than Perl5, sure.
+[07:09] <chromatic> Wow.  Vestigial variables in this code.
+[07:09] * treed had to actually start using P5 at work.
+[07:09] <treed> Banged my head against the desk for a whole afternoon.
+[07:09] <treed> Fortunately, Tene's awesome.
+[07:23] *** donaldh joined
+[07:25] *** fperrad joined
+[07:30] <chromatic> treed, do you ever have problems with "Object must be created by a class." exceptions?
+[07:34] <treed> In what?
+[07:34] <purl> IN EXCELSIS DEO
+[07:35] <treed> I don't recall having seen that before.
+[07:36] <chromatic> Just curious about the subclass of Class problems.
+[07:37] <Austin> I've hit that one a few times. I think it was while I was getting my brain around the whole class vs. object distinction.
+[07:37] <treed> I can't recall what the error was.
+[07:41] <treed> Tene might know.
+[07:41] <treed> I think I actually started doing Cardinal Classes as has-a under the general assumption that subclassing PMCs has problems.
+[07:41] <treed> Tene actually tested it after he found that out, IIRC.
+[07:42] <treed> And found that there are, indeed, problems with subclassinc parrot;Class.
+[07:44] <chromatic> I'm not surprised.
+[08:02] *** JimmyZ joined
+[08:02] <JimmyZ> Is parrot.org down?
+[08:03] <chromatic> Looks like it.
+[08:30] <dukeleto> 'ello
+[08:30] *** payload joined
+[08:31] <dukeleto> it was getting hammered by search engines this morning, i think someone contact osu support
+[08:31] <dukeleto> yet another reason for git
+[08:31] <chromatic> Except I can't dcommit.
+[08:31] <dukeleto> chromatic: you are thinking git-svn
+[08:32] <chromatic> True.
+[08:32] <dukeleto> chromatic: if we were on git, everyone could still currently commit to their local branches, until the master repo came up
+[08:33] <dukeleto> we have a GitObjections page, should we have a WhyGitIsAwesome page?
+[08:33] <dukeleto> everyone could also pull in each others branches that were hosted on other git mirrors
+[08:34] <dukeleto> the main repo doesn't stop any development with git, because a "main repo" is only by convention
+[08:34] <dukeleto> s/the main repo/the main repo going down/
+[08:36] <dukeleto> chromatic: i have euler_bench setup to test every released version of parrot against each other. 1.6.0 has the fasted interpreter load time, by about 3x than 0.9.0
+[08:37] <chromatic> That measures only startup?
+[08:38] <dukeleto> chromatic: we have an euler problem 000 that measures interpreter startup, i will give you the raw numbers in a sec
+[08:39] <dukeleto> 1.3.0-1.6.0 are all about the same time to start up
+[08:39] <chromatic> HEAD should be faster.
+[08:39] <dukeleto> actually, 1.3.0 seems to be just ever so slightly faster than 1.6.0
+[08:40] <dukeleto> chromatic: i can add trunk to the run
+[08:40] <chromatic> That'd be handy.
+[08:40] <dukeleto> chromatic: they are all compiled with "--optimized"
+[08:42] <chromatic> Good.
+[08:42] <dukeleto> i am going to have to use r41351 (what i have) since the server is down
+[08:44] <dukeleto> i think i got cachegrind working too, but we will have to save that for tomorrow. i am compiling an optimized trunk now
+[08:45] <chromatic> The server's back up now.
+[08:46] <dalek> parrot: r41467 | chromatic++ | trunk/src/runcore/main.c:
+[08:46] <dalek> parrot: [runcores] Changed the default runcore to the fast runcore for all builds, not
+[08:46] <dalek> parrot: just optimized builds.  There's no debugging benefit to the slow core.
+[08:46] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41467/
+[08:46] <dalek> parrot: r41468 | chromatic++ | trunk/src/pmc/class.pmc:
+[08:46] <dalek> parrot: [PMC] Tidied Class PMC's add_parent slightly.  It performs less useless work
+[08:46] <dalek> parrot: now.
+[08:46] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41468/
+[08:46] <dalek> parrot: r41469 | chromatic++ | trunk/src/pmc/class.pmc:
+[08:46] <dalek> parrot: [PMC] Simplified Class PMC's remove_parent() by replacing manual array resizing
+[08:46] <dalek> parrot: with a simple call to the delete_keyed_int() VTABLE entry of the array of
+[08:46] <dalek> parrot: parents.
+[08:46] <purl> it has been said that parents is a week at least, to be sure
+[08:46] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41469/
+[08:46] <dalek> parrot: r41470 | chromatic++ | trunk/src/pmc/class.pmc:
+[08:46] <dalek> parrot: [PMC] Hoisted otherwise duplicate code into static calculate_mro() function.
+[08:46] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41470/
+[08:46] <dalek> parrot: r41471 | chromatic++ | trunk/src/pmc/class.pmc:
+[08:46] <dalek> parrot: [PMC] Tidied Class PMC; no functional changes.
+[08:46] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41471/
+[08:47] <szbalint> purl still triggers to dalek :S
+[08:47] <purl> szbalint: what?
+[09:05] <nopaste> "dukeleto" at 69.64.235.54 pasted "Euler_Bench #000 for all released versions of Parrot+trunk (intrepeter load time)" (13 lines) at http://nopaste.snit.ch/18054
+[09:06] <dukeleto> looks like 1.6.0 is faster than r41351 by a smidgin
+[09:07] <chromatic> Hopefully trunk will beat it back.
+[09:08] <dukeleto> chromatic: ok, will check latest trunk, then sleep
+[09:08] <chromatic> Ditto.
+[09:10] *** bacek joined
+[09:10] <bacek> o hai
+[09:11] * dukeleto waves at bacek with one foot in his bed
+[09:11] <bacek> dukeleto: at least it's not grave :)
+[09:11] <chromatic> No, but it is serious.
+[09:11] <purl> okay, chromatic.
+[09:13] <dukeleto> chromatic: compiling an optimized r41471 now
+[09:18] <bacek> It was a big startup time drop in 1.1
+[09:18] <bacek> Like 3x times. Looks good
+[09:18] <chromatic> That was removing PARROT_EXPORT from all vtable C functions.
+[09:19] <bacek> Ah! I remember it! :)
+[09:19] <dalek> parrot: r41472 | chromatic++ | trunk/src (3 files):
+[09:19] <dalek> parrot: [GC] Replaced more Parrot_gc_mark_PObj_alive() with proper typed versions,
+[09:19] <dalek> parrot: especially the Context PMC's mark() for STRING registers.
+[09:19] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41472/
+[09:19] <chromatic> That halved startup time.
+[09:19] <chromatic> We did something else to improve startup time, but I don't remember what gave us the extra 17%.
+[09:20] <bacek> Anyway. Overall picture is good.
+[09:20] *** iblechbot joined
+[09:20] <bacek> We just need to remove more PARROT_EXPORTs
+[09:21] <chromatic> I wonder if there's a linker option to hide symbols linking against other shared libraries.
+[09:21] <chromatic> Does that make any sense?
+[09:22] <bacek> I don't think so...
+[09:24] *** masak joined
+[09:25] <chromatic> 15% of our symbols visible from nm -g come from libc or gmp.
+[09:25] <bacek> Bah... git-svn can't rebase branches properly...
+[09:25] <nopaste> "dukeleto" at 69.64.235.54 pasted "Euler_Bench #000 for all released versior41472 Parrot+trunk (intrepeter load time)" (12 lines) at http://nopaste.snit.ch/18056
+[09:26] <dukeleto> it pretty freakin' close
+[09:26] * dukeleto calls it a night
+[09:26] <dukeleto> chromatic: let me know what other data would be useful for ya
+[09:26] <chromatic> 32-bit or 64-bit machine, dukeleto?
+[09:28] <bacek> dukeleto: what about real performance not startup time?
+[09:28] <dukeleto> chromatic: mbp, so 32-bit binaries, i guess
+[09:28] <chromatic> 32-bit pointers?
+[09:28] <dukeleto> chromatic: parrot --version doesn't say anything about it
+[09:28] <chromatic> Interesting data either way.  Thanks!
+[09:29] <dukeleto> chromatic: does the output of perl Configure.pl tell you the bit-ness?
+[09:29] <dukeleto> chromatic: yes, i will hook it up to some type of graph next
+[09:30] <chromatic> look for 'ptrsize' in config_lib.pasm
+[09:30] <dukeleto> chromatic: 4
+[09:30] <chromatic> Okay.  Good to know.
+[09:32] <dukeleto> bacek: will give more reports on the other euler bench problems tomorrow, but i did a few preliminary ones and 1.6.0 was doing well. i haven't tried trunk yet on those.
+[09:37] *** allison joined
+[09:52] *** gaz joined
+[10:10] <dalek> parrot: r41473 | bacek++ | branches/pcc_arg_unify_2_0/lib/Parrot/Pmc2c/PCCMETHOD.pm:
+[10:11] <dalek> parrot: Fix access of Context fields in PCCMETHOD.pm
+[10:11] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41473/
+[10:28] <dalek> parrot: r41474 | bacek++ | branches/pcc_arg_unify_2_0/include/parrot/call.h:
+[10:28] <dalek> parrot: Fix ASSERT_SIG_PMC macro merge conflict.
+[10:28] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41474/
+[10:28] <dalek> parrot: r41475 | bacek++ | branches/pcc_arg_unify_2_0/src (2 files):
+[10:28] <dalek> parrot: Various merge fixes
+[10:28] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41475/
+[10:31] <bacek> Ok. make corevm done
+[10:31] <bacek> Epicly failing apparently.
+[10:47] *** mokurai left
+[11:07] *** quek joined
+[11:09] *** whoppix joined
+[11:17] *** cosimo joined
+[11:19] <dalek> parrot: r41476 | bacek++ | branches/pcc_arg_unify_2_0 (7 files):
+[11:19] <dalek> parrot: Recover more stuff from pcc_arg_unify branch.
+[11:19] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41476/
+[11:53] *** whiteknight joined
+[11:53] *** payload joined
+[11:54] <whiteknight> good morning parrot
+[11:56] <dalek> parrot: r41477 | bacek++ | branches/pcc_arg_unify_2_0 (7 files):
+[11:56] <dalek> parrot: Revert "Recover more stuff from pcc_arg_unify branch." bacek-- using
+[11:56] <dalek> parrot: diff with wrong branch...
+[11:56] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41477/
+[12:02] <whiteknight> bacek: what is the plan for pcc_arg_unify_2_0
+[12:02] <whiteknight> ?
+[12:02] <bacek> whiteknight: make it work...
+[12:03] <whiteknight> so you're copying changes from pcc_arg_unify to the new branch which is updated to newer trunk?
+[12:03] <bacek> it's freaking big diff between pcc_arg_unify and trunk...
+[12:04] <whiteknight> yeah it is
+[12:04] <whiteknight> lots of branches have landed in trunk since pcc_arg_unify was created
+[12:04] <bacek> I'm actually reviewing all merge conflicts that happened. And looks like I resolved them incorrectly
+[12:04] <whiteknight> ok
+[12:05] <whiteknight> I'm looking over your diff now
+[12:05] <whiteknight> allison is supposed to be writing up a design document for the branch now and should have it posted soon
+[12:05] <whiteknight> once that gets posted, we can all make it work
+[12:13] *** payload joined
+[12:14] *** Austin joined
+[12:15] <Austin> Good morning, #parrot
+[12:16] <whiteknight> good morning Austin
+[12:16] <Austin> Today, I hate ... PGE
+[12:16] <whiteknight> is this what we are doing now first thing in the morning? Saying something we hate?
+[12:17] <Austin> Dude, this is *so* not the first thing in the morning.
+[12:17] <Austin> This is an hour or so into a wumpus hunt.
+[12:17] <whiteknight> okay, well I haven't witnessed all the non-hate items
+[12:18] <whiteknight> so which wumpus are you hunting?
+[12:18] <Austin> Here's the bug: $S1 = ".sub anon :anon\\n.param pmc match\\n\\t## Remember end of last ws, in case rule is called 2x\\n\\t\\t$P0 = get_global '$!ws'\\n\\t
+[12:18] <Austin> Do you see it?
+[12:19] <Austin> Hint: It's about 8 characters in.
+[12:19] <whiteknight> no
+[12:19] <whiteknight> still no
+[12:19] <Austin> Ahh. Well, do you see the .namespace directive?
+[12:19] <whiteknight> no
+[12:20] <Austin> THAT'S THE BUG
+[12:20] <whiteknight> the bug is...in my brain?
+[12:20] <Austin> PGE generates all in-line code using this anon-sub eval approach, and it all goes into the root namespace, because there's no .namespace generated for the sub
+[12:21] <whiteknight> oh, ouch. You can't specify like a :namespace() argument anywhere?
+[12:22] <Austin> Nerp. You just type {{ say "Hello, world!" }} and PGE does the rest.
+[12:22] <whiteknight> so what you want really is {{ .namespace 'Foo'\\nsayHello, World!" }}?
+[12:22] <Austin> So I spent 40 minutes hunting for the right incarnation of    07get_hll_global [ 'close' ; 'Grammar' ], '$!ws'  only to discover that it's not there.
+[12:23] <whiteknight> well that is definitely TEH SUXX0RS
+[12:23] <Austin> It's actually in 7    get_hll_global '$!ws'  - the root variable
+[12:23] <Austin> So now that I know it, it's easy to work around. But man, it's so wrong.
+[12:24] <whiteknight> that sounds ot me like a definite bug
+[12:25] <whiteknight> ping pmichaud about it, or create a ticket
+[12:25] <purl> I can't find pmichaud in the DNS.
+[12:25] <Austin> Yeah. I've gotta talk to pmichaud and get his take on it, but I think there's no good reason (other than "it's not worth doing") for having it in the root nsp
+[12:25] <whiteknight> THAT'S CAUSE YOU'RE RETARDED PURL
+[12:26] <whiteknight> That doesn't make any sense to me, why would inline PIR in the grammar be evaled?
+[12:26] <whiteknight> why wouldn't it just be added...inline?
+[12:26] *** JimmyZ joined
+[12:27] <Austin> Because treating it as a sub let's you use it for control flow. Whereas inlining it would require dark magic to manage control flow.
+[12:28] <Austin> *let's = lets
+[12:29] <Austin> And once you've got <{{ ... }}> doing control flow by eval'ing an anon sub, it's pretty easy to reuse the code for {{ ... }}
+[12:30] <Austin> I'd ask, "How was the funeral?" except that I'm pretty sure I know. So, other than the last act, Mrs. Lincoln, what did you think of the play?
+[12:32] <Austin> (Or, to put it another way, how are you?)
+[12:34] <whiteknight> Doing well, thanks for asking
+[12:34] <whiteknight> it was my grandfather, but the death wasn't any sort of surprise. He was given 2 years to live 4.5 years ago
+[12:34] *** payload1 joined
+[12:34] <Austin> So what have you been up to this week?
+[12:36] <whiteknight> mostly personal/family stuff. Haven't had any chance to get hackin
+[12:36] <whiteknight> although I have a huge open window this weekend to code, so I'm looking forward to that
+[12:37] <Austin> :)
+[12:37] <Austin> Did you take the week off from work?
+[12:40] <Austin> I don't know if you remember a little dialogue you and I had the other day, about (mis)using the #include facility for other purposes in my compiler.
+[12:40] <Austin> But it's come to that, now.
+[12:41] <bacek> oookey...
+[12:42] <Austin> I went ahead and wrote the code that creates an empty sub. It was like 40 lines, and a nightmare.
+[12:42] <bacek> I reviewed diff between pcc_arg_unify_2_0 and pcc_arg_unify. Unfortunately I can't find anything suspicious.
+[12:42] <bacek> bacek@icering:~/src/parrot$ git diff pcc_arg_unify_local |wc -l
+[12:42] <bacek> 108642
+[12:42] <bacek> But I definitely missed something...
+[12:42] * Austin chortles at baceks diffitude
+[12:43] <Austin> Well, it's always in the last place you look. So try line 108640, give or take.
+[12:45] <whiteknight> Austin: only took a day off from work
+[12:45] <whiteknight> and came back to a TODO list written in blood on my desk
+[12:45] <Austin> Well, I guess that means it's important.
+[12:46] <Austin> Or they would not have used blood.
+[12:47] <whiteknight> right, we do have plenty of markers here
+[12:52] *** bluescreen joined
+[13:11] *** JimmyZ_ joined
+[13:23] *** payload joined
+[13:34] *** zerhash joined
+[13:41] *** bkuhn joined
+[13:44] *** bacek joined
+[13:45] <bacek> bah.
+[13:45] *** iblechbot joined
+[13:45] <bacek> Original branch failing in same way...
+[13:45] * bacek spent few hours for almost nothing...
+[13:50] <whiteknight> time spent on it is not wasted
+[13:50] <whiteknight> what exactly are the failures?
+[13:51] <nopaste> "bacek" at 122.110.46.45 pasted "pcc_arg_unify failures" (137 lines) at http://nopaste.snit.ch/18060
+[13:51] <whiteknight> oh, great
+[13:51] <bacek> In nutshell - it's really broken.
+[13:52] <whiteknight> looking only at the diff, I suspect there is an issue in Parrot_mmd_build_type_tuple_from_sig_obj
+[13:53] <whiteknight> it doesn't look like it is calculating tuple_size anymore
+[13:53] <bacek> diff between trunk and branch? Or 2 branches?
+[13:53] <whiteknight> looking at the complete diff of pcc_arg_unify_2_0 from the time it was created
+[13:55] <whiteknight> I need to really look at the source code to make sure
+[13:55] <rg1> msg chromatic r41470 broke the build on sparc (you missed a return statement when you made calculate_mro void)
+[13:55] <purl> Message for chromatic stored.
+[13:59] <whiteknight> actually nevermind, it looks like tuple_size isn't used anywhere anymore
+[14:00] <moritz> kill it!
+[14:06] <masak> its refcount is down to 0, so...
+[14:10] * whiteknight really needs to read the calling conventions PDD again.
+[14:11] <whiteknight> ...nevermind, PDD03 doesn't answer any of the questions I had
+[14:14] <whiteknight> there actually doesn't appear to be any documentation anywhere about set_args, get_params, set_returns and get_results
+[14:15] *** Andy joined
+[14:16] <bacek> whiteknight: pdd03. Line 28
+[14:17] <bacek> anyway, $bedtime
+[14:18] * bacek wave from tomorrow
+[14:18] <whiteknight> thanks
+[14:18] <whiteknight> goodnight
+[14:18] <whiteknight> I was hoping for a pasm code example here, but I guess this will have to do
+[14:18] <jrtayloriv> bacek->sleep(8, "dreams of bacon cheeseburgers");
+[14:20] <whiteknight> if we had a syntax for PMC aggregate literals in PASM code, the set_* and get_* opcodes would be much more efficient
+[14:22] <whiteknight> goddamn the pcc system is a big damn mess
+[14:27] *** elmex joined
+[14:31] *** davidfetter joined
+[14:32] <dalek> lua: d65c92e | fperrad++ | src/pmc/lua (5 files):
+[14:32] <dalek> lua: use Parrot_gc_mark_PMC_alive & Parrot_gc_mark_STRING_alive
+[14:32] <dalek> lua: (instead of Parrot_gc_mark_PObj_alive)
+[14:32] <dalek> lua: review: http://github.com/fperrad/lua/commit/d65c92eb7664c3e0615a672084570c08789bbfc3
+[14:33] *** Psyche^ joined
+[14:33] *** theory joined
+[14:42] *** JimmyZ_ joined
+[14:52] <dalek> parrot: r41478 | NotFound++ | trunk/src (2 files):
+[14:52] <dalek> parrot: [cage] c++ required cast and returnning a value in void function
+[14:52] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41478/
+[15:11] *** payload joined
+[15:11] <pmichaud> okay, should nqp be installed as  "parrot-nqp" or as "parrot_nqp" ?
+[15:12] <pmichaud> PDD30:76 gives "parrot-python" as an example, but none of the other parrot* tools use hyphens.
+[15:15] <dukeleto> pmichaud: change the docs to say parrot_python?
+[15:15] <purl> dukeleto: that doesn't look right
+[15:16] <pmichaud> that would seem to be most consistent
+[15:16] <pmichaud> I'll do that for now.
+[15:17] <dukeleto> pmichaud: i am sure asking allison about it would be a good idea too, or at least parrot-dev
+[15:18] <pmichaud> looking for use of - versus _ in my /usr/bin/ directory is somewhat enlightening.  :)
+[15:18] <pmichaud> i.e., it's  apt-get and not apt_get
+[15:18] <pmichaud> and ssh-keygen and not ssh_keygen
+[15:18] <moritz> 745 with -, 200 with _ here
+[15:19] <NotFound> Given our commitment with unicode, meybe we should use a cuneiform character or something.
+[15:19] <pmichaud> 312 versus 54 here
+[15:19] <moritz> wow, I should really clean up my system at some point ;-)
+[15:20] <pmichaud> yes, I just did a reinstall last week so mine is fairly clean at the moment :)
+[15:20] <jonathan> moritz: Ain't the directory called "bin" 'cus you throw all your trash in it? ;-)
+[15:20] <moritz> jonathan: ;-)
+[15:26] <mikehh> NotFound - I made identical changes you did in r41478 - I just wasn't happy about the Class.pmc return; - but it passes all tests
+[15:28] <mikehh> NotFound: I was going to ask you about that but you did it already
+[15:32] <mikehh> All tests PASS (pre/post-config, test, fulltest) at r41478 - Ubuntu 9.04 amd64
+[15:33] <pmichaud> about now is when I really wish parrot was using git.  Maybe I should give git-svn a try.
+[15:33] <pmichaud> (working on new grammar engine stuff)
+[15:35] <NotFound> mikehh: I did the same, looked if it passed the tests.
+[15:36] <pmichaud> (git-svn) bah, too much trouble.
+[15:36] <NotFound> mikehh: the other branches don't return anything, so I supposed it was just a mistake not deleting that.
+[15:52] <whiteknight> I tried git-svn at one point, I don't remember why I gave it up
+[15:54] <tewk> pmichaud, git-svn is really easy
+[15:54] <pmichaud> I'd need to find an existing mirror or build my own
+[15:54] <whiteknight> somebody had such a mirror. I want to say it was moritz but I could be wrong
+[15:54] <pmichaud> right.
+[15:54] <pmichaud> I'll just stick with svn and carp about it.
+[15:54] <whiteknight> yay!
+[15:55] * moritz has one, yes
+[15:55] <moritz> http://moritz.faui2k3.org/files/parrot-all-git-svn.tar.gz
+[15:56] <tewk> git svn clone -r 41478 https://svn.parrot.org/parrot/trunk
+[15:56] <tewk> will just clone the head.
+[15:57] <tewk> I'd like to follow your new grammar engine stuff with git.
+[15:57] <tewk> you could create a local branch from git-svn and push that to git-hub
+[15:58] <pmichaud> if I create a local branch from git-svn and place it on github, how hard will it be to get changes back into the parrot svn repo?
+[15:58] <pmichaud> or to keep it up-to-date with parrot trunk?
+[16:00] <tewk> I do it all the time I can send you a couple of scripts.
+[16:00] <pmichaud> that would help
+[16:00] <pmichaud> in many ways I'd prefer to develop in my own github account
+[16:00] *** MoC joined
+[16:00] <pmichaud> I just need to know
+[16:01] <pmichaud> (1) how to pull changes from parrot trunk
+[16:01] <tewk> Basically, I continually rebase my changes on top of git-svn, I have a script that does that.
+[16:01] <tewk> script comming
+[16:01] <pmichaud> (2) when we're done developing, how to push the new features back to parrot repo
+[16:01] <pmichaud> if #2 ends up just being "build a huge diff and apply that to parrot svn", I'd be okay with that, too.
+[16:02] <whiteknight> it sort of stinks that we have to bend over backwards like this to develop in a way we like
+[16:02] <pmichaud> whiteknight: I liked your article on the topic :)
+[16:02] <whiteknight> thanks! It took me like 4 days to write i
+[16:02] <whiteknight> it
+[16:02] <moritz> pmichaud: (1) can be done with dukeleto's git mirror on github, and git-cherry-pick
+[16:02] <pmichaud> moritz: that sounds like a pain
+[16:03] <tewk> git svn dcommit will push changes back to parrot svn, assuming you're rebased on-top of git-svn
+[16:03] <moritz> pmichaud: it depends on how many changes you want to pull
+[16:03] <pmichaud> moritz: all of them
+[16:03] <pmichaud> I want to stay sync'd with parrot trunk
+[16:03] <tewk> yeah you have to develop ontop of git-svn to make pushing back to svn easy
+[16:03] <tewk> pmichaud start by  git svn clone -r 41478 https://svn.parrot.org/parrot/trunk
+[16:05] <pmichaud> can I just say "head" instead of "41478"?
+[16:05] *** ruoso joined
+[16:05] <pmichaud> looks like I have to install git-svn, too :)
+[16:06] <tewk> apt-get install git-svn
+[16:06] <pmichaud> did that.
+[16:06] <pmichaud> looks like you have to use the explicit rev number
+[16:07] <pmichaud> cloning repo now
+[16:08] <pmichaud> okay, clone done
+[16:09] <cotto_w0rk> helo
+[16:10] <tewk> git checkout -b new_pge --track remotes/git-svn
+[16:10] <pmichaud> ...why the branch?
+[16:11] <nopaste> "tewk" at 155.98.68.48 pasted "rebase local git changes on top of latest SVN HEAD" (18 lines) at http://nopaste.snit.ch/18061
+[16:11] <tewk> pmichaud, you don't have to you can just use master
+[16:12] <pmichaud> that would be my preference for now
+[16:12] <pmichaud> I'd like to know the minimum steps needed to get things to work.  I can embellish from there.
+[16:13] <tewk> All that script does is stash local working directory changes while it rebases your work on top of the latest head, and then it pops the local working directory changes back off the stash stack and away you go.
+[16:13] <pmichaud> where am I fetching from, in that case?
+[16:13] <tewk> Parrot SVN
+[16:13] <purl> Parrot SVN is http://svn.perl.org/parrot/trunk
+[16:13] <moritz> if you have a clean working copy, 'git svn rebase' is enough
+[16:14] <tewk> note its a "git svn fetch"
+[16:14] <pmichaud> so, with this approach should I also be pushing to github, or no?
+[16:14] <tewk> pmichaud, no not yet.
+[16:14] <pmichaud> so everything stays local?
+[16:15] <tewk> yeah, but you can push master to git-hub to share your changes
+[16:16] <whiteknight> so "git svn fetch" to update from the SVN repo, "git push" to push it to github, and "git dcommit" to commit to SVN repo?
+[16:16] <tewk> you will need to push -f to git-hub since you are rebasing on top of PARROT SVN
+[16:16] <tewk> whiteknight, yes
+[16:16] <whiteknight> that sounds easy enough
+[16:16] <pmichaud> I don't understand why -f is needed there
+[16:16] <tewk> the pushes to github will be non-fast-foward pushes so people
+[16:17] <moritz> pmichaud: because 'git svn rebase' rewrite history
+[16:17] <tewk> because you change history every time you rebase your local changes on top of the latest from PARROT SVN
+[16:17] <pmichaud> okay.
+[16:17] <tewk> people pulling from github should use "git pull --rebase"
+[16:17] <pmichaud> let me try a couple of things
+[16:18] *** Zak joined
+[16:18] <tewk> Because you will be pushing non-fast-foward changes to github
+[16:18] <whiteknight> I'm seeing some failed smoke reports on darwin and win32
+[16:18] <pmichaud> if this is going to cause more people to say "git is more complicated than svn", I'd prefer to not do it
+[16:19] <pmichaud> I don't want to provide more reasons for the stick-with-svn crowd to mispoint to "git is harder than svn"
+[16:19] <whiteknight> I think we're all intelligent to know that the complication stems from the interplay between git and svn, not from either inividually
+[16:19] <pmichaud> whiteknight: I'm not so sure about that.
+[16:19] <moritz> pmichaud: then staying with svn for now is easier
+[16:20] <whiteknight> I'm smart enough to know that government needs to stay out of my medicare, I'm smart enough to know that git-svn is different beast from git
+[16:20] <pmichaud> whiteknight: proving my point, eh?  ;-)
+[16:20] <whiteknight> "Something new and different! Kill it!"
+[16:20] <tewk> pmichaud, you are developing a patch set on top of the latest SVN HEAD.  This workflow is a little more complicated than normal git workflow, but it is a lot easier than maintaing patches or continually rebasing SVN branches to stay up to date with trunk.,
+[16:21] <pmichaud> tewk: ...except I'm not planning to do svn branches.
+[16:21] <pmichaud> at least, I don't have a need to do svn branches yet.
+[16:21] <tewk> Yes but thats the VERY BAD alternative to git-svn
+[16:21] <tewk> You shouldn't do svn-branches
+[16:22] <pmichaud> huh?
+[16:22] <tewk> I'm, agreeing with you.
+[16:22] <pmichaud> if it's easier to build in svn trunk than to use git-svn, then I should go with that.
+[16:23] <pmichaud> The downside is that it's harder for me to make intermediate commits available for others to see.
+[16:24] <pmichaud> for the early stages I could probably do things in an svn branch, and then merge back to trunk when there's a bit more substantial stuff.
+[16:24] <dukeleto> tewk: git svn fetch pulls all remote branches while git svn rebase only pulls those needed for the current branch
+[16:24] <pmichaud> and then work in trunk from there.  there shouldn't be many conflicts
+[16:28] <tewk> dukeleto, I was trying to eliminate network io, when rebasing multiple local branches, looks like git svn was smarter than me.
+[16:31] <dukeleto> tewk: it is scare like that
+[16:31] <dukeleto> s/scare/scary/
+[16:32] *** jan joined
+[16:32] <dalek> parrot: r41479 | pmichaud++ | branches/pct-rx:
+[16:32] <dalek> parrot: [pct-rx]  Create a new branch for initial regex refactor work
+[16:32] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41479/
+[16:33] <tewk> dukeleto, its the best patch-set workflow solution I've found, I love it, and have used it everyday for over a year.
+[16:34] <tewk> rebasing is a source control "comming of age" skill, once you get it, its wonderfull.
+[16:35] <dukeleto> tewk: your script looks useful
+[16:36] <dukeleto> tewk: which branch were you telling pmichaud to use git push -f on ?
+[16:37] <tewk> his local master branch, when he wants to push it to github.
+[16:37] <dukeleto> tewk: he was pushing to the master github branch then, or creating a new one? I don't think -f should be used on rakudo's master branch on github
+[16:38] <tewk> dukeleto, Right, this is a different project, it should have its own github repository.
+[16:38] <dukeleto> unless it is absolutely necessary and everyone is notified that they need git pull --rebase
+[16:38] <dukeleto> tewk: gotcha
+[16:39] <tewk> And it should be publicly known that the "projectX" github repo is a patch-set continually rebased against an upstream master.
+[16:40] <tewk> Parrot SVN in this case./
+[16:41] <dukeleto> tewk: i have a git alias similar to your script: sup    = !git stash && git svn rebase && git stash pop
+[16:41] <tewk> Looks like pmichaud decided to stick with SVN, which in this case should be very much trouble.
+[16:42] *** darbelo joined
+[16:43] <tewk> dukeleto, yours is much more concise.  I was learning git and git-svn when I wrote mine.
+[16:45] <dukeleto> tewk: yours will be easier to modify to do more complicated things, and i have a bug.
+[16:46] <dukeleto> if there is nothing to stash, my script pops the *previous* element on the stash, so it only works properly if there is actually something to stash
+[16:46] <dukeleto> tewk: your code goes the extra mile to check that, which is good.
+[16:51] <tewk> dukeleto, I knew there was a reason I spent time figuring out how to detect changes in the working-dir.
+[16:52] <tewk> Now that I think about it, I think I started with your code and ended up with my solution.
+[16:52] <tewk> Mine started as a bash alias, but same difference
+[16:57] *** particle joined
+[17:00] <dukeleto> tewk: i could fix it by stashing into a named stash, and then popping it. if the named stash isn't there, the pop should be a noop
+[17:00] <dukeleto> i'm a poet and i don't know it
+[17:04] <NotFound> Stashing into a stash... Du-du-bi-du-bi....
+[17:05] *** joeri joined
+[17:11] <dalek> parrot: r41480 | darbelo++ | trunk (3 files):
+[17:11] <dalek> parrot: [pmc2c] Error out if the pmclass declaration differs form the pmc file's basename. This was previously a warning.
+[17:11] <dalek> parrot: SKIP pmc2c tests that use this until we decide if they should be fixed or removed.
+[17:11] <dalek> parrot: Remove item from DEPRECATED.pod
+[17:11] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41480/
+[17:16] <dalek> TT #1060 closed by NotFound++: Inconsistent test failures in t/op/annotate.t
+[17:25] *** leto joined
+[17:30] *** mokurai joined
+[17:32] <dalek> close: r156 | Austin++ | trunk/ (20 files):
+[17:32] <dalek> close: NOT WORKING: Refactored Node, moved a bunch of stuff into Types, added
+[17:32] <dalek> close: IncludeFile
+[17:32] <dalek> close: review: http://code.google.com/p/close/source/detail?r=156
+[17:39] <dalek> TT #665 closed by darbelo++: Pmc2c gets confused when name in "pmclass" line mismatches the filename
+[17:41] *** zerhash joined
+[17:51] *** chromatic joined
+[17:57] *** kyle joined
+[18:04] *** kjeldahl joined
+[18:06] *** mberends joined
+[18:08] *** cotto_work joined
+[18:40] <cotto_work> it's quiet
+[18:40] <purl> yeah... TOO quiet...
+[18:40] <whiteknight> MAKE SOME NOISE
+[18:40] <cotto_work> gjnaiohawjndbnkljfaljbl;dfml;awnghq;jgnasl;gkl;aehb;laejkl;sajahgtukwb
+[18:41] <whiteknight> I've heard people say Perl is like line noise
+[18:41] <whiteknight> SO MAKE SOME PERL
+[19:01] <darbelo> Are spam tickets noise?
+[19:01] <darbelo> I can make a lot of those!
+[19:01] *** cotto_work joined
+[19:06] <dalek> TT #1063 created by darbelo++: pmc2c tests need review.
+[19:07] *** quek joined
+[19:11] <darbelo> cotto_work: What state was the pmc_pct branch in when it was abandoned?
+[19:19] <cotto_work> darbelo, I don't fully recall, but I know that it'll be nearly trivial to bring it in sync with trunk.
+[19:19] <cotto_work> btw, I'm wearing my GSoC shirt.
+[19:19] * cotto_work is happy
+[19:19] * darbelo is sill waiting on the cotton.
+[19:20] <darbelo> s/sill/still/
+[19:21] *** cconstantine joined
+[19:22] * particle forgot how to match non-newline char with qr//msx
+[19:23] <darbelo> [^\\n] ?
+[19:24] <particle> ah, i suppose that'll have to do.  \\N wasn't working, as that's perl 6 :)
+[19:25] *** AndyA joined
+[19:25] <Tene> particle: [^\\v] ?
+[19:25] <chromatic> Check this, whiteknight.
+[19:26] <whiteknight> check check it
+[19:26] <chromatic> If we allocate all arenas on megabyte (or power-of-two, but let's megabyte) boundaries, we can get the arena holding any PObj with a pointer mask of the low bits.
+[19:27] <chromatic> We can move the GC live/gray/free information into the arena structure and out of the PObj flags.
+[19:27] <chromatic> It costs a pointer mask more to get at the flags, but during GC (especially stop the world GC), we're not churning the L1/L2 caches with random access patterns.
+[19:28] <whiteknight> that's interesting
+[19:29] <whiteknight> simplifies the stack-marking code because we can check if a pointer is a PMC with a drastically simplified calculation
+[19:29] <chromatic> I didn't even think of that.
+[19:30] <whiteknight> is there any good way to guarantee that the OS will return us an arena that's aligned on a megabyte boundary?
+[19:31] <chromatic> I'm not sure.
+[19:31] <Tene> whiteknight: did you ever make a ticket with io cleanups tasklist?
+[19:31] <whiteknight> Tene: shit, no. I'm retarded
+[19:31] <whiteknight> I SWEAR I'll do it tonight
+[19:31] <Tene> whiteknight: I haven't had any time yet, due to family drama, so no problem on my end. :)
+[19:32] <Tene> So no hurries.
+[19:32] <whiteknight> (family drama) same here.
+[19:32] <chromatic> posix_memalign?
+[19:33] <whiteknight> is win32 going to have that?
+[19:34] <whiteknight> and I wonder what the performance of that is compared to a bare malloc
+[19:34] <chromatic> mmap() may be easier.
+[19:34] <Tene> we're not going to be allocating arenas that frequently, are we?
+[19:35] <darbelo> mmap, (and most other memory allocation) is randomized on OpenBSD. So make sure you have fallback mechanism.
+[19:36] <chromatic> OpenBSD doesn't let you specify the address as the first argument?
+[19:36] <darbelo> It does, sure. But it ignores it.
+[19:37] <chromatic> Ah, POSIX... so full of promise and so useless in practice.
+[19:37] <darbelo> From the man page: If addr is non-zero, it is used as a hint to the system.  (As a convenience to the system, the actual address of the region may differ from the address supplied.)
+[19:39] <whiteknight> Another idea that's great in theory
+[19:39] <whiteknight> if only operating systems could develop, and actually implement, reasonable standards
+[19:40] <darbelo> For the record. That is standards-compliant mmap() behaviour as far as I know.
+[19:42] <cconstantine> Hey guys, I'm thinking of making a new toy language in parrot on my mac.  I have macports and appear to have install parrot (the runtime) with 'sudo port install parrot'.  Is it possible to get the devel tools also?
+[19:44] <darbelo> Hmm. MAP_FIXED could save you from the address randomization.
+[19:44] <chromatic> cconstantine, is there a port called parrot-dev?
+[19:45] <chromatic> I'd rather use MAP_FIXED than sbrk.
+[19:45] <cconstantine> chromatic: nope, no port-dev
+[19:45] <cconstantine> when I do a 'port search parrot' I get a 'parrot @1.0.0 (lang, devel)'
+[19:46] <cconstantine> I'm guessing the lang,devel are options/configurations and I'm further guessing I have lang, but I have no idea how to get to devel
+[19:46] <darbelo> The OpenBSD sbrk manpage:  The brk() and sbrk() functions are historical curiosities left over from earlier days before the advent of virtual memory management.
+[19:47] <Tene> cconstantine: 1.0.0 is very old.
+[19:47] <cconstantine> :/
+[19:47] <cconstantine> so, uninstall the macport and do the manual download thing?
+[19:47] <darbelo> That would probably be better.
+[19:47] <cconstantine> k
+[19:54] <cconstantine> compiling a checkout from svn... hopefully that is recent enough ;)
+[19:54] <Tene> :)
+[19:54] <Tene> cconstantine: what sort of language are you interested in?
+[19:54] <darbelo> You could have also used the latest release too. We release every month.
+[19:55] <darbelo> But svn is better than the last release already :)
+[20:05] <cotto_work> did allison ever post that doc on pcc_rewiring?
+[20:06] <darbelo> I think she was unvailable until tomorrow.
+[20:21] <whiteknight> cotto_work: yeah, I think it was due to land Saturday morning
+[20:23] <whiteknight> I'm too excited about these refactors to just wait around forever
+[20:24] <cconstantine> Tene: a toy lisp
+[20:24] <cconstantine> Tene: I don't expect it to be really useful, but I need a project
+[20:24] <darbelo> Why does everyone start with lisp?
+[20:25] * cconstantine loves lisp.
+[20:25] <Tene> cconstantine: you might want to look at my scheme: http://github.com/tene/steme/
+[20:25] <cconstantine> Tene: thanks
+[20:25] <Tene> cconstantine: or rindolf's fork of it, spark: http://bitbucket.org/shlomif/spark/overview/
+[20:25] <cconstantine> hehe
+[20:25] <cconstantine> I'll probably just fork it
+[20:26] <darbelo> jrtayloriv was also working on a scheme recently.
+[20:26] <cconstantine> ... or borrow some code... I'm not really looking *for* a lisp, I'm looking to *implement* one
+[20:26] *** dukeleto joined
+[20:26] <dukeleto> 'ello
+[20:26] <Tene> hi leto
+[20:26] <darbelo> Well, PCT will probably make it very easy.
+[20:27] <Tene> cconstantine: Yes, steme is very basic.  Just a s-exp parser and a few builtins.
+[20:27] <Tene> cconstantine: it's what I use for my PCT presentations. :)
+[20:27] *** ash_ joined
+[20:27] <cconstantine> hehe
+[20:27] <Tene> So, IMO, it's a good first project with PCT.
+[20:28] <cconstantine> I started on llvm... but I don't really want to write a GC, and interop with both perl and python would be really nice
+[20:28] <cconstantine> I got as far as lex/bison gramar stuffs... didn't get much further
+[20:28] <Tene> ew, they're no fun compared to PGE. :)
+[20:29] <cconstantine> it was shades of my undergrad compilers class
+[20:30] <cconstantine> I've spent a grand-total of maybe an hour looking at parrot so I have no idea how easy it'll be, but the docs all make it sound like it's easier
+[20:30] <cconstantine> and more stable... llvm was scary
+[20:30] <whiteknight> it's rediculously easy
+[20:30] <cconstantine> llvm wasn't scary for the tech... it was scary because of the docs
+[20:30] <whiteknight> we're actually going to be using LLVM as our JIT backend eventually. So you'll get all the power and none of the hassle
+[20:31] <cconstantine> awesome
+[20:31] <cconstantine> I like to hear that
+[20:31] <whiteknight> yeah, the docs are lousy from what I've seen
+[20:31] <whiteknight> of course, our docs aren't much better
+[20:31] <cconstantine> I don't think I really want an LL vm, I really want a HL vm
+[20:31] <Tene> cconstantine: The commit log of steme is intended to be an easy intro to building a compiler on Parrot, so should be easy to read.
+[20:31] * cconstantine gasps!
+[20:31] <cconstantine> Tene: thanks :)
+[20:32] <ash_> whiteknight: I have been doing some more work with the llvm-c bindings, they are pretty comprehensive but not at all as easy as C++
+[20:32] <darbelo> say, does steme do macros?
+[20:33] <Tene> darbelo: No, but I've been doing a lot of thinking about how to do them in PGE.
+[20:33] <cconstantine> PGE =? Perl Grammar Engine?
+[20:33] <Tene> Parrot Grammar Engine
+[20:33] <cconstantine> ah
+[20:33] <whiteknight> ash_: we can handle things that aren't easy. So long as it's possible we will make it work
+[20:34] <darbelo> P usually means Parrot on parrot :)
+[20:34] <cconstantine> ok
+[20:34] <ash_> when I finish translating the llvm-jit example to C (so it can load llvm-bitcode dynaimcally and jit it) i'll send you a link to show you , its not as documented as it should be though
+[20:34] <Tene> darbelo: any specific reason you're asking?
+[20:34] <Tene> darbelo: I'm waiting until after pmichaud's upcoming PGE refactor/rewrite to start playing with it.
+[20:34] <whiteknight> ash_: Hard part is just figuring out how we want to implement the interface. Do we want a "compile" op, or do we want a "JITEngine" PMC, or something different entirely?
+[20:34] <ash_> i am basing most of my translation from the ocaml bindings http://llvm.org/svn/llvm-project/llvm/tags/RELEASE_25/bindings/ocaml/
+[20:35] <ash_> beats me, i am just trying to figure out how it all works together and how it all works with C at the moment
+[20:36] <ash_> but i think if you translated the PASM opt codes into JIT operations and ran that it would be pretty efficient
+[20:37] <chromatic> Maybe we need a tracing runcore that can hand off a stream of ops to a JIT.
+[20:40] <ash_> but also, the llvm may not be the only way to do a JIT system, once I get a something working with it that JIT's then can try comparing it to libjit
+[20:40] <darbelo> Tene: cconstantine mentioned writing a lisp, and that got me curious. I don't really know that much PCT.
+[20:43] <darbelo> What tlittle PCT I know makes me think they'd be tough to get right.
+[20:43] <Tene> darbelo: not so much, no.
+[20:44] <ash_> whiteknight: http://blog.fallingsnow.net/2008/05/23/simple-vm-jit-with-llvm/ is what i am doing my example based off of, i have the C++ one working, but I am trying to tralsnate the C++ parts into C, i think its one of the better examples of how to use the llvm-jit system
+[20:44] <whiteknight> ash_: Yeah, I printed that out yesterday when you mentioned it and have been reading it intently
+[20:44] <darbelo> As I said, I don't really know that much PCT.
+[20:44] <whiteknight> darbelo: it's crazy easy. You should write a small compiler to test it out
+[20:45] <Tene> darbelo: after you parse a macro definition, you compile it into a match and register it in some global or lexical variable, and then in your parser, you have a rule that checks the global or lexical or whatever variable for alternatives to try.
+[20:45] <Tene> Approximately.
+[20:46] <whiteknight> chromatic: we're going to want an API for it that allows JITing methods as a unit, creating thunks for NCI functions, and compiling programs as a whole for AOT
+[20:46] <ash_> if you run it, it shows the various dis assembled version of the bitcode, its kind of cool seeing how it translates down then how the JIT + optimizations translate it further into 1 body execution with all the functions inlined, it cut the code down significantly when you compare the original 3 functions to the final one that resulted in an inline
+[20:46] <whiteknight> so an op is probably not right for all that (although certainly interesting possibility!), but a PMC might be
+[20:47] <darbelo> Hmm. Simpler than I expected. PCT++
+[20:47] <whiteknight> ahs_: yeah, it is a cool example
+[20:47] <pmichaud> pct will soon get even simpler :)
+[20:47] <darbelo> pmichaud++ too, then.
+[20:47] <Tene> darbelo: none of those are actually trivial... I'm hoping that once PGE gets protoregexes, I can just compile macros down into a protoregex.
+[20:48] <pmichaud> in particular, we should be able to get rid of the Perl6Grammar steps
+[20:48] <whiteknight> yeah, soon you'll be able to write a compiler with crayons, construction paper, glue, and elbow noodles
+[20:48] <whiteknight> don't get no easier then that
+[20:48] <Tene> I haven't looked at that in depth yet, though.
+[20:49] <pmichaud> also, "PGE" may disappear as a standalone component (more)
+[20:49] <pmichaud> more precisely, the new protoregex features will show up in PCT::Regex instead of in PGE
+[20:49] <pmichaud> (PGE will continue to exist to provide backwards compat for existing projects)
+[20:50] <whiteknight> I have a lot of updating to do for Matrixy anyway, so I'll gladly bump it up to use the new stuff
+[20:50] <whiteknight> haven't done any development on it in months, so it needs a lot of TLC
+[20:51] <jrtayloriv> Anyone know who maintains the PIR .el (emacs lisp) file?
+[20:51] <whiteknight> ...nobody?
+[20:52] <darbelo> jrtayloriv: Firs sucker to ask ;)
+[20:53] * whiteknight leaves. later
+[20:53] <jrtayloriv> grrrrrr .... having really annoying tab issues, and I have yet to take the time to learn how to write emacs lisp yet ... but I guess I'll have more luck with all of the reading I've been doing on Scheme lately though ;-)
+[20:58] <particle> jrtayloriv: svn log is your friend
+[20:58] <particle> or  svn blame for that matter
+[20:58] <jrtayloriv> particle, Ah -- thanks :)
+[21:01] *** bluescreen joined
+[21:09] <jrtayloriv> I'd like to initialize the environment of my compiler with several "builtin" procedures. But I'd like them to be stored in lexical variables that hold references to anonymous subroutines. How can I create a big file that just initializes a bunch of variables like this inside the top PAST::Block?
+[21:09] <jrtayloriv> (Sorry if that doesn't make sense, I'm still trying to piece together exactly what it is that I want to do here ...)
+[21:11] <jrtayloriv> I could do it by just writing it into the actions.pm obviously, but I'm trying not to clutter it up with hundreds of lines of initialization code.
+[21:12] <jrtayloriv> I'm looking for some way to just define those variables inside of that PAST::Block from an external file ...
+[21:16] <jrtayloriv> I see builtins.pir, but I don't think that does what I want (correct me, if I'm wrong about this) ... I want certain symbols (variables) to be bound to standard functions during the initialization of the environment. But those symbols can be changed to point to different procedures (or strings, lists, numbers, etc) afterwards.
+[21:17] *** cconstantine_ joined
+[21:17] <dalek> decnum-dynpmcs: r187 | darbelo++ | trunk/ (6 files):
+[21:17] <dalek> decnum-dynpmcs: Add copyright statements and license comments to pmc files.
+[21:17] <dalek> decnum-dynpmcs: review: http://code.google.com/p/decnum-dynpmcs/source/detail?r=187
+[21:21] *** bacek joined
+[21:22] <darbelo> jrtayloriv: you want to be able to rebind the names of your built in functions at runtime?
+[21:22] <jrtayloriv> darbelo, Yes, to point to either other functions or to data.
+[21:23] <darbelo> Why not construct a lookup table?
+[21:23] <jrtayloriv> So for instance 'define' is a builtin in scheme, but I can say (set! define 5), and then define just points to the constant value 5 from then on.
+[21:24] <jrtayloriv> Well, I've already got lexical variables, which do exactly what I want (I think), so I just wanted to use those.
+[21:28] <jrtayloriv> For instance, the way that names are resolved (don't know the "technical" term for this ...) with lexical variables in PIR is exactly how the bindings of scheme's identifiers are looked up.
+[21:29] <darbelo> So, your builtins are free-floating pieces of code, and you want to give them names at load-time.
+[21:29] <Tene> jrtayloriv: I'd just define the builtins as global functions, possibly in some alternate namespace, and then have a standard program prelude that fetches the builtins into local lexical variables.
+[21:30] <darbelo> (set! set! set!) ?
+[21:31] <Tene> IA! IA! IA!
+[21:31] <Tene> cthulhu fhtagn!
+[21:33] <jrtayloriv> darbelo, Yes - the builtins would just be variables holding references to anonymous subs in the scope of the TOP PAST::Block.
+[21:34] <jrtayloriv> Tene, So you mean declare them in builtins.pir as usual?
+[21:34] <darbelo> I would declare them in builtins.pir under a separate 'compiler-private' namespace.
+[21:35] <dukeleto> Tene: the hp lovecraft film festival is in Portland in 1 week :)
+[21:36] <darbelo> And then have the compiler emmit the pir to initialize those variables to the magic compiler-prive functions.
+[21:37] <jrtayloriv> darbelo, Where would I include that file to declare them in the proper scope?
+[21:37] <jrtayloriv> bah ... I'll come back when I've done a bit more reading, so I can ask intelligent questions. Thanks for the help so far.
+[21:38] <darbelo> Include files?
+[21:39] <Tene> dukeleto: I'll be in Seattle from Sunday to Friday.
+[21:39] <dalek> lua: 6749a5b | fperrad++ | src/pmc/luatable.pmc:
+[21:39] <dalek> lua: remove struct LuaHash (refactor with ATTR)
+[21:39] <dalek> lua: review: http://github.com/fperrad/lua/commit/6749a5ba8d9b99fc204439e279c95b63c475dd7b
+[21:43] <darbelo> Hm, does lua work with an installed parrot?
+[21:43] <jrtayloriv> darbelo, Yeah, I think my problem is that I'm not grokking namespaces and scoping well enough ... or how actions.pm interacts with compiler.pir ... basically -- I'm really not even sure which questions I should be asking at this point. I'll come back when I am ;)
+[21:44] <Tene> darbelo: if not, it's a bug, and should be fixed.
+[21:45] <darbelo> I cant convince it to find my parrot_config.
+[21:46] <darbelo> But I just looked in Configure.pl and it seems to think it still lives in the parrot tree.
+[21:48] <darbelo> Ah, it has to be in the $PATH
+[21:53] <darbelo> Tene: I think some paths assume lua is still in laguages/
+[21:53] <Tene> darbelo: oops.
+[21:54] <darbelo> INC contains: /home/darbelo/parrot/lua/t/../../../lib
+[21:56] <darbelo> making a symlink to lib in my home dir somewhat solves it, but I don't consider it a permanent solution.
+[21:56] <darbelo> :)
+[21:57] <darbelo> Oh, and the makefile half-misbehaves under non-GNU makes.
+[21:57] <NotFound> make: *** No rule to make target `t/lua-TestMore/src/Test/More.lua', needed by `Test/More.pir'.  Stop.
+[21:58] <NotFound> This is with gnu make
+[22:01] <darbelo> I get that too after fixing the other stuff.
+[22:03] <Tene> does lua support modules yet?
+[22:03] <nopaste> "NotFound" at 213.96.228.50 pasted "Lua fixes for C++ build" (350 lines) at http://nopaste.snit.ch/18062
+[22:03] <Tene> It would be great to add inter-hll support to lua, and add it to our list of inter-compatible languages. :)
+[22:07] *** cconstantine_ joined
+[22:13] <darbelo> It needs some portability touchups in the build department.
+[22:14] <darbelo> This is Yak #42 in the shaving list.
+[22:16] <darbelo> As does anything generated with mk_language_shell.pl for that matter.
+[22:20] <dalek> parrot: r41481 | mikehh++ | trunk/config/gen/makefiles/root.in:
+[22:20] <dalek> parrot: get make cover to run all the tests make fulltest does
+[22:20] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41481/
+[22:24] <Tene> argh, I need to just take a full week off to work on Parrot stuff full time to trim down my tasklist.
+[22:25] <mikehh> Tene: how about a month :-}
+[22:25] <Tene> I wish.
+[22:34] *** kid51 joined
+[22:45] *** davidfetter joined
+[22:50] *** davidfetter joined
+[22:51] <dalek> parrot: r41482 | jkeenan++ | trunk/config/init/defaults.pm:
+[22:51] <dalek> parrot: Removing old inline comment in order to resolve �http://rt.perl.org/rt3/Ticket/Display.html?id=41500.
+[22:51] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41482/
+[22:56] *** Whiteknight joined
+[23:02] <dalek> parrot: r41483 | jkeenan++ | branches/library_files/lib/Parrot/Harness/DefaultTests.pm:
+[23:02] <dalek> parrot: Eliminate t/doc/*.t -- directory no longer exists -- from @standard_tests, per comment from mikehh++ in https://trac.parrot.org/parrot/ticket/1061.
+[23:02] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41483/
+[23:09] *** tokuhirom____ joined
+[23:09] <mikehh> kid51: at the moment I have got make fulltest and make cover running the same tests - see r41481
+[23:10] *** bacek joined
+[23:11] <kid51> Okay -- but as I've worked on this TT I've realized that there are a variety of issues involved here, above and beyond Coke's original complaint.
+[23:12] <kid51> Mainly:  that our notion of what our "default tests" has stretched and become confusing over time.
+[23:13] <kid51> A couple of years back, I would have expected @Parrot::Harness::DefaultTests::default_tests to be either:
+[23:14] <kid51> (a) the set of tests run by default by 't/harness' without any options;
+[23:14] <kid51> and/or
+[23:14] <kid51> (b) the set of tests run by the most common 'make' target:  'make test'
+[23:15] <kid51> It turns out that that array no longer describes either t/harness or make test very well.
+[23:15] <kid51> As you note in ticket, at one point some npq tests were tacked on to 'make test'
+[23:16] <mikehh> kid51: yes - I think make test runs an initial test t/op/annotate which I might need to incorporate in make fultest/cover
+[23:16] <kid51> ... and t/harness subtracts tests from @Parrot::Harness::DefaultTests::default_tests in its most basic operation
+[23:18] <kid51> So I think we need some discussion of what 't/harness', 'make test', 'make fulltest', etc. *ought* to mean.
+[23:19] <kid51> How quickly -- or, more likely, slowly -- does 'make cover'
+[23:19] <kid51> 'make cover' run?
+[23:20] <mikehh> I can run most of the tests using options like TEST_JOBS=5 - which speeds things up a lot on multicore/multithreaded systems - however you can't do that on make cover - it will blow up
+[23:21] <kid51> I've never actually run 'make cover' -- even though I've done coverage on the configure and build tools hundreds of times.
+[23:21] <mikehh> so it takes me about an hour to run as opposed to make fulltest which takes about 10 minutes
+[23:22] <kid51> That's what I would have expected.
+[23:22] <mikehh> you need Devel::Cover installed
+[23:22] <kid51> When I do my configure/build tests coverage, it's probably about the same ratio
+[23:26] <mikehh> I think bacek has some script that runs it - can't find the url at the moment
+[23:36] *** chromatic joined
+[23:37] <chromatic> http://www.modernperlbooks.com/mt/2009/09/genericity-versus-optimization.html
+[23:43] <darbelo> (Replace Conditional with API)++
+[23:46] <chromatic> Having replaced runtime conditionals with APIs a few times now, I feel confident in my ability to turn a phrase.
+[23:53] <dalek> parrot: r41484 | jkeenan++ | branches/library_files/lib/Parrot/Harness/DefaultTests.pm:
+[23:53] <dalek> parrot: Modify documentation to reflect fact that exported arrays hold paths to directories containing files, not files themselves.
+[23:53] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/41484/
+[23:53] <dalek> TT #1064 created by brianwisti++: [PATCH] test documenting difference between $I1 and $I01

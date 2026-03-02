@@ -1,0 +1,129 @@
+[00:13] *** rurban1 joined
+[01:14] *** rurban1 joined
+[01:39] *** rurban1 joined
+[03:43] *** cxreg joined
+[04:06] *** plobsing joined
+[04:31] *** Psyche^ joined
+[04:54] *** woosley joined
+[05:11] *** woosley joined
+[05:21] *** woosley joined
+[05:25] *** woosley joined
+[05:28] *** woosley joined
+[05:33] *** woosley joined
+[05:37] *** woosley joined
+[05:42] *** woosley joined
+[05:52] *** woosley joined
+[06:04] *** woosley joined
+[06:46] *** cooper joined
+[06:59] *** FROGGS joined
+[07:28] *** basiliscos joined
+[12:38] *** cogno joined
+[13:22] *** kshannon joined
+[13:42] *** bluescreen joined
+[14:25] *** benabik joined
+[14:26] *** rurban1 joined
+[15:07] *** FROGGS joined
+[16:42] *** Chirag joined
+[17:17] *** basiliscos joined
+[18:01] *** user_2906 joined
+[18:03] *** benabik joined
+[18:14] <Chirag> rurban: Hey! Thanks a lot for your help with my proposal :) .. My (final) exams are from 4th May to 15th May (and that would mark the end of the semester :D)
+[18:18] <Chirag> I prepared my github account today, forked parrot and created a remote to parrot (the original repo) ..
+[18:21] <Chirag> Since I still have a few days before my exams, I was wondering if I should start working on the first task - adding GC write barriers?
+[18:29] *** rurban1 joined
+[18:35] <rurban> If you feel well enough, why not.
+[18:36] <rurban> you can add them manually to the ops or improve the compiler to add it. Best would be to add {} to each branch which does an early return. Only early returns need to add these barriers
+[18:38] <rurban> git checkout rurban/pmc2c_orig
+[18:38] <rurban> and then check the TODO GC write barrier warnings
+[18:38] <rurban> Like TODO GC write barrier to default.pop_float
+[18:38] <rurban> TODO GC write barrier to default.pop_integer
+[18:38] <rurban> TODO GC write barrier to default.pop_pmc
+[18:38] <rurban> TODO GC write barrier to default.pop_string
+[18:38] <rurban> TODO GC write barrier to default.shift_float
+[18:38] <rurban> TODO GC write barrier to default.shift_integer
+[18:38] <rurban> TODO GC write barrier to default.shift_pmc
+[18:39] <rurban> TODO GC write barrier to default.shift_string
+[18:42] <rurban> e.g. look at capture.c then:
+[18:42] <rurban> CAPTURE_array_CREATE(interp, _self, array);
+[18:42] <rurban> return VTABLE_shift_float(interp, array);
+[18:42] <rurban> /* need PARROT_GC_WRITE_BARRIER(interp, _self); before return */
+[18:42] <rurban> so it needs to transform return VTABLE_shift_float(interp, array); to
+[18:42] <rurban> PARROT_GC_WRITE_BARRIER(interp, _self);
+[18:43] <rurban> return VTABLE_shift_float(interp, array);
+[18:43] <rurban> nope. better use intermediates for the result.
+[18:44] <rurban> so FLOATVAL tmp;
+[18:44] <rurban> CAPTURE_array_CREATE(interp, _self, array);
+[18:44] <rurban> tmp = VTABLE_shift_float(interp, array);
+[18:44] <rurban> PARROT_GC_WRITE_BARRIER(interp, _self);
+[18:44] <rurban> return tmp;
+[18:46] <Chirag> so all other barriers have to be written in the same way?
+[18:46] <rurban> so basically every PMC which returns a value and calling return VATBLE_method needs to add the write barriers for self
+[18:46] <rurban> yes
+[18:47] <Chirag> after writing them, how do i test?
+[18:47] <rurban> rurban/pmc2c_orig already detects and marks all the cases correctly. it just doesn't do the transforms yet
+[18:47] <rurban> make should print no TODO GC write barrier warnings
+[18:48] <rurban> benabik is right person to ask how the write barriers internally work
+[18:48] <rurban> I need to look it up also later
+[18:48] <benabik> What?
+[18:48] <rurban> hi. do we need write barriers in pmcs only for self, or also for intermediate return values?
+[18:49] <rurban> like in Capture_shift_float
+[18:49] <benabik> The specific rule is any time you save a value to a new PMC in an old PMC.
+[18:49] <benabik> The old PMC is the one that gets barriered.
+[18:50] <rurban> sounds good
+[18:50] <benabik> Lemme check Capture_shift_float.  Been a while since I’ve used Parrot’s WB...
+[18:51] <rurban> so it's mostly self, but sometimes we have some other pmc args (pmc *old)
+[18:51] <rurban> Capture_shift_float is just some simple example
+[18:51] <rurban> CAPTURE_array_CREATE(INTERP, SELF, array);
+[18:51] <rurban> return VTABLE_shift_float(INTERP, array);
+[18:52] <rurban> Here  we can add the write barrier between the CREATE and the VTABLE call
+[18:52] <rurban> so we don't need an intermediate value for the result value
+[18:53] <rurban> because the VTABLE call doesnt touch SELF
+[18:54] <benabik> In that case, I’ll point out that CAPTURE_array_CREATE already calls PARROT_GC_WRITE_BARRIER
+[18:54] <rurban> so these rules need to be codified in the pmc2c transformer
+[18:55] <rurban> ah yes. hmm. maybe we should add all the missing barriers manually
+[18:55] <benabik> Yeah, WB are tricky to add automatically.
+[18:55] <rurban> and just mark it in pmc2c as already done
+[18:55] <benabik> The best you can really do is WB any PMC you use but don’t create yourself.  And that’ll pessimize GC a lot.
+[18:57] <Chirag> a new PMC is when SELF is passed, right?
+[18:57] <rurban> no. SELF is the old pmc. a new is either the return value of PMC, or another PMC arg which is modified upon some values from SELF
+[18:58] <benabik> The simplest rule is “if you use a PMC you didn’t create, write barrier it”
+[18:58] <rurban> good
+[18:58] <Chirag> will remember that
+[18:58] <Chirag> :)
+[18:58] <benabik> You’ll probably add some you didn’t need, but that’s better than missing some you did.
+[18:58] <rurban> So e.g for capture.pmc add a comment like /* no PARROT_GC_WRITE_BARRIER, already in CAPTURE_array_CREATE */
+[18:59] <rurban> and then check the compiler for this comment
+[18:59] <rurban> I'll create a ticket for it
+[18:59] <Chirag> alright!
+[19:15] <rurban> https://github.com/parrot/parrot/issues/1069
+[19:17] <rurban> can some gh admin add user chirag. I still have no admin rights there.
+[19:17] <rurban> Chirag: what's your github username?
+[19:18] <rurban> you need to fork parrot
+[19:19] <rurban> your fork will then appear at https://github.com/parrot/parrot/network/members
+[19:19] <rurban> and then you can add simple pull requests
+[19:21] <rurban> note that we write SELF in the .pmc file, which gets transformed to _self in the .c file
+[19:21] <rurban> same for INTERP
+[19:23] <Chirag> i use ZYROz as a nick
+[19:23] <rurban> updated
+[19:24] <Chirag> forked already
+[19:24] <rurban> name your branch ZYROz/pmc2_orig then
+[19:24] <Chirag> ok..
+[19:25] <rurban> or better ZYROz/pmc2_orig2-gh1069, it will be an improvement over rurban/pmc2_orig
+[19:25] <Chirag> sure
+[19:25] <rurban> this should be good enough work for a few days
+[19:26] <Chirag> yes :)
+[19:26] <Chirag> I ll keep looking up the docs as I go along..
+[19:30] <Util> #ps time
+[19:30] *** rurban1 joined
+[19:52] *** rurban1 joined
+[20:13] <Chirag> I cant get past this - make: *** [runtime/parrot/library/nqp-setting.pbc] Aborted (core dumped)
+[20:14] <Chirag> this happens during make install
+[20:34] <Chirag> rurban: make install fails for rurban/pmc2_orig ..  make: *** [runtime/parrot/library/nqp-setting.pbc] Aborted (core dumped)
+[21:04] <rurban> don't do make install. work just from the git dir
+[21:05] <rurban> because rurban/pmc2_orig is not ready yet. lots of wrong WB
+[21:07] <rurban> see commit d2a039e48567a0d49945bf89b36cae6974273484 where I added the GC WB checks
+[22:06] <basiliscos> Good to know that Chirag is going to devep parrot with new forces.
+[22:06] <basiliscos> I'm still stucked at documentation,
+[23:24] *** rurban1 joined
+[23:26] *** rurban2 joined
+[23:51] *** benabik joined

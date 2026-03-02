@@ -1,0 +1,1455 @@
+[00:00] <Infinoid> I've also got a "src/inter_call.c:390: failed assertion 'PObj_is_PMC_TEST(sig_pmc)'" from t/spec/S12-class/declaration-order.t, which somehow wasn't reported as a failure in the harness summary
+[00:00] <pmichaud> Infinoid: that's a known failure.
+[00:00] <Infinoid> ok
+[00:00] <pmichaud> that one is in trunk also.
+[00:00] <allison> pmichaud: yeah, don't block the branch merge on Lua/Closure
+[00:00] <pmichaud> the declaration-order.t and increment.t tests are known failures.
+[00:00] <Infinoid> ok, I'll see if I can get some more info about the others
+[00:00] <pmichaud> Infinoid: try running them directly from command line
+[00:00] <jonathan> pmichaud: NQP passes all here.
+[00:00] <pmichaud> yes, gc bug somewhere.
+[00:01] <jonathan> OK
+[00:01] <pmichaud> dinnertime here... I'll backscroll reports a bit later
+[00:01] <jonathan> ok
+[00:01] * jonathan will prob sleep soonish
+[00:01] *** bacek_ joined
+[00:02] <Infinoid> all of the tests I listed before are marked as TODO, yet they were reported by the harness summary for some reason.  -G has no effect on them.
+[00:03] <Infinoid> sorry for the false alarm.  things are looking pretty good
+[00:05] *** bacek joined
+[00:07] <Infinoid> maybe it was reporting TODO passes, there are several of those.
+[00:09] *** AndyA joined
+[00:14] <dalek> r33168 | allison++ | pdd22io_part2:
+[00:14] <dalek> : [pdd22io] Update Unicode string tests to use new way of setting UTF-8 encoding
+[00:14] <dalek> : on a filehandle.
+[00:14] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33168
+[00:18] *** Whiteknight joined
+[00:22] *** tetragon joined
+[00:26] *** cognominal joined
+[00:29] <Infinoid> ok, I'm confused.  t/spec/S06-signature/type-capture.t, t/spec/S04-statements/next.t and t/spec/S04-statement-modifiers/if.t run fine from the command line, but when run under the harness, they get "No subtests run".  that doesn't seem to be the case in trunk.  (if.t fails 4 tests in trunk, but they all at least run.)
+[00:31] <jonathan> That's...odd.
+[00:31] <chromatic> The harness adds extra flags.
+[00:31] <chromatic> They might be aborting on exit thanks to a double free.
+[00:32] <Infinoid> no extra flags according to "ps ax | grep parrot".  something in the environment, perhaps?
+[00:35] * Infinoid attaches gdb to parrot running under the harness
+[00:35] <chromatic> Try -D40
+[00:35] <Infinoid> ah, the old if(!VTABLE_does(interp, p_arg, CONST_STRING(interp, "hash"))) segfault trick.
+[00:36] <Infinoid> odd that it crashes under the harness but not on the command line, given that they are both run with exactly the same args.
+[00:37] <chromatic> That's a segfault?
+[00:37] <Infinoid> that's a segfault, p_arg's vtable is 0xdeadbeef
+[00:37] <Infinoid> I nopasted a backtrace of that a little while ago, http://nopaste.snit.ch/14711
+[00:38] <Infinoid> that was from a different spectest.  it seems to have migrated
+[00:39] <Infinoid> pmichaud said he was seeing the same thing in an nqp test.
+[00:41] <chromatic> Oh, those are easy to trace.
+[00:41] <chromatic> Break on the return value of new_pmc_header.
+[00:46] <Infinoid> conditional breakpoints make gdb slow.  let me guess, once it's there, put a watchpoint on the address of pmc->vtable, right?
+[00:48] <chromatic> Nah, that'll only tell you that src/gc/dod.c poisons the vtable.
+[00:49] <chromatic> Look for what *allocates* the PMC and that'll give you better hints as to why it gets collected early.
+[00:50] <Infinoid> wow, these backtraces are getting big.
+[00:51] <nopaste> "Infinoid" at 96.238.213.50 pasted "backtrace of the dying PMC's allocation" (365 lines) at http://nopaste.snit.ch/14714
+[00:52] <Infinoid> ooh, pretty sunset
+[00:52] <chromatic> I hate "Class %Ss already registered."
+[00:52] <jonathan> oh, it's that fun exception
+[00:53] <jonathan> Did anyone manage to track down that's beneath that yet?
+[00:54] <jonathan> (Put another way: is it a "we know what it is and don't know how to fix it", or a "we don't know what it is"?)
+[00:55] <chromatic> I don't know what it is.  I don't know if anyone else knows what it is.
+[00:55] <chromatic> I do wonder "What happens when code run from an exception handler throws an exception?"
+[00:56] <jonathan> Perhaps, this... :-)
+[00:57] <Infinoid> hardware CPU designers typically reserve a special place in hell for software that does that.
+[00:57] <chromatic> Just a thought.
+[00:57] <purl> it has been said that Just a thought. is _smtp_code_220 really an object method ?
+[00:58] <Infinoid> that said, having an error in a catch block isn't really that evil, and should be handled gracefully
+[00:58] <pmichaud> back again.
+[00:59] <chromatic> There's "should be" and there's "is" and I don't know the difference here.
+[00:59] <Infinoid> hey Pm.  I think the other errors I was seeing were other instances of the same segfault you were seeing in nqp.
+[00:59] <pmichaud> yes, I think so also.
+[00:59] <pmichaud> I'm going to have to increase my gdb-fu though.
+[00:59] <Infinoid> I've posted a backtrace of where that PMC was allocated, if it helps.
+[00:59] <Infinoid> in half an hour, I should have more time for digging through it
+[00:59] <pmichaud> my best guess is that tailcalls are releasing the context containing the arguments before they get processed.
+[01:00] <pmichaud> it was allocated from init_first_dest_named?
+[01:00] <chromatic> Yes.
+[01:00] <pmichaud> okay then, my guess would be wrong.  Or at least not indicated by this backtrace.
+[01:00] <pmichaud> that actually makes me happier.
+[01:01] <pmichaud> how can I find the equivalent for my segfault in nqp?
+[01:01] <pmichaud> that ought to be much simpler to debug/trace (smaller code and all that)
+[01:01] <chromatic> Find the PMC with the invalid vtable.
+[01:02] <chromatic> Then break on new_pmc_header's return value (break src/pmc.c:xx if retval == 0x....)
+[01:04] <pmichaud> (gdb) break src/pmc.c:238 if pmc == 0x82688a8
+[01:04] <pmichaud> didn't seem to do it.
+[01:05] <pmichaud> I'll try...
+[01:07] <nopaste> "pmichaud" at 72.181.176.220 pasted "backtrace of gc'd pmc header" (33 lines) at http://nopaste.snit.ch/14715
+[01:07] <chromatic> RetContinuation getting recycled early?
+[01:08] <pmichaud> could be, especially on a tail call.
+[01:08] <pmichaud> or other things.  Will keep looking...
+[01:10] <pmichaud> src/inter_call.c:2677
+[01:10] <pmichaud> set_context_sig_returns(interp, ctx, indexes, ret_x, result_list);
+[01:10] <pmichaud> ...that looks suspicious.
+[01:11] <chromatic> The ctx parameter?
+[01:12] <pmichaud> yes.
+[01:12] <pmichaud> the ctx might have already been reclaimed by the time we get back from runops.
+[01:13] <pmichaud> since the return continuation that was holding it for us will have already been invoked (and released)
+[01:15] <chromatic> Makes sense.
+[01:15] <pmichaud> trying it now.
+[01:16] <pmichaud> that didn't appear to fix it.
+[01:17] *** gmansi joined
+[01:19] <pmichaud> I'll step through a few things in that area and see what happens.
+[01:20] <dalek> r33169 | Whiteknight++ | trunk:
+[01:20] <dalek> : [Book] Update some things in the beginning of chapter 5, reference some things from the PIR chapters, and delete some stuff that I know to be deprecated or removed entirely.
+[01:20] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33169
+[01:21] <Whiteknight> chromatic, pmichaud, if you guys find a solution to this problem let me know, I think it will affect a problem I've been having
+[01:21] <Whiteknight> in fact, if you need me to help with anything, let me know
+[01:21] <pmichaud> will do.
+[01:21] <pmichaud> I might need some questions answered about argument handling at some point.
+[01:21] <Whiteknight> ...and if you don't want my help, keep it to yourself :)
+[01:22] <Whiteknight> Hell, I might need some questions answered about argument handling too
+[01:22] <Whiteknight> If there was ever a case to make parrot stack-based, it's our messy argument passing conventions
+[01:23] <chromatic> I'm not sure that would help.
+[01:23] <pmichaud> well, I think that's because they were bolted on to something that was kinda stack based.  :-)
+[01:24] <chromatic> Every time we mix C calling conventions and PIR calling conventions we run into trouble.
+[01:24] <Whiteknight> it's trouble that we are going to need to clear up eventually
+[01:25] <Whiteknight> for performance, if not for our sanity
+[01:30] <Whiteknight> time to go, talk to you gentlemen later
+[01:33] <Infinoid> I think he must have been talking about you guys.
+[01:33] <Infinoid> ok.  so how can I help?
+[01:40] <allison> chromatic: re "mixing calling conventions" yes, they need to be merged as much as possible
+[01:41] <chromatic> I intend to send mail to the list raising the possibility of making MMD variants in vtables use PCC not CCC.
+[01:41] <allison> well, CCC is collapsing into PCC
+[01:42] <allison> that is, everything is going through pcc_invoke
+[01:42] <allison> (one of the pcc_invoke variants
+[01:42] <allison> )
+[01:42] <allison> chromatic: though, MMD is already using pcc_invoke
+[01:42] <chromatic> Yeah, through the ops->CCC->MMD->NCI->CCC conversion chain.
+[01:43] *** gmansi joined
+[01:43] <allison> chromatic: that's just because everything is using that chain at the moment
+[01:43] <allison> chromatic: agreed that PCC needs some simplification still
+[01:44] <chromatic> If VTABLE_cmp always does multidispatch, why even have cmp as a vtable entry?
+[01:44] <allison> because it doesn't always do multi dispatch
+[01:44] <allison> several PMCs have VTABLE_cmp overridden
+[01:44] <chromatic> To do multi dispatch.
+[01:45] <allison> no, to do single dispatch
+[01:45] <chromatic> Hm, if only single dispatch were a degenerate case of multi dispatch....
+[01:45] <allison> the default PMC does multidispatch, so multi happens anywhere a VTABLE_cmp isn't defined
+[01:45] <allison> the expensive part of multidispatch is the lookup
+[01:46] <allison> the call is cheap
+[01:47] <chromatic> I have code which proves otherwise.
+[01:47] <allison> is this code after you revamped the look up process? or using a cache?
+[01:49] <chromatic> Yes.
+[01:49] <allison> okay, well that changes the game :)
+[01:49] <allison> pcc_invoke definitely needs some streamlining
+[01:50] <chromatic> It's all of the conversions which throw away information and marshall and unmarshall the same known arguments in and out of generic datastructures that makes things slow.
+[01:50] <allison> but, better to have one call path and streamline that one path, than keep going with what we have now (which is half-a-dozen different call paths)
+[01:50] <chromatic> In an op, we know the name of the MMD call and the name and (often) types of its arguments.
+[01:50] <chromatic> We convert that to C calling conventions and throw away some type information.
+[01:51] <chromatic> Then we call the MMD dispatcher, converting the C-style arguments into varargs, throwing away all type information.
+[01:51] <chromatic> Then we unpack them, parsing a string to get back some type information.
+[01:51] <allison> chromatic: so, at the moment pcc_invoke is bolted on top of another argument passing scheme, but part of the calling conventions refactors is to make pcc_invoke *the* argument passing strategy
+[01:52] <chromatic> Then we shove them into a PMC (which contains at least one other PMC), which we pass elsewhere to look up the proper MMD variants.
+[01:52] <chromatic> That often hits a cache, now.
+[01:52] <allison> so, you can build a CallSignature from within the MMD lookup, and make a call with that directly
+[01:52] <chromatic> The madness hasn't ended yet though.
+[01:52] <allison> cutting out several layers of indirection
+[01:52] <allison> it's stages of refinement
+[01:53] <chromatic> We take that PCC-style dispatch and call an NCI PMC, which unmarshalls the arguments into a C-style system and invokes a function pointer.
+[01:53] <pmichaud> ick, I'm in a maze of twisty argument passing code, all opaque.
+[01:53] <chromatic> Which calls the vtable-style entry.
+[01:53] <allison> oh, you mean for the MMD's defined in C?
+[01:53] <chromatic> Yes.
+[01:54] <allison> well, that's the only way we have to make C functions act like full subs
+[01:54] <nopaste> "Coke" at 72.228.52.192 pasted "sample text for old non-core platform test failure." (19 lines) at http://nopaste.snit.ch/14716
+[01:54] <chromatic> They could take PCC-style args.
+[01:54] <chromatic> That would help.
+[01:54] <allison> at least, at the moment
+[01:55] <allison> yeah, we could generate MULTIs like METHODs
+[01:55] <chromatic> That would be a big improvement.
+[01:56] <allison> can't think of any drawbacks at the moment
+[01:56] <Coke> was "miniparrot" discussed at the summit?
+[01:56] <allison> Coke: as in parrot on embedded devices? or parrot as the replacement for the perl configure/build tools?
+[01:57] <chromatic> On the invocation side, I think a separate mechanism to invoke a multi given an existing context would work nicely.
+[01:57] <Coke> whatever corresponds to the broken --miniparrot option to configure. =-)
+[01:57] <allison> chromatic: but, it doesn't have an existing context
+[01:57] <chromatic> It does in ops.
+[01:58] <allison> Coke: that's documented as "Build parrot assuming only pure ANSI C is available.", so I'd have to say "No"
+[01:58] <allison> Coke: not even a desired feature anymore, AFAICT
+[01:59] <allison> chromatic: an MMD execution needs its own context, otherwise you tromp all over existing registers
+[02:00] <chromatic> see src/ops/math.ops
+[02:00] <allison> chromatic: because calling, for example 'add $P0, $P1' might just call a C function, but it might also call a PIR subroutine
+[02:01] <Coke> allison: --miniparrot isn't desired, or targeting ansi c isn't desired?
+[02:01] <allison> chromatic: what about src/ops/math.ops?
+[02:02] <allison> Coke: I guess it depends on the definition of "pure ANSI C"
+[02:02] <Coke> allison: can you comment on 55386 ? If you say it's safe to rip out, I can add it to my queue.
+[02:02] <Coke> pretty sure no one is using it now since it's borked. =-)
+[02:02] <chromatic> . o O { Hm, we could get rid of direct vtable invocation altogether. }
+[02:03] <chromatic> Don't worry, that's a 3.0 thought.
+[02:03] <allison> Coke: we conform to C '89
+[02:03] <allison> Coke: don't see any need for a configuration flag that conforms to some other standard
+[02:03] <chromatic> allison, within math.ops, plenty of PMC-arg ops get those PMCs from contexts and immediately dispatch to MMD.
+[02:03] <chromatic> Not just infix, but VTABLE_add, VTABLE_cmp, etc.
+[02:04] <Coke> allison: http://en.wikipedia.org/wiki/ANSI_C is C89. sort of.
+[02:04] <Coke> I think it was meant to be the same thing, anyway.
+[02:04] <allison> chromatic: yes, I wrote them to do that, but they go via vtables so they can be overridden to do something else
+[02:05] <allison> Coke: yes, saying it's "ANSI C" isn't specific enough
+[02:05] <Coke> so, anyway, I'll rip it out. =-)
+[02:05] <allison> Coke: three cheers!
+[02:05] <Infinoid> rip rip, hooray
+[02:06] <allison> oh, yeah, looking at src/ops/math.ops again, do we have a ticket in place to rip out the old 'infix' opcodes?
+[02:06] <allison> it's about time to do it
+[02:07] <Coke> New in 0.0.9
+[02:07] <Coke> - Miniparrot (Josh)
+[02:08] <allison> looks like no 'infix' ticket
+[02:12] <allison> they're not even listed in DEPRECATED.pod yet...
+[02:15] <Coke> kid51: ping?
+[02:19] <dalek> r33170 | coke++ | rm_miniparrot:
+[02:19] <dalek> : Create a branch for RT#55386, remove --miniparrot option from Configure.pl
+[02:19] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33170
+[02:19] <dalek> r33171 | allison++ | trunk:
+[02:19] <dalek> : [cage] Add deprecation notice for 'infix' and 'n_infix' opcodes.
+[02:19] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33171
+[02:28] *** TiMBuS joined
+[02:31] <pmichaud> yes, the issue I'm having appears to be a tailcall issue.
+[02:35] <Coke> facebook++
+[02:44] <dalek> r33172 | coke++ | rm_miniparrot:
+[02:44] <dalek> : First pass at removing the --miniparrot option to Configure.pl
+[02:44] <dalek> : Note that this doesn't impact the creation of the "miniparrot" executable,
+[02:44] <dalek> : which is still part of the build process.
+[02:44] <dalek> : "make test" passes everything except for t/steps/.
+[02:44] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33172
+[02:47] <Coke> there. I /think/ the only thing left to do in that branch is to fixup the t/steps/ tests from trying to use --miniparrot as an option to Configure.pl
+[02:48] <Coke> ->
+[03:02] *** Alias joined
+[03:03] <pmichaud> ...can I cheat and put a "gc run sequence number" into mark_context?
+[03:05] <pmichaud> if I don't mark the caller_ctx nodes, then I lose them in a tailcall (and possibly other situations)
+[03:05] *** chromatic joined
+[03:05] <pmichaud> If I mark them, then in some situations I end up in endless recursive loops, as well as the fact that we may mark some contexts multiple times in a single gc run.
+[03:05] <pmichaud> s/may/will/
+[03:09] <pmichaud> afk for a while.
+[03:14] <Infinoid> how about just checking whether the various PMCs have already been marked, before marking them?
+[03:14] <Infinoid> it may be a little slower, but I think it should work
+[03:17] <Infinoid> oh, mark_context calls itself directly.  oof.
+[03:26] <pmichaud> right.
+[03:26] <pmichaud> I would think that the PMCs already check if they've been marked.
+[03:28] *** jimmy joined
+[03:29] *** kid51 joined
+[03:29] <kid51> Coke ping
+[03:29] <tewk> pmichaud: could the tailcall ops be modified to mark the context for you?
+[03:37] *** petdance joined
+[03:41] *** PerlPilot joined
+[03:41] *** pmichaud_ joined
+[03:42] *** wolverian joined
+[03:43] <allison> pmichaud: the infinite looping mark_context is what prompted me to do the first draft fo shifting contexts to PMCs (since GC already handles loops). just go for the quickest possible fix for now, contexts will become GC-able soon
+[03:46] *** jonathan joined
+[03:47] *** wolverian joined
+[03:51] *** jonathan_ joined
+[03:55] <tewk> .return FUNCCALL is now .tailcall right, no one fixed ncigen :(
+[03:57] *** polyglotbot joined
+[03:58] *** leo joined
+[03:58] *** wolverian joined
+[03:58] *** dalek joined
+[04:00] * kid51 must sleep
+[04:00] <purl> $kid51->sleep(8 * 3600);
+[04:02] *** pmichaud joined
+[04:02] *** adu joined
+[04:02] *** jonathan joined
+[04:07] *** PerlJam joined
+[04:11] *** pmichaud joined
+[04:13] *** dalek joined
+[04:15] <pmichaud> I think quickest fix is a gc run counter to break loops, so I'll go with that.
+[04:18] <pmichaud> it'll also improve some efficiency.
+[04:21] *** leo joined
+[04:21] *** dalek joined
+[04:31] <dalek> r33174 | allison++ | trunk:
+[04:31] <dalek> : [pdds] Renaming PDD 14, preparing for merge of three PDDs.
+[04:31] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33174
+[04:33] <dalek> r33175 | allison++ | trunk:
+[04:33] <dalek> : [pdds] Regenerating the manifest for renamed draft PDD.
+[04:33] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33175
+[04:51] *** stockwellb joined
+[05:00] *** tetragon joined
+[05:06] <allison> hmmmm... it looks like PDD 14 (bignum) is just a proposal, never implemented
+[05:07] *** bacek joined
+[05:25] <dalek> r33176 | tewk++ | trunk:
+[05:25] <dalek> : [ncigen] ncigen now generates a majority of the sqlite3 signatures correctly
+[05:25] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33176
+[05:26] <lathos> tewk: Did you apply your fix to not require C?
+[05:27] <lathos> Ah, yes. Excellent.
+[05:27] <lathos> I've been corresponding with Tim Bunce on DBDI, and next time I have some spare time I shall start implementing that.
+[05:28] <nopaste> "tewk" at 155.97.237.62 pasted "ncigen_attempt_on_sqlite3.diff" (605 lines) at http://nopaste.snit.ch/14717
+[05:30] <lathos> Does anyone else remember h2ph?
+[05:34] <dalek> r33177 | allison++ | trunk:
+[05:34] <dalek> : [pdds] Descriptions of the native integer and float types.
+[05:34] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33177
+[05:34] <dalek> r33178 | allison++ | trunk:
+[05:34] <dalek> : [pdds] Deleting the now completly redundant datatypes PDD (number 4 is
+[05:34] <dalek> : now available for reuse).
+[05:34] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33178
+[05:42] <tewk> lathos:just tried h2ph on sqlite3.h, cool it pulled out #defines.
+[05:42] <tewk> ncigen can't do that yet, it just pulls function definitions.
+[05:42] <lathos> Yes, it's a very old (Perl4) way of doing extensions by parsing header files. I just found it amusing that that's where we're up to with Parrot. :)
+[05:43] <lathos> So where do you see this going? Do you plan to apply that ncigen result patch? Or do you want to handle it manually?
+[05:43] <tewk> ncigen uses a full c99 parser generated from PGE, if that makes you feel anybetter.
+[05:44] <lathos> I'm feeling good. :) Just want to know what the plan is.
+[05:44] <tewk> I though I'd ask you what you wanted.  I could apply it and you could modify from there if it will save you time.
+[05:45] <adu> I plan on rewriiting languages/c99 in Haskell
+[05:45] <lathos> Oh. I dunno. It looks good. But if we're planning to have things autogenerated from ncigen, then probably best *not* to check it in, but to check in something which creates and builds it.
+[05:47] <pmichaud> as of r33179 in the lex5 branch, all tests pass that are expected to pass.
+[05:47] <pmichaud> I'm tired now, so I'll see what reports people have and about merging into trunk tomorrow morning.
+[05:47] <dalek> r33179 | pmichaud++ | lex5:
+[05:47] <dalek> : Add a context gc run counter to avoid loops in mark_context.
+[05:47] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33179
+[05:47] <tewk> Hmmm, ncigen doesn't have a programatic interface right now, but it would be cool to interface it with perl6 and write a perl6 script to autogenerate portions of the interface.
+[05:49] <tewk> adu: why haskell?
+[05:49] <dalek> r33180 | allison++ | trunk:
+[05:49] <dalek> : [pdds] Removing PDD 4 from the manifest.
+[05:49] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33180
+[05:52] <adu> tewk: because its parsing abilities are beyond awsome
+[05:52] <adu> and you can implement lisp in one line
+[05:53] <adu> lisp = number <|> identifier <|> parens $ many $ lexeme lisp
+[05:54] *** stockwellb left
+[05:56] <lathos> The problem is, you do that and you end with lisp.
+[05:56] <adu> then maybe I should work on languages/lisp
+[06:19] <tewk> PGE parsing is awesome too, it will be great when it gets a speed boost soon.
+[06:24] *** baa joined
+[06:32] *** Hadi joined
+[06:33] *** Hadi left
+[06:41] *** TiMBuS joined
+[06:54] <baa> QUIT
+[06:55] <jimmy> QUIT
+[06:56] *** contingencyplan joined
+[07:05] *** TiMBuS joined
+[07:18] *** uniejo joined
+[07:41] <dalek> r33181 | allison++ | trunk:
+[07:41] <dalek> : [pdds] Add interface definition for Integer PMC.
+[07:41] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33181
+[07:57] <moritz> purl, msg pmichaud in lex5 I get no new failures (compared to trunk) in both parrot's 'make test' and rakudo's 'make spectest
+[07:57] <purl> Message for pmichaud stored.
+[08:03] *** alvar joined
+[08:06] <dalek> r33182 | fperrad++ | trunk:
+[08:06] <dalek> : [WMLScript] change PASM registers to PIR registers
+[08:06] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33182
+[08:06] <dalek> r33183 | fperrad++ | trunk:
+[08:06] <dalek> : [WMLScript] update syntax
+[08:06] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33183
+[08:08] *** Hadi joined
+[08:15] *** Hadi left
+[08:26] *** UltraDM joined
+[08:31] *** Hadi1 joined
+[08:31] *** Hadi1 left
+[08:43] *** ff-wonko joined
+[08:52] *** iblechbot joined
+[09:07] *** elmex joined
+[09:08] *** Hadi joined
+[09:10] *** Hadi left
+[09:34] *** rob joined
+[09:50] <dalek> r33184 | fperrad++ | trunk:
+[09:50] <dalek> : [Lua] change PASM registers to PIR registers
+[09:50] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33184
+[09:59] <dalek> r33185 | fperrad++ | trunk:
+[09:59] <dalek> : [Lisp] change PASM registers to PIR registers
+[09:59] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33185
+[10:00] *** ff-wonko joined
+[10:01] *** Ademan joined
+[10:02] <dalek> r33186 | moritz++ | trunk:
+[10:02] <dalek> : [cage] remove trailing whitespaces
+[10:02] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33186
+[10:04] <dalek> r33187 | moritz++ | trunk:
+[10:04] <dalek> : [cage] fix line length in PDD14 to make codetest happier; still needs a
+[10:04] <dalek> : VERSION section.
+[10:04] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33187
+[10:11] *** tomyan joined
+[10:11] <cotto> Does ~$<foo> in nqp mean "the string matched by foo"?
+[10:13] <cotto> Also, it's hard to search for syntax like that, but maybe that's just a result of the relative age of nqp.
+[10:14] <moritz> the string matched by the subrule <foo>
+[10:14] <moritz> these things are described in S05
+[10:16] <dalek> r33188 | moritz++ | trunk:
+[10:16] <dalek> : [cage] some more line wrappings in pdd14
+[10:16] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33188
+[10:17] <cotto> You're right.  I just needed to look more at the context.
+[10:17] <moritz> (the prefix ~ isn't described in S05, that's just basic Perl 6 :)
+[10:22] <jimmy> 122  \t \t=item i_[add|subtract|multiply|divide|floor_divide|modulus|pow]_float(INTVAL b)
+[10:22] <jimmy> 123 \t=item i_[add|subtract|multiply|divide|floor_divide|modulus|pow]_float(INTVAL
+[10:22] <jimmy> 124 \tb)
+[10:22] <jimmy> moritz: why ?
+[10:23] <jimmy> seems ugly
+[10:24] <moritz> jimmy: it's ugly, but otherwise the coding standard tests fail
+[10:24] <jimmy> I see. thought it's really ugly.
+[10:25] <moritz> it is.
+[10:25] <moritz> other suggestions are welcome
+[10:26] <jimmy> none :)
+[10:27] <moritz> I've now done the line wrapping after the =item
+[10:27] <dalek> r33189 | moritz++ | trunk:
+[10:27] <dalek> : [cage] neither line wrapping in pdd14
+[10:27] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33189
+[10:27] <jimmy> I don't know what the coding standard is.
+[10:28] <moritz> see docs/pdds/pdd07_codingstd.pod
+[10:28] <moritz> s/neither/nicer/
+[10:28] <moritz> ouch, my english is too bad
+[10:28] <jimmy> moritz: me too.
+[10:29] <dalek> r33190 | fperrad++ | trunk:
+[10:29] <dalek> : [parrot_compiler] change PASM registers to PIR registers
+[10:29] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33190
+[10:31] *** gmansi joined
+[10:46] *** peansen joined
+[11:23] *** kj joined
+[11:58] *** iblechbot joined
+[12:40] *** ff-wonko joined
+[12:59] *** ff-wonko joined
+[13:05] *** rkh joined
+[13:06] <pmichaud> moritz++  # checking lex5 branch for me
+[13:13] *** jimmy joined
+[13:16] *** ff-wonko joined
+[13:51] * Coke gets close to removing --miniparrot
+[13:52] <Coke> it boggles me that we have passing tests for a feature that doesn't work.
+[13:52] <Coke> s/feature/option/
+[13:52] <Coke> msg kid51 I pinged you on the ticket. Thanks for any help!
+[13:52] <purl> Message for kid51 stored.
+[13:55] *** pmichaud joined
+[13:55] *** PerlJam joined
+[13:55] *** wolverian joined
+[13:56] *** dalek joined
+[13:57] *** polyglotbot joined
+[13:59] *** jonathan joined
+[14:00] *** leo joined
+[14:03] *** masak joined
+[14:15] *** gryphon joined
+[14:20] *** apeiron joined
+[14:26] *** PacoLinux joined
+[14:31] <jonathan> hi all
+[14:32] <moritz> OH HAI
+[14:33] <jonathan> I can haz Rakudo hacking.
+[14:34] <masak> \\o/
+[14:42] *** Alias joined
+[14:50] *** jimmy_ joined
+[14:55] <Coke> Alias: hio.
+[14:55] <Alias> hi
+[14:55] <purl> hola, Alias.
+[14:55] * Coke feels the urge to say "crikey!"
+[14:55] * Coke tries to avoid it.
+[14:56] <Coke> how goes fruity parrot?
+[14:57] <Coke> ... we are so totally making a breakfast cereal.
+[14:57] <szbalint> G'Day mate!
+[14:57] <Coke> lukcy charms?
+[14:57] <Coke> lucky charms?
+[14:57] <Coke> purl, you disappoint.
+[14:57] <purl> Coke: excuse me?
+[14:57] <dalek> r33191 | jonathan++ | trunk:
+[14:57] <dalek> : [rakudo] Eliminate a now-unrequired global.
+[14:58] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33191
+[14:59] <pmichaud> I think the lex5 branch is about done -- testing, please?
+[15:00] <jonathan> pmichaud: Were there were any changes since I tested last night?
+[15:01] <pmichaud> yes, I think so.
+[15:01] <pmichaud> r33179 was done at 05:47 UTC
+[15:01] <jonathan> pmichaud: Doing a testing run then.
+[15:01] <jonathan> Oh, I suspect I was sleeping then.
+[15:01] <jonathan> Or trying to sleep.
+[15:03] <jonathan> pmichaud: Advice wanted.
+[15:03] <jonathan> When generating the code for a routine/param type checks etc it'd be helpful to know if we're in a multi sub or not.
+[15:04] <jonathan> I know that a way is to use a $?OH_PLEASE_NOT_ANOTHER_GLOBAL ;-)
+[15:04] <jonathan> Any better suggestions?
+[15:04] <Coke> pmichaud: kicking off a lex5 test on osx/85
+[15:04] <Coke> er, 86 =-)
+[15:05] <pmichaud> jonathan: how does it help us to know about multi?
+[15:05] <jonathan> pmichaud: For one, I want to stop emitting type checks in the sub itself if we know it's a multi
+[15:05] <jonathan> Because we already determined the sub accepted the types in the dispatcher.
+[15:05] <jonathan> I'd also like to know whether it's a method or a sub, so I know whether to stick an invocant (if one isn't declared) into the signature object.
+[15:06] <pmichaud> the general approach would be to create a generic signature object, and the adjust that object at a higher level when we know if it's a multi, method, or whatever.
+[15:06] <pmichaud> as opposed to trying to do it all in the signature object part.
+[15:07] <jonathan> That's possible, if I make a way to make the signature object easily obtainable, I guess.
+[15:07] <jonathan> In fact, we may already have that...
+[15:07] <pmichaud> well, parameter passing is high on my list of things to do next.
+[15:07] <jonathan> Yeah...
+[15:07] <pmichaud> since lexicals now work :-)
+[15:07] <jonathan> w00t
+[15:07] * masak tests lex5
+[15:08] * Coke gets a build failure, and tries a realclean.
+[15:08] * moritz needed a realclean in that branch as well
+[15:08] * jonathan just did one before even trying to build
+[15:09] <jonathan> pmichaud: What was your plan on the whole "what does the signature method actually build" issue?
+[15:09] <jonathan> I'd like to see $?SIG_BLOCK_NOT_NEEDED go away preferably.
+[15:09] <particle> say what? lexicals work?
+[15:09] <pmichaud> particle:  they work if we can get testing of lex5 :-)
+[15:10] <particle> on its way
+[15:10] <Coke> particle: you get windows. *tag*
+[15:10] <pmichaud> yes, $?SIG_BLOCK_NOT_NEEDED should go away.
+[15:10] <Coke> pmichaud: aside from core test, should I also do nqp & rakudo?
+[15:10] <jimmy_> masak: what does lex5 mean?
+[15:10] <jonathan> Well, I didn't want it in the first place, I just didn't have any better ideas.
+[15:10] <Coke> (known failure in t/pmc/bigint.t)
+[15:10] <moritz> particle: actually masak's (in)famous for+recursion test passes in lex5/
+[15:10] <masak> jimmy_: 'the fifth branch fixing lexicals stuff in Parrot'
+[15:11] <moritz> particle: (if I interpreted the one unexpected passing TODO test correctly)
+[15:11] <pmichaud> jonathan: I can't say for sure until I get into it.  But I'd like for  $( $<signature> )   to just return the right thing.
+[15:11] <jimmy_> masak: 词法资料?
+[15:11] <jonathan> Well, that's the code to make a signature object I guess...
+[15:11] <pmichaud> lex5 resolves:  56512, 56612, 58392, 58916, 59082, and 60604
+[15:11] <jonathan> Trouble is we tend to need some code as well.
+[15:12] <pmichaud> ...like, what sort of code?
+[15:12] <jonathan> Like, PAST::Var param nodes.
+[15:12] <pmichaud> right, those are part of the signature object.
+[15:12] * Coke should know about how many tests are in t/ by now.
+[15:12] <jonathan> What do you mean by that, though?
+[15:12] <masak> jimmy_: 对不起，我听不动。
+[15:13] <pmichaud> do you mean signature object or the signature ast?
+[15:13] <pmichaud> (sorry, I'm getting confused on my end -- still early here.)
+[15:13] <jimmy_> lexicals stuff means '词法' ?
+[15:13] <jonathan> Well, thing is we need to build up to two things.
+[15:13] <masak> jimmy_: I don't know.
+[15:13] <pmichaud> oh.
+[15:13] <jonathan> We want to build some PAST that creates the instance of Signature
+[15:13] <masak> jimmy_: my Mandarin is not that advanced.
+[15:13] <masak> jimmy_: it has to do with variables and bindings.
+[15:13] <PerlJam> masak: haven't you been learning it for 2 years?
+[15:14] <jonathan> And we also need to build the PAST the creates the .param style stuff - *if* it's the signature for a block or routine.
+[15:14] <PerlJam> masak: you should know everything by now!  :)
+[15:14] <masak> PerlJam: two years, and still no talk about lexicals in class!
+[15:14] <masak> it's an outrage.
+[15:14] <jimmy_> masak: actually, I don't know what deos lexcals stuff mean.
+[15:14] <pmichaud> my best guess is that I'd like to build up a signature ast (the part that does the .param style stuff), and then when we get to the block/routine we introspect the that ast to build the code to generate the signature object.
+[15:14] <masak> jimmy_: I'll try to find you a resource.
+[15:14] <jimmy_> s/lexcals/lexicals/g
+[15:14] *** barney joined
+[15:14] <pmichaud> if that doesn't work, then we build up both items in parallel
+[15:14] <jonathan> pmichaud: That feels the wrong way around to me.
+[15:15] <pmichaud> jonathan: it really needs to be that way, because of  $^a
+[15:15] <moritz> jimmy_: lexicals are variables that are only available in a small piece of code, and that scope is known at compile time
+[15:15] <jonathan> If you write :($x, $y) style things, you want to build a signature object.
+[15:15] <jimmy_> masak: lexical analyzer means "词法分析' in chinese.
+[15:15] <jonathan> Unless we make sigterm also build the signature out of the PAST made.
+[15:15] <masak> jimmy_: take a look at http://en.wikipedia.org/wiki/Scope_(programming)#Static_scoping_.28also_known_as_lexical_scoping.29
+[15:15] <jonathan> (As in, the PAST with all the paramters declared in it)
+[15:16] <jimmy_> thanks moritz
+[15:16] <pmichaud> I guess I could see doing it the other way around, too.
+[15:16] <jimmy> hi
+[15:16] <jimmy_> I know that it is a private var.
+[15:16] <jonathan> I guess we can factor the signature object out of that, and in sigterm we just throw away the other bit, and in the case of a routine we keep both.
+[15:16] <pmichaud> I still need to think about it a bit more.  And for me, it's writing the code that will give me the correct answer.
+[15:17] <pmichaud> i.e., when it becomes too difficult to do one way, I'll know to use the other (or try a third :-)
+[15:17] <jonathan> OK
+[15:17] <jonathan> One other thing I was pondering was maybe moving type checks into the dispatcher (when I re-work the dispatcher for the other stuff) even for single dispatch.
+[15:17] <masak> jimmy_: there are two of you. no, there's not really such a thing as a 'private var'. but you might still have grasped the concept.
+[15:18] <jonathan> Then we don't have the "should we emit the check or not" worry.
+[15:18] <pmichaud> jonathan: would that also include initializations?
+[15:18] <jimmy_> the other is me too.
+[15:18] <jonathan> pmichaud: Example?
+[15:18] <jimmy_> but my friend is using my computer. hehe
+[15:18] <pmichaud> sub foo(Int $a = 3, Num $b = 4.0) { ... }
+[15:19] <jimmy> this is jimmy
+[15:19] <PerlJam> speaking of initializations ... does has $.foo = "hello world" still not work?
+[15:19] <pmichaud> PerlJam: it still does not work.
+[15:19] <Coke> pmichaud: lex5 passes core tests, nqp, rakudo, and tcl on intel OS X
+[15:19] <jonathan> PerlJam: No, but I'm about tired enough of people moaning about that to go refactor the relevant bit of the grammar... ;-)
+[15:19] <jonathan> pmichaud: Perhaps - I guess we should verify such things.
+[15:19] <jonathan> Hmm.
+[15:20] <jonathan> I'm still thinking it all through quite a bit.
+[15:20] *** Zaba joined
+[15:20] <pmichaud> I think that initializations imply it should still take place in the sub.
+[15:20] <jonathan> becuase of the things like sub foo($a, $b where { $a < $b }) { ... } style things.
+[15:20] <pmichaud> Also, we have the lexical scoping issues discussed yesterday, which also would seem to imply "in the sub"
+[15:20] <jimmy_> I don't know what is the difference between lexicals and private vars.
+[15:20] <jonathan> Yeah. Apart from we've gotta deal with this somehow in the multi case.
+[15:21] <pmichaud> although wrapper+tailcall doesn't look that bad to me at this point.
+[15:21] <jimmy> I think it's the same.
+[15:21] <jonathan> That's one way...
+[15:21] <pmichaud> it'll also depend on how the calling_conventions branch shakes out.  If we can bind signatures to captures and then pass that efficiently to a sub, it all becomes much easier.
+[15:22] <jonathan> Yes.
+[15:22] <moritz> jimmy: the term "private" is mostly used for object attributes nowadays, but I also know that name for lexicals (from my old programming days :)
+[15:22] <pmichaud> Coke:  (OSX + lex5)  Yay!
+[15:22] <jimmy> thanks moritz.
+[15:22] <pmichaud> Coke: thanks
+[15:22] <jonathan> Well, I did already float a while back the "just take a slurpy array and slurpy hash (which one day becomes a capture object instead when Parrot supports those) and then pass them to the signature object to bind" idea.
+[15:22] <jimmy> actually, i heard lexicals just from perl
+[15:23] <pmichaud> jonathan: yes, that's still a possibility also.
+[15:23] <jonathan> pmichaud: I rather like that idea.
+[15:23] <pmichaud> I didn't like building the slurpy array and slurpy hash
+[15:24] <jonathan> OK, but if the direction we're supposed to be going is that Parrot builds and gives us a capture object...
+[15:24] <pmichaud> correct
+[15:24] <jonathan> Which is pretty much what it *is* doing interally now from what I can see.
+[15:24] <pmichaud> I haven't seen the details of how that's working yet.
+[15:24] <jonathan> Then we can say "OK, for now we use what Parrot provides us, then it's an easy switch when it does provide a capture"
+[15:25] <particle> jonathan: isn't that the CallSignature pmc?
+[15:25] <jonathan> Then code-gen becomes easy-ish. Build a signature object up. Doing so provides us with a list of variables that this signature binds.
+[15:25] <jonathan> Then emit lexical declarations for 'em.
+[15:26] <jonathan> particle: Yes
+[15:26] <pmichaud> ...and attach constraints, also?
+[15:26] <jonathan> I'm pretty sure what that's doing
+[15:26] <jonathan> pmichaud: Yes, we can have the signature object attach them as it binds, maybe.
+[15:26] <jonathan> Probably most efficient.
+[15:27] <jonathan> Well, maybe.
+[15:27] <jonathan> You can do it either way I figure.
+[15:27] <jonathan> I'd be tempted to have the signature binding do it in the first cut.
+[15:27] <pmichaud> I think I'd want the signature binding code to work in its caller's lexical environment directly.
+[15:28] <jonathan> Speed?
+[15:28] <purl> hmmm... Speed is too subjective, I think.
+[15:28] <pmichaud> yes, but also because then the signature is doing its work directly on the sub's lexicals.
+[15:29] <pmichaud> which is where it should be doing its work.
+[15:29] <pmichaud> maybe we need this in two steps
+[15:29] <jonathan> Then we're basically back to generating code in the sub itself to unpack the sig. :-)
+[15:29] <jonathan> Which is OK too I guess.
+[15:30] <pmichaud> no, I'm thinking the sub can do a method call on the signature object
+[15:30] <jonathan> So was I.
+[15:30] <jonathan> OH!
+[15:30] <jonathan> I mis-interpreted what you said, I think.
+[15:30] <jimmy> F:\\pipp\\parrot-dev\\docs>make html
+[15:31] <jimmy> make: `html' is up to date.
+[15:31] <jonathan> When you said you wanted the signature binding code to work in its caller's lexical environment directly, what exactly did you mean?
+[15:31] <nopaste> "tewk" at 155.97.237.62 pasted "lex5 passing TODOS" (8 lines) at http://nopaste.snit.ch/14718
+[15:31] <masak> pmichaud: three failed tests in t/pmc/bigint.t on the lex5 branch. but maybe that's to be expected.
+[15:31] <pmichaud> I meant in the sub's lexical environment, assuming that the sub is the 'caller' to the signature
+[15:31] <pmichaud> yes, that was ambiguous
+[15:31] <pmichaud> masak:  the bigint.t failures are expected, I think.
+[15:32] *** Andy joined
+[15:32] <jonathan> OK, so it'd take the LexPad of the caller and just do keyed access?
+[15:32] <pmichaud> jonathan: yes.
+[15:32] <jonathan> Oh, OK
+[15:32] <jonathan> Then we were thinking the same thing. :-)
+[15:32] <jonathan> I thought you might have meant a different thing.
+[15:32] <pmichaud> I still don't know how to make {...} things work, though.
+[15:32] <jonathan> Phew. :-)
+[15:32] <jonathan> {...} ?
+[15:32] <pmichaud> $a where { ... }
+[15:33] <pmichaud> such that the { ... } is properly lexically scoped.
+[15:34] <jonathan> Maybe for the single dispatch case we should leave the checking done in the sub itself. Can we just capture_lex such blocks before calling the !BIND or whatever we call it method on the Signature?
+[15:34] <pmichaud> <brainstorm>  what we _really_ want is:
+[15:35] <pmichaud> when we bind to a signature, that creates a new context and lexpad based on the sub that is being called.  We haven't invoked the sub yet, though.
+[15:35] <jonathan> Yes.
+[15:35] <pmichaud> then when we call the sub, it simply "adopts" the context that was built in the bind.
+[15:35] *** Lorn joined
+[15:35] <jonathan> Yes.
+[15:35] <jonathan> That way occured to me.
+[15:36] <jonathan> Another approach was (maybe too evil)
+[15:36] <jonathan> That a multi with subtypes to check gets code emitted to bind the signature and then throw a resumable exception.
+[15:36] <jonathan> The dispatcher calls all of the possibilities and sees which throw "cannot bind" exceptions and which throw resumable "I'm OK" exceptions
+[15:37] <pmichaud> oooh
+[15:37] <jonathan> Then it just resumes the one it decides on, if there is one.
+[15:37] <pmichaud> I kinda like that.
+[15:37] <jonathan> *If* we can do it without making Parrot explode, it would be rather neat.
+[15:38] <particle> seems a natural parrot way to do it, in fact
+[15:38] <pmichaud> another item:  are we going to expect that rakudo subs will be called by other than the rakudo dispatcher?
+[15:38] <pmichaud> s/will/may/
+[15:39] <jonathan> For the single dispatch case: if we leave all the checks inside the sub rather than doing them in the dispatcher it'll just work.
+[15:39] <jonathan> For multiple dispatch case: they call invoke on the multi-sub - which does the Rakudo dispatcher anyway.
+[15:39] <jonathan> So I think it'd Just Work.
+[15:39] *** davidfetter joined
+[15:40] <pmichaud> so we'd need to generate separate code for multi vs non-multi
+[15:40] <jonathan> Yeah, but actually maybe it's not so bad.
+[15:40] <pmichaud> I'm thinking it might not be.
+[15:40] <jonathan> Just a !BIND_SINGLE and !BIND_MULTI on the Signature.
+[15:41] <pmichaud> in the multi case, is it ever possible to try to grab a specific sub from the multi and call it as a single-dispatch?
+[15:41] <jonathan> You can do things like &foo<Int,Num>
+[15:41] <pmichaud> ...that wouldn't go through the multi dispatcher, right?
+[15:41] <jonathan> *but* I'm not sure that's promised you'll still get anything unique from that.
+[15:42] <jonathan> Because the thing is that that form may still leave many possibilities.
+[15:42] <pmichaud> so what does that do, exactly?
+[15:42] <jonathan> I'd be happy enough for that form to return a Perl6MultiSub that just has the possibilities in it.
+[15:42] <jonathan> Basically it finds all candidates that would match being dispatched with an Int and a Num.
+[15:43] <pmichaud> does that only do type checks, or does it include where clauses?
+[15:43] <jonathan> No, because where clauses check values, not just nominal types.
+[15:43] <jonathan> (e.g. type checks)
+[15:43] <pmichaud> so, would  &foo<3, 5>   get me all of the subs that would dispatch with a 3 and 5 ?
+[15:44] <jonathan> I don't remember seeing that in the synopses
+[15:44] <pmichaud> or are we limited to protoobjects in there?
+[15:44] <jonathan> I can only recall the case where you stuck type names in there.
+[15:44] <jonathan> I guess protos or maybe role names will fly too
+[15:45] <jonathan> I'm not sure what on earth happens if you put a named subtype in there... :-|
+[15:45] <pmichaud> I guess i'm asking, would  &foo<Int>   match    multi sub foo(Int $x where { $x % 2 == 0 });    ?
+[15:45] <jonathan> Yes
+[15:45] <jonathan> I believe so
+[15:45] <pmichaud> so the where clauses don't participate in the matching.
+[15:45] <jonathan> AFAIK, they don't.
+[15:45] <pmichaud> that's a bit surprising.
+[15:46] * jonathan tries to find the relevant bit of synopsis
+[15:47] <pmichaud> okay, here are my initial thoughts then
+[15:47] <pmichaud> overall I like the idea of doing the bindings as a method call on a signature object
+[15:48] <pmichaud> I think we should do that even for single dispatch -- in the single dispatch case, the (Parrot) sub simply takes the params, binds them to the signature, and then calls the signature to import the results into the current lexical scope
+[15:48] <pmichaud> as opposed to generating code to do it.
+[15:48] <jonathan> Yes, agree.
+[15:49] <jonathan> Oh, I wasn't advocating doing that differently. I was only questioning whether we do the type *checks* for nominal types in the dispatcher or in the binder for single dispatch.
+[15:50] <jonathan> I wasn't thinking binding would differ besides that.
+[15:50] <pmichaud> I can argue that one both ways.
+[15:50] <pmichaud> I need to think about it a bit.
+[15:51] <particle> Bug: Attempting to mark dead context 11f65f0
+[15:52] <pmichaud> particle:  you _must_ be running lex4, or a very outdated copy.
+[15:52] <pmichaud> the "attempting to mark" is gone from the branch.
+[15:52] <particle> aha, yep, i never switched on my ubuntu x64
+[15:52] <jonathan> pmichaud: I can argue it both ways too.
+[15:52] <particle> so far, win32 passes core, nqp, and i'm doing rakudo spectest now
+[15:53] <jonathan> pmichaud: My main clincher for doing the checks in the binder for single dispatch is interoperability with other languages.
+[15:53] <pmichaud> jonathan: agreed there.
+[15:53] <pmichaud> is there a way for a sub to know if it's being called from the multidispatcher?
+[15:53] <jonathan> pmichaud: OTOH, if we are putting the custom dispatching stuff in by overriding the invoke VTABLE and having our own PMC type for subs (no, *not* one for everything!)...which I am pondering doing...
+[15:54] <jonathan> Then invoke would do the right thing anyway.
+[15:55] <pmichaud> if we could make it possible for a sub to detect that it's being called from the multidispatcher, then we put all of the checks inside of the sub
+[15:55] <pmichaud> if being called from the multidispatcher, it throws a resumable exception saying "checks passed"
+[15:55] <jonathan> Hmm.
+[15:55] <pmichaud> if being called as single-dispatch, it simply keeps going.
+[15:55] <jonathan> Off the top of my head, not completely sure where we'd stick that flag.
+[15:56] <pmichaud> does it have to be a flag?
+[15:56] <pmichaud> can't the sub check the identity of its caller?
+[15:56] <pmichaud> surely there's some level of introspection we can have for this.  :-)
+[15:56] <jonathan> Thing is, the dispatcher doesn't really call it, as such.
+[15:57] <jonathan> The invoke VTABLE method hands back an opcode_t specifying where to continue execution.
+[15:57] <pmichaud> how about a property on the sub?  ;-)
+[15:57] <pmichaud> I see.
+[15:57] <jonathan> Not unless you want to have to go refactor it when we start invoking the same sub in many threads...
+[15:58] <jonathan> So in a multi we chosoe the variant we will invoke, and call its vtable invoke
+[15:58] <jonathan> For the subtype case we'd finish up by actually doing a vTABLE_invoke on the continuation from the winner.
+[15:59] <jonathan> And falling back into the original runloop at the right point.
+[15:59] <pmichaud> doesn't "choose the variant" involve some code execution, though?
+[16:00] <jonathan> Yes.
+[16:00] <jonathan> But we do that by forcing it to run that there and then.
+[16:00] *** gmansi joined
+[16:00] <jonathan> Parrot_run_meth_fromc_...
+[16:00] <pmichaud> we can't force the sub itself to run that there and then?
+[16:01] <pmichaud> install a handler, invoke the sub, wait for it to return an exception (which it must do).
+[16:01] <pmichaud> after getting the exception, save the exception and go to the next sub in the list
+[16:02] <pmichaud> when we've gotten them all, resume the exception from the sub with the best match.
+[16:02] <jonathan> Yes.
+[16:02] <jonathan> That's the plan.
+[16:02] <jonathan> Or, what I'm thinking would be a good plan, anyway.
+[16:02] <pmichaud> within the sub, it processes arguments and does argument checking, and _if_ it's being called as a multisub it throws an exception when that's done.
+[16:02] <pmichaud> .....OR!!!!
+[16:03] <jonathan> No, if it's being called as a multi sub it maybe only does subtype checks.
+[16:03] <jonathan> We do the nominal type stuff in the dispatcher.
+[16:03] <pmichaud> I'd like verification that we only do type checks for multis.
+[16:03] <pmichaud> why not do it all in the sub?
+[16:03] <pmichaud> we could do nominal type stuff as an optimization in the dispatcher, yes.
+[16:04] <jonathan> Well, it's also the optimization that enables caching to work out. ;-)
+[16:04] <jonathan> But more seriously
+[16:05] <jonathan> We sort by nominal types etc.
+[16:05] <jonathan> The code is already in place to do all of that.
+[16:05] <jonathan> (Which isn't a "it works so we shouldn't change it" argument, but rather "it works so undoing it only to do it as a future opt" seems odd).
+[16:07] <jonathan> We can do nominal type checks in the single dispatcher too for consistency, if you're happier that way.
+[16:07] <jonathan> Provided we make our own Sub PMC type it can work out.
+[16:07] <jonathan> Even in the language interop case.
+[16:07] <pmichaud> yes.
+[16:08] <pmichaud> I need to brainstorm it just a bit more in my head.
+[16:08] <jonathan> OK.
+[16:08] *** Hadi joined
+[16:08] <pmichaud> a _lot_ more stuff makes sense now, though.
+[16:08] <jonathan> This is fitting together quite nicely from my side. :-)
+[16:08] <pmichaud> same here.
+[16:08] <pmichaud> I just want to decide how I want to build the object in the parser.
+[16:08] <jonathan> Yes.
+[16:08] <pmichaud> *signature object
+[16:08] <jonathan> That wants some thought.
+[16:08] *** Hadi left
+[16:09] <jonathan> Since we'll want to be able to easily introspect the PAST to pull out stuff we need to declare.
+[16:09] <pmichaud> I know the grammar for signatures has changed a bit, so I need to review it as well.
+[16:09] <jonathan> Yes.
+[16:09] <pmichaud> actually, I don't think it's a problem to do that any more.
+[16:09] <jonathan> OK
+[16:09] <pmichaud> if the signature object is the thing that attaches constraints, there's no need for the sub to have to duplicate that.
+[16:09] <jonathan> See sig_extract_declarables for some (maybe bad) ideas.
+[16:10] <jonathan> Oh yes, indeed.
+[16:10] <pmichaud> and that's true for all lexicals, not just parameters.
+[16:10] <jonathan> Yup
+[16:10] <jonathan> So my ($a, $b) etc just falls nicely out of it.
+[16:11] <pmichaud> which is where I've been headed from this to begin with.  :-)
+[16:11] <pmichaud> and that's why I was asking about initializations
+[16:11] *** ff-wonko joined
+[16:11] <pmichaud> because initializations are part of the signature.
+[16:11] <jonathan> Aye.
+[16:11] <jonathan> OK, this is looking promising.
+[16:12] <pmichaud> I don't want to hold you back on stuff, but I would like to take a crack at signature parsing in the next day or two.
+[16:12] <pmichaud> it really is the next item on my plate to look at (and why I wanted lexicals to work, because it's all kinda useless without them.)
+[16:13] <jonathan> That is fine for me.
+[16:13] <pmichaud> thanks, this _really_ helps clarify things for me a lot.  I think we have a plan.
+[16:13] <jonathan> I think we have enough of a shared vision on where we want to go with this.
+[16:13] <pmichaud> "jinx!"
+[16:14] <jonathan> So I'm completely comfortable leaving you to handle that side of things.
+[16:14] <pmichaud> same to you on the multidispatch side.
+[16:14] <pmichaud> this can work out *really* well.  :-)
+[16:14] <jonathan> Awesome.
+[16:14] <pmichaud> so, how's that lex5 branch looking?!?  ;-)
+[16:14] <jonathan> I've worked out pretty much how auto-threading is going to fit very neatly into this too.
+[16:14] <pmichaud> autothreading++
+[16:15] <jonathan> erm, I got a bit tied up in this discussion and forgot to keep running tests ;-)
+[16:15] <jonathan> Parrot and NQP fine
+[16:15] <jonathan> Rakudo ones happening now
+[16:15] * masak crosses fingers
+[16:15] <pmichaud> I really do think that lex5 fixes it.
+[16:16] <pmichaud> when we get a generational gc (and convert over to using it), we'll get a nice speed boost.
+[16:16] <particle> pmichaud: i'm on S29-array/push.t atm
+[16:16] <pmichaud> right now a gc sweep ends up going through every context
+[16:16] <pmichaud> okay, I have an errand I *must* run right now, I'll be back in 20 or so
+[16:17] <jonathan> (auto-threading in a sentence: we'll have an !AUTOTHREAD thread sub that does a level of threading by the S09 criteria; if we need to do an auto-thread then we clone this and attach the sub we were originally calling as a property to the clone)
+[16:17] <jonathan> OK
+[16:17] <jonathan> Will have spectest results for when you return.
+[16:18] <pmichaud> ...why clone?  Why not just invoke !AUTOTHREAD ?
+[16:18] <pmichaud> and pass the sub as a param?
+[16:18] <pmichaud> (this is what junctions are doing now.)
+[16:18] <pmichaud> bbiab
+[16:20] <jonathan> pmichaud: Ah, yes
+[16:20] <jonathan> That may work too
+[16:20] <particle> i got 43 failures in rakudo
+[16:20] <particle> increment's 41 we expect *blech*
+[16:21] <particle> S06-signature/slurpy-params.t fails 2
+[16:21] <jonathan> pmichaud: Yes, and 2 from declarattion-order?
+[16:21] <jonathan> Oh.
+[16:21] <jonathan> oops, s/pmichaud/particle/
+[16:21] <particle> yeah, i expected declaration-order, not slurpy-params :(
+[16:21] <PerlJam> I didn't get any failures in S06-signature/slurpy-params.t
+[16:22] <particle> current instr.: 'die' pc 12219 (src/gen_builtins.pir:7463)
+[16:22] <particle> called from Sub '!TYPECHECKPARAM' pc 13133 (src/gen_builtins.pir:8011)
+[16:22] <particle> called from Sub 'x_typed_join' pc 1259 (EVAL_13:396)
+[16:22] <jonathan> That's...interesting.
+[16:24] <particle> > sub x(Int *@args){1}; x(1);
+[16:24] <particle> Parameter type check failed
+[16:25] * jonathan wonders why that would work anywhere
+[16:25] <jonathan> Given that we don't have typed arrays yet.
+[16:26] <jonathan> That doesn't fail here. Very, very strange.
+[16:26] *** hercynium joined
+[16:26] <jonathan> (the test, that is)
+[16:26] <particle> it doesn't fail in lex5 there?
+[16:26] <jonathan> For me in the REPL
+[16:26] <jonathan> > sub x(Int *@args){1}; x(1);
+[16:26] <jonathan> Parameter type check failed
+[16:26] <jonathan> The test doesn't fial in lex5, no
+[16:27] <jonathan> I'd not expect this code to work yet.
+[16:27] <jonathan> (As in, it shoudln't fail, but it will until we get typed arrays)
+[16:27] <particle> odd that it fails here, then, although my failure seems correct
+[16:27] <jonathan> Question is why it doesn't fail elsewhere
+[16:27] <particle> right
+[16:28] <jonathan> We both get the same error with that code in the REPL
+[16:28] <particle> are types parsed but ignored for arrays?
+[16:28] <particle> i'm rebuilding trunk now to test that
+[16:28] <jonathan> No, it tires to do a type check
+[16:28] <jonathan> *tries
+[16:28] <jonathan> But it doesn't know how to type check arrays yet.
+[16:28] <jonathan> So it just fails.
+[16:28] <particle> fails in trunk repl
+[16:28] <jonathan> OK. So we all consistently fail it in the REPL.
+[16:29] <jonathan> But the test file behaves differently.
+[16:29] <particle> lemme check ubuntu
+[16:29] <moritz> if in doubt, don't trust the REPL
+[16:30] <jonathan> particle: In the test file
+[16:30] <jonathan> #?rakudo skip 'types on slurpy params'
+[16:30] <jonathan> So why on earth you're running that when it should be fudged is a mystery.
+[16:30] <particle> hrmm, i don't have that line here
+[16:30] <jonathan> :-S
+[16:30] <particle> oh, i know...
+[16:31] <Coke> repl?
+[16:31] <purl> repl is Read Eval Print Loop
+[16:31] <particle> i ran tools/test_summary.pl, which *doesn't* update t/spec from svn
+[16:31] <jonathan> pmichaud: lex5 tests pass as in trunk
+[16:31] <jonathan> particle: Oh. :-)
+[16:31] <pmichaud> ...all is well so far?
+[16:32] <jonathan> pmichaud: I've checked parrot tests, Rakudo test, Rakudo spectest and NQP. All good.
+[16:32] <particle> pmichaud: i'm rerunning rakudo spectest, i ran an old rev of t/spec :(
+[16:32] *** workbench joined
+[16:33] <jonathan> Test*er* fail!
+[16:33] <particle> i blame the tools
+[16:33] <masak> my lex5 spectests just finished too.
+[16:33] <particle> why doesn't test_summary.pl update t/spec?
+[16:33] <jonathan> What's that saying about "a bad workman..."? ;-)
+[16:34] <pmichaud> ...because it's not run from 'make'?
+[16:34] <masak> 41 failed in t/spec/S03-operators/increment.t and 41 failed in t/spec/S04-statements/for.t
+[16:34] <masak> s:2nd/41/43/
+[16:34] <pmichaud> ...for.t?
+[16:34] <pmichaud> that seems new.
+[16:34] <masak> aye,
+[16:34] <moritz> particle: because sometimes we want to run old versions, to update docs/spectest.data for example
+[16:35] <masak> pmichaud: I'll nopaste it for you.
+[16:35] <pmichaud> also I run old versions to generate the spectest-progress
+[16:35] <pmichaud> masak:  try running from command line
+[16:35] <pmichaud> I'm thinking it's a harness bug.
+[16:35] <moritz> erm yes, spectest-progress, that's what I meant
+[16:35] <masak> pmichaud: you think correctly. all pass.
+[16:35] <pmichaud> okay, not a blocker.
+[16:36] * jonathan smells a merge coming on
+[16:36] *** jhorwitz joined
+[16:36] <tewk> Merge baby merge :)
+[16:36] * masak has the champagne ready
+[16:36] * Coke is sad that tcl isn't using this. =-)
+[16:37] *** leto_ joined
+[16:37] <tewk> Well I'm not sure its going to help speedwise, but at least it will be correct.
+[16:37] <masak> Coke: tcl doesn't do recursion in for loops?
+[16:37] <pmichaud> tcl doesn't use parrot's lexicals.
+[16:38] <masak> ah.
+[16:38] <masak> well, good for tcl! :)
+[16:40] <pmichaud> I know this because I once went looking to see how partcl was able to get lexicals to work, only to discover it wasn't using Parrot's lexicals at all.  :-|
+[16:40] <tewk> What does tcl do?
+[16:40] <pmichaud> it keeps a hash
+[16:40] <moritz> perhaps because they didn't work? :-)
+[16:40] <pmichaud> and manages it directly
+[16:40] <pmichaud> moritz: that's part of it, but tcl also needs dynamic lexpads
+[16:41] <tewk> ah, right.
+[16:41] <Coke> [uplevel] sucks immensely. =-)
+[16:42] <Coke> but it's probably implementable using parrot. I don't think anyone who could fix it is interested in working on tcl over perl6, though. =-)
+[16:42] <tewk> pmichaud: how close is perl6 to operating on PIR objects, say I have a ncigen AST tree that I want to maniuplate from perl6.
+[16:42] <tewk> Should I just use nqp
+[16:42] <pmichaud> either should work.
+[16:43] <pmichaud> The trick is that both expect to have protoobjects as handles.
+[16:43] *** dngor joined
+[16:44] <pmichaud> if the ast tree is being generated by PCT, then it all Just Works.
+[16:44] <tewk> It's not PCT, but I'm using P6metaclass
+[16:44] <pmichaud> that's good enough.
+[16:45] <tewk> cool, tewk plans on digging into perl6 this evening.
+[16:45] <pmichaud> either rakudo or nqp should work.  We still may need a bit more glue here and there but that can happen quickly.
+[16:46] <tewk> ncigen + perl6 is going to generate SQLite PIR bindings.
+[16:46] <pmichaud> most excellent
+[16:46] <pmichaud> I look forward to that.
+[16:46] <particle> that seems like an odd dependency
+[16:46] <pmichaud> I still need to see about troubleshooting lathos' assignment issues.
+[16:46] <jonathan> With the unmanaged struct stuff?
+[16:46] <pmichaud> yes.
+[16:47] <tewk> I don't think we are using umanaged stuct stuff no, but might have to again in the future.
+[16:47] <tewk> We are using the Pointer PMC in a unmanaged struct style though.
+[16:48] <particle> tewk: as a proof-of-concept, using perl6 seems nice, but when rakudo leaves the repo you'll need to use nqp
+[16:48] <jonathan> tewk: How are structs handled at the moment with ncigen?
+[16:48] <tewk> jonathan: they aren't :), they are parsed, but I'm not generating ManagedStructs yet.
+[16:49] <jonathan> Ah, OK.
+[16:49] <tewk> a lot of structs in c libraries are opaque to PIR, so it hasn't been a blocker yet.
+[16:49] <jonathan> The Perl 6 view of this kinda thing is that a struct is a class that has all native types.
+[16:50] <jonathan> I don't think we'll get to looking at that for a little bit though.
+[16:50] <tewk> Early on all we need is pointers.
+[16:50] <jonathan> Sure.
+[16:50] <pmichaud> okay, anyone have any reason I should hold the merge?
+[16:50] * Coke holds his peace.
+[16:50] *** Whiteknight joined
+[16:50] <tewk> Merge, the sooner its it the sooner someone will start toying around with GC'ed contexts
+[16:51] *** Theory joined
+[16:52] <tewk> particle: thats one reason I thing we should keep pbc of common languages in the repo.
+[16:52] <tewk> Build tools should eventually be written in HLLs
+[16:53] <pmichaud> ...and NQP is probably not H enough for general-purpose tool building.
+[16:53] <pmichaud> otoh, the build tools can be compiled to .pbc and *those* can go in the repo :-)
+[16:54] <tewk> Once you have ruby, rakudo, or python, why would you want to go back?
+[16:54] <pmichaud> (might still need the .pbc of the HLL library, though.)
+[16:54] <tewk> :)
+[16:54] <Coke> tewk;back to perl? excellent question.
+[16:54] <tewk> back to nqp, pir
+[16:55] <Coke> (joke)
+[16:56] <tewk> ;)
+[16:58] <pmichaud> initial merge done, testing.
+[16:59] <dalek> r33192 | jonathan++ | trunk:
+[16:59] <dalek> : [rakudo] Recognize ;; parameter separator; set invocant and multi_invocant fields in the signature.
+[16:59] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33192
+[17:00] *** AndyA joined
+[17:03] *** ambs joined
+[17:07] *** ruoso joined
+[17:09] <particle> pmichaud: only increment.t failures, so okay by me to merge
+[17:09] <pmichaud> excellent.  I had one or two codingstd fixes to make, so a final 'make test' and then commit.
+[17:09] <particle> better svn up after jonathan's commit
+[17:09] <pmichaud> already got it.  :-)
+[17:10] <particle> i don't see any bonus tests listed in test_summary.pl
+[17:10] <pmichaud> test_summary.pl doesn't really report bonuses (yet)
+[17:10] <pmichaud> there's one.
+[17:10] <particle> are they not listed at all, ah.
+[17:12] <jonathan> pmichaud: I guess after this merge there will be a bunch of spectests that begin working, though?
+[17:12] <pmichaud> jonathan: could be -- I haven't seen it or checked.
+[17:12] <particle> i'm checking now
+[17:12] <pmichaud> I do know that it closes six rt tickets.
+[17:12] <particle> should take a while
+[17:12] <jonathan> If not, the RT tickets that it closes should turn into tests I guess.
+[17:12] <pmichaud> (at least six.)
+[17:12] <jonathan> Assign them to moritz! ;-)
+[17:13] <pmichaud> I'm not too worried about all of them becoming tests.  They were all different manifestations of the same problem.
+[17:13] <pmichaud> i.e., I don't need to come up with tests for every way that array slices can fail when they're not implemented.  :-)
+[17:13] <particle> tools/autounfudge.pl --auto # running now
+[17:14] <jonathan> pmichaud: OK, so long as we have enough coverage to not regress.
+[17:14] <jonathan> :-)
+[17:14] <pmichaud> the recursive for test has made it into the spectests, so that's pretty good.
+[17:14] <tewk> If they would be valuable to the the context refactor, I would add them now.
+[17:15] <pmichaud> merged, r33193.
+[17:15] <pmichaud> bug reports welcomed -- send them to /dev/null.  :-P
+[17:15] <dalek> r33193 | pmichaud++ | trunk:
+[17:15] <dalek> : Merge lexicals branch into trunk.  "make realclean" required (new opcodes).
+[17:15] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33193
+[17:15] <tewk> pmichaud++
+[17:15] <tewk> pmichaud++
+[17:16] <pmichaud> time for lunch -- I'll be back for parrotsketch (starts in 75)
+[17:19] <moritz> pmichaud++ indeed
+[17:20] <moritz> (for all lurkers, after r33193 you have to 'make realclean', otherwise you'll get build failures)
+[17:20] <moritz> oh, it even says so int he commit message
+[17:20] * moritz should start reading first ;)
+[17:21] <masak> pmichaud++
+[17:21] <masak> ...many times over.
+[17:21] <masak> I'll email the November list.
+[17:22] <jonathan> pmichaud++ indeed
+[17:30] *** ambs left
+[17:30] * masak pops champagne bottle
+[17:33] *** chromatic joined
+[17:33] * chromatic might be late to #ps
+[17:36] <nopaste> "tewk" at 155.98.69.7 pasted "known failure? t/spec/S12-class/declaration-order.t" (38 lines) at http://nopaste.snit.ch/14721
+[17:37] <jonathan> tewk: Yes.
+[17:38] <moritz> there's a ticket for that
+[17:41] <tewk> trunk passes all tests parrot and rakudo
+[17:46] *** gmansi joined
+[17:55] <PacoLinux> same for me (and 21 second less in making trunk tests ? :) )
+[18:06] *** rurban joined
+[18:08] <jhorwitz> preposted my status in #ps
+[18:09] <Infinoid> hum.
+[18:10] <Infinoid> #   Failed test 'nci_vV - char** out parameter'
+[18:10] <Infinoid> #   at t/pmc/nci.t line 2707.
+[18:10] <Infinoid> # Exited with error code: [SIGNAL 3]
+[18:10] <Infinoid> # Received:
+[18:10] <Infinoid> # Parrot VM: PANIC: vV is an unknown signature type.
+[18:13] *** cognominal joined
+[18:18] <Tene> Which spectests pass now that didn't pass before the lexicals merge?
+[18:18] <Tene> pmichaud: did you add a parrot test to test lexicals behavior?
+[18:18] <moritz> Tene: I unfudge one in for.t
+[18:18] <moritz> Tene: and autounfudge is currently running, and finds more
+[18:19] <Tene> Ah.  Nice.
+[18:19] <particle> moritz: i'm running it too, ...slowly...
+[18:19] <jonathan> Parallel unfudging!
+[18:20] <particle> if only we weren't running over the same data :)
+[18:20] <moritz> particle: I'm already at S29
+[18:20] <particle> moritz: i'm at S04 more than 1h later
+[18:20] <moritz> jonathan: actually with --jobs=2 you can parallelize autounfudge ;)
+[18:21] <Tene> can I --jobs=8 ?
+[18:21] <moritz> Tene: sure you can.
+[18:21] * Tene builds parrot.
+[18:22] * Tene builds rakudo
+[18:22] * rurban switches to git
+[18:23] <Tene> rurban: let me know if you run into any issues.  I've had to deal with most of them.  :)
+[18:23] <rurban> First I have to understand the basics
+[18:23] <rurban> keeping a branch with svn in sync is way too much work for me.
+[18:24] <Tene> Aw.  My work's dev box doesn't have TAP::Harness. :(
+[18:24] <moritz> particle: I've applied (parts of) autounfudge now locally, and I'm testing right now
+[18:24] <particle> okie
+[18:31] <tewk> Infinoid: add vV to config/gen/call_list/misc.in
+[18:33] <jonathan> Arrrgh.
+[18:34] * jonathan creates a segfault
+[18:34] <cotto> jonathan is in good company
+[18:37] <masak> aye.
+[18:39] <Infinoid> tewk: I'd love to, I just don't understand the syntax of that file.
+[18:39] * jonathan won't commit this patch
+[18:39] <jonathan> Damm. This is teh suck...
+[18:42] *** rurban_ joined
+[18:44] <cotto> errand &
+[18:46] <dalek> r33194 | moritz++ | trunk:
+[18:46] <dalek> : [rakudo] add tests for [perl #60404] to t/spectest.data
+[18:46] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33194
+[18:50] <barney> pmichaud: Could you take a quick look at $?INIT in languages/pipp/src/pct/actions.pm ?
+[18:51] <barney> It doesn't behave as expected with t/php/oo_2.php
+[18:51] <Tene> pmichaud: rt 58854 needs to be fixed.
+[18:51] <pmichaud> easier is now to add things using the loadinit attribute on PAST::Block
+[18:51] <Whiteknight> wouldn't you know that the repair guy shows up exactly when #ps starts?
+[18:51] <Tene> newclosure workaround for gather blocks.
+[18:53] *** alvar joined
+[18:53] <barney> pmichaud: I'll look into loadinit. Still it looks like $?INIT should have been set, but is undefined in the method TOP
+[18:55] <tewk> Infinoid: added
+[18:55] * jonathan -> nom
+[18:55] <tewk> svnup
+[18:55] <pmichaud> barney: is class_constant_definition being called?
+[18:55] <dalek> r33195 | tewk++ | trunk:
+[18:55] <dalek> : [NCI] added "vV" signature
+[18:55] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33195
+[18:56] <rurban> http://www.parrotcode.org/release/devel still points to 0.8.0
+[18:57] <nopaste> "barney" at 84.154.59.31 pasted "No $?INIT, but class_constant_definition() was called" (56 lines) at http://nopaste.snit.ch/14723
+[18:57] <barney> Yes, it emits an empty block with name 'class_constant_definition'
+[18:58] <pmichaud> there is no   defined( ... ) function in PCT.
+[18:58] <pmichaud> are you planning for it to use one from PIPP?
+[19:00] *** Hadi joined
+[19:00] *** Hadi left
+[19:01] <pmichaud> ...and the INIT block *is* in the nopaste you just showed me.
+[19:01] <pmichaud> so that part's working.
+[19:01] <Coke> I see we have no tweety.
+[19:02] <barney> pmichaud: where is the $?INIT block ?
+[19:02] <pmichaud> oh wait, maybe not.
+[19:03] <pmichaud> I was thinking the PAST;Block with the :init :load flags was it.
+[19:03] <pmichaud> btw:       for $<sea_or_code> {
+[19:03] <pmichaud> looks very funny to me.
+[19:03] <pmichaud> is $<sea_or_code> a match object?
+[19:03] <pmichaud> if so, you might want  @($<sea_or_code>)
+[19:05] <barney> pmichaud: If i remove the defined check in actions.pm I get: Method 'blocktype' not found for invocant of class 'Undef'
+[19:06] <pmichaud> yes, that sounds a lot like an undef.  hrm.
+[19:07] <barney> for $<sea_or_code>     is like in the Rakudo actions.pm
+[19:07] <barney> I tried to a add a testcase in complete_workflow.t, but It works as expected there
+[19:07] <pmichaud> okay.
+[19:07] <pmichaud> oh, $<sea_or_code> is an array of matches.
+[19:08] <pmichaud> yes, that's okay.
+[19:09] <dalek> r33196 | infinoid++ | trunk:
+[19:09] <dalek> : [ops2pm] Fix a mkdir race condition when running with "make -j".
+[19:10] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33196
+[19:14] *** apeiron joined
+[19:16] <nopaste> "pmichaud" at 72.181.176.220 pasted "$?INIT is being set properly (for barney)" (52 lines) at http://nopaste.snit.ch/14724
+[19:17] <masak> rakudo: my $a = 5; $a = [ $a, 6 ]; say $a
+[19:17] <polyglotbot> No output (you need to produce output to STDOUT)
+[19:17] <masak> on #perl6 and in November this now creates an infinite regress
+[19:17] <masak> that can't be right, now can it?
+[19:18] <pmichaud> we don't have list interpolation done yet.
+[19:18] <masak> ah.
+[19:18] <masak> so how do I write the above in current Rakudo>
+[19:18] <masak> ?
+[19:18] <pmichaud> could try +$a
+[19:18] <masak> or ~$a
+[19:20] <pmichaud> barney:  is looks as though defined( ... ) on the PAST::Block is returning false.
+[19:20] <pmichaud> (in TOP)
+[19:20] *** Hadi joined
+[19:20] <pmichaud> it's looking in php_constants for  "Hash[0xb74a238c]"  (the stringification of the PAST::Block node) and not finding it.
+[19:21] *** Hadi left
+[19:22] *** Hadi joined
+[19:22] *** Hadi left
+[19:22] <pmichaud> bbiab
+[19:22] <barney> pmichaud++
+[19:42] <dalek> r33197 | bernhard++ | trunk:
+[19:42] <dalek> : [Pipp]
+[19:42] <dalek> : Fix support for class constants.
+[19:42] <dalek> : Do not use the PHP function 'defined' for definedness of a PIR register
+[19:42] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33197
+[19:43] <barney> cotto: I'll look at '--target=pir' tomorrow.
+[19:43] <cotto> thanks.
+[19:44] <masak> pmichaud++ # closing a lot of tickets
+[19:44] <cotto> How good are you with actions?
+[19:45] <masak> who, me?
+[19:45] <cotto> I have a grammar that parses opening/closing tags, but it's taking me a long time to wrap my head around what actions.pm should look like.
+[19:45] <cotto> no, barney
+[19:45] <masak> ah.
+[19:45] <barney> Not very. Problem is mostly to know which PAST to generate
+[19:45] <cotto> I'll keep hacking at it, then.
+[19:48] <barney> actions most likely need to know the tagstyle, for deciding whether to echo the last value
+[19:48] <cotto> you mean first?
+[19:48] <cotto> as in <?="foo"; $i++;?>
+[19:48] <barney> Or first. I'm pretty bad with PHP
+[19:49] <cotto> lawl
+[19:49] *** Whiteknight joined
+[19:50] <barney> cotto: yes
+[19:51] <barney> I'm still astonished that this isn't a PHP syntax error
+[19:53] <barney> maybe do the same as in <?php echo "foo"; $i++ ?>
+[19:54] <bacek> good morning
+[19:54] <cotto> yes, those two produce identical output
+[19:54] <bacek> pmichaud++ !!!
+[19:55] <barney> if    tagstyle == '<?='  then wrap an 'echo' around the first child
+[19:55] <cotto> basically
+[19:55] <purl> it has been said that basically is the might have on one side justified is ribasushi's question
+[19:55] <cotto> no, basically is <reply>
+[19:55] <purl> okay, cotto.
+[19:58] <barney> like it is done in the method 'arguments()' and setting :name('echo')
+[20:00] <cotto> yes.  Pipp currently handles <?= correctly (for simple cases, at least).
+[20:01] <PerlJam> isn't that being deprecated?
+[20:01] <dalek> Krishna Sethuraman | Parrot Development on Windows:
+[20:01] <dalek> link: http://www.perlfoundation.org/parrot/index.cgi?parrot_development_on_windows
+[20:05] <cotto> PerlJam, you mean <?=  ?
+[20:14] <dalek> r33198 | pmichaud++ | lex3:
+[20:14] <dalek> : Removing obsolete branch.
+[20:14] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33198
+[20:14] <dalek> r33199 | pmichaud++ | lex4:
+[20:14] <dalek> : Removing obsolete branch.
+[20:14] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33199
+[20:14] <dalek> r33200 | pmichaud++ | lex5:
+[20:14] <dalek> : Removing obsolete branch.
+[20:14] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33200
+[20:14] <dalek> r33201 | pmichaud++ | lex2:
+[20:14] <dalek> : Removing obsolete branch.
+[20:14] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33201
+[20:14] <GeJ> Good morning everyone
+[20:15] <PerlJam> cotto: aye
+[20:17] <masak> GeJ: evenin'
+[20:18] <particle> stop trying that mind trick on me, GeJ, it's still yesterday here. you can't convince me it's tomorrow already!
+[20:18] <cotto> PerlJam, Where'd you see that?  The manual (which usually mentions such things) doesn't say anything.
+[20:18] <GeJ> hej masak
+[20:18] <masak> hej :)
+[20:19] <GeJ> particle: sure I can... and if it's any consolation, I can already tell you that tomorrow looks pretty nice. warm and nice.
+[20:20] * masak refuses to believe that
+[20:21] <masak> there's snow everywhere!
+[20:21] <pmichaud> I have seen the future and it can be summed up in just one word...   "Plastics."
+[20:21] * GeJ checks outside.
+[20:21] <GeJ> masak: no there isn't!
+[20:21] <masak> pmichaud: :D
+[20:21] <masak> GeJ: check again.
+[20:21] <masak> it's that white giant sheet outside
+[20:22] *** Debolaz joined
+[20:24] <GeJ> blue liquid thingy all around, check! whitish dust that goes in the shoes and socks, check! blue intangible stuff above the head, check! big hot yellow ball in the blue stuff, check!
+[20:24] <GeJ> see, no snow in here.
+[20:24] *** sjansen joined
+[20:30] * jonathan is return
+[20:30] <Infinoid> no big hot yellow ball here
+[20:30] <bacek> GeJ: you jocking! There is clouds everywhere!
+[20:30] <jonathan> My snows are gone. :-(
+[20:30] <Infinoid> there will be moar
+[20:32] <Coke> ~/ This was a triumph /~
+[20:32] <pmichaud> bright yellow ball here, not so very hot.
+[20:32] <Coke> all day rain here.
+[20:32] <Coke> (expected snow this evening as temps drop)
+[20:32] <Infinoid> snow tonight here too
+[20:33] <pmichaud> afk # pick up kids from skool
+[20:33] * Coke leaks memory.
+[20:33] <Infinoid> o/~ I'm making a note here: HUGE SUCCESS
+[20:34] <Coke> Infinoid++
+[20:35] <Coke> is the vtable_self branch done?
+[20:42] <Tene> pmichaud: can I get you to look at r31136?  That was a lexicals workaround that needs to be addressed now.
+[20:43] <Tene> I don't have the concentration available today to think about this and figure out what happened on the lexicals branch.
+[20:46] <Coke> 580+41
+[20:46] <purl> 621
+[20:46] <Tene> karma tene?
+[20:46] <purl> tene has karma of 310
+[20:46] <dalek> r33202 | chromatic++ | trunk:
+[20:46] <dalek> : [src] Promoted some MMD and NCI STRINGs to cached constant strings.  This saves
+[20:46] <dalek> : 426 (or 17.39%) STRING creations from "Hello, world!" startup.  It's a very
+[20:46] <dalek> : modest performance improvement there, but the fewer GCable elements at the
+[20:46] <dalek> : start, the fewer GC runs -- and the faster Parrot starts.
+[20:46] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33202
+[20:47] <Coke> what's the difference between CONST_STRING and const_string ?
+[20:47] <Tene> 31*5*2
+[20:47] <purl> 310
+[20:47] <chromatic> CONST_STRING constants have to be compile-time constants in the source code.
+[20:48] <Coke> ah
+[20:48] <Tene> 311 is prime.  Dammit, I wasn't going to work on parrot today.
+[20:48] <chromatic> That's a subtle naming distinction which should not be so subtle.
+[20:49] <jonathan> pmichaud++ # posting on rakudo.org too
+[20:49] <allison> chromatic: yes, the lowercase version needs a more explicit name (as do many of our string functions)
+[20:49] <allison> chromatic: (adding to strings tastlist)
+[20:49] <chromatic> ****ing_const_string
+[20:50] <chromatic> Though I don't like gerunds where verbs should be.
+[20:50] <Coke> CONST_CONST_STRING and DYNAMIC_CONST_STRING. ;)
+[20:51] <pmichaud> Tene:  I've already started it -- just waiting for spectest to finish.
+[20:51] <pmichaud> ...which it did while I was out getting kids.
+[20:51] <allison> CONST_STRING_MACRO and Parrot_str_build_constant_string
+[20:52] <chromatic> _MACRO?
+[20:52] <chromatic> Doesn't HAI_I_AM_UPPERCASE signify that enough now?
+[20:52] <allison> chromatic: just being overly verbose
+[20:53] <allison> it is more than just an ordinary macro, though
+[20:53] <chromatic> Hm, removing PARROT_EXPORT from vtable subs in C improves startup by 38.14%.
+[20:53] <dalek> r33203 | pmichaud++ | trunk:
+[20:53] <dalek> : [rakudo]:  Remove gather workaround introduced in r31116 (RT #58854, Tene++)
+[20:53] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33203
+[20:53] <Tene> karma tene?
+[20:53] <purl> tene has karma of 311
+[20:53] <Tene> Much better.
+[20:54] <allison> like 'CONST_STR_FILE_ENTRY'
+[20:54] <pmichaud> there... got you your prime and you didn't have to do any work.  :-)
+[20:54] <Tene> :)
+[20:55] <chromatic> "Hello, world!" in PIR is only 154 times slower than "Hello, world!" in C, mostly thanks to startup time.
+[20:55] <chromatic> Previously it was 250 times slower.
+[20:55] <Tene> moritz: do you remember how you made gather/take break earlier?  Did you commit a test for it?  Can you check to see if it works now?
+[20:55] <allison> chromatic: startup time is something we'll have to work on over time
+[20:56] <pmichaud> what's the speed difference for perl 5 ?
+[20:56] <pmichaud> that's perhaps a more accurate comparison.
+[20:56] <chromatic> 26 times
+[20:56] <pmichaud> perl 5 : C  ==   26 : 1   ?
+[20:57] <allison> chromatic: is it worth doing a general cleanup/removal of PARROT_EXPORT tags?
+[20:57] <pmichaud> also, are you profiling the .pir or the .pbc ?
+[20:57] <chromatic> PIR.
+[20:57] <pmichaud> so, that includes compilation time.  okay.
+[20:57] <Coke> ohoh, can I do tclsh85 to partcl? =-)
+[20:57] *** Whiteknight joined
+[20:58] <Tene> Coke: yes plz.
+[20:58] <Tene> Coke: is it fast or slow?
+[20:58] <Coke> for "puts hi":
+[20:58] <Tene> >.>
+[20:58] <chromatic> PIR is 1.73 times slower than PBC.
+[20:58] <jonathan> chromatic: Should check that dynamic extensions still work after removing those.
+[20:58] <Coke> .177 / 0.014
+[20:58] <purl> 12.6428571428571
+[20:58] <chromatic> jonathan, they don't work.
+[20:58] <Coke> huh. that's not as slow as I thought.
+[20:58] <chromatic> I'm not checking this in yet.
+[20:58] <jonathan> chromatic: I feared so. :-|
+[20:58] <Coke> but when you add in anything real, it's MUCH slower.
+[20:59] <jonathan> chromatic: I'm trying to remember why we need to export them all. If the call is through the vtable...or is the problem that the call isn't always through the v-table?
+[20:59] <chromatic> jonathan, the problem is initializing their vtables in the PMC-specific init functions.
+[21:00] <chromatic> They use raw C function pointers in ancestor PMCs.
+[21:00] <chromatic> Mostly they need a way to grab the ancestor's PMC vtable, copy it, and stuff their own (could even be static) function pointers in the table.
+[21:00] <chromatic> We still export some 2700 symbols from our shared library.
+[21:00] <chromatic> 43% of startup time is dynlib relocations.
+[21:01] <jonathan> Ouch.
+[21:01] <chromatic> 26.11% of startup time is initializing core PMCs.
+[21:01] *** nopaste joined
+[21:01] <chromatic> 8% of startup time is initializing BigInt and Integer.
+[21:02] * jonathan wonders why we spend 26% of our time doing that
+[21:02] <allison> chromatic: possibly a quick optimization there
+[21:02] <allison> jonathan: building vtables and C-level MULTIs, likely
+[21:03] <chromatic> Parrot_mmd_add_multi_list_from_c_args.
+[21:03] <chromatic> That itself is 17.49% of startup time.
+[21:03] <chromatic> Called *six* times.
+[21:03] <allison> some of that can be delayed, just cache the data and process it when the mmd is actually invoked
+[21:03] <chromatic> Each call is ~3% of startup time.
+[21:03] <tewk> chromatic: its possible to fix those dynlib relocations at build time by telling the linker to be smart, no
+[21:04] <allison> chromatic: yeah, but it doesn't do all the work every time it's called
+[21:04] <chromatic> tewk, I would think so.
+[21:04] <tewk> I know you can on windows,
+[21:05] <tewk> kde has fixed the dynlib problem before, too,  now that I think about it.
+[21:05] <chromatic> I wonder how much -fPIC hurts us (not that we can get rid of it).
+[21:06] <moritz> Tene: I don't know which breakage you mean
+[21:07] <dalek> r33204 | pmichaud++ | trunk:
+[21:07] <dalek> : [pge]:  accessing vtable functions by name is now deprecated (RT #60384)
+[21:07] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33204
+[21:07] <Tene> moritz: there was a lexicals issue with gather/take that you reported a while back.
+[21:08] <moritz> Tene: chances are that it was actually masak, because he actually uses that stuff ;)
+[21:08] <Tene> ... oh, right, there are TWO people with m-names.
+[21:08] <pmichaud> I think it was masak.
+[21:08] <Tene> I'm really not awake today.  :/
+[21:08] <Tene> Sorry.
+[21:08] <pmichaud> I'm not sure it ever got filed as a ticket.
+[21:08] <pmichaud> or a spectest.
+[21:08] <purl> i think a spectest is only helpful for people hacking on partcl at this point, i think.
+[21:08] <tewk> http://en.wikipedia.org/wiki/Prelink
+[21:12] *** Limbic_Region joined
+[21:12] <Limbic_Region> pmichaud++ # lexicals finally work properly
+[21:12] <Tene> pmichaud: are you planning a more significant blog post?
+[21:13] <pmichaud> Tene: not at the moment... do I need one?
+[21:13] <Limbic_Region> $everyone_who_contributes++ # because it is mostly a thankless job that everyone wants done but few are willing to do
+[21:13] <Tene> I'd be interested in a summary of what has changed.  I can probably get it from a diff or something with more work, though.
+[21:13] <Tene> Just curious.
+[21:13] <pmichaud> with respect to lexicals?  Bottom line is that they work.  :-)
+[21:13] <moritz> ;)
+[21:14] <pmichaud> how they work is currently at http://www.pmichaud.com/perl6/lexical.txt
+[21:14] <pmichaud> I might need to update that a bit to match reality, since that was the design idea behind it
+[21:14] <pmichaud> for example, the handling of autoclose changed slightly
+[21:15] <pmichaud> I could turn lexical.txt into a blog post, yes.
+[21:15] <pmichaud> probably for parrotblog
+[21:15] <Tene> It would be good to have documentation of the lexicals system in docs/ somewhere too
+[21:15] * Limbic_Region assumes state is still broken or unimplemented though?
+[21:15] <moritz> state is NYI, right
+[21:16] <dalek> r33205 | Whiteknight++ | calling_conventions:
+[21:16] <dalek> : [calling_conventions] update to trunk r33195, fixing a few conflicts and adjusting for a few changes. Still doesn't pass that test, however
+[21:16] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33205
+[21:16] <pmichaud> one of the milestones is updating pdd20
+[21:16] <jonathan> pmichaud: Would be good to have it turned into a PDD. ;-)
+[21:16] * Limbic_Region remembers pointing out to Jeff Horowitz at YAPC::NA how one of his examples would be better done with state before he knew it wasn't implemented
+[21:17] <Tene> Right, there's a PDD for it!
+[21:17] <Tene> Clever.
+[21:17] * jhorwitz perks up
+[21:17] <pmichaud> that pdd needs to be rewritten.
+[21:17] <Tene> Man, I need to stay off of IRC today before I embarass myself further.
+[21:17] <Tene> spelling.
+[21:17] <purl> spelling is not one of Nicholas's strong points or trucky. or tricky :)
+[21:17] <Coke> Tene: too late!
+[21:17] <pmichaud> since it is, well, wrong.  that pdd has caused me a lot of headaches.
+[21:18] <Limbic_Region> jhorwitz - sorry to have disturbed your slumber but nothing new to report yet ;-)
+[21:18] <Coke> so, does that fact that we're so slow concern anyone other than me? =-)
+[21:18] *** donaldh joined
+[21:18] <jonathan> pmichaud: I know you've spent more of your life on lexicals than you probably wanted to already, but I suspect the PDD has the best chance of being right if you (at some point, when you can face it) were to update it.
+[21:19] <allison> Coke: of course, but actually working comes before working fast
+[21:19] * jhorwitz crawls back under his rock
+[21:19] <pmichaud> jonathan: yes, I'm already resigned to the fact that I'll have to be the one to rewrite it.
+[21:19] <moritz> Coke: oh come on, jonathan and chromatic did the MMD cache, and chromatic did a startup profile
+[21:20] <pmichaud> to be honest, fixing lexicals was a lot harder than writing PCT, and I got paid for that part.  :-)
+[21:20] * allison heads out to drive across town
+[21:21] <Tene> pmichaud: if you can update your lexicals.txt and mail me, I can do the PDD for you.
+[21:21] <Limbic_Region> pmichaud - speaking of which, how is your funding these days?
+[21:21] <pmichaud> Tene: that would be great
+[21:21] <pmichaud> l_r:  well, I have the ian hague grant for redesigning pge, but of course there's a lot more to do than just that :-)
+[21:22] * Tene @ allalone.org
+[21:22] *** alvar joined
+[21:22] <pmichaud> more funding would always be helpful :-)
+[21:23] <Limbic_Region> well, I am looking at possibly doing something like jonathan's sponsorship - one day a week/month thing starting at the beginning of the new year
+[21:24] <Limbic_Region> last we spoke, you were more interested in help with travel but I know that is dynamic
+[21:24] <pmichaud> one day a week/month a-la jonathan style would be excellent
+[21:25] <Coke> ls
+[21:25] <Coke> ww
+[21:25] <Limbic_Region> ww not found
+[21:25] <pmichaud> okay, I need a break for a short while -- bbl
+[21:25] * Limbic_Region will send you an email
+[21:26] <Coke> why do we have "parrot_is_shared" ? should we not default to that?
+[21:26] <Coke> (er, as a config option)
+[21:26] <Coke> (esp. given our 3 core platforms.)
+[21:28] <chromatic> I think it's because Mac OS X is weird.
+[21:28] <Coke> fair enough.
+[21:28] <chromatic> That's the only platform I recall where building a static libparrot ever worked or made sense.
+[21:31] <Coke> Someone should copy allison's final response to 36249 to the trac wiki and resolve the ticket.
+[21:31] <Tene> pmichaud: did you close the ticket about the gather workaround?
+[21:31] <Tene> Ah.  You did.
+[21:31] <Tene> Email is friendly.
+[21:34] <chromatic> Hm, prelinking didn't seem to do much.
+[21:36] <Coke> chromatic: speaking of caching: http://rt.perl.org/rt3/Ticket/Display.html?id=45987
+[21:36] <jonathan> Do we even have a method cache these days?
+[21:36] <dalek> r33206 | moritz++ | trunk:
+[21:36] <dalek> : [rakudo] follow a moved test in spectest.data
+[21:36] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33206
+[21:37] <chromatic> I doubt it.
+[21:37] <chromatic> If we do use a cache, I'd rather use call-site PIC.
+[21:37] <jonathan> I didn't ever investigate that much (leo's implementation was too opaque for me to grok it from that and I never got around to reading the paper)
+[21:38] <chromatic> The paper's not too bad.
+[21:38] <jonathan> Got a URL handy or is Google the best bet?
+[21:38] *** alvar_ joined
+[21:38] <chromatic> I'd have to Google it to find it.
+[21:38] <jonathan> ok, I'll google myself
+[21:38] <jonathan> ...that sounded dirty...
+[21:40] <jonathan> Found the info
+[21:44] <dalek> r33207 | moritz++ | trunk:
+[21:44] <dalek> : [rakudo] track merge test files in spectest.data
+[21:44] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33207
+[21:46] <donaldh> Are there any Cygwin users around?
+[21:48] <Coke> I have cygwin, haven't done much parrot with it rece4ntly.
+[21:49] <donaldh> Hmmm, I used to be able to debug parrot. Now I only get a hex stack, i.e. no symbols.
+[21:50] <donaldh> I have a parrot crash that I can reproduce so I'm trying to debug it.
+[21:50] <Coke> what configure options did you use?
+[21:50] <donaldh> Coke: the default. It's compiling with -g
+[21:51] <Coke> bah. can't help ATM: my cygwin svn is too old.
+[21:51] <Coke> (oh, wait, i have like 4 copies of svn here.)
+[21:51] <donaldh> I used to get an erroneous -s link flag, inherited from perl5 that I had to manually remove, but there's no trace of that any more.
+[21:52] <Coke> yah. I'll check in with you when i get home; too many obstacles to doing a quick check at work.
+[21:52] <donaldh> np
+[21:52] <Coke> If you don't hear back, opening a ticket is also fine.
+[21:53] <donaldh> Yup. It looks like a Cygwin weirdness tho. Or do you mean for the SEGV?
+[21:53] <Tene> Both would be fine.
+[22:07] <donaldh> Coke: oh joy. debugging is there. it's just that the stack is corrupted.
+[22:07] <chromatic> Cygwin hates longjmp :)
+[22:08] *** johbar joined
+[22:08] *** ff-wonko joined
+[22:10] <Coke> maybe someone on another platform can duplicate the segv?
+[22:10] <dalek> r33208 | jonathan++ | trunk:
+[22:10] <dalek> : [core] Implement remove_method vtable method in the Class PMC, plus the method variant.
+[22:10] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33208
+[22:10] <donaldh> Will try myself on Linux when I get a chance.
+[22:10] <Coke> donaldh++
+[22:11] <Coke> if it's a segfault, also try running the program with -G to see if it's a GC related segfault.
+[22:11] <moritz> if somebody needs a linux box to test, on you can either get a login on feather or on the machine where the #perl6 evalbot runs on
+[22:11] <dalek> r33209 | pmichaud++ | trunk:
+[22:11] <dalek> : [rakudo]:  Add quote with multiple bracket characters, and texas quotes.
+[22:11] <dalek> : * Partially fixes RT #60670.
+[22:11] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33209
+[22:12] <Coke> when did those turn into "texas" quotes?
+[22:12] <Coke> thought they were french. =-)
+[22:12] <pmichaud> « is french
+[22:12] <pmichaud> << is Texas
+[22:12] <pmichaud> Texas quotes are working.  French aren't.
+[22:14] * jonathan stares at the two and tries to decide if the Texan ones are bigger ;-)
+[22:14] * Coke stares at pmichaud's two sends.
+[22:14] <donaldh> Coke: it's a GC related segfault. -G runs fine. Does --gc-debug do anything useful. It doesn't seem to do anything for me.
+[22:14] <moritz> they are (two codepoints vs. one)
+[22:14] <jonathan> Ooh, multi methods nearly work...
+[22:15] <Coke> donaldh: --gc-debug, as i recall, works by not actually reclaiming anything, causing the GC pressure to increase.
+[22:15] <Coke> chromatic has a nice article on tracking down parrot GC bugs.
+[22:15] <Coke> http://www.oreillynet.com/onlamp/blog/2007/10/how_to_debug_a_gc_problem_in_p.html
+[22:15] <donaldh> Coke++
+[22:15] <Coke> chromatic++
+[22:16] <Coke> also: http://www.oreillynet.com/onlamp/blog/2007/10/debugging_gc_problems_in_parro.html
+[22:17] <Coke> note that --runcore=gcdebug is INSANELY slow.
+[22:17] <Coke> (so if you're running a language instead of PIR, you might want to trim it down a bit first.)
+[22:17] <Coke> chromatic: I'd love to see an article about how to fix memory leaks. =-)
+[22:18] <chromatic> Run Valgrind.
+[22:18] <chromatic> Read output.
+[22:18] <chromatic> Think really hard.
+[22:18] <chromatic> Check in fix.
+[22:18] <Infinoid> Profit.
+[22:18] <Coke> I have trouble on step 3 there.
+[22:18] <chromatic> Me too, because WE FIXED THE LEAKS.
+[22:18] <donaldh> bugger. SIGILL from --runcore=gcdebug
+[22:18] <Coke> yo yo, sig illin.
+[22:18] <chromatic> I thought it was --runcore=gc-debug
+[22:18] <Coke> I could be mistaken.
+[22:19] <chromatic> That one has anti-vomiting properties.
+[22:19] <Coke> (fixed the leaks) ah, but this is tcl, innit!
+[22:19] <chromatic> No, THIS IS SPARTA.
+[22:19] <Coke> (I mean, the leaks are in parrot, but still, tcl seems to break things that core doesn't notice.)
+[22:19] <Coke> THIS IS CAKETOWN!
+[22:19] <chromatic> Wait.  Tcl's madness.
+[22:19] <Coke> I'd kick you down in the large hole we have in the centre of our town if I didn't need you to fix my memory leaks.
+[22:19] <Coke> (why the (&*#$ do they even have that hole? huh?)
+[22:21] <chromatic> They're baking the world's largest cake.
+[22:21] <donaldh> I'll happily share my testcase, but it involves PIR, NCI, sqlite3 and a sample DB.
+[22:22] *** gmansi joined
+[22:24] <Coke> chromatic: so my 'thinking hard' basically involved trying to match up the init sub the alloc was usually called from with a corresponding destroy sub.
+[22:24] <Coke> I was unable to do this on the one or two I started out with, though.
+[22:24] <Coke> also, I hate C. :|
+[22:25] <Coke> ->
+[22:25] <chromatic> That's basically how it works.
+[22:41] *** tak joined
+[22:44] *** gmansi joined
+[22:51] * jonathan wishes he wasn't so thick today
+[22:58] <dalek> r33210 | jkeenan++ | rm_miniparrot:
+[22:58] <dalek> : Eliminate tests for Configure.pl --miniparrot option, which is no longer being offered.
+[22:58] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33210
+[23:09] *** TiMBuS joined
+[23:21] *** alvar joined
+[23:30] <dalek> r33211 | jonathan++ | trunk:
+[23:30] <dalek> : [rakudo] Some final bits to get multi methods working.
+[23:30] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33211
+[23:33] *** bacek_ joined
+[23:34] *** tak joined
+[23:48] *** tak joined
+[23:49] *** ffwonko joined
+[23:57] <dalek> r33212 | jonathan++ | trunk:
+[23:57] <dalek> : [rakudo] Add another spectest.
+[23:57] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=33212

@@ -1,0 +1,711 @@
+[00:14] *** MoC joined
+[00:21] <cotto> bacek_at_work, when do you think the key branch will be ready to merge into trunk?
+[00:24] * Whiteknight is looking forward to that too
+[00:25] <Whiteknight> nopaste?
+[00:25] <purl> nopaste is at http://nopaste.snit.ch/ (ask TonyC for new channels) or http://poundperl.pastebin.com/ or http://paste.scsys.co.uk/ or App::Nopaste or tools/dev/nopaste.pl or at http://www.extpaste.com/ or http://paste.scsys.co.uk (for #catalyst, #dbix-class, #moose  and others) or http://gist.github.com/
+[00:25] <clunker9_> http://pasta.test-smoke.org/ or http://paste.husk.org/ or http://nopaste.snit.ch:8001/ or http://rafb.net/paste or http://poundperl.pastebin.com/ or http://paste.scsys.co.uk/
+[00:26] <chromatic> tools/dev/nopaste.pl
+[00:28] <Whiteknight> these rakudo spectest failures are both remarkably similar
+[00:29] <nopaste> "whiteknight" at 69.248.162.161 pasted "backtraces for two rakudo spectest failures, called from ../../parrot perl6.pbc" (228 lines) at http://nopaste.snit.ch/17216
+[00:29] <Whiteknight> damnit, nopasted it to the wrong channel
+[00:30] <Whiteknight> same failures and almost identical backtraces when calling from the fakecutable
+[00:32] <chromatic> Do you get them while running the PBC with the --leak-check option?
+[00:32] <chromatic> Sorry, --leak-test.
+[00:32] <Whiteknight> no, haven't tried that option yet
+[00:32] <Whiteknight> same backtrace too when using -G, so no difference there
+[00:33] <Whiteknight> and same exact backtrace with --leak-test
+[00:35] <Whiteknight> what is the "t" in the NCI signature?
+[00:36] *** patspam joined
+[00:36] <chromatic> Raw string?
+[00:36] <Whiteknight> okay, that makes some sense
+[00:37] <Whiteknight> I'm trying to figure out why this is calling into IMCC from NCI. is that how the PASM compreg works?
+[00:37] <Whiteknight> or the PIR one?
+[00:39] <chromatic> I believe so.
+[00:40] <Whiteknight> man, this trace is rediculous
+[00:40] <Whiteknight> i dont even know where to start with it
+[01:01] *** allison joined
+[01:03] <Whiteknight> Okay, the constant pointed to in Parrot_init_arg_op is actually a string but is being treated as a PMC
+[01:03] <chromatic> Definitely a problem.
+[01:05] <cotto> maybe it's a stealth PMC
+[01:05] *** Andy joined
+[01:05] <Whiteknight> ctx->constants[*pc]->u.string is a valid string, while ctx->constants[*pc]->u.key is not a valid PMC
+[01:05] <Whiteknight> the string is "Perl6Scalar"
+[01:08] <dalek> parrot: r39983 | jkeenan++ | branches/darwin2hints/t/steps/init/hints/darwin-01.t:
+[01:08] <dalek> parrot: Add more tests for subs internal to init::hints::darwin.
+[01:08] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39983/
+[01:08] <Whiteknight> (gdb) p * ctx->constants[*pc]->u.string
+[01:08] <Whiteknight> $5 = {cache = {_b = {_bufstart = 0x1b4c390, _buflen = 16}, _ptrs = {_struct_val = 0x1b4c390, _pmc_val = 0x10}, _i = {_int_val = 28623760, _int_val2 = 16},
+[01:08] <Whiteknight> _num_val = 1.4142016470804839e-316, _string_val = 0x1b4c390}, flags = 463104, strstart = 0x1b4c390 "Perl6Scalar", bufused = 11, strlen = 11,
+[01:08] <Whiteknight> hashval = 0, encoding = 0x13b69e0, charset = 0x13b6d30}
+[01:08] <Whiteknight> (gdb) p * ctx->constants[*pc]
+[01:08] <Whiteknight> $4 = {type = 115, u = {integer = 140266244385480, number = 6.9300732622038298e-310, string = 0x7f9247abaac8, key = 0x7f9247abaac8}}
+[01:09] <Whiteknight> what does that type number correspond to? is that some kind of flag to determine the type, or someting more nefarious?
+[01:11] <chromatic> Looks like a Rakudo type.
+[01:14] <dalek> partcl: r523 | coke++ | branches/convert_tcllist (50 files):
+[01:14] <dalek> partcl: Merged /trunk:r499-522
+[01:14] <dalek> partcl: review: http://code.google.com/p/partcl/source/detail?r=523
+[01:14] <dalek> parrot: r39984 | jkeenan++ | branches/darwin2hints/t/steps/init/hints/darwin-01.t:
+[01:14] <dalek> parrot: Fine-tune tests, e.g., make sure  is always usable at end of blocks.
+[01:14] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39984/
+[01:15] <Whiteknight> okay, somewhere along the line the FixedIntegerArray for the sub signature isn't getting passed, or not passed correctly
+[01:15] <Whiteknight> so the constants pointer is off, and is pointing to the wrong arguments in the packfile
+[01:16] <chromatic> That could do it.
+[01:16] <chromatic> Is it getting collected?
+[01:17] <chromatic> What if you pmc_register all FIAs.
+[01:17] <chromatic> Punctuation FAIL.
+[01:18] <dalek> parrot: r39985 | jkeenan++ | branches/darwin2hints/t/steps/init/hints/darwin-01.t:
+[01:18] <dalek> parrot: Correct bad commenting out of skip all conditions.
+[01:18] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39985/
+[01:19] <Whiteknight> I was getting the same failure with -G
+[01:19] <Whiteknight> so I don'think it's a collection issue
+[01:20] <allison> Whiteknight: well, the thing is, not all subroutine calls use the fixed integer array constant
+[01:21] <Whiteknight> in this case, the test is failing at ASSERT_SIG_PMC, which does pmc->vtable->base_type == enum_class_FixedIntegerArray
+[01:21] <Whiteknight> so I don't know if it always happens, but Parrot wants it to happen here
+[01:23] <allison> Whiteknight: it means that some piece of code isn't catching the case of PCC argument passing
+[01:24] <allison> Whiteknight: (because their argument signature is passed in interp->args_signature instead of a key constant)
+[01:24] <Whiteknight> okay, that's good information to have!
+[01:24] <Whiteknight> (i can also verify that a FIA constant is nowhere in the vicinity of this constant, so it's not an off-by-one kind of error
+[01:25] <Whiteknight> I checked up to off-by-6 before I got tired of that approach :)
+[01:25] <Whiteknight> allison: at that point, interp->args_signature is NULL
+[01:25] <Whiteknight> so that's a double-bad
+[01:26] <chromatic> Sounds like it shouldn't even be in this code at all.
+[01:27] *** jimk joined
+[01:27] <Whiteknight> okay, so we have a function being called with no signature passed anywhere.
+[01:27] <Whiteknight> or, nowhere that anybody can find it
+[01:30] <allison> Whiteknight: how about interp->current_args?
+[01:30] <Whiteknight> also NULL
+[01:32] <nopaste> "Whiteknight" at 69.248.162.161 pasted "interpreter structure for allison++" (12 lines) at http://nopaste.snit.ch/17219
+[01:32] <chromatic> Bad interpreter?
+[01:33] <Whiteknight> maybe
+[01:33] <allison> Whiteknight: CONTEXT(interp)->results_signature?
+[01:34] <chromatic> dynamic_env = 0x14b7590, lo_var_ptr = 0x7fff547cda78, parent_interpreter = 0x0 ?
+[01:34] <chromatic> 64-bit system?
+[01:35] *** kid51 joined
+[01:36] *** darbelo left
+[01:36] <allison> the interpreter struct looks relatively sane
+[01:37] <chromatic> Look at the address differences between lo_var_ptr and dynamic_env though.
+[01:37] <Whiteknight> CONTEXT(interp)->results_signature = NULL
+[01:37] <Whiteknight> yes, it's a 64-bit system
+[01:38] <Whiteknight> chromatic: is dynamic_env created on the system stack? There is a pretty big gap between my system's stack and it's heap
+[01:39] <Whiteknight> those kinds of numbers are normal here
+[01:39] <chromatic> That could be it then.
+[01:39] <allison> Whiteknight: okay, well all of the checks that stop a function call from going all the way into Parrot_init_arg_op check one of those alternative locations
+[01:40] <Whiteknight> so all of those alternative locations (why are there so many?) are NULL and no FIA is in the constants pool, so something is definitely borked
+[01:40] <Whiteknight> and I don't feel like I can meaningfully trace into IMCC's parser to figure out why not
+[01:42] <allison> Whiteknight: there are so many because we have too many calling conventions and each passes args differently
+[01:43] <allison> I dropped in part way through the debugging session... this is Rakudo code, and you can't pin down the problem section of code?
+[01:45] <Whiteknight> these are the current rakudo spectest failures
+[01:46] <Whiteknight> http://nopaste.snit.ch/17216
+[01:46] <Whiteknight> check out that remarkably attractive backtrace
+[01:46] <Whiteknight> makes me weep with joy
+[01:47] <chromatic> Is it trying to run code compiled in an external runloop?
+[01:47] <Whiteknight> i dont know
+[01:47] *** |Ryan52 joined
+[01:49] <allison> ah, excellent, Parrot_runops_from_c_args tells you that this isn't an ordinary call from an op, so it shouldn't be using the key constant for the signature
+[01:50] <Whiteknight> okay, what should it be using?
+[01:50] <Whiteknight> (I really feel like I should know all this by now)
+[01:52] <allison> it's using the third option, which is passing the args around as a C varargs datastructure
+[01:53] <allison> (And really, not grokking this is probably more of an honor than anything else, it really shouldn't work this way)
+[01:54] <Whiteknight> but I've done enough poking and hacking in this area that I really should understand how it works by now
+[01:54] <allison> but that code path shouldn't wind up in Parrot_init_arg_op
+[01:55] <Whiteknight> okay, that's very good to know
+[01:56] <Whiteknight> actually, I'm looking through the code now and it doesn't appear that there is any other path for the code to take
+[01:57] <allison> Whiteknight: ah, it's the return rather than the call
+[01:57] <Whiteknight> Parrot_runops_fromc_args calls set_retval, which calls set_retval_util, which always calls Parrot_init_arg_op
+[01:58] <Whiteknight> yes, sorry
+[01:58] <allison> Whiteknight: so the call does go on to runops_args, and appropriately avoids Parrot_init_arg_op
+[01:58] <allison> then it comes back and calls set_retval
+[01:59] <allison> and that's where the mess comes in
+[01:59] <Whiteknight> right
+[02:00] * Whiteknight grumbles menacingly about the quality of the whole PCC system
+[02:00] <chromatic> You can use the word "quality" in that sentence?
+[02:00] <allison> Whiteknight: oh, this code is much, much older than PCC
+[02:00] * Whiteknight grumbles menacingly about the of the whole PCC system
+[02:01] <Whiteknight> great, it's a timecapsule of legacy garbage
+[02:01] <chromatic> Giants walked the earth then, gods among men.
+[02:01] <allison> PCC did its best to work around the trembling bowels of this code
+[02:02] <Whiteknight> all I really want for christmas is pcc_rewiring :)
+[02:02] <cotto> pcc_rewiring doesn't appear to be galloping in on a white horse to save us
+[02:02] <chromatic> I want a hovercraft.
+[02:02] <allison> okay, for set_retval to do anything other than return NULL, the return signature must be either S or P
+[02:02] <Whiteknight> i would settle for a hovercraft
+[02:02] <Whiteknight> the return signature according to the NCI thunk is P_Jt
+[02:03] <allison> pcc_rewiring is patiently and stubbornly crawling its way across the desert to save us ;)
+[02:03] *** Ryan52 joined
+[02:03] <chromatic> And we only see this in Rakudo because nothing else uses eval quite like this yet.
+[02:03] <Whiteknight> yeah, more aggressive eval tests are definitely needed
+[02:04] <allison> ah, the backtrace says 'P'
+[02:04] <Whiteknight> yeah
+[02:04] <chromatic> Very easy to see why memory layout changes this.
+[02:05] <allison> so we've got a subroutine call that takes a PMC return value, if that helps at all in identifying it
+[02:05] <Whiteknight> so who is supposed to be assembling this signature, is it NCI in the caller, or is it the callee?
+[02:05] <Whiteknight> once we know when the signature is supposed to be set, we can focus in and see why it isn't
+[02:06] <Whiteknight> or, why it's getting unset
+[02:06] <allison> the subroutine should be setting it
+[02:07] <allison> this is the return signature, and the call from C is trying to extract the return values from the PIR sub
+[02:08] <Whiteknight> right
+[02:08] <allison> hmmm... we can probably do one better, since we have what looks like the string of the eval'd sub there in the back trace, and it shows itself as "_block329"
+[02:09] <Whiteknight> I have that PIR code handy. let me nopaste it
+[02:09] <nopaste> "whiteknight" at 69.248.162.161 pasted "PIR code for allison++ and chromatic++" (76 lines) at http://nopaste.snit.ch/17220
+[02:10] <Whiteknight> There are two :load subs there, which would be getting executed in Packfile_fixup_subs
+[02:10] *** amuck joined
+[02:10] <Whiteknight> I don't know which one is breaking this
+[02:10] <Whiteknight> although both are creating P6 metaclasses
+[02:10] <chromatic> Neither, as far as I can see.
+[02:11] <Whiteknight> actually now that I think about it, if Packfile_fixup_subs is only executing the :load subs as it claims, then neither should have a return value
+[02:12] <Whiteknight> :load subs don't return anything, right? so it's nonsensical to be extracting a return value from one
+[02:12] <chromatic> Exactly.
+[02:12] <allison> looks like that's a different chunk of eval'd code than the one that appears in the back trace
+[02:12] <Whiteknight> the plot thickens!
+[02:12] <purl> Hmmm... needs more cornstarch.
+[02:13] <Whiteknight> is it? I may be looking at one from the wrong test failure
+[02:13] <allison> that one is looking at "t/spec/S14-roles/basic.rakudo"
+[02:13] <Whiteknight> oh no, that nopaste I showed you had two backtraces
+[02:13] *** TiMBuS joined
+[02:13] <Whiteknight> one for each failed test (they're remarkably similar)
+[02:13] <allison> while the backtrace is looking at t/spec/S12-attribute..
+[02:13] <allison> (it truncates the string at that point)
+[02:14] <Whiteknight> right
+[02:14] <Whiteknight> I can get the other PIR segment if you want
+[02:15] <allison> good to be sure
+[02:15] <allison> if the subs are similar, the one for the S14 test is returning a PMC
+[02:16] <Whiteknight> that PIR snippet was from S14
+[02:18] <allison> aye, so I'm curious if the one from S12 that appears in the stack trace is doing the same
+[02:18] <nopaste> "Whiteknight" at 69.248.162.161 pasted "other PIR program for allison++" (74 lines) at http://nopaste.snit.ch/17221
+[02:18] <allison> it seems likely
+[02:19] <dalek> parrot: r39986 | petdance++ | trunk (2 files):
+[02:19] <dalek> parrot: fixed splint annotations for a bunch of functions
+[02:19] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39986/
+[02:19] <Whiteknight> yeah, this time there's a single :load that's creating a metaclass
+[02:21] <Whiteknight> I still don't understand how a :load function can be returning a value, that makes no sense to me
+[02:21] <allison> this generated code is daft, it creates a const for the same sub twice, then invokes it
+[02:22] <Whiteknight> oh wow, I hadn't noticed that before
+[02:22] <allison> patrick talked to me a bit about return values from :load, I forget what he wanted them for
+[02:23] <Whiteknight> pmichaud: ping
+[02:23] <Whiteknight> do we currently support them, or is that a wishlist item?
+[02:24] <allison> mmm... it looks like he wants them so he can have a copy of the :load subroutine available to invoke in cases where :load isn't ordinarily invoked
+[02:24] <Whiteknight> src/packfile.c:778 the return value is being ignored and not stored anywhere
+[02:25] <allison> so, this anonymous eval'd code is returning a PMC sub that is the :load subroutine for the 'B0rk' namespace
+[02:25] <Whiteknight> ah, okay. I see what he wants now
+[02:27] <Whiteknight> Okay, so Packfile_fixup_subs (which is poorly named) should just be executing the :load function, right?
+[02:27] <chromatic> Yes.
+[02:28] <chromatic> It does :load and :init.
+[02:28] <allison> does either root_new or get_hll_global do a Parrot_runops_fromc_args
+[02:28] <Whiteknight> and a :load function doesn't really have a signature, because they don't take arguments and don't meaningfully return values at this point
+[02:28] <Whiteknight> allison: I don't think so
+[02:28] <allison> oh, I remember
+[02:29] <Whiteknight> so Parrot should recognize that this is a :load situation and not look for a signature in the first place
+[02:29] <allison> he needed a special way to get the :load sub because :load isn't invoked from an eval'd block of code
+[02:29] <Whiteknight> it isn't?
+[02:29] <Whiteknight> oh wait, no it wouldn't be
+[02:29] <Whiteknight> okay, that makes more sense then
+[02:29] <allison> no, only when the loaded by load_bytecode
+[02:29] <Whiteknight> right right
+[02:29] <allison> instead, it invokes the first sub it finds in the eval block
+[02:30] <allison> which is our dreaded _block329,
+[02:30] <allison> which returns a PMC
+[02:30] <Whiteknight> okay, that makes more sense to me then
+[02:30] <Whiteknight> but that doesn't explain why _block329 is getting executed from within Parrot_fixup_subs
+[02:31] <allison> go one step back
+[02:31] *** bacek joined
+[02:31] <Whiteknight> ../
+[02:31] <allison> it's being executed from imcc_compile
+[02:32] <Whiteknight> and that means...?
+[02:32] <Whiteknight> does that PBC_MAIN flag change the behavior?
+[02:34] <allison> it's an "action"
+[02:35] *** janus joined
+[02:35] <allison> it essentially says to treat it as a :main sub
+[02:36] <bacek> cotto: ping?
+[02:36] <dalek> parrot: r39987 | bacek++ | branches/ops_pct/compilers/opsc/op/op.pir:
+[02:36] <dalek> parrot: [opsc] Remove useless Op.new.
+[02:36] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39987/
+[02:36] <dalek> parrot: r39988 | bacek++ | branches/ops_pct (3 files):
+[02:36] <dalek> parrot: [opsc] Rename dir op to ops
+[02:36] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39988/
+[02:36] <Whiteknight> ah yes, it does. So PackFile_fixup_subs executes :load, :init, :main, :immediate, and :postcomp
+[02:36] <Whiteknight> (depending on the action)
+[02:38] <allison> yes
+[02:39] *** jimmy joined
+[02:39] <cotto> bacek, pong?
+[02:39] <dalek> parrot: r39989 | bacek++ | branches/ops_pct/compilers/opsc/opsc.pir:
+[02:39] <dalek> parrot: [opsc] Rename die to exit.
+[02:39] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39989/
+[02:39] <dalek> parrot: r39990 | bacek++ | branches/ops_pct (5 files):
+[02:39] <dalek> parrot: [opsc] Add skeleton for Ops::OpLib
+[02:39] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39990/
+[02:39] <dalek> parrot: r39991 | bacek++ | branches/ops_pct/compilers/opsc/t/04-oplib_BUILD.t:
+[02:39] <dalek> parrot: Add tests for OpLib::BUILD
+[02:39] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39991/
+[02:39] <bacek> cotto: key_revamp branch is almost ready to merge.
+[02:40] <allison> Whiteknight: what you really want is some debug prints in the PIR code to see what it's doing
+[02:40] <cotto> nice
+[02:40] <cotto> bacek++
+[02:40] <bacek> And I did quite few changes in ops_pct :)
+[02:40] <bacek> only one problem with key_revamp - Rakudo epicly fail because of "GC"...
+[02:40] <cotto> bacek, I was going to rename oplib to runcore, since that's a little more indicative of what the code does.
+[02:41] <allison> Whiteknight: is it successful at fetching the class's :load function?
+[02:41] <Whiteknight> i have no idea
+[02:42] <allison> Whiteknight: because it looks like the failure happens when it attempts to return the PMC object for that :load function
+[02:42] <bacek> cotto: no-no. OpLib is runcore independent. Parsing/sorting/etc
+[02:42] <bacek> afk # kids time
+[02:43] <allison> Whiteknight: (but that the rest of the subroutine runs fine)
+[02:44] <allison> Whiteknight: hard to be sure without the debug info, though
+[02:44] <cotto> kids++
+[02:46] *** |Ryan52 joined
+[02:47] <Whiteknight> okay, I'll try to rerun this thing with debugging stuff tomorrow,but it's getting late now
+[02:49] <allison> Whiteknight: yup
+[02:49] <cotto> bacek (when you get back), so you're thinking that the PCT stuff will give us a past, the OpLib stuff will do the runcore-independent stuff and runcore/foo.pm will be runcore-specific?
+[02:49] <allison> Whiteknight: good progress on tracking it down, well done
+[02:49] <cotto> just making sure we're in sync
+[02:49] <Whiteknight> thanks for the help allison++. I would have been banging my head fruitlessly all night without it
+[02:49] <dalek> parrot: r39992 | whiteknight++ | trunk/src/packfile.c:
+[02:49] <dalek> parrot: [packfile] add some extra documentation here explaining what executes when
+[02:49] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39992/
+[02:50] <Whiteknight> and then I would need ibuprofen
+[02:50] <cotto> but not 'N Sync
+[02:50] <cotto> because that wouldn't be good for anybody
+[02:50] <Whiteknight> goodnight
+[02:50] <allison> Whiteknight: night
+[02:54] <bacek> cotto: (back for 30 seconds) exactly
+[02:55] *** zak_ joined
+[03:20] <Coke> .
+[03:21] <Tene> !
+[03:21] <TimToady> ?
+[03:22] <Tene> ,
+[03:36] <Infinoid> ;
+[03:39] <cotto> :
+[03:41] <bacek> %
+[03:41] <bacek> o_O
+[03:52] *** amuck joined
+[04:08] *** Andy joined
+[04:11] <Andy> back
+[04:12] <dalek> partcl: r524 | coke++ | trunk (12 files):
+[04:12] <dalek> partcl: Merge back branches/convert_tcllist -
+[04:12] <dalek> partcl: Convert the TclList PMC into a PIR class.
+[04:12] <dalek> partcl: review: http://code.google.com/p/partcl/source/detail?r=524
+[04:17] <dalek> partcl: r525 | coke++ | branches/convert_tcllist:
+[04:17] <dalek> partcl: This branch has been merged back to trunk.
+[04:17] <dalek> partcl: review: http://code.google.com/p/partcl/source/detail?r=525
+[04:30] *** eternaleye joined
+[04:51] <dalek> partcl: r526 | coke++ | branches/tclstring (11 files):
+[04:51] <dalek> partcl: merge from trunk:509-525
+[04:51] <dalek> partcl: (2 test files still failing.)
+[04:51] <dalek> partcl: review: http://code.google.com/p/partcl/source/detail?r=526
+[04:53] *** sekimura joined
+[05:06] <cotto> snoring cat?
+[05:06] <cotto> YouTube or it didn't happen
+[05:06] <Coke> No thanks, I've already got one.
+[05:07] <Coke> even better, Snoring 3-legged cat.
+[05:07] <cotto> nm.  There are some there already.
+[05:10] <brbrooks> anybody here dabble in OCaml?
+[05:17] <dalek> parrot: r39993 | allison++ | trunk/config/gen/config_pm/config_lib_pasm.in:
+[05:17] <dalek> parrot: [install] Add an 'installed' flag to the two versions of the frozen
+[05:17] <dalek> parrot: parrot config data so languages and pbc_to_exe can easily make build
+[05:17] <dalek> parrot: decisions. Part of fix for TT #495.
+[05:17] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39993/
+[05:22] *** amuck joined
+[05:22] *** amuck joined
+[05:47] <dalek> parrot: r39994 | petdance++ | trunk/include/parrot/interpreter.h:
+[05:47] <dalek> parrot: Splint complains about PMCNULL's storage, so don't use it.
+[05:47] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39994/
+[05:57] <dalek> parrot: r39995 | allison++ | trunk/tools/dev/pbc_to_exe.pir:
+[05:57] <dalek> parrot: [install] Modify pbc_to_exe so it uses the configured values for the
+[05:57] <dalek> parrot: include directory instead of a hard-coded build directory path when
+[05:57] <dalek> parrot: working with an installed parrot_config. Fixes the original bug report
+[05:57] <dalek> parrot: for TT #495, but does not fix some build directory library paths also in
+[05:57] <dalek> parrot: pbc_to_exe. These will also need to be fixed.
+[05:57] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39995/
+[06:44] *** jq left
+[06:54] *** iblechbot joined
+[07:12] *** mberends joined
+[07:30] <dalek> parrot: r39996 | fperrad++ | trunk (2 files):
+[07:30] <dalek> parrot: [config] refactor MSVC SAL
+[07:30] <dalek> parrot: see TT #824
+[07:30] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39996/
+[07:33] <dalek> TT #824 closed by fperrad++: [CAGE] refactor MSVC SAL with Configure
+[08:26] <NotFound> 39996 generates lots of warnings: warning: "PARROT_HAS_SAL" is not defined
+[08:28] <cotto> Heh.  OpsFile.pm around r15000 had the same formatting I recently changed back to.
+[08:34] <dalek> TT #824 reopened by NotFound++: [CAGE] refactor MSVC SAL with Configure
+[08:36] <cotto> Better late than never...
+[08:37] <dalek> parrot: r39997 | cotto++ | trunk/lib/Parrot/Op.pm:
+[08:37] <dalek> parrot: [ops2c] revert r656, which apparently hasn't come in handy since then
+[08:37] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39997/
+[08:38] <NotFound> 656? :o
+[08:38] <cotto> yes
+[08:38] <cotto> It took a bit of digging to find out why it was added in the first place.
+[08:39] <NotFound> Archeology, or paleontology?
+[08:40] <cotto> OpsFile.pm is surprisingly similar to its ancestor from circa r5000.
+[08:43] <cotto> It's definitely time for bed.  Good night.
+[08:50] <dalek> parrot: r39998 | fperrad++ | trunk/include/parrot/compiler.h:
+[08:50] <dalek> parrot: fix r39996
+[08:50] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39998/
+[08:55] <mikehh> 2 to go to r40000 - that is a lot of commits
+[08:56] <mikehh> how long ago was r656?
+[08:58] <mikehh> well All tests PASS (pre/post config, smolder, fulltest) at r39996 - Ubuntu 9.04 amd64
+[08:58] <mikehh> let me svn up and try again
+[08:59] <chromatic> r656 | gregor | 2001-12-31 09:14:10 -0800 (Mon, 31 Dec 2001) | 3 lines
+[09:02] <NotFound> warnings fixed by r39998
+[09:05] <NotFound> I hope that the release counter is not 16 bit X-)
+[09:27] <mikehh> All tests PASS (pre/post config, smolder, fulltest) at r39998 - Ubuntu 9.04 amd64
+[09:31] <dalek> TT #824 closed by rblasch++: [CAGE] refactor MSVC SAL with Configure
+[10:28] *** david joined
+[10:29] <david> Hi - why does 'method getGlobalTransactionId( --> Array of Int ) { ... } ' (within a role) - warn of 'Use of type object as value'?
+[10:53] *** masak joined
+[10:58] <dalek> parrot: r39999 | fperrad++ | trunk/config/gen/platform/win32/threads.h:
+[10:58] <dalek> parrot: [win32] puts #undef close to #include
+[10:58] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/39999/
+[10:59] *** mokurai left
+[11:01] <dalek> parrot: r40000 | fperrad++ | trunk/t/configure/049-options_test_prepare.t:
+[11:01] <dalek> parrot: [t] fix on win32
+[11:01] <dalek> parrot: don't mix / and \\ in paths
+[11:01] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/40000/
+[11:04] *** Whiteknight joined
+[11:19] <mikehh> well we have now got to r40000
+[11:31] *** david left
+[11:54] <mikehh> All tests PASS (pre/post config, smolder, fulltest) at r40000 - Ubuntu 9.04 amd64
+[12:09] *** MoC joined
+[12:16] <Whiteknight> parrot++
+[12:16] *** kid51 joined
+[12:29] <Whiteknight> good morning kid51
+[12:31] <Whiteknight> irclogs?
+[12:31] <purl> irclogs is, like, http://irclog.perlgeek.de/parrot/today or see also: infrared clogs
+[12:31] <kid51> good morning Whiteknight
+[12:31] <kid51> How's your head this morning?
+[12:32] <kid51> Do you have a lump from banging it against code all night?
+[12:32] <kid51> Did you take ibuprofen?
+[12:34] <Whiteknight> haha, no lumps and no ibuprofen. I managed to go to bed before doing any bodily harm
+[12:41] <dalek> parrot: r40001 | jkeenan++ | trunk/t/configure/049-options_test_prepare.t:
+[12:41] <dalek> parrot: Delete some commented-out code.
+[12:41] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/40001/
+[12:41] <dalek> parrot: r40002 | jkeenan++ | branches/darwin2hints/t/configure/049-options_test_prepare.t:
+[12:41] <dalek> parrot: Delete some commented-out code.
+[12:41] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/40002/
+[12:49] <Infinoid> Whiteknight: ping
+[12:50] <Whiteknight> Infinoid: pong
+[12:50] <Infinoid> hi :)
+[12:50] <Whiteknight> good morning!
+[12:50] <purl> And good moroning to you, Whiteknight.
+[12:51] <Whiteknight> and you purl!
+[12:51] <Infinoid> I'm fixing the PipeHandle PMC, it needs to wait() for the child, not close() it
+[12:51] <Whiteknight> oh, okay
+[12:51] <Infinoid> but first, I had a question.  Is it really appropriate to use a piohandle variable for pids?  Will it break anywhere?
+[12:51] <Whiteknight> I don't think so, no
+[12:52] <Infinoid> it's an integer on unix and a pointer on win32, and that's the right thing in both cases?
+[12:52] <Infinoid> (I'm really uninformed about the details of win32)
+[12:54] * Infinoid adds a Parrot_io_wait_child()
+[12:54] <Whiteknight> on win32 it's a HANDLE, which I believe is an integral type
+[12:55] <Infinoid> hmm, ok
+[12:55] <Infinoid> INTVAL procid =  VTABLE_get_integer_keyed_int(interp, filehandle, 0);
+[12:55] <Infinoid> HANDLE process = (HANDLE) procid;
+[12:55] <Infinoid> WaitForSingleObject(process, INFINITE);
+[12:56] <Infinoid> so that means I should add a PIOCHILDHANDLE or somesuch?
+[12:57] <Infinoid> hrm.  time to fire up the winxp box and take a look at its headers
+[12:57] <Infinoid> parrot ends up just casting PIOHANDLE to void* on win32
+[13:02] <Whiteknight> does it? I thought it was casting PIOHANDLE to HANDL
+[13:02] <Whiteknight> HANDLE
+[13:02] <Infinoid> typedef void* Parrot_WIN32_HANDLE;
+[13:02] <Infinoid> typedef Parrot_WIN32_HANDLE PIOHANDLE;
+[13:03] <Infinoid> strawberry perl's winnt.h typedefs HANDLE to void* as well, so I guess it's safe
+[13:04] <Infinoid> anyway, win32 uses the same data type (HANDLE) for its pids and its io, and unix uses the same data type (int) for its pids and its io, so I think it should be fine to use PIOHANDLE for pids too
+[13:05] <Infinoid> I'll add a comment to the child attr to remind me so I won't get confused about this again later :)
+[13:10] <Whiteknight> okay
+[13:10] <Whiteknight> (I dont know why I thought it was an integer type)
+[13:11] <Infinoid> I think SOCKET might be an integer type
+[13:12] <Infinoid> it is.  oh, and it's unsigned, just to make life more interesting
+[13:14] <Whiteknight> w00t
+[13:24] *** Austin joined
+[13:25] *** Austin left
+[13:25] *** Austin joined
+[13:28] *** bacek joined
+[13:35] * Infinoid gets confused by msdn
+[13:40] <Infinoid> on unix, we call waitpid() to clean up a child process.  on win32, we're calling WaitForSingleObject() and CloseHandle() instead, but to me those look more like select() and close()
+[13:40] <Infinoid> it's not clear to me that they are the correct things to call, and I'm failing to find out how to get the child process's return value
+[13:41] <Whiteknight> hmmm
+[13:41] <Whiteknight> msdn is TEH SUXXOR, that's for sure
+[13:43] <Infinoid> ah, there's an GetExitCodeProcess()
+[13:43] *** Austin_ joined
+[13:43] <Infinoid> which can fail, if the process is still running.  apparently I'm supposed to call that after the process exits but before the HANDLE is freed up?  If it ever is
+[13:44] <Infinoid> NotFound: help!
+[13:44] <Whiteknight> yeah, in win32 you just take what you want, convert it to camel case, and it's probably a function
+[13:44] <Whiteknight> DoThatThingWhereWeRunAProcessAndGetItsReturnValueAsAnInteger()
+[13:45] <Infinoid> oh, and it looks like I can kill a process with TerminateProcess(), specifying the return value that *I* want the process to return
+[13:45] <Infinoid> that's just brilliant.
+[13:45] <Whiteknight> RunItAndWaitForItToDoWhateverItWantsToDoUntilItReturns()
+[13:46] * Infinoid imagines an inexplicable RunItAndWaitForItToDoWhateverItWantsToDoUntilItReturnsNonblocking() variant
+[13:47] * Infinoid thinks he likes chromatic's NSPushCandyColoredButton() more
+[13:51] <Austin> Have you tried this? http://msdn.microsoft.com/en-us/library/ms682512(VS.85).aspx
+[13:52] <Infinoid> Yep.  Note that return value handling isn't mentioned anywhere on that page
+[13:52] <Austin> (Note in particular the wait-for-single-object call...)
+[13:53] <Infinoid> yeah.  WaitForSingleObject looks more like select() than wait() to me
+[13:54] <Infinoid> it's also used for open file handles and mutexes
+[13:54] *** bacek joined
+[13:54] <Infinoid> and it doesn't give me a way to get the process's return value...
+[13:56] <Infinoid> so I think the idea is, we wait for the process handle, then get its return value, and then close the handle
+[13:56] * Infinoid is in the middle of trying that.
+[13:56] <Austin> Right. You'd wait for the process handle to change status (meaning it exited, 'cause that's all it can do) and then call GetExitCodeProcess on the handle.
+[13:56] <Infinoid> cool.  thanks for confirming
+[14:03] <Austin> seen pmichaud?
+[14:03] <purl> pmichaud was last seen on #parrot 16 hours, 50 minutes and 50 seconds ago, saying: (the Rakudo failures all deal with Roles.)
+[14:03] <Austin> Must be time for him to reappear.
+[14:04] <Austin> Anyone know what the rules are for PIR-level named parameters being fed into positionals?
+[14:06] <Austin> Whiteknight: Do I remember correctly that you were cursing chatZilla a while back?
+[14:06] <Austin> (Or what that someone else?)
+[14:07] <Whiteknight> I like chatzilla, mostly
+[14:07] <Austin> Okay.
+[14:07] <Austin> I'm trying it now. I wondered if there were any insurmountable annoyances
+[14:09] <bacek> Hah! I found "GC" error!
+[14:09] * bacek dancing around
+[14:10] <nopaste> "bacek" at 114.73.4.125 pasted "Very special assert in hash.c" (24 lines) at http://nopaste.snit.ch/17222
+[14:12] <bacek> (In nopaste) I check that we never put non-constant key into constant PMC Hash.
+[14:12] <bacek> And it failing.
+[14:12] <bacek> Any volunteers to prove that I'm totally wrong?
+[14:13] <Whiteknight> wow
+[14:13] <nopaste> "bacek" at 114.73.4.125 pasted "bt from hash.c assertion." (27 lines) at http://nopaste.snit.ch/17223
+[14:13] <Austin> Here's me not knowing anything about the GC, but why shouldn't you put a non-constant string into the hash?
+[14:14] <bacek> we shouldn't put non-constant string into constant hash
+[14:14] <bacek> "constant" if Parrot's meaning of "constant"
+[14:14] <Austin> Okay. What's a constant hash?
+[14:14] <bacek> s/uf/in/
+[14:14] <bacek> From constant pool
+[14:15] <Austin> Because the GC doesn't search the constant pool?
+[14:15] <Austin> <rewind> What is a constant, in Parrot's usage?
+[14:15] <bacek> Austin: yes, afaiu
+[14:16] *** elmex joined
+[14:17] <dalek> close: r73 | Austin++ | trunk/ (4 files):
+[14:17] <dalek> close: Got named parameters working from arg-expr side
+[14:17] <dalek> close: review: http://code.google.com/p/close/source/detail?r=73
+[14:18] <Austin> You know, it's surprising how quickly my grammar has become polluted with nasty little hacks.
+[14:18] <Austin> Larry++
+[14:24] <bacek> Whiteknight: can you confirm that GC doesn't mark constant pool?
+[14:24] <bacek> (Or say that I just have to go to bed at 12:30AM...)
+[14:27] <Austin> It's 5:00 somewhere, Bacek.
+[14:28] <bacek> Austin: I don't believe you. Half-hour timezone can exist only on Australia.
+[14:29] <bacek> clock?
+[14:29] <purl> bacek: LAX: Sat 7:29am PDT / CHI: Sat 9:29am CDT / NYC: Sat 10:29am EDT / LON: Sat 3:29pm BST / BER: Sat 4:29pm CEST / IND: Sat 7:59pm IST / TOK: Sat 11:29pm JST / SYD: Sun 12:29am EST /
+[14:30] <bacek> Something like Easter Island should be in 5.00AM atm.
+[14:33] *** skids joined
+[14:34] <Austin> Venezuela and Newfoundland, Canada, both use 30-minute offsets.
+[14:35] <Austin> Arizona used to, but stopped a while back.
+[14:37] <bacek> "Blame the Canada!" :)
+[14:38] * bacek used to live in Russia with ~10 timezones across the country
+[14:38] * Austin sings, "Blame Canada!"
+[14:40] * Austin sings, "Should we blame the government, or blame society? Or should be blame the images on TV?"
+[14:41] <Austin> Bacek, your watch was never broken. It was just in the wrong place. :)
+[14:41] <NotFound> Infinoid: pong
+[14:41] <Infinoid> NotFound: Hi, was hoping for a little help with I/O on win32
+[14:42] <bacek> Austin: :)
+[14:42] <Infinoid> NotFound: You added some code to the pipe close stuff, to WaitForSingleObject() the child process HANDLE, and then CloseHandle() it.  Is it sane to put a GetExitCodeProcess() inbetween those two?
+[14:42] <NotFound> Infinoid: I can start my laptop with xp home in a minute
+[14:43] <Infinoid> No hurry, I am trying to get this patch to work on unix first :)
+[14:43] <NotFound> Infinoid: yes, you can use the process handle as long as you haven't yet closed it
+[14:44] <Infinoid> getting it to work on win32 will require going to the win32 machine in the living room, which also implies getting out of bed, so I am carefully ordering my priorities
+[14:44] <Infinoid> ok, thanks
+[14:48] <dalek> tracwiki: v28 | bacek++ | ParrotQuotes
+[14:48] <dalek> tracwiki: Priorities ftw!
+[14:48] <dalek> tracwiki: https://trac.parrot.org/parrot/wiki/ParrotQuotes?version=28&action=diff
+[14:49] <Whiteknight> bacek: GC marks constant pool to find non-constant children. It does not sweep constant pool
+[14:50] <bacek> So, I'm wrong :/
+[14:52] <Whiteknight> i might be wrong about that
+[14:54] * Infinoid is pushing readline() and readline_interactive() down into the base Handle class
+[14:54] <bacek> sigh...
+[14:55] <dalek> tracwiki: v29 | bacek++ | ParrotQuotes
+[14:55] <dalek> tracwiki: Split long line
+[14:55] <dalek> tracwiki: https://trac.parrot.org/parrot/wiki/ParrotQuotes?version=29&action=diff
+[14:59] <Coke> hey, smolder is green.
+[15:00] <Coke> even solaris and amd64
+[15:01] * NotFound plays Greensleeves
+[15:01] <bacek> smolder is green, nose is red... Is is Christmas already?
+[15:01] <Austin> Yeah, we replaced main.c with "hello, world."
+[15:02] <Infinoid> and a call to emit_magic_pony()
+[15:02] <NotFound> Austin: I'm sure that if we do that someone will put "void main ..." in order to have some warning X-)
+[15:02] <Infinoid> If your OS doesn't supply a emit_magic_pony() function, parrot doesn't support your platform (yet).
+[15:03] <Austin> :)
+[15:03] <bacek> s/yet/and will never support/ :)
+[15:03] <NotFound> patch -p0 < fairy_dust.patch
+[15:04] <bacek> Previously patch applied. Apply anyway?
+[15:05] <Austin> Soy based. Biodegradable.
+[15:05] <Austin> http://www.youtube.com/watch?v=3nbEeU2dRBg
+[15:05] <NotFound> while true ; do yes | patch -p0 < fairy_dust.patch ; done
+[15:07] <NotFound> MMmmm... some problem with multiple stdin X-)
+[15:07] <Austin> for patch in /dev/fairy* ; do dd if=$patch of=/tmp/patch ; yes | patch -p0 < /tmp/patch ; done
+[15:10] *** Limbic_Region joined
+[15:10] <bacek> Austin: why so complicated? Just use cat!
+[15:10] <NotFound> bacek: curiosity kill them
+[15:10] <bacek> (Hope it will not eat parrot)
+[15:12] <bacek> Are you sure about "curiosity"? I suspect GC kill them.
+[15:13] <Austin> Make it a const curiosity.
+[15:13] <NotFound> GC stand for Great Curiosity, isn't it?
+[15:13] <Infinoid> <gc> im in ur pools, sweeping ur cats
+[15:13] * bacek ROTFL
+[15:13] <Austin> I have a GC question: what if it didn't do anything?
+[15:14] <Infinoid> Austin: when?  how?  why?
+[15:14] <NotFound> Austin: I think that is called the Infinity Memory Model.
+[15:14] <bacek> Than nothing bad will happen
+[15:14] <Austin> NotFound: Exactly.
+[15:14] <Austin> How much memory does parrot really need?
+[15:14] <bacek> (If you have petabytes of memory)
+[15:15] <NotFound> Austin: do you suggest to use an Infinity Memory as a pluggable GC module?
+[15:15] <Austin> Sure.
+[15:15] <NotFound> Not a bad idea.
+[15:15] <Austin> It's fast, and it doesn't core dump.
+[15:15] <bacek> it's already there. Just pass -G to ./parrot
+[15:16] <Austin> Is it?
+[15:16] <purl> it's it!
+[15:16] <NotFound> bacek: Is it? Or is implemented as some flag and lots of if?
+[15:17] <bacek> -G just disable GC at all. So it equivalent to Infinite Memory afaiu
+[15:17] <Austin> I think the only thing that IMM needs is to print out the total consumption at the end.
+[15:17] <bacek> -G --leak-test
+[15:18] <bacek> (Or valgrind ... -G)
+[15:18] <NotFound> bacek: but making it pluggable will be a fast way to implement and test the pluggability of the GC subsystem.
+[15:19] <bacek> NotFound: agreed. Looks like pluggable GC on Whiteknight's todo list
+[15:20] <NotFound> Yeah, just a way to test it without testing a new GC at the same time.
+[15:23] <Austin> Ooh. Cheap business cards, only 1 cent each.
+[15:23] <Austin> I <3 spam.
+[15:24] <bacek> Austin: want to enlarge something? :)
+[15:24] <Austin> Sure. I think I need more memory.
+[15:25] * bacek passing old good ferrite memory to Austing
+[15:26] <bacek> At least it's big!
+[15:26] * bacek must sleep...
+[15:26] <purl> $bacek->sleep(8 * 3600);
+[15:27] <bacek> see you tomo^W sometime
+[15:27] <NotFound> We can innovate and implement a NaN memory model.
+[15:28] <Austin> What's that, NotFound?
+[15:29] <NotFound> Austin: If I know in advance what is, will not be innovative.
+[15:29] <Austin> Ahh. Good point.
+[15:30] <dalek> TT #827 created by coke++: command line arg to specify maximum memory allocation
+[15:35] <NotFound> I think there was an RT ticket about that.
+[15:35] <Coke> NotFound: I probably opened that one too!
+[15:35] <NotFound> Coke: ping
+[15:36] <NotFound> Good synch ;)
+[15:36] <Coke> my web is horrifically slow atm.
+[15:42] *** davidfetter joined
+[15:45] <NotFound> I can't find it.
+[16:04] <pmichaud> Good morning, #parrot
+[16:05] <allison> good morning, pmichaud
+[16:06] *** Psyche^ joined
+[16:08] <davidfetter> afternoon, all
+[16:16] * kid51 is back from breakfast
+[16:19] *** chromatic joined
+[16:20] * Infinoid ends up moving most of FileHandle's methods down into Handle
+[16:30] *** davidius joined
+[16:30] <mikehh> pmichaud: hi - I did another report on rakudo spectests - should I paste it
+[16:30] <mikehh> for you that is
+[16:33] <mikehh> pmichaud: I only get the Segmentation fault if I build against an optimized parrot
+[16:34] <mikehh> pmichaud: otherwise it fails with a backtrace against a non-optimized parrot
+[16:35] <pmichaud> mikehh: yes, please paste
+[16:38] <nopaste> "mikehh" at 90.209.117.228 pasted "rakudo spectest failures at at parrot r40000" (160 lines) at http://nopaste.snit.ch/17224
+[16:40] <chromatic> That's the problem Whiteknight and allison were debugging yesterday.
+[16:40] <nopaste> "mikehh" at 90.209.117.228 pasted "fixes for spectest failures - not a PATCH - just commentry as I think it only applies to amd64" (97 lines) at http://nopaste.snit.ch/17225
+[16:42] <mikehh> damn - I missed the first couple of lines - just explanation - not important
+[16:42] <pmichaud> mikehh: I think it applies to x86, also.
+[16:42] <pmichaud> I think the error occurs whenever we have an eval that throws an exception.
+[16:43] <pmichaud> the interesting thing to try would be to just do the last 4 tests
+[16:43] <mikehh> anyway I got both failing tests to work
+[16:43] <NotFound> Then it can be related to my "throw from C-catch from pir" patch.
+[16:44] <chromatic> It did seem to start around that time; pmichaud bisected it there.
+[16:44] <chromatic> Hm, what if it resumes to a place that expects a return value from PIR?
+[16:44] <dalek> parrot: r40003 | jkeenan++ | branches/darwin2hints (20 files):
+[16:44] <dalek> parrot: Move detection of Fink and Macports libraries from config steps to Darwin
+[16:44] <dalek> parrot: hints files.  Modify t/steps/ test files appropriately.  Modify config steps
+[16:44] <dalek> parrot: that formerly used _handle_darwin_for_fink() or _handle_darwin_for_macports.
+[16:44] <dalek> parrot: Add two configuration options:  darwin_no_fink, darwin_no_macports.
+[16:44] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/40003/
+[16:45] <mikehh> it was just the last test in t/spec/S14-roles/basic.t which is ok if I just SKIP the last TODO test
+[16:45] <NotFound> As it is implmented now, and before the patch, exceptions thown from C can't be resumed.
+[16:45] <Coke> msg kid51 - why are you adding options to avoid using fink and darwin?
+[16:45] <purl> Message for kid51 stored.
+[16:46] <chromatic> I mean "resumes PIR execution" not "It's a resumable exception"... but I can't imagine how that would work.
+[16:50] <chromatic> bacek_at_work, the GC does mark constants... once.  It never sweeps them.  Sweeping them also has the effect of clearing their liveness flags.  During mark, the GC figures that if that flag is true, it's already marked this thing in this run, so it skips marking it again.  Thus constant PObjs which point to non-constant PObjs will only mark the kids once.
+[16:57] <pmichaud> Does this mean that constant PObjs can never refer to non-constant PObjs ?
+[16:59] <chromatic> Right.
+[16:59] <pmichaud> okay, what are some examples of constant PObjs, then?
+[16:59] <pmichaud> I think this may be a major problem for Rakudo.
+[16:59] <chromatic> Sub
+[16:59] <chromatic> Class
+[17:00] <pmichaud> ....surely that can't be right in the case of Sub, though (more)
+[17:00] *** mokurai joined
+[17:01] <pmichaud> we have all sorts of non-constant things that get attached to Sub
+[17:01] <chromatic> Try this patch then.
+[17:02] <pmichaud> more precisely, I should say "Parrot has all sorts of non-constant things ..."
+[17:06] <nopaste> "chromatic" at 72.90.115.31 pasted "Always Mark Constant PObjs -- pmichaud" (13 lines) at http://nopaste.snit.ch/17226
+[17:06] <chromatic> afk
+[17:09] <pmichaud> I guess I'm saying that if the non-constant PObjs aren't being marked, I'm surprised we aren't seeing a lot more GC faults.
+[17:10] <NotFound> pmichaud: In this and similar things, take into account that we have lots of workarounds and TODO'ed things.
+[17:11] <NotFound> Ans skipped
+[17:12] <pmichaud> That's fine, I'm just saying there are parts of Parrot's existing implementation (lexicals and contexts) that really depend on the notion that they're attached to Subs
+[17:12] <pmichaud> i.e., that the Sub will keep them alive
+[17:12] <NotFound> The Sub or the Continuation?
+[17:12] <pmichaud> the Sub
+[17:23] <nopaste> "pmichaud" at 72.181.176.220 pasted "a minimized case to get "abort on exit"" (5 lines) at http://nopaste.snit.ch/17227
+[17:25] *** pjcj joined
+[17:29] <chromatic> Did that patch help anything?
+[17:29] <pmichaud> well, I don't have anything failing at the moment for it to help.
+[17:30] <pmichaud> unless we think it'll resolve the abort-on-exit messages
+[17:30] <chromatic> I don't think it will.
+[17:30] <pmichaud> right
+[17:31] <pmichaud> I think my point is that a lot of stuff in Parrot seems to depend on the ability to put non-constant things on Subs, so I'm a little surprised we aren't seeing more issues than we are
+[17:32] <pmichaud> s/lot of stuff/some key things/
+[17:54] *** Khisanth joined
+[17:58] <mikehh> pmichaud: I set up a test of the last 4 in t/spec/S12-attributes/class.t it fails with backtrace, but if I skip the last it passes
+[17:58] <mikehh> pmic haud: then I re-did the test t/spec/S12-attributes/class.t just skipping the last test and it now passes
+[17:59] <mikehh> sorry
+[17:59] <pmichaud> I think the problem arises when there are two failing evals containing class definitions
+[17:59] <mikehh> pmichaud: then I re-did the test t/spec/S12-attributes/class.t just skipping the last test and it now passes
+[17:59] <pmichaud> (or other code that has an "execute on load" block)
+[18:00] <pmichaud> the nopaste I gave above (http://nopaste.snit.ch/17227) seems to be a minimal test case
+[18:02] <mikehh> I what happens if you just do the last
+[18:06] <mikehh> ok - you need both
+[18:12] <mikehh> gotta go to the store - bbl
+[18:50] <kid51> Coke ping
+[18:51] <kid51> msg Coke Adding options because I can see that users might want to avoid using those libraries, specifically, the increasingly unmaintained Fink distributions.
+[18:51] <purl> Message for coke stored.
+[18:53] <brbrooks> what's with this purl messaging system? purl says i have 1 message wating
+[18:53] *** eternaleye joined
+[18:54] <kid51> Then in purl window, type:  messages
+[18:54] <kid51> Then, after done: messages erase
+[18:55] <kid51> Yet another communications system you have to keep up with to be one of the cool kids ;-)
+[18:55] <brbrooks> mmm
+[18:56] <kid51> Mainly for messages for someone who is temporarily off channel, IMO
+[19:02] <dalek> parrot: r40004 | jkeenan++ | branches/darwin2hints/lib/Parrot/Configure/Step/Methods.pm:
+[19:02] <dalek> parrot: Eliminate an internal sub which is no longer used.
+[19:02] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/40004/
+[19:08] *** fdorothy joined
+[19:29] *** HG` joined
+[19:37] *** eternaleye joined
+[20:16] *** szabgab joined
+[20:22] <cotto> messages help
+[20:22] <purl> To leave a message, say in channel or privmsg purl "msg <nickname> MESSAGE FOR J00".  To read your messages, privmsg purl "messages".  To erase your messages, privmsg purl "messages erase". or Delivery Not Guaranteed!
+[20:22] <cotto> brbrooks, ^
+[20:25] *** iblechbot joined
+[20:28] <Austin> brbrooks: figure it out, yet?
+[20:56] *** kid51 joined
+[21:16] <brbrooks> yep
+[21:21] *** eternaleye joined
+[21:29] *** eternaleye joined
+[22:32] *** Khisanth joined
+[22:33] *** bacek joined
+[22:36] *** rg1 joined
+[23:09] *** MoC joined
+[23:15] <Coke> (deep in review) (half hour time zone) Mumbai.
+[23:17] <Coke> msg kid51 if they don't want to use fink, they can avoid specifying it in their dynamic search path. I wouldn't give options for it.
+[23:17] <purl> Message for kid51 stored.
+[23:23] <Coke> msg kid51 but then you don't seem to be doing what I suggested in my ticket either, so I'll just be confused over here. =-)
+[23:23] <purl> Message for kid51 stored.
+[23:28] <dalek> parrot: r40005 | jkeenan++ | branches/darwin2hints/t/steps/init/hints/darwin-01.t:
+[23:28] <dalek> parrot: Test untested branch in _strip_ldl_as_needed().
+[23:28] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/40005/
+[23:31] <dalek> parrot: r40006 | jkeenan++ | branches/darwin2hints/config/init/hints/darwin.pm:
+[23:31] <dalek> parrot: Delete unreachable statement.
+[23:31] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/40006/
+[23:33] *** allison joined
+[23:37] <cotto> msg darbelo At some point you should make sure that a user downloading and testing your dynpmcs can run make test without expecting any new failures.
+[23:37] <purl> Message for darbelo stored.
+[23:39] <cotto> msg darbelo Also, I'm not so hot about how the default Makefile target copies the library into the build dir.
+[23:39] <purl> Message for darbelo stored.
+[23:44] *** cognominal joined
+[23:50] *** Whiteknight joined
+[23:53] *** Austin joined
+[23:54] <dalek> parrot: r40007 | jkeenan++ | branches/darwin2hints (2 files):
+[23:54] <dalek> parrot: Add some tests for corner cases.
+[23:54] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/40007/
+[23:55] <Austin> moo

@@ -1,0 +1,801 @@
+[00:00] <Tene> Yay, segfault!
+[00:00] <Infinoid> heh.  I don't understand perlio.c, either.
+[00:01] <Infinoid> #define PerlLIO_dup(fd)                 dup((fd))
+[00:01] <Infinoid> #define PerlLIO_dup2(fd1, fd2)          dup2((fd1), (fd2))
+[00:04] <Infinoid> ah.  win32 uses stdio, not file descriptors, so they specialcase their dup routine to call win32_dup(win32_fileno(file))
+[00:05] <Tene> Hmm... there's a problem with the io layer.
+[00:05] <chromatic> Hey, we're down to one.  Nice.
+[00:07] <nopaste> "tene" at 166.70.38.237 pasted "problems with PIO_dup" (86 lines) at http://nopaste.snit.ch/12478
+[00:08] <Infinoid> fd=-1
+[00:08] <Tene> Ahh.
+[00:08] <Tene> Well, that's a problem.
+[00:08] <chromatic> Welcome to PDP-8 assembly language.
+[00:13] <Tene> What's the difference between dup'ing the fd and re-opening the same fd?
+[00:14] <Infinoid> depends a lot on where it came from
+[00:14] <Infinoid> if you open a file twice, changes made to one fd will supercede changes made to the other
+[00:15] <Tene> Infinoid: fdopen() the same fd, that is.
+[00:16] <Infinoid> oh.  fdopen() is just C library stuff, it will behave the same as a dup()'d fd
+[00:16] <Tene> I'm doing something wrong with the ParrotIOLayer.
+[00:17] <Infinoid> hrm
+[00:17] <Infinoid> except that fclose() on both FILE*'s will try to close() the same underlying fd twice
+[00:18] <Infinoid> when you destroy one file handle, the other one becomes inoperative
+[00:20] <Infinoid> did you figure out why dup() returned -1?  was the input valid?  can you check errno?
+[00:22] <Tene> The problem I'm working on right now is that I can't get a valid ParrotIOLayer.  Both ->stack of the pmc it's called with and interp->piodata->default_stack throw segfaults when fdopen_down tries to access ->api on them.
+[00:22] <Tene> they're 0x20 and 0x1b respectively, which don't look like valid pointers.
+[00:26] <Infinoid> ok.  in PIO_dup, layer is a copy of io->stack
+[00:26] <Infinoid> io is the pmc data pointer, casted to ParrotIO
+[00:27] <Infinoid> if io->stack is 0x20, are you sure that was really a ParrotIO PMC?
+[00:28] <Tene> It's called like:
+[00:28] <Tene> PMC * const dest     = PIO_dup(SELF);
+[00:28] <Tene> from parrotio.pmc
+[00:32] <Infinoid> ok, that makes sense
+[00:33] *** GeJ joined
+[00:34] <Infinoid> do you have to pass in INTERP too, or does the pmc2c thingy handle that for you?
+[00:35] <Tene> ...
+[00:35] <Tene> I think I have to pass that myself.
+[00:36] <Infinoid> the odd thing is, if it was supposed to be "PMC * const dest     = PIO_dup(INTERP, SELF);", I would have expected the compiler to barf
+[00:36] <Tene> Yeah, me too.
+[00:36] <Infinoid> missing a prototype perhaps?
+[00:37] <Tene> I don't know where I should put a prototype.
+[00:37] <Tene> i could find one mentioned for PIO_destroy anywhere.
+[00:37] <Tene> compiles fine with INTERP being passed in and seems to run fine, too.
+[00:37] <Infinoid> the prototype for that is in include/parrot/io.h
+[00:37] <Tene> Except for that same double free I was trying to get rid of in the first place. ;)
+[00:38] <Infinoid> so, invalid pointer problem solved? :)
+[00:38] <Tene> Yes.
+[00:39] <Infinoid> great.  so, your strategy is basically to take a new fd (created with dup()), and wrap a new ParrotIO around it, right?
+[00:39] <Tene> Right.
+[00:39] <Infinoid> that sounds good... no chance of sharing the same allocated buffers, thus, no chance of double frees
+[00:39] <Infinoid> what's your PIO_dup() look like currently?
+[00:42] <nopaste> "tene" at 166.70.38.237 pasted "PIO_dup" (30 lines) at http://nopaste.snit.ch/12479
+[00:43] <Infinoid> if newfd is -1, I'm really curious what io->fd was, and also, what errno is
+[00:44] <chromatic> Do you mean to use io->fd or newfd in PIO_fopen_down?
+[00:45] <Infinoid> he replaced newfd with io->fd because newfd was -1
+[00:45] <Infinoid> the disturbing thing is, even after creating a new ParrotIO around the same fd, he still sees a double free.
+[00:45] <chromatic> There's no code in the -1 case here.
+[00:46] <Tene> No, newfd isn't getting set to -1 anymore.
+[00:47] <Tene> Works fine with newfd, just put it back.
+[00:47] <Infinoid> getting a double free?
+[00:47] <Tene> Yes.
+[00:47] <Tene> Now trying to figure out where.
+[00:48] <Infinoid> valgrind might help
+[00:50] <Infinoid> also, at some point it's probably a good idea to put some real error checking in there for the return value of dup()... you never know, big processes might run out of fds
+[00:51] <chromatic> real_exception... errno...
+[00:51] <nopaste> "tene" at 166.70.38.237 pasted "assign_pmc" (20 lines) at http://nopaste.snit.ch/12480
+[00:51] <Tene> When I add that PMC_data(other) = NULL; the double-free goes away.
+[00:52] <Tene> Doesn't go away when I do it to the clone.
+[00:53] <Tene> ... oh.
+[00:53] <Tene> I was returning new_io_pmc(io), not (newio)
+[00:54] <Infinoid> awesome
+[00:54] <Tene> Huh.  It works.
+[00:54] <purl> of course it works
+[00:55] <Coke> tello?
+[00:55] * Coke pats purl onna head.
+[00:57] <Coke> hurm. I'm supposed to see a 3 element list. instead, I see the number '3'. This *should* be easy to track down.
+[00:59] <Infinoid> scalar context? :)
+[01:00] <chromatic> Scalar context and Tcl... yeah, that's head-explodey.
+[01:01] <Tene> some tests in t/postconfigure/ always hang for me, but seem to complete successfully if I ^C them.
+[01:02] <Coke> puts [join [list {*}{a  b c}] ,] # should print "a,b,c\\n", instead prints "3\\n". It's related to the {*} syntax. (yes, tcl has syntax now. Shhh. It'll be ok.)
+[01:04] <Tene> what does {*} do?
+[01:06] <Coke> it expands the next word into multiple words.
+[01:06] <Coke> it's as if you had typed: puts [join [list a b c]]
+[01:08] <Coke> which is much handier when the thing following {*} is not a literal, obviously.
+[01:20] *** Ademan joined
+[01:22] * Coke is lost in sea of trace output and gives up for the night.
+[01:47] <kid51> Tene:  can you send me instances of those t/postconfigure/ tests hanging, including OS/platform details?
+[01:47] <kid51> And can you pinpoint hang locations by running prove -v?
+[01:48] <kid51> I wrote the tests, but have never experienced this hanging or heard reports of that.
+[01:48] <kid51> Also:  Are they hanging during 'perl Configure.pl --test' or during 'make test'?
+[02:05] *** particl1 joined
+[02:10] *** chromatic joined
+[02:28] *** rdice joined
+[03:19] *** teknomunk joined
+[03:50] *** b2gills left
+[04:07] <Tene> So, if 'make test' passes just the same after my ParrotIO changes, it should be okay to commit?
+[04:08] <particle> yep
+[04:08] <PerlJam> Tene: if not, someone will scream at you  :-)
+[04:09] *** Ademan joined
+[04:19] <PerlJam> woo ...  I'm losing it.  I just tried "perl perl6.pbc" several times and was puzzled why it wasn't working.
+[04:19] <Tene> Heh.
+[04:21] <particle> hrmm... maybe you should build perl with an embedded parrot and direct it to run .pbc files via parrot.
+[04:21] <particle> it's definitely a sign.
+[04:22] <PerlJam> Well ... I /have/ wanted access to p6 regex (PGE) in perl 5 on occasion ...  ;)
+[04:22] <chromatic> ext/Parrot-Embed/
+[04:23] <avar> Are there any examples of how to use specific pir libs w. Parrot::Embed and how to convert pir->perl datastructures?
+[04:26] <PerlJam> avar: I don't know how chromatic's parrot column it going, but that sounds like a good topic at some point  ;)
+[04:27] <Tene> Okay, I'm looking at include/parrot/io.h and I'm uncertain about the attribute and FUNC_MODIFIES stuff.  It looks autogenerated.  Is it a generated file?
+[04:27] <particle> if it's generated, it'll be in a comment at the top
+[04:28] <Tene> Oh, clever!
+[04:28] <Tene> Okay, thanks.
+[04:28] <Tene> particle++
+[04:29] <avar> PerlJam: If someone parrot-y could spoonfeed me info I might bother to write re::engine::PGE :)
+[04:29] <PerlJam> avar: what info do you need?
+[04:30] <PerlJam> (how much spoon feeding do you require?)
+[04:30] * particle looks for a silver spoon
+[04:31] <PerlJam> are the pmcs in languages/perl6/src/pmc used for anything?
+[04:31] <particle> yes
+[04:31] <PerlJam> or, put another way, how can I make perl6.pbc use the perl6bool.pmc?
+[04:31] <particle> see languages/perl6/Makefile
+[04:31] <avar> PerlJam: I'm not sure, I just remember peeking at it once and being very confused:)
+[04:32] <avar> How to make a match and access match buffers and such would be nice
+[04:32] <PerlJam> particle: been there, done that, but my changes don't seem to have affected anything.
+[04:32] <avar> And how to feed it a new grammar etc.
+[04:32] <avar> But I really don't want to bother anyone else with it unless they're really excited about it since I'm being really lazy about it:)
+[04:33] <particle> omg my head just exploded
+[04:33] <particle> i imagined using re:engine:PGE to run Perl5Rules in perl 5
+[04:33] <particle> er, Perl5Regex
+[04:34] <Tene> I'm rather uncertain about my addition to include/parrot/io.h
+[04:34] <Tene> Is it enough to bother asking the list, or just commit and let someone complain to me about it?
+[04:34] <particle> well, we don't like it when trunk breaks
+[04:35] <particle> but if make test passes. what's the prob?
+[04:35] <PerlJam> particle: for instance, as a test, I made perl6str.pmc's get_integer routine always add 7 to the value it returns, yet I can't get perl6.pbc to ever do that.
+[04:35] <particle> i've fallen way behind on reviewing commits, but chromatic reviews most (and all c commits afaict)
+[04:36] <avar> PerlJam: It's probably best not to make it a re::engine
+[04:36] <PerlJam> avar: there is a bit of an impedence mismatch between the perl5 "interface" and the perl6 semantics.
+[04:37] <PerlJam> $0 vs $1 for instnace
+[04:37] <avar> The main problem is that p5 regexes are strings and p6 regexes are objects
+[04:37] <particle> p5 regexes are still strings?
+[04:37] <PerlJam> yeah, I was just about to say something about hacking a "match object"  :)
+[04:38] <particle> hrmm. a reentrant string.
+[04:38] <PerlJam> avar: qr// gives an object doesn't it?
+[04:38] <avar> No they're first class objects (in 5.11) but you always end up with the quote problem
+[04:38] <particle> i suppose that makes as much sense as "a reentrant object"
+[04:38] <avar> yeah, but the // part quotes which will screw you up in lots of cases
+[04:39] <PerlJam> avar: you can't turn off the quoting and just grab what's in between and shunt it off to the re engine?
+[04:39] <avar> no, it'll still be interpolated
+[04:39] <PerlJam> avar: or, better yet, morph the quoting to use perl6 rules.
+[04:40] <avar> But generally it's just a lot of troble and it would be easier to start by doing my $rule = Grammar::Foo->new; my $m = $rule->match($str): say $m->[0]; and so on
+[04:41] *** Theory joined
+[04:43] <particle> could possible be shimmed in with m/(?p6).../
+[04:45] <avar> Yes, I'm just saying if you want a p5 interface to pge it's best to start by doing a regular XS/Parrot::Embed module rather than using re::engine stuff
+[04:46] <particle> yep. i'm not too interested in that, though
+[04:46] <particle> i'd rather get p5 on p6 or parrot
+[04:46] <particle> or just xlate
+[04:47] <avar> Well, if you'd get PGE working on something people actually use in production you'd have a lot more .pg stuff to play with once p6 becomes usable:)
+[04:48] <particle> i hope that as parrot approaches 1.0 this year, it'll be used in production
+[04:50] <PerlJam> I hope that as rakudo approaches perl 6, it'll be used in production  :)
+[04:51] <PerlJam> (I'm not so hopeful for "this year" as I should be though)
+[04:51] <particle> yeah, meetoo
+[04:51] <particle> my tuit supply is near nil lately
+[04:53] <PerlJam> particle: do you know why Str.pir does $P0('String', 'Str') and $P0('Perl6Str', 'Str')  (where $P0 is make_proto)  >
+[04:53] <PerlJam> er ?
+[04:53] <purl> derrr.. or http://www.imdb.com/title/tt0108757/
+[04:54] <PerlJam> that would seem to map both String and Perl6Str to the Str type in perl 6
+[04:54] <particle> that's exactly right
+[04:54] <PerlJam> but that doesn't make much sense to me since Perl6Str extends String
+[04:55] <particle> but sometimes you are dealing with a parrot String
+[04:55] <particle> and you want to treat it as a Str
+[04:55] <particle> it's a bit of a mess that needs cleaning eventually
+[04:56] <PerlJam> okay, then how would I do the same for Bool?
+[04:56] <PerlJam> (All I wanted to do was something simple to whet my appetite and hone my skills a little before I tried something slightly more complex and simple is turning out to not be so)
+[04:56] <particle> what do yo want to do with bool?
+[04:57] <PerlJam> I was just trying to implement increment() and decrement()
+[04:57] <PerlJam> (in Perl6Bool.pmc)
+[04:58] <PerlJam> currently it appears that the only pmc that's actually used is perl6str.pmc
+[04:58] <particle> hrmm
+[04:58] <particle> c:\\usr\\local\\parrot\\trunk\\languages\\perl6>perl6 -e "say 1 ~~ Bool::True"
+[04:58] <particle> 1
+[04:58] <PerlJam> Maybe I should just skip to my next trick which was to implement increment() and decrement() for Perl6Str
+[04:59] <particle> the ACCEPTS method is definitely called for Bool
+[05:01] <PerlJam> um ... where is ACCEPTS documented?
+[05:02] <svnbotl> r26320 | tene++ | trunk:
+[05:02] <svnbotl> : Fix ParrotIO's clone()
+[05:02] <svnbotl> : Add PIO_dup to dup an fd
+[05:02] <svnbotl> : Add a set_pmc to ParrotIO
+[05:02] <svnbotl> : chromatic++ pmichaud++ Infinoid++
+[05:02] <PerlJam> Tene++ again!  :)
+[05:02] <particle> .sub 'increment' :method
+[05:02] <particle> $P0 = get_global 'True'
+[05:02] <particle> .return ($P0)
+[05:02] <particle> .end
+[05:03] <particle> that'd be my off-the-cuff guess for increment
+[05:03] <PerlJam> particle: I can do it in pir, the execise here was for me to do it in the .pmc file.
+[05:03] <particle> oh. i see.
+[05:03] <particle> src/classes/Bool.pir is where i was looking
+[05:04] <particle> i guess i didn't realize you were looking at src/pmc/
+[05:04] <PerlJam> I'm looking at both because they apparently interact.
+[05:04] <PerlJam> or, they would if I could make make_proto('Perl6Bool','Bool') work  :)
+[05:04] <particle> ok, well perl6bool isn't built
+[05:05] <particle> there's no perl6bool.c file on my system
+[05:05] <PerlJam> particle: it is in my copy :)
+[05:05] <PerlJam> as I said, perl6str.pmc appears to be the only one of the pmcs that's actually in use.
+[05:05] <particle> ok, so you have METHOD increment() { ... }
+[05:09] <particle> PerlJam: onload in bool.pir makes objects of type Boolean
+[05:09] <particle> and sets them as globals
+[05:09] <PerlJam> I can tell you exactly what I have:  METHOD increment() { SELF.set_bool(1); }   and then in Bool.pir, I replaced  $P0('Boolean', 'Bool') with $P0('Perl6Bool', 'Bool');
+[05:10] <particle> ok
+[05:10] <particle> what happens?
+[05:10] <particle> of course, you also modified the makefile to build perl6bool.pbc
+[05:10] <PerlJam> yep
+[05:11] <PerlJam> and my test is: parrot perl6.pbc -e 'my $x = Bool::True; $x++; $x++; say $x;'  # I expect to get a 1 as output.
+[05:11] <PerlJam> I get 3
+[05:11] <particle> ok, so find out what type $x is
+[05:12] <PerlJam> er, how?
+[05:12] <purl> i think er, how is that a problem ?
+[05:12] <particle> i bet it's Integer
+[05:12] <particle> $x.WHAT iirc
+[05:12] <PerlJam> oh, right.  I'm not fully in perl6-think right now.
+[05:12] <PerlJam> Bool
+[05:14] <particle> maybe $x.WHAT.WHAT
+[05:15] <PerlJam> still Bool :)
+[05:15] <PerlJam> Is there a way to trace the method calls?
+[05:15] <particle> not really, no
+[05:16] * particle is in really-tired-wife-is-away-two-beers-for-dinner-mode
+[05:18] * davidfetter hands particle another beer
+[05:18] <particle> PerlJam: try SELF.set_integer(1)
+[05:19] <PerlJam> I've convinced myself that my increment() method isn't being called at all.
+[05:20] <wknight8111> Force your increment method to output an error diagnostic. It's crude, but it should show you if something is happening
+[05:20] <PerlJam> (I added a printf(), re-make, and don't see the output.  I did the same with perl6str and I do see the output (yay! a positive result) )
+[05:20] <PerlJam> :-)
+[05:20] <wknight8111> ...nevermind then
+[05:21] <PerlJam> okay, that's weird.
+[05:21] <PerlJam> oh, no it's not.
+[05:22] <particle> alert('foo');
+[05:22] <PerlJam> get_string() is called from the pmc just fine.
+[05:22] *** teknomunk joined
+[05:22] <particle> please tell me your increment sub is before the final }
+[05:23] <PerlJam> yes.  :-P
+[05:23] <particle> good, because i would have been upset if you weren't getting compile errors
+[05:24] <PerlJam> aha!  s/METHOD/VTABLE void/
+[05:24] * PerlJam does the happy dance
+[05:24] <particle> ahhhh.... duh.
+[05:25] * PerlJam doesn't understand it all yet, but it's sinking into the grey matter slowly
+[05:26] <particle> good point, though. i find it odd that the perl 6 pmc's functions aren't decorated with METHOD or VTABLE
+[05:26] <particle> it should be REQUIRED by pdd17
+[05:26] <particle> perhaps chromatic's parser is still forgiving
+[05:27] <PerlJam> now to adding increment and decrement to perl6str  :-)
+[05:27] <PerlJam> s/ing//
+[05:30] <PerlJam> er, how do I remake the Makefile?
+[05:31] <particle> make Makefile
+[05:31] <purl> i heard make Makefile was a shortcut
+[05:31] <PerlJam> i.e., it's generated from config/makefiles/root.in
+[05:31] <particle> that's one of my favorite hacks
+[05:32] <PerlJam> It mildly bothers me as it's so close to make -f Makefile
+[05:32] <PerlJam> but, still neat :)
+[06:02] <svnbotl> r26321 | duff++ | trunk:
+[06:02] <svnbotl> : [rakudo] implement auto{increment,decrement} semantics as per S03
+[06:02] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26321
+[06:04] <PerlJam> boy that was a useless message.  It didn't even mention Bool
+[06:05] * PerlJam was distracted by using "git svn" to push something upstream for the first time.
+[06:06] <chromatic> Is Bool now one of the Rakudo PMCs, and built by default?
+[06:06] <PerlJam> yes.
+[06:07] <chromatic> Good stuff.
+[06:14] <chromatic> Hm, the commit mail is taking a while to come through.
+[06:14] <chromatic> I can't abuse you^Hyour patch until it does.  Sigh.
+[06:16] <PerlJam> chromatic: my next commit will venture into territory I'm even less familiar with (I'm going to flesh out initial implementations for auto{inc,dec} strings)
+[06:17] <PerlJam> I'm not really sure about STRING* v. char and such.  (I assume that I should use INTVAL rather than int too)
+[06:17] <PerlJam> er, s/char/char*/
+[06:19] <chromatic> There are encoding considerations.  That could be tricky.
+[06:19] <chromatic> Start with STRING and only use char if lathos says you can.
+[06:20] <chromatic> (I suspect that he will not.)
+[06:20] <PerlJam> well, I figure I'll do something very ASCII (since that's better than /* do nothing */) and then let someone else show me the right way to respect encodings, etc.
+[06:22] <PerlJam> also, there appears to be some prior art of ignoring the encoding in perl6str.pmc so I wouldn't be treading anywhere someone else hasn't already tread  :)
+[06:23] <lathos> If only someone wrote a design document about all this.
+[06:23] * PerlJam senses sarcasm
+[06:24] <lathos> http://svn.perl.org/viewvc/parrot/trunk/docs/pdds/draft/pdd28_character_sets.pod?view=markup
+[06:24] <shorten> lathos's url is at http://xrl.us/bhjfk
+[06:24] <chromatic> I skimmed the doc; it's not entirely clear to me how to make increment/decrement respect encodings.
+[06:24] <PerlJam> lathos: tell me, how do I do the equivalent of isalpha() or isdigit()?
+[06:24] <chromatic> Then again, I have very much not the smartest person in the room syndrome with regard to this.
+[06:25] <lathos> The problem is that the whole infrastructure just isn't there right now, so it can't be helped.
+[06:25] <lathos> Right now it's unfortunately probably best just to hack away and we'll clean it up later.
+[06:26] <PerlJam> that's exactly what I figured.
+[06:26] <chromatic> When you commit, then file a bug that it needs robustification.
+[06:26] <PerlJam> will do
+[06:26] <lathos> But if you're doing stuff like isalpha (or anything really), it could be worth creating a stub Parrot_string_isalpha (or whatever) abstraction and we'll make *that* do the right thing later, rather than having to go through everyone's code looking for all the different ways they've done things..
+[06:27] <chromatic> There are some suspicious functions in src/charset/*.c
+[06:27] <lathos> Everything in src/charset is suspicious. :(
+[06:28] <PerlJam> heh ... I'll just use to_ascii() first ;)
+[06:28] <lathos> is_cclass does look like the right thing.
+[06:29] <PerlJam> perhaps someone who knows what's what could satisfy RT#48260
+[06:38] <PerlJam> is there a pastebot on this channel?
+[06:38] <PerlJam> oh, never mind
+[06:38] <purl> Okie dokie
+[06:39] <Tene> purl: nopaste
+[06:39] <purl> nopaste is at http://nopaste.snit.ch/ (ask TonyC for new channels) or http://rafb.net/paste or http://paste.husk.org/ or http://poundperl.pastebin.com/ or http://paste.scsys.co.uk/ or don't bother me while I'm eating
+[06:39] <PerlJam> Tene: yeah, I got it.   (there are so many different names to remember in all of the channels I frequent)
+[06:40] <nopaste> "PerlJam" at 75.43.16.244 pasted "Perl6Str autodecrement implementation." (42 lines) at http://nopaste.snit.ch/12488
+[06:40] <PerlJam> here's a first cut at autodecrement.  Be kind I haven't coded in C in a while.
+[06:41] <PerlJam> but feedback is *most* welcome.
+[06:41] <chromatic> I'm getting lost in the single- and double-character variable names.
+[06:41] <chromatic> s and i I get, but....
+[06:43] <PerlJam> sx and ex are just the previous values of s and e so we can take care of finding the . if there is one.
+[06:44] <PerlJam> (so that blah-999.jpg becomes blah-998.jpg)
+[06:44] <lathos> Do extra characters really cost that much? :)
+[06:46] <PerlJam> btw, is there a tool that tidies C code to whatever the standard is for parrot?
+[06:46] <PerlJam> (well, something that I can apply to the .pmc file)
+[06:46] <chromatic> svk diff | mail -s 'chromatic|Andy please tidy my code'
+[06:48] <PerlJam> chromatic: well, if you don't mind the busy work, feel free to recast that paste in a more parroty manner.  :-)
+[06:50] <chromatic> If you fix up the variable names and throw in some newlines, I'll poke at it.
+[06:55] <PerlJam> It's nigh on my bedtime, so perhaps tomorrow.
+[06:55] <PerlJam> good night all.
+[07:05] *** uniejo joined
+[07:11] <svnbotl> r26322 | chromatic++ | trunk:
+[07:11] <svnbotl> : [IMCC] Sped up compute_dominators() by about 75%.  In particular, walking
+[07:11] <svnbotl> : backwards through the three-level runner loop is responsible for most of the
+[07:11] <svnbotl> : gains.
+[07:11] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26322
+[07:30] <svnbotl> r26323 | chromatic++ | trunk:
+[07:30] <svnbotl> : [IMCC] Minor cleanups of this file.
+[07:30] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26323
+[07:46] *** cognominal joined
+[07:47] *** cognominal left
+[07:48] *** cognominal joined
+[08:09] *** iblechbot joined
+[08:11] *** wknight8111 joined
+[08:14] <svnbotl> r26324 | fperrad++ | trunk:
+[08:14] <svnbotl> : [Lua]
+[08:14] <svnbotl> : now works without --no-gc
+[08:14] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26324
+[08:16] <chromatic> Heh.  I've said that for while.
+[08:17] <lathos> chromatic: I take it you know about valgrind massif? I only just found out about it.
+[08:18] *** kj joined
+[08:19] <chromatic> I've run it a couple of times, but I'm not a thread person, so I don't really know how to use it.
+[08:19] <chromatic> I do love Valgrind and Callgrind.
+[08:20] <lathos> It's not a thread thing, it's more of a heap profiler. May be handy with GC leak detection.
+[08:21] <chromatic> I've found the gc-debug runcore good at that.
+[08:26] <svnbotl> r26325 | chromatic++ | trunk:
+[08:26] <svnbotl> : [PMC] Removed a few unnecessary STRING allocations within CodeString's emit().
+[08:26] <svnbotl> : This improves the performance of this METHOD by around 5%, but it has the nice
+[08:26] <svnbotl> : effect of reducing GC time by the same amount (at least going by the p6rx
+[08:26] <svnbotl> : tests).
+[08:26] <svnbotl> : The fewer PObjs we create, the faster we go.
+[08:26] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26325
+[08:29] *** AndyA joined
+[08:34] <jrt4> Before I post this as a bug, will someone make sure I'm not being stupid ... I'm looking at fixup_unpack() in packfile.c at switch (entry->type) -- the docs (pdd13) say "0x01 - Subroutine fixup", however gdb, and enum_fixup_t both have entry->type at 2 for sub fixups. Are the docs wrong?
+[08:37] <lathos> If so then docs/parrotbyte.pod:169 is also wrong.
+[08:40] <jrt4> Ah ... they must have added in enum_fixup_none since the docs were written.
+[08:42] <lathos> Dunno, the docs look newer. Certainly file it as a bug.
+[09:00] *** mj41 joined
+[09:03] <jrt4> Done ... Is there any way to keep rt from collapsing the whitespace in the bugs I email in? Does it take HTML <code> || <pre> tags?
+[09:03] <Tene> chromatic: thank you for comments.
+[09:04] <chromatic> Glad to help.
+[09:04] <chromatic> It's really minor stuff.
+[09:10] <Tene> Yes, but coding style guidelines make me comfortable.
+[09:13] <chromatic> They make bugs easier to spot too.
+[10:15] *** wknight8111 joined
+[10:18] *** kj joined
+[10:58] *** ruoso joined
+[11:31] *** liona29 joined
+[12:04] *** iblechbot joined
+[12:21] <Coke> jrt4: for anything where you care about whitespace, send it as an attachment.
+[12:22] <Coke> (like, code.)
+[12:32] <Coke> chromatic++ # code reviews.
+[12:34] *** Theory joined
+[12:46] <svnbotl> r26326 | fperrad++ | trunk:
+[12:46] <svnbotl> : [codingstd]
+[12:46] <svnbotl> : C parentheses
+[12:46] <svnbotl> r26327 | fperrad++ | trunk:
+[12:46] <svnbotl> : [Lua]
+[12:46] <svnbotl> : now works without --no-gc
+[12:46] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26327
+[12:55] *** cosimo_ joined
+[12:59] <svnbotl> r26328 | coke++ | trunk:
+[12:59] <svnbotl> : [t]
+[12:59] <svnbotl> : ' isn't a quote delimiter in tcl, so this test would have always failed.
+[12:59] <svnbotl> : fperrad++ # I didn't even know this file was in the repo.
+[12:59] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26328
+[13:24] *** Psyche^ joined
+[13:28] *** parrot-poke joined
+[13:55] *** wknight8111 joined
+[14:20] *** Psyche^ joined
+[14:23] *** gryphon joined
+[14:25] *** skids joined
+[14:34] <cognominal> I got lexical self working...
+[14:35] *** Alias_ joined
+[14:49] <particle> cognominal++
+[14:49] <cognominal> waiting for someone interested in my patches...
+[14:50] <cognominal> I guess with heredoc and postcircumfixed pairs, we will be close to compile rakudo in rakudo
+[14:51] <cognominal> I am pissed off to see people still coding in pir.
+[14:51] *** davidfetter joined
+[14:55] <pmichaud> cognominal: "pissed off"?  really?
+[14:58] <cognominal> well, it's about time for people to use parrot to code in HLLS
+[14:59] <kj> there seems to be something wrong with pbc_to_exe; parrot bails out when I run an application in my language (the tutorial language I wrote)
+[14:59] <Coke> kj: works fine for tcl.
+[14:59] <kj> cognominal: as long as there's no complete language, people might still be hesitant
+[14:59] <kj> coke: sure, some apps work fine
+[14:59] <Coke> cognominal: most of the people here are writing compilers, so...
+[15:00] <pmichaud> cognominal: so, how would you write the "substr" function in Perl 6 ?
+[15:00] <kj> but this app is rather big
+[15:00] <Coke> when you say *parrot* is bailing out, do you mean the compiled thing that is calling the parrot libraries?
+[15:00] <Coke> pmichaud: hey... can I trouble you to look at something in tcl for 5 minutes?
+[15:00] <kj> coke: I create an executable, squaak.exe in my case, and it just stops
+[15:00] <pmichaud> coke: sure
+[15:01] <kj> i just get a new prompt
+[15:03] <cognominal> Coke: I want people to start to play with HLLs written with parrot.
+[15:04] <cognominal> in fact, I wanted to use rakudo, not so much modifying it.
+[15:05] <pmichaud> cognominal: we're getting there, albeit slowly
+[15:05] <cognominal> btw, I have noted that people can't get used to drop parentheses in conditionals. grammar.pg was full of them.
+[15:06] <cognominal> not that it hurts
+[15:06] <kj> you mean actions.pm?
+[15:06] <cognominal> oops
+[15:06] <cognominal> yes
+[15:06] <pmichaud> it doesn't hurt, and in many ways I think the parens are more readable
+[15:07] <kj> well I have no problem with that. but I'm not a Perl programmer, so I Just Don't Know anything else
+[15:12] <svnbotl> r26329 | coke++ | trunk:
+[15:12] <svnbotl> : [tcl]
+[15:12] <svnbotl> : Add a failing test for {*} that works in tcl 8.5
+[15:12] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26329
+[15:18] <particle> kj: you're on windows, right? after your command, try echo %ERRORLEVEL%
+[15:18] <particle> see  if there's a segfault
+[15:18] <particle> cognominal: i don't see your patches hitting the mailing list
+[15:19] <particle> maybe my mail client dropped them
+[15:20] <particle> cognominal: where are you submitting patches? parrotbug@parrotcode.org? rakudobug@perl.org?
+[15:22] <skids> cognominal: I'm more interested in coding in perl6 than working on parrot, frankly, but neither it nor pugs has async socket IO really working enough to start porting over Net:: stuff which is about the only part I can job-justify :-)
+[15:22] <skids> Glad to see Tene tackling it, wish I had more spare attention.
+[15:22] <kj> particle: good idea. it's some non-0 value indeed, so there's someting wrong.
+[15:24] <cognominal> I had submitted a patch to parrotbug@parrotcode.org
+[15:24] <svnbotl> r26330 | coke++ | trunk:
+[15:24] <svnbotl> : [tcl]
+[15:24] <svnbotl> : Now that 8.5.0 is released, when running the tcl tests, specifically
+[15:24] <svnbotl> : use the 8.5.0 tests, not HEAD.
+[15:24] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26330
+[15:24] <cognominal> waiting it to get thru before submitting other
+[15:25] <cognominal> I did not know about rakudobug@perl.org
+[15:26] <particle> rakudobug@ is for rakudo patches. it automatically puts the bug in the rakudo queue
+[15:26] <Coke> (otherwise a bugadmin has to move the tickets around, which is doable, but time consuming.)
+[15:26] <Coke> s/time/tuit/
+[15:28] * davidfetter wonders where he can find a gift pack of tuits
+[15:28] <davidfetter> the round ones are best
+[15:28] <Coke> hurm. if all my user callable subs in tcl have a "&" prefix, there's really no reason to keep all my helper methods in another namespace. I could just keep them sans sigil. (or with a different sigil)
+[15:29] *** Andy joined
+[15:29] <svnbotl> r26331 | coke++ | trunk:
+[15:29] <svnbotl> : [tcl]
+[15:29] <svnbotl> : When running tcl's test suite, use GC.
+[15:29] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26331
+[15:43] <nopaste> "pmichaud" at 76.183.97.54 pasted "partial trace for tcl" (8 lines) at http://nopaste.snit.ch/12490
+[15:54] <particle> coke: tcl only fails 5 subtests on win32 now
+[15:59] *** slavorg joined
+[16:00] <svnbotl> r26332 | coke++ | trunk:
+[16:00] <svnbotl> : [tcl]
+[16:00] <svnbotl> : pmichaud++ # figuring out where this was falling down.
+[16:00] <svnbotl> : Re-implement a workaround for a failing test. (At one point, :slurpy
+[16:00] <svnbotl> : here always provided us with a TclList: when it does again, this hack
+[16:00] <svnbotl> : can be removed.)
+[16:00] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26332
+[16:05] <pmichaud> need an RT ticket for :slurpy, I think.
+[16:11] * particle thinks of things that are slow: glaciers, global warming, tcl's test suite
+[16:25] <avar> Actually some icefalls are a lot faster than
+[16:26] <avar> ..tcl;)
+[16:32] <particle> rats. i don't see a way to specify which pages firefox should load from commandline
+[16:45] <Coke> tcl is invoking a LOT of opcodes.
+[16:49] <Coke> seriously, speed updates welcome. =-)
+[16:50] <Coke> I would love to have more people hacking on partcl.
+[16:51] <cotto_work> how much of the schedule for YAPC::NA and the subsequent hackathon is known?
+[16:52] * davidfetter wonders whether his talk got accepted
+[16:59] <Coke> I would expect: http://conferences.mongueurs.net/yn2008/talks to show me when the proposals are due.
+[17:00] <davidfetter> see, that would make sense and help people.
+[17:01] <Coke> seen jmcadams?
+[17:01] <purl> jmcadams was last seen on #catalyst 2 days and 14 hours ago, saying: will try to get one together... no promises though... i'm running way behind on everything right now :(  [Mar  9 20:01:43 2008]
+[17:05] <Coke> particle: are you sure that's how those tests would output in tclsh8.5 on windows?
+[17:06] <particle> no
+[17:06] <particle> they're not testing against tclsh8.5 anyway
+[17:06] <Coke> no, but they're supposed to behave *just like* 8.5
+[17:06] <particle> ok, well then the expected output was wrong anyway
+[17:06] <particle> tcl?
+[17:06] <purl> tcl is http://www.tcl.tk/ or TCL7::TCL8 as perl4::perl5 or possibly partcl. or http://rt.perl.org/rt3/NoAuth/parrot/List.html?Field=Lang&Value=tcl or segfaulting parrot since 2001. or  the canary in the mine shaft, as far as parrot is concerned. or http://www.tcl.fr/
+[17:07] <svnbotl> r26333 | particle++ | trunk:
+[17:07] <svnbotl> : [tcl] fix some test portability problems leading to windows failures
+[17:07] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26333
+[17:08] * particle downloads activetcl
+[17:08] * Coke muahahahas.
+[17:09] *** Alias_ joined
+[17:10] *** Theory joined
+[17:10] <Coke> I think tcl is failing 2 tests on non-windows now.
+[17:10] <particle> ok, it's failing two on windows, too
+[17:11] <particle> and one occasionally
+[17:11] <particle> *one more
+[17:11] <Coke> woz the other one?
+[17:11] <Coke> lsort is passing everything here; but it's got the continuation issue.
+[17:12] <particle> here too
+[17:12] <particle> t/cmd_error.t reports failures occasionally when run in make test, but 'prove t/cmd_error.t' never gets erros
+[17:13] <Coke> huh.
+[17:13] <particle> it's from some wonky c code somewhere
+[17:14] <particle> i used to get these problems with imcc tests
+[17:14] <particle> chromatic and andy went over the imcc source, and the problems disappeared
+[17:14] <particle> sic em!
+[17:16] *** Alias_ joined
+[17:18] <particle> c:\\usr\\local\\parrot\\trunk\\languages\\tcl>\\usr\\tcl\\bin\\tclsh85
+[17:18] <particle> % puts [pwd]
+[17:18] <particle> C:/usr/local/parrot/trunk/languages/tcl
+[17:20] <particle> so, i can change t/cmd_pwd.t to use File::Spec::Unix->canonpath( getcwd );
+[17:20] <particle> then the test will fail, but the expected output is correct
+[17:20] <particle> should i mark the test TODO, or let it fail?
+[17:21] <Coke> If you can conditionally TODO it, that'd be good.
+[17:25] <particle> can do
+[17:38] <svnbotl> r26334 | particle++ | trunk:
+[17:38] <svnbotl> : [tcl] tchsh likes unix slashies, even on windows
+[17:38] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26334
+[17:51] <svnbotl> r26335 | particle++ | trunk:
+[17:51] <svnbotl> : [rakudo] remove accidentally committed test code by duff
+[17:51] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26335
+[18:08] *** pjcj joined
+[18:09] *** rdice joined
+[18:10] <Andy> ehich tests?
+[18:10] <Andy> What did we do?  Were we good?  Hooray for us!
+[18:12] <cognominal> nope, a spare 'say'
+[18:12] <particle> andy: there's some funny business with tcl pmcs on win32
+[18:12] <particle> they could use a good going-over
+[18:13] <Andy> specific file?
+[18:14] <particle> when i run make test, i get occasional erros in t/cmd_error.t
+[18:17] <Andy> Well, I can't dig right now.
+[18:17] <Andy> maybe a splint run would do you good.
+[18:17] <Andy> lemme at least compile tcl and see if anything leaps out.
+[18:19] <Coke> pmichaud++
+[18:20] <pmichaud> ...what did I do?  ;-)
+[18:21] * pmichaud thinks that coke is throwing out random karma
+[18:21] <particle> silence is golden
+[18:33] <Coke> ah, that was for your eyes earlier today.
+[18:34] <Coke> will be happy to karma you again if you can fix the remaining failure in t/tcl_misc.t =-)
+[18:36] <pmichaud> karma pmichaud
+[18:36] <purl> pmichaud has karma of 1059
+[18:36] <pmichaud> I could TODO the test :-)
+[18:36] *** davidfetter joined
+[18:37] *** ambs joined
+[18:37] <Coke> tbbthp.
+[18:38] <davidfetter> oi, ambs
+[18:39] <ambs> Hi, davidfetter
+[18:39] * davidfetter recently back from .pt :)
+[18:39] <davidfetter> (fsvo "recently")
+[18:40] <ambs> davidfetter: and you didn't visit me? :-P
+[18:40] <ambs> :D
+[18:41] <davidfetter> sorry. where are you?
+[18:41] <ambs> Braga
+[18:41] <ambs> somewhere in the north
+[18:41] <davidfetter> ah. i was in lisbon
+[18:42] <davidfetter> got to talk to lisbon.pm :)
+[18:42] <davidfetter> is there a braga.pm ?
+[18:42] *** cout joined
+[18:43] <ambs> yes, second biggest perl monger group in Portugal, I must say
+[18:43] *** Psyche^ joined
+[18:43] <davidfetter> :)
+[18:43] <ambs> hmms... my parrot is failing a lot of tests :-/
+[18:46] <ambs> Failed 3/561 test programs. 8/11196 subtests failed.
+[18:49] <davidfetter> that's not too awful
+[18:51] * ambs pokes svnbotl
+[18:51] <svnbotl> r26336 | ambs++ | trunk:
+[18:51] <svnbotl> : Copied some code from readline.pm to gmp.pm to detect libgmp with macports.
+[18:51] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26336
+[18:52] *** gryphon joined
+[18:52] *** IllvilJa joined
+[18:52] <ambs> how I missed these lines :)
+[18:54] <particle> wow! a commit from ambs.
+[18:54] <particle> glad to have you back :)
+[18:54] <ambs> thanks :D
+[18:58] <pmichaud> ambs++ # yay!
+[19:01] <Coke> ambs?
+[19:01] <purl> ambs is, like, Alberto Simoes, one of the organizers of YAPC::EU::2005 and available at mailto:ambs@cpan.org
+[19:01] <ambs> hmms.. these errors are usual?
+[19:01] <ambs> # dyld: Symbol not found: _pio_stdio_layer
+[19:01] <ambs> #   Referenced from: /Users/ambs/Projects/parrot/./t/src/io_19
+[19:01] <ambs> #   Expected in: dynamic lookup
+[19:01] <ambs> #
+[19:01] <ambs> COKE!!
+[19:01] * Coke finally makes the connection between committer ambs and Alberto.
+[19:01] <Coke> ~~
+[19:02] <Coke> Ola, ambs.
+[19:02] <ambs> Hello, Coke.
+[19:02] <ambs> Trying to get back :)
+[19:03] <particle> coke: tell me the phone call is tied to UTC
+[19:04] <Coke> particle: yes.
+[19:04] <Coke> I think we have one more hour.
+[19:04] <Coke> which means my alert messags are finally going to be timely since DST ended last time.
+[19:06] *** jrt4 joined
+[19:21] <pmichaud> phone is in 39mins
+[19:21] <pmichaud> I will miss it, as I will be off having wedding photos taken :-)
+[19:23] *** barney joined
+[19:23] <Coke> barney: hio.
+[19:23] <ambs> pmichaud: who's wedding?
+[19:23] <barney> hi there
+[19:23] <purl> niihau, barney.
+[19:24] <pmichaud> ambs:  mine :-)
+[19:24] <ambs> pmichaud: and you are here in your wedding?
+[19:24] <ambs> Congratulations, by the way :-D
+[19:24] <pmichaud> no, the wedding itself will be on Friday.  We're doing photos today.
+[19:25] <pmichaud> and thanks.
+[19:25] <barney> How about a Parrot release name as a wedding present?
+[19:26] <ambs> hehehe
+[19:26] <pmichaud> for those who are wondering, Paula and I have been together for quite a while but never got married for tax/estate reasons.  But we've decided to go ahead and bite the bullet on the taxes/estates.
+[19:26] <pmichaud> er, "never got legally married"
+[19:26] <ambs> pmichaud: Paula is (also) a Portuguese name, btw
+[19:26] <Tene> How married did you get, then?
+[19:27] <Tene> Any parroters near SF, btw?
+[19:28] <parrot-poke> Im near SF
+[19:29] <parrot-poke> more of a groupie at this point
+[19:31] <Tene> I'll be in SF in a couple of weeks.  Might have time to meet someone for dinner.
+[19:38] <svnbotl> r26337 | ambs++ | trunk:
+[19:38] <svnbotl> : Not sure of this fix, but one more test passing (test 16 from t/src/io.t)
+[19:38] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26337
+[19:55] *** ambs_ joined
+[19:57] *** purl joined
+[20:05] <Coke> IO PEN ING!
+[20:09] <cognominal> Paula is French too, but not too common
+[20:10] <barney> Paula is German too
+[20:11] <ambs> damn :)
+[20:14] <Coke> AIGH. tcl 8.5.1 is out.
+[20:15] * particle has tcl 8.5.1.0 installed :)
+[20:16] <ambs> 8.4 here :-P
+[20:18] * Coke builds 8.5.1
+[20:18] * ambs makes perl6
+[20:21] <svnbotl> r26338 | bernhard++ | trunk:
+[20:21] <svnbotl> : #41237: [TODO] PMC Class name IDs will require a dot in front
+[20:21] <svnbotl> : Avoid deprecated PIR syntax
+[20:21] <svnbotl> : Some beautifications
+[20:21] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26338
+[20:22] <ambs> beautifications++
+[20:23] <ambs> dinner &
+[20:29] <Coke> gah. had a tcl8.5 alpha release in /usr/local; built tlch8.5.1 locally; ran ./tclsh8.5 ; guess which tcl library i was using...
+[20:30] <Tene> The right one?
+[20:30] <purl> the right one is the one where you control the box :)
+[20:30] <Tene> purl: forget the right one
+[20:30] <purl> Tene: I forgot right one
+[20:35] <Coke> anyone want to know how much slower partcl is than tclsh8.5.1 ?
+[20:35] <Coke> running, say, t/cmd_expr.t
+[20:36] <Coke> anyone? =-)
+[20:36] <Coke> about 3000 times slower. =-)
+[20:38] <davidfetter> d'oh
+[20:38] <Coke> 1m27.493s vs. 0.030s
+[20:39] <Coke> (and I don't even *pass* all those tests.)
+[20:40] <svnbotl> r26339 | bernhard++ | trunk:
+[20:40] <svnbotl> : #51662: [TODO] Remove 'classname' rule in imcc.y
+[20:40] <svnbotl> : Expect changed error message after 'classname' has been removed.
+[20:40] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26339
+[20:44] <Coke> (even worse on something like examples/bench.tcl ; tclsh does it in half the time of the cmd_expr.t, parrot was up to 4.5 minutes when I killed it.
+[20:45] * ambs fg
+[20:45] <ambs> Coke: that are bad news, right?
+[20:46] <svnbotl> r26340 | bernhard++ | trunk:
+[20:46] <svnbotl> : #51662: [TODO] Remove 'classname' rule in imcc.y
+[20:46] <svnbotl> : Avoid deprecated PIR syntax
+[20:46] <svnbotl> diff: http://parrotvm.org/svn/parrot/revision/?rev=26340
+[20:46] <Coke> it's SLOOOOW.
+[20:46] <Coke> insanely slow.
+[20:47] <Coke> perhaps If I blog about it, I can shame mdiep into coming back!
+[20:47] <ambs> :D
+[20:47] *** arbingersys joined
+[20:52] * ambs wonders why same Test::Harness shows a different output (when running prove)
+[20:53] *** Psyche^ joined
+[20:54] * ambs bounces his head on the wall.
+[20:58] <particle> different TAP::Parser?
+[20:59] <ambs> no, different architecture, and different messages in the test accordingly to it
+[21:09] <Coke> AHAHAHAHAAH
+[21:10] <Coke> the script examples/bench.tcl runs about 2**16 times slower in parrot than on tclsh8.5
+[21:11] <davidfetter> ouch
+[21:11] <Coke> 64366 times, but damn.
+[21:12] <particle> i bet it'd be easy to get an order of magnitude improvement there somewhere
+[21:12] <particle> not that you'd notice.
+[21:13] <particle> try an optimised build, for giggles
+[21:13] <Coke> I can't wait another 23 minutes to run the damn thing at the moment. :|
+[21:14] <Coke> if there would be that much of a speedup, why ever NOT build optimised?
+[21:14] <particle> because you need to debug
+[21:14] <Coke> that shouldn't be the default, should it? =-)
+[21:14] <Coke> we are gonna have to flip that bit at some point.
+[21:15] <particle> for sure it'll be optimized by default at parrot 0.50.0
+[21:16] <particle> that's our 'major subsystems implementation complete' release
+[21:23] <Coke> ok. the first test, which was 2916 times slower with default build, is only 1752 times slower with optimized build.
+[21:23] <particle> there you go. that's an order of magnitude, base 2
+[21:24] <Coke> if you squint really hard, yes. =-)
+[21:25] <Coke> so, I should be aiming to get unoptimized partcl to run only single digit times faster than tclsh8.5
+[21:25] <Coke> and then count on parrot for the rest. =-)
+[21:26] <particle> perfect. only 15 oom to go
+[21:45] *** slightlyoff joined
+[21:57] <cognominal> I am back to my old question, what happens if your Perl6 class has the same name as a pmc?
+[21:57] <cognominal> I want to extend the Hash class...
+[22:12] <pmichaud> for the moment, it has to have a different name
+[22:13] <pmichaud> however, the way that protoobjects are set up, that's not too much of a problem
+[22:13] <pmichaud> i.e., Perl6Hash (in Parrot) can be held as the 'Hash' entry in the root namespace and report itself back as 'Hash'
+[22:13] <pmichaud> (actually,  %hash.WHAT gives back the Protoobject, which can report whatever it wants :-)
+[22:14] <cognominal> well, but the method I add to the namespace hash are not visible
+[22:16] <cognominal> rakudo  -e 'my %h; for  %h.HOW.methods { say $_   } '  # uses the pmc iterator to list me the methods of the protoobject!!
+[22:16] <cognominal> but no the keys method!
+[22:16] <cognominal> ... I added
+[22:48] *** Psyche^ joined
+[23:11] *** cotto_work joined
+[23:11] *** jjore joined
+[23:11] *** davidfetter joined
+[23:11] *** amoore joined
+[23:11] *** cxreg joined
+[23:11] *** zev joined
+[23:11] *** teknomunk_ joined
+[23:11] *** parrot-poke_ joined
+[23:11] *** rhr_ joined
+[23:11] *** TimToady_ joined
+[23:11] *** particl1 joined
+[23:11] *** arbingersys joined
+[23:11] *** purl joined
+[23:11] *** cout joined
+[23:11] *** Alias_ joined
+[23:11] *** mdiep joined
+[23:11] *** silug joined
+[23:11] *** arcady joined
+[23:11] *** Khisanth joined
+[23:11] *** bphillips joined
+[23:11] *** ewilhelm joined
+[23:11] *** shamu joined
+[23:11] *** pfig joined
+[23:13] *** diakopter joined
+[23:13] *** Ademan joined
+[23:13] *** tewk joined
+[23:13] *** Sartak joined
+[23:13] *** Crassworm joined
+[23:13] *** Tene joined
+[23:13] *** allison joined
+[23:13] *** slightlyoff joined
+[23:13] *** spinclad_ joined
+[23:13] *** jdv79_ joined
+[23:13] *** jrt4 joined
+[23:13] *** IllvilJa joined
+[23:13] *** Theory joined
+[23:13] *** wknight8111 joined
+[23:13] *** Coke joined
+[23:13] *** Dave joined
+[23:13] *** c9s_ joined
+[23:13] *** shorten joined
+[23:13] *** buildbot joined
+[23:13] *** cotto joined
+[23:13] *** Piper joined
+[23:13] *** TonyC joined
+[23:13] *** workbench joined
+[23:15] *** skids joined
+[23:24] <wknight8111> viva la netsplit
+[23:28] *** davidfetter joined
+[23:35] *** clunker joined
+[23:35] *** dngor joined
+[23:35] *** confound joined
+[23:45] *** BitPoet joined
+[23:45] *** Andy joined
+[23:45] *** jrockway joined
+[23:45] *** avar joined
+[23:46] *** Infinoid joined
+[23:46] *** confound joined
+[23:46] *** dngor joined
+[23:46] *** clunker joined
+[23:46] *** davidfetter joined
+[23:46] *** skids joined
+[23:46] *** diakopter joined
+[23:46] *** Ademan joined
+[23:46] *** tewk joined
+[23:46] *** Sartak joined
+[23:46] *** Crassworm joined
+[23:46] *** Tene joined
+[23:46] *** allison joined
+[23:46] *** slightlyoff joined
+[23:46] *** spinclad_ joined
+[23:46] *** jdv79_ joined
+[23:46] *** jrt4 joined
+[23:46] *** IllvilJa joined
+[23:46] *** Theory joined
+[23:46] *** wknight8111 joined
+[23:46] *** Coke joined
+[23:46] *** Dave joined
+[23:46] *** c9s_ joined
+[23:46] *** shorten joined
+[23:46] *** buildbot joined
+[23:46] *** cotto joined
+[23:46] *** Piper joined
+[23:46] *** TonyC joined
+[23:46] *** workbench joined
+[23:48] *** cotto_work joined
+[23:48] *** jjore joined
+[23:48] *** amoore joined
+[23:48] *** cxreg joined
+[23:48] *** zev joined
+[23:48] *** teknomunk_ joined
+[23:48] *** rhr_ joined
+[23:48] *** TimToady_ joined
+[23:48] *** particl1 joined
+[23:48] *** arbingersys joined
+[23:48] *** purl joined
+[23:48] *** cout joined
+[23:48] *** Alias_ joined
+[23:48] *** mdiep joined
+[23:48] *** silug joined
+[23:48] *** arcady joined
+[23:48] *** Khisanth joined
+[23:48] *** bphillips joined
+[23:48] *** ewilhelm joined
+[23:48] *** shamu joined
+[23:48] *** pfig joined
+[23:49] *** clunker joined
+[23:49] *** dngor joined
+[23:49] *** confound joined
+[23:55] *** slavorg joined

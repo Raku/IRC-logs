@@ -1,0 +1,206 @@
+[00:22] *** rurban joined
+[00:23] *** rurban1 joined
+[01:25] *** rurban joined
+[01:26] *** FROGGS__ joined
+[02:26] *** rurban joined
+[02:28] *** rurban1 joined
+[02:31] *** rurban2 joined
+[03:37] *** Timbus joined
+[05:31] *** woosley joined
+[08:53] *** basiliscos joined
+[09:47] *** Psyche^ joined
+[09:55] *** Timbus joined
+[11:03] *** FROGGS__ joined
+[11:36] *** FROGGS__ joined
+[12:02] *** autark joined
+[12:43] *** ivan joined
+[13:23] *** rurban joined
+[13:28] <dalek> Heuristic branch merge: pushed 25 commits to parrot/rurban/pmc2c_orig2-gh1069 by rurban
+[13:29] <rurban> merged your new rework, ended up empty. Still the one remaining gc.t bug
+[14:14] *** Chirag joined
+[14:52] *** Khisanth joined
+[14:54] *** rurban joined
+[14:59] <Chirag> rurban : So I tried removing "manual_wb" and "no_wb" but that did not change anything...
+[15:00] <Chirag> So since gc.t threw an error -- "set_attr_str() not implemented in class 'HashIterator' " .. I was wondering if WB is not the problem
+[15:43] <rurban_> I'm just annotating the WB in the GC to see which pmc exactly is the causing the problem
+[15:46] <Chirag> hmm.. is it required for HashIterator to have set_attr_str() ?
+[15:53] <rurban_> Looks in master
+[15:53] <rurban_> look in master
+[15:55] <rurban_> no, hashiters have no string repr for the attrs
+[15:58] <Chirag> hmm..
+[15:59] <rurban_> But I get similar wrong pmc types now with your latest change
+[16:00] <Chirag> let me try with the commit before I did anything .. and step by step check each commit
+[16:00] <rurban_> I get get_repr() not implemented in class 'CallContext'
+[16:01] <Chirag> without making any modifications?
+[16:03] <rurban_> Just a debug printf in gc_gms_write_barrier
+[16:04] <rurban_> Oh yeah, my fault
+[16:05] <Chirag> ?
+[16:07] <rurban_> found my bug. got now all the PMC types being write barriered
+[16:09] <Chirag> what was it?
+[16:18] <rurban_> #ifdef DEBUG_GC_WB
+[16:18] <rurban_> fprintf(stderr, "WB pmc %-20s, gen %ld at %p - %p\\n",
+[16:18] <rurban_> VTABLE_get_string(interp, pmc)->strstart, gen, pmc, item->ptr);
+[16:18] <rurban_> #endif
+[16:18] <rurban_> I used get_repr before
+[16:19] <rurban_> but not all pmc's have a repr
+[16:32] <Chirag> oh .. I thought you found the WB bug .. :D
+[16:34] <Chirag> btw I tried gc.t on commit "[codingstd] fix trailing whitespace"  .. still the same error
+[16:36] <rurban_> no, still fixing GC debugging. -DMEMORY_DEBUG is broken for GMS
+[16:37] <rurban_> But got it now, I think
+[16:40] *** FROGGS joined
+[16:44] <rurban_> This needs to be done anyway. the new GC never had a proper checker
+[16:47] <Chirag> ohk..
+[17:04] <rurban_> MultiSub is my candidate
+[17:07] <Chirag> invoke doesnt require a WB right?
+[17:10] <rurban_> wait a sec, got something better
+[17:11] <rurban_> ResizableIntegerArray is not dirty
+[17:20] <Chirag> set_integer_native .. the first if block doesnt have a WB
+[17:23] <rurban_> right
+[17:25] <rurban_> we should just remove the manual_wb the WBs and the return
+[17:27] <rurban_> no, still the same bug
+[17:28] <Chirag> yeah.. me too
+[17:28] <rurban_> I'll push my gc debugging fixes now
+[17:33] <rurban_> I'll sanity check master before. Maybe we had a GC bug before already
+[17:35] <rurban_> master is fine, even with the new GC sanity check code, so it's our new WB code
+[17:35] <Chirag> hmm
+[17:46] <rurban_> I only get https://github.com/parrot/parrot/issues/1067 with valgrind
+[17:48] <Chirag> i didnt understand this..
+[17:51] <rurban_> no prob
+[17:58] <Chirag> so now how should I go about finding the wrong WBs?
+[18:03] <rurban_> wait a sec. I need to fulltest it before I can commit it to master
+[18:03] <Chirag> ok
+[18:05] *** bluescreen joined
+[18:06] <dalek> parrot/rurban/gms_debug-gh1073: 13ba440 | rurban++ | / (3 files):
+[18:06] <dalek> parrot/rurban/gms_debug-gh1073: [gc] add MEMORY_DEBUG support to the GMS gc
+[18:06] <dalek> parrot/rurban/gms_debug-gh1073:
+[18:06] <dalek> parrot/rurban/gms_debug-gh1073: fix and enable -DMEMORY_DEBUG for the GMS gc,
+[18:06] <dalek> parrot/rurban/gms_debug-gh1073: add DETAIL_MEMORY_DEBUG lines for all sanity checked PMCs,
+[18:06] <dalek> parrot/rurban/gms_debug-gh1073: and add a single MEMORY_DEBUG line when write_barrier'ing a PMC
+[18:06] <dalek> parrot/rurban/gms_debug-gh1073:
+[18:06] <dalek> parrot/rurban/gms_debug-gh1073: we never caught up with the change from the List_Item_Header iterator
+[18:06] <dalek> parrot/rurban/gms_debug-gh1073: to POINTER_ARRAY_ITER.
+[18:06] <dalek> parrot/rurban/gms_debug-gh1073: Fixes GH issue #1073
+[18:06] <dalek> parrot/rurban/gms_debug-gh1073: review: https://github.com/parrot/parrot/commit/13ba440aad
+[18:19] <rurban_> So I got a GC WB pmc CallContext           gen 2 at 0x709b10 - 0x7abeb0 and a GC WB pmc ResizablePMCArray     gen 2 at 0x787410 - 0x7ac408 before the crash
+[18:32] <rurban_> found a bug in pmc2c for single return
+[18:32] <Chirag> a pm file?
+[18:33] <rurban_> when we use RETURN we must not use :manual_wb, :manual_wb means that no WB will be added, even not in a RETURN
+[18:34] <rurban_> for a lowercase return value; the WB will be added after the return, not before
+[18:34] <rurban_> a single lowercase return value
+[18:36] <Chirag> ah.. so that never gets WB-ed
+[18:38] <Chirag> cannot find anything wrong with CallContext
+[18:39] <Chirag> set_integer_native is wrong for ResizablePMCArray
+[18:39] <rurban_> see perl -ne'BEGIN{undef $/} print "$ARGV:$. $1\\n" if /(\\s+return .*;\\n\\s+PARROT_GC_WRITE_BARRIE)/' src/pmc/*.c
+[18:41] <Chirag> should I manually add them?
+[18:47] <rurban_> First I'm fixing pmc2c
+[18:59] <rurban_> hmm, destroy should be :write I think
+[19:03] <rurban_> yes, this was it. gc.t passes now
+[19:04] <rurban_> nice
+[19:04] <Chirag> which destroy.. the one i mentioned yesterday?
+[19:05] <Chirag> ptrobj.pmc?
+[19:08] <rurban_> I added a manual WB to parrotlibrary.destroy
+[19:08] <rurban_> ptrobj was a special case already before
+[19:08] <rurban_> running fulltest now
+[19:09] <Chirag> ok.. fingers crossed :D
+[19:09] <rurban_> I have to look over the RETURN also once more, that we have no :manual_wb's there
+[19:09] <rurban_> and pmc2c also
+[19:10] <rurban_> but looks much better now
+[19:11] <Chirag> hmm.. why did u have to put a manual_wb in destroy.. wasnt it getting added automatically by pmc2c
+[19:12] <rurban_> nope, it has no :write tag
+[19:13] <rurban_> I think they should have one
+[19:14] <rurban_> when someone calls detroy manually it might be helpful. if they are destroyed automatically they are already added to the root, so no WB needed
+[19:14] <rurban_> all the stress tests also work now
+[19:15] <rurban_> pushing soon, time to benchmark and celebrate part 1
+[19:15] <Chirag> yay! I guess :D
+[19:16] <rurban_> but the bug was in resizablepmcarray, as the new MEMORY_DEBUG said
+[19:16] <rurban_> happy
+[19:16] <Chirag> I will push my two changes now
+[19:19] <Chirag> Also, if you could please double check these:
+[19:19] <Chirag> 1. role.pmc    METHOD add_method     METHOD remove_method     manual??
+[19:19] <Chirag> 2. scalar.pmc  assign_pmc   no_wb??
+[19:31] <dalek> parrot: 9240d3a | rurban++ | / (2 files):
+[19:31] <dalek> parrot: [gc] add MEMORY_DEBUG support to the GMS gc
+[19:31] <dalek> parrot:
+[19:31] <dalek> parrot: fix and enable -DMEMORY_DEBUG for the GMS gc,
+[19:31] <dalek> parrot: add DETAIL_MEMORY_DEBUG lines for all sanity checked PMCs,
+[19:32] <dalek> parrot: and add a single MEMORY_DEBUG line when write_barrier'ing a PMC
+[19:32] <dalek> parrot:
+[19:32] <dalek> parrot: we never caught up with the change from the List_Item_Header iterator
+[19:32] <dalek> parrot: to POINTER_ARRAY_ITER.
+[19:32] <dalek> parrot: review: https://github.com/parrot/parrot/commit/9240d3a600
+[19:32] <dalek> Heuristic branch merge: pushed 43 commits to parrot/rurban/pmc2c_orig2-gh1069 by rurban
+[19:32] <rurban_> oops, didn't want to push to master now. have to check if this was thr right one
+[19:33] <rurban_> rurban/pmc2c_orig2-gh1069 is good
+[19:34] <dalek> parrot: e4e45e9 | rurban++ | / (2 files):
+[19:34] <dalek> parrot: Revert "[gc] add MEMORY_DEBUG support to the GMS gc"
+[19:34] <dalek> parrot:
+[19:34] <dalek> parrot: This reverts commit 9240d3a60083aac90ccf8fc83cab8a84cfbe73b8.
+[19:34] <dalek> parrot: This has some codingstd vialations. I'll rather add rurban/gms_debug-gh1073
+[19:34] <dalek> parrot: later
+[19:34] <dalek> parrot: review: https://github.com/parrot/parrot/commit/e4e45e9317
+[19:38] <rurban_> running the benchmarks now
+[19:40] <Chirag> great..I guess u missed my last message
+[19:49] <rurban_> oops the new code is slower. less calls but many more branches
+[19:50] <rurban_> Probably some superfluous WBs still
+[19:54] *** travis-ci joined
+[19:54] <travis-ci> [travis-ci] parrot/parrot#1034 (master - 9240d3a : Reini Urban): The build passed.
+[19:54] <travis-ci> [travis-ci] Change view : https://github.com/parrot/parrot/compare/8e173af06203...9240d3a60083
+[19:54] <travis-ci> [travis-ci] Build details : http://travis-ci.org/parrot/parrot/builds/27159328
+[19:54] *** travis-ci left
+[19:55] <Chirag> my message is lost in the dalek notifications ..
+[19:55] <Chirag> #repost
+[19:55] <Chirag> if you could please double check these:
+[19:55] <Chirag> 1. role.pmc    METHOD add_method     METHOD remove_method     manual??
+[19:55] <Chirag> 2. scalar.pmc  assign_pmc   no_wb??
+[19:55] *** FROGGS joined
+[19:57] <rurban_> Our benchmark times are good (better than before) but the WB branch is still slower
+[19:57] <rurban_> more instructions, more branches, more cycles
+[19:58] <Chirag> hmm..
+[20:01] <rurban_> One WB too much is about 0.7 sec, This is a lot
+[20:02] <rurban_> Found one wrong one, looking for more
+[20:02] <Chirag> rurban_ : u saw my message right?
+[20:07] *** travis-ci joined
+[20:07] <travis-ci> [travis-ci] parrot/parrot#1035 (master - e4e45e9 : Reini Urban): The build passed.
+[20:07] <travis-ci> [travis-ci] Change view : https://github.com/parrot/parrot/compare/9240d3a60083...e4e45e931736
+[20:07] <travis-ci> [travis-ci] Build details : http://travis-ci.org/parrot/parrot/builds/27159503
+[20:07] *** travis-ci left
+[20:32] <dalek> parrot/rurban/pmc2c_orig2-gh1069: 61d4a19 | rurban++ | src/pmc/ (3 files):
+[20:32] <dalek> parrot/rurban/pmc2c_orig2-gh1069: [pmc] some tiny WB optimizations
+[20:32] <dalek> parrot/rurban/pmc2c_orig2-gh1069:
+[20:32] <dalek> parrot/rurban/pmc2c_orig2-gh1069: 0.7sec faster benchmark. remove superfluous WB in class.is_equal
+[20:32] <dalek> parrot/rurban/pmc2c_orig2-gh1069: add one to class.resolve_method in the write case.
+[20:32] <dalek> parrot/rurban/pmc2c_orig2-gh1069: remove WB in orderedhashiterator.shift_string, already done in shift_pmc()
+[20:32] <dalek> parrot/rurban/pmc2c_orig2-gh1069: review: https://github.com/parrot/parrot/commit/61d4a19805
+[20:57] <rurban_> Role.add_methods just WBs the self->role->methods array, but self itself not. I think self should also be WB here. same for the other role methods on some attrs
+[21:00] <rurban_> scalar has indeed too many
+[21:11] <dalek> parrot/rurban/pmc2c_orig2-gh1069: 2a10a6f | rurban++ | src/pmc/scalar.pmc:
+[21:11] <dalek> parrot/rurban/pmc2c_orig2-gh1069: [pmc] some tiny WB optimizations in scalar.assign_pmc
+[21:11] <dalek> parrot/rurban/pmc2c_orig2-gh1069:
+[21:11] <dalek> parrot/rurban/pmc2c_orig2-gh1069: no measurable impact in the benchmarks
+[21:12] <dalek> parrot/rurban/pmc2c_orig2-gh1069: review: https://github.com/parrot/parrot/commit/2a10a6f6e7
+[21:27] *** rurban joined
+[21:35] <dalek> parrot: 13ba440 | rurban++ | / (3 files):
+[21:35] <dalek> parrot: [gc] add MEMORY_DEBUG support to the GMS gc
+[21:35] <dalek> parrot:
+[21:35] <dalek> parrot: fix and enable -DMEMORY_DEBUG for the GMS gc,
+[21:35] <dalek> parrot: add DETAIL_MEMORY_DEBUG lines for all sanity checked PMCs,
+[21:35] <dalek> parrot: and add a single MEMORY_DEBUG line when write_barrier'ing a PMC
+[21:35] <dalek> parrot:
+[21:35] <dalek> parrot: we never caught up with the change from the List_Item_Header iterator
+[21:35] <dalek> parrot: to POINTER_ARRAY_ITER.
+[21:35] <dalek> parrot: Fixes GH issue #1073
+[21:35] <dalek> parrot: review: https://github.com/parrot/parrot/commit/13ba440aad
+[21:35] <dalek> parrot: 4e2fadb | rurban++ | / (3 files):
+[21:35] <dalek> parrot: Merge branch 'rurban/gms_debug-gh1073'
+[21:35] <dalek> parrot: review: https://github.com/parrot/parrot/commit/4e2fadb602
+[21:53] *** travis-ci joined
+[21:53] <travis-ci> [travis-ci] parrot/parrot#1036 (master - 4e2fadb : Reini Urban): The build passed.
+[21:53] <travis-ci> [travis-ci] Change view : https://github.com/parrot/parrot/compare/e4e45e931736...4e2fadb6027f
+[21:53] <travis-ci> [travis-ci] Build details : http://travis-ci.org/parrot/parrot/builds/27169947
+[21:53] *** travis-ci left
+[22:11] *** Timbus joined
+[22:12] <rurban_> wrote the docs also now
+[22:42] <dalek> parrot/rurban/pmc2c_orig2-gh1069: bfb5f4c | rurban++ | / (3 files):
+[22:42] <dalek> parrot/rurban/pmc2c_orig2-gh1069: [docs] document pmc2c and the new write barrier attributes
+[22:42] <dalek> parrot/rurban/pmc2c_orig2-gh1069: review: https://github.com/parrot/parrot/commit/bfb5f4c376
+[23:12] *** basiliscos joined

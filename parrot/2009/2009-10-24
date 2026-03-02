@@ -1,0 +1,956 @@
+[00:01] *** darbelo joined
+[00:01] <pmichaud_> so, the only piece I'm missing is how to specify a type as that last argument
+[00:01] <chromatic> bacek, the only thing I could find that uses get_string there was the MMD tuple creation in CallSig's own get_pmc.
+[00:01] <pmichaud_> and perhaps that just argues that we really want the last argument to be a type more than an object to be cloned
+[00:01] <japhb> pmichaud_, and there I've got nothing yet.  Brain still too fuzzy
+[00:02] <pmichaud_> I like the potential power of "object to be cloned", but the common case is "create a new object of this type"
+[00:02] <bacek> chromatic: indeed. Let me finish testing and I'll commit lazy string_sig creation
+[00:02] <bacek> chromatic: and then we can fix MMD to use raw arguments instead
+[00:03] <pmichaud_> and typical code generation really wants that "new object of this type" to be specified as a constant somehow.
+[00:03] <darbelo> Whiteknight: pong
+[00:03] <chromatic> bacek, the only thing I don't see this doing is marking named arguments by appending 'n' in the signature.
+[00:04] <Austin> So you're back to specifying the hll-mapped role you want to request?
+[00:04] <japhb> pmichaud_, the only two ideas I have in that direction are: 1. double the ops again.  Ew.  2. Have the default arg be a thunk to be called to get the default.  Whether that's a win depends on how often code in the wild needs to use the default.
+[00:04] <bacek> chromatic: it's not required for MMD.
+[00:04] *** zak_ joined
+[00:04] <Whiteknight> darbelo: I'm starting to prototype the 2D matrix PMC. I'm trying to figure out a good way to do indexing
+[00:05] <pmichaud_> Austin: actually, I'm looking at    $P0 = vivify_lex '%foo', ['Hash']
+[00:05] <pmichaud_> and
+[00:05] <pmichaud_> $P1 = vivify $P0, 'key', ['Undef']
+[00:05] <Austin> So the HLL can't change its mind about what default type to use?
+[00:06] <pmichaud_> no, but I'm not sure that's all that important.  The "change its mind part" was more along the lines of one HLL being able to signal to another HLL what type to use
+[00:06] <Austin> Ah
+[00:06] <pmichaud_> for example, a library running in the 'parrot' namespace being able to create objects for callers coming from the 'mylang' hll namespace
+[00:07] <Austin> When you mentioned that before, the little man in my head that pulls all the levers just said "forget this," an quit. (It's been muscle memory only for the last half hour or so)
+[00:08] <pmichaud_> Both P6object and PCT run into issues like this, because they provide methods that are often called from other hll namespaces, and we want those methods to be able to act as if they were in the foreign hll namespace.
+[00:08] <pmichaud_> so, when something from a toolkit creates an "integer", it ends up creating an integer that is correctly mapped according to its HLL caller type.
+[00:08] <pmichaud_> If the vivification type is hard-coded into the PIR, there's less opportunity for that to occur.
+[00:09] <Austin> So fetch is:   fetch Pagg, Pkey, Pdfltkey ?
+[00:09] <darbelo> Whiteknight: Have you considered using keyed access with a FIA?
+[00:09] <pmichaud_> maybe.
+[00:09] <bacek> purl: (6518415064 - 5795672288) / 6518415064 * 100
+[00:09] <purl> 11.0877071942162
+[00:09] <bacek> 11%!!!
+[00:09] <Austin> 1/9th
+[00:10] <pmichaud_> as I said, I really like the clone semantics, I just can't figure out how to get the common "make me an object of this type" semantics, short of creating a new one of those objects at the beginning of each sub, or doing a set of lookups at the beginning of each sub
+[00:10] <Austin> bacek: What did you do?
+[00:10] <Whiteknight> darbelo: I was thinking of something very similar to that
+[00:10] <bacek> chromatic: you was wrong. It's 11%, not 5-6 :)
+[00:10] <bacek> Austin: drop creating stirng_sig in PCC
+[00:10] <Austin> bacek: congrats
+[00:11] <pmichaud_> in some sense I guess the "set of lookups" at the beginning of each sub feels like the best way to go, but I'm not sure I like it.
+[00:11] <japhb> pmichaud_, this may sound a little odd, but how about having the last arg be a label?
+[00:11] <Austin> pmichaud_: How could a local library know the type to create using fetch?
+[00:12] <japhb> That way we only do the lookups and default when needed?
+[00:12] <japhb> or, instead of a label,
+[00:12] <japhb> have a pre-op that sets the label to use to default, like setting an exception handler
+[00:12] <chromatic> I don't mind underestimating this way.
+[00:13] <pmichaud_> Austin: I must be getting tired -- I didn't follow your question.
+[00:13] <Austin> japhb: I don't get it. An example?
+[00:13] <pmichaud_> japhb: label -- interested.
+[00:13] <pmichaud_> *interesting.
+[00:13] <japhb> OK, still fighting through the fuzz here,
+[00:13] <Austin> pmichaud_: In the case where hll A calls B, how could B provide an A-centric type via fetch?
+[00:13] <Whiteknight> darbelo, dukeleto: I just pushed a prototype of the PMC. bare bones. check it out
+[00:13] <darbelo> Whiteknight: I've been thinking about this and the way I see it being the most efficient is to keep the PMC's data in 'cblas-native' format, with as little conversion as possible in inter-PMC operations.
+[00:13] <pmichaud_> Austin:  B can find out the hll of its caller
+[00:13] <darbelo> Whiteknight: Ohh. I'll ckeck it out.
+[00:13] <japhb> but something like:
+[00:14] <pmichaud_> then B can find out A's hll_mapping
+[00:14] <Whiteknight> darbelo: the way we do storage isn't as important right now as the way we do indexing
+[00:14] <japhb> push_def_handler default_array
+[00:14] <pmichaud_> then B can choose/create a fetch argument that is consistent with that mapping
+[00:14] <Whiteknight> but you're right, CBLAS internal format would be nice
+[00:14] <japhb> fetch aggregate, key
+[00:14] <japhb> ...
+[00:14] <japhb> default_array:
+[00:14] <pmichaud_> japhb:  here's an examle
+[00:14] <japhb> afk for just a sec, damn
+[00:15] <pmichaud_> actually, japhb, now that I'm looking at it, I think that using a label is basically what PAST does now.
+[00:15] <pmichaud_> we just avoid the "if null" check.
+[00:15] <Austin> pmichaud_: That argues that fetch should take a pmc or a type name, instead of a role sentinel.
+[00:15] <pmichaud_> Austin: I've been wanting to have role sentinels in addition to pmcs
+[00:15] <pmichaud_> to avoid having to always look up the pmc
+[00:15] <pmichaud_> (I don't have a good way to do it, which is why I'm falling back to "okay, let's just eat the cost of looking up the pmc")
+[00:16] <darbelo> Whiteknight: Yeah, maily I was thinking of Complex there, FLOATVAL is just a double.
+[00:16] <pmichaud_> actually, I think I know what I want to do here.
+[00:16] <pmichaud_> first, all of this discussion has been *incredibly* useful.
+[00:16] <Whiteknight> darbelo: yes, I think we are going to have to have multiple PMC types
+[00:16] <japhb> Oh, duh!  I think I see a solution!
+[00:16] * pmichaud_ waits for japhb's solution.
+[00:17] * Austin disbelieves.
+[00:17] <japhb> fetch aggregate, key, label_for_SUCCESS
+[00:17] * pmichaud_ disbelieves also, but hopes.
+[00:17] <japhb> do_default
+[00:17] <japhb> label_for_success:
+[00:17] <pmichaud_> japhb:  that's what PAST does now.
+[00:17] <japhb> pmichaud_, yep.
+[00:17] <pmichaud_> so no advantage to what we have now.  :-)
+[00:17] <dalek> parrot: r42057 | bacek++ | trunk/src (2 files):
+[00:17] <dalek> parrot: Stop building string_sig in build_sig_object functions.
+[00:17] <dalek> parrot: Do it lazily on request. It gives us ~11% performance improvement on
+[00:17] <dalek> parrot: fib.pir
+[00:17] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42057/
+[00:17] <japhb> no null check.
+[00:17] <Austin> 2->1 ops
+[00:18] <japhb> but OK, fine, genius is fleeting.  ;-)
+[00:18] <pmichaud_> there's still a null check, it's just being done inside of the fetch opcode instead of separately
+[00:18] <japhb> pmichaud_, your idea was?
+[00:18] <pmichaud_> I don't think the null check provides that much benefit
+[00:18] <japhb> pmichaud_, yes, understood.
+[00:18] <dalek> parrot-linear-algebra: 58cb4dc | Whiteknight++ | src/pmc/NumMatrix2D.pmc (2 files):
+[00:18] <dalek> parrot-linear-algebra: add a prototype of a 2D matrix PMC for proof-of-concept
+[00:18] <dalek> parrot-linear-algebra: review: http://github.com/Whiteknight/parrot-linear-algebra/commit/58cb4dcd2c225e7824041677c4262d6533bbef18
+[00:18] <japhb> sigh
+[00:18] <pmichaud_> actually, in the vivify case the label form avoids a null-check and a bind
+[00:18] <pmichaud_> but still, not a huge benefit
+[00:18] <darbelo> Whiteknight: You are going for 'allocate storage on assignement' there, right?
+[00:19] <pmichaud_> my idea is summed up in one word:  "wait"
+[00:19] <pmichaud_> a lot of this discussion is predicated on the code that NQP produces now
+[00:19] * japhb blinks
+[00:19] <Whiteknight> darbelo: I haven't thought about allocation yet
+[00:19] * Austin has never been good at waiting.
+[00:19] <pmichaud_> but NQP produces code that is based on older ideas about how Perl 6 would work
+[00:19] <pmichaud_> and a lot of those ideas are no longer valid
+[00:19] <pmichaud_> I'm thinking about the fetch and vivify opcodes at the moment, and I'm guessing that NQP likely won't need them anyway
+[00:19] <Whiteknight> Matrixy requires resizable matrices, but allows for preallocation as an optimization
+[00:19] <pmichaud_> other languages might be able to use them, but NQP won't
+[00:20] <Whiteknight> so if matrices were fixed-size, we could implement a relatively fast copy
+[00:20] <Austin> 8-O
+[00:20] <pmichaud_> so perhaps the thing to do is to wait and see what NQP-rx develops, and look at the code it generates
+[00:20] <Austin> I'll bite. Why won't nqp use them?
+[00:21] <pmichaud_> it would use them, but only for aggregate and package lookups
+[00:21] <Austin> Sure.
+[00:21] <pmichaud_> and I think we'll find that's a much smaller percentage than the example that you were looking at
+[00:21] <pmichaud_> where every lexical fetch was generating 4+ opcodes
+[00:21] <pmichaud_> in the future, NQP lexical fetches will be one opcode
+[00:21] <pmichaud_> (find_lex)
+[00:21] <Austin> My example combined two things: lexical fetches and (package/aggregate) fetches.
+[00:21] * pmichaud_ looks at the example again
+[00:22] <pmichaud_> the example in the ticket only showed lexical
+[00:22] *** kj joined
+[00:23] <darbelo> The two approaches that make sense to me are: The default init() can allocate a 'big enough for most uses' buffer, that we grow as needed. Or, init() leaves the thing empty, and we allocate storage on first assignement, when we know how big the thing will be.
+[00:24] <pmichaud_> oh, in the ticket it also says
+[00:24] <Austin> pmichaud_: True. But the "load, unless_null $Px, vivify_, default, vivify_YY:" pattern is the same for lexical loads and aggregates.
+[00:24] <pmichaud_> "we expect about a 2-3% reduction is pbc size (pir lines != opcode words) and a corresponding 2-3% increase in execution speed. "
+[00:24] <Austin> So my grep caught them both.
+[00:24] <darbelo> I can argue it both ways, but it'll depend on what our typical use case will be.
+[00:24] <pmichaud_> my question is how many of those patterns were lexical lookups
+[00:24] <pmichaud_> anyway, with
+[00:24] <Austin> Right. That I didn't count.
+[00:24] <pmichaud_> "we expect about a 2-3% reduction is pbc size (pir lines != opcode words) and a corresponding 2-3% increase in execution speed. "
+[00:24] <purl> i already had it that way, pmichaud_.
+[00:24] <Whiteknight> darbelo: I like the second idea. I think they should start empty, and then become fixed-size on assign
+[00:25] <pmichaud_> ...why would a 2-3% reduction in pbc size result in a 2-3% increase in execution speed?  That doesn't follow from my experience.
+[00:25] <ttbot> Parrot trunk/ r42057 MSWin32-x86-multi-thread make error http://tt.ro.vutbr.cz/file/cmdout/120439.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[00:26] <chromatic> My guess is that the execution improvement will be about half of the size improvement.
+[00:26] <pmichaud_> I'm guessing even less.
+[00:27] <pmichaud_> when I moved CodeString and Capture from being written in PIR to being written in C (essentially combining multiple operations into a single C method), I didn't get near that level of performance increase
+[00:27] <darbelo> Whiteknight: How does matrixy handle it's matrices now? Does it reuse storage on any operations?
+[00:27] <Austin> The size estimates were based on the original proposed 'vivify' op, which is now defunct.
+[00:28] <Whiteknight> darbelo: right now it uses nested RPAs, and allows resizing
+[00:28] <pmichaud_> Austin: sure, size might be reduced by 2-3%, but there's no corresponding performance increase
+[00:28] <Whiteknight> in-place resizing
+[00:28] <chromatic> CodeString suffers from its use of METHOD.
+[00:28] <kj> good evening
+[00:28] <purl> Ah, evening. The tumultuous mind tarries and contemplates, reveling in the silence afforded by the diurnal proletariat. Good evening, indeed.
+[00:28] <pmichaud_> chromatic: I think that's a bit of a wash (but could be wrong)
+[00:28] <pmichaud_> at any rate, we took what were several dozen opcodes and put them into C
+[00:29] <bacek> purl: (8505314725 - 5795672288) /8505314725 * 100
+[00:29] <chromatic> and cross the C/PIR boundary, which is never fast.
+[00:29] <purl> 31.8582265866711
+[00:29] <pmichaud_> is the C/PIR boundary that much more expensive than a PIR-PIR call?
+[00:29] <chromatic> Oh yes.
+[00:29] <pmichaud_> interesting.
+[00:29] <Austin> pmichaud_: The library has grown slightly. It now has 1411 occurrences of "find_lex" and 1415 of ", vivify_".
+[00:29] <bacek> speaking of speed: fib.pir is 31% faster now comparing to post pcc merge :)
+[00:29] <Austin> Suggesting there are 4 places where aggregates are accessed.
+[00:30] <pmichaud_> Austin: right
+[00:30] <chromatic> bacek, we have another 19% to go then.
+[00:30] <pmichaud_> so in the new NQP, you would end up with 1411 occurrences of find lex and 4 occurrences of vivify
+[00:30] <bacek> chromatic: it will tough...
+[00:30] <Austin> Won't you be vivifying parameters?
+[00:30] <pmichaud_> which makes me think I'm essentially correct that lexical lookups swamp all other forms
+[00:30] <pmichaud_> parameters are already vivified, by definition
+[00:31] <pmichaud_> i.e., they come in as arguments supplied by the caller
+[00:31] <Austin> foo(My::symbol::name)
+[00:31] <Austin> It's how I create nulls.
+[00:31] <pmichaud_> My::symbol::name  takes care of the vivification before calling foo
+[00:31] <Whiteknight> oi! This is such a pain. We have so many places where we really need access to two integers: size, resize, index/get, index/set, etc
+[00:32] <Whiteknight> and the VTABLE interface is basically useless for it
+[00:32] <Austin> I just use a symbol name that doesn't exist, and the lookup returns null.
+[00:32] <darbelo> Whiteknight: It rezises the R(RPA)A on *shrinking* matrices?
+[00:32] <pmichaud_> that will likely change in the new NQP
+[00:32] <bacek> chromatic: can we reuse Sub's RetContinuation?
+[00:32] <Whiteknight> darbelo: No, not yet anyway
+[00:32] <Austin> Man, you mean my is_null function will become useless?
+[00:32] <Austin> :(
+[00:32] <Whiteknight> Matrixy has a really bad implementation, that's why I'm rewriting it
+[00:32] <Austin> All that work, for naught.
+[00:32] <chromatic> bacek, manual recycling?
+[00:32] <pmichaud_> it will become much better
+[00:32] <pmichaud_> my $foo := PIR::null
+[00:33] <bacek> chromatic: caching inside Sub and reusing
+[00:33] <pmichaud_> (which will execute the null opcode and bind $foo to the result)
+[00:33] <bacek> chromatic: it's about 35% of all time spent in fib.pir
+[00:33] <chromatic> I see that.
+[00:33] <chromatic> I don't think we can recycle that so easily.  Our subs are re-entrant.
+[00:33] <darbelo> Whiteknight: Oh, I was just checking for behaviur we might want to preserve.
+[00:34] <pmichaud_> anyway, I figure that if you pass NULL as an argument to a subroutine, you have a reason for wanting it to be NULL and NQP shouldn't be vivifying it for you.
+[00:34] <Austin> :)
+[00:34] <Austin> FWIW, those four places where the aggregate accesses occur get run a whole lot.
+[00:34] <pmichaud_> sure, but I don't think we're saving much in terms of execution speed there
+[00:35] <bacek> chromatic: what about using TLS for it?
+[00:35] <chromatic> TLS?
+[00:35] <purl> TLS is Transport Layer Security or the Times Literary Supplement or the latest version of SSL (3.1 or something like that) or Thread Local Storage or at http://en.wikipedia.org/wiki/Transport_Layer_Security or required for XMPP
+[00:35] <Whiteknight> darbelo: we need a function to copy the buffer from one size to another (bigger or smaller)
+[00:35] <Whiteknight> and with that, we can resize pretty easily
+[00:35] <pmichaud_> either the elements exist, in which case we branch, or they don't exist, in which case we create a new object.  That's the same in all the scenarios we've posited.
+[00:35] <bacek> chromatic: Thread Local Storage
+[00:35] <Austin> I'm thinking that my code might be deficient in aggregate accesses, because I've gone out of my way to put everything together as method calls.
+[00:35] <chromatic> I'd rather explore merging Context and RetCont.
+[00:36] <Whiteknight> chromatic: true!
+[00:36] <pmichaud_> it's only a question of whether the branch is occurring in PIR or if it's occurring inside of an opcode
+[00:36] <darbelo> Whiteknight: We could, with some extra bookkeeping, avoid the shrink operation and save on memory allocation.
+[00:37] <pmichaud_> i.e., I'd think that fetch/vivify are really only improving our .pbc size, not really increasing code speed
+[00:37] <dalek> TT #1141 created by kjs++: Parrot API changes breaks PIRC
+[00:37] <pmichaud_> we're just saving the cost of opcode dispatch; I'm not sure how much that is.
+[00:37] <Whiteknight> darbelo: agreed. I'm storing x/y sizes, so we can shrink those bounds without reallocating the underlying storage
+[00:37] <Austin> I think that's what everyone else is agonizing over right now :)
+[00:37] <pmichaud_> ?
+[00:38] <pmichaud_> "everyone else"?
+[00:38] <pmichaud_> you mean the pcc cost?  that's subroutine dispatch, not opcode dispatch
+[00:38] <Austin> Ah.
+[00:38] <pmichaud_> that's the cost of the invoke opcode, not the cost of opcodes in general :-)
+[00:39] <bacek> chromatic: interesting... We have 1M calls to Parrot_allocate_context and 1M calls to new_ret_continuation. Allocate context is heavier than new_ret_continuation. But context takes ~7% vs 35% for continuation.
+[00:39] <pmichaud_> the fact that fixing invoke to be faster results in double-digit performance improvements just indicates how much of parrot execution is being swamped by the cost of subroutine dispatch :-)
+[00:39] <bacek> chromatic: something is terribly wrong here...
+[00:39] <chromatic> I'm sure that varies depending on PObj allocation.
+[00:39] <darbelo> Whiteknight: And (for cblas, at leat) we can take advantage of the 'Row-Major'/'Column-Major' C/FORTRAN thing to avoid most transposing.
+[00:40] <chromatic> It just so happens that in this particular order, the GC runs more often for pmc_new with RetCont than pmc_new with Context.
+[00:40] <Whiteknight> darbelo: ATLAS supports flags for rowmajor/colmajor operations
+[00:40] <Austin> Anyway, back on topic: You're saying that fetch is essentially only needed for aggregate accesses, since PCT will be smarter about lexicals. What about vivify?
+[00:40] <pmichaud_> since NQP will be smarter about lexicals.
+[00:40] <bacek> chromatic: sounds reasonable...
+[00:41] <pmichaud_> NQP will be able to assume that lexicals are vivified upon declaration.
+[00:41] <darbelo> That makes the MATLAB a' operation trivially cheap.
+[00:41] <pmichaud_> there is no other vivification for lexicals.
+[00:41] <pmichaud_> vivification for aggregates would still be the same as now
+[00:41] <darbelo> And, from what little MATLAB I remember ' was used fairly heavily.
+[00:42] <pmichaud_> i.e., fetch the element, branch unless null, build a new element, bind in the aggregate
+[00:42] <Whiteknight> darbelo: so the question is this: do we want to resize dynamically (grow when accessed but never shrink) or do we want to specify a fixed size ahead of time
+[00:42] <Whiteknight> I'm thinking now that dynamic resizing might be best
+[00:42] <darbelo> Whiteknight: I agree.
+[00:42] <pmichaud_> the only significant difference between "fetch" and "vivify" is that vivify also does a bind
+[00:43] <Austin> Sure.
+[00:43] <Austin> So when will nqprx land?
+[00:43] <pmichaud_> (which should answer chromatic's question about how to implement the vivify opcode, should we decide we want to do that)
+[00:43] <Whiteknight> darbelo: Okay, I'm going to throw together a prototype of that
+[00:43] <pmichaud_> I'll have variables done this weekend.
+[00:43] <Whiteknight> we can modify it later
+[00:43] <bacek> chromatic: nope. gc_ms_more_traceble_objects called only ~4000 times.
+[00:43] <chromatic> pmichaud_, does this obviate the experimental fetch opcode?
+[00:43] <pmichaud_> chromatic: for the moment, it seems yes.
+[00:43] <pmichaud_> I need to think about it a bit more.
+[00:44] <darbelo> I won't have many tuits over the weekend, but I'll most assuredly be all over that on monday.
+[00:44] <pmichaud_> I really like the idea of having opcode support for lvalue versus rvalue semantics, because I agree that the code we generate from PAST for it looks really ugly and inefficient
+[00:45] <Whiteknight> darbelo: that way we can do resizing (at a cost), and we can support preallocating which will be cheaper
+[00:45] <pmichaud_> adding fetch/vivify makes the code look less ugly, but it's not significantly more efficient.
+[00:45] <chromatic> We could benchmark it.
+[00:45] *** zak_ joined
+[00:46] <pmichaud_> I wouldn't rip out the experimental ops just yet, no.
+[00:46] <pmichaud_> benchmarking it would be good -- I could put together a quick benchmark fairly quickly.
+[00:46] <chromatic> If you have callgrind installed, that's the way to check performance.
+[00:46] <pmichaud_> I do, and yes, it is.
+[00:47] <dalek> parrot: r42058 | chromatic++ | trunk/src/pmc/retcontinuation.pmc:
+[00:47] <dalek> parrot: [PMC] Enabled (experimental) recycling of RetContinuation PMC when it gets
+[00:47] <dalek> parrot: invoked.  This gives a 4.98% performance improvement on fib.pir.  Hopefully the
+[00:47] <dalek> parrot: RetCont PMC will merge with Context soon, but until then, this is a nice
+[00:47] <dalek> parrot: improvement that's easy to revert if it causes problems.
+[00:47] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42058/
+[00:47] <pmichaud_> the _other_ optimization I've been considering is to make PAST smarter about knowing when it needs to re-fetch a lexical in the first place
+[00:48] <pmichaud_> for example, right now we fetch a lexical on every use
+[00:48] <pmichaud_> thus:
+[00:48] <pmichaud_> my $b := $a + $a * 3
+[00:48] <darbelo> Ok, gotta go now.
+[00:48] <pmichaud_> does two fetches of $a, along with creating (separate) temporaries for each if it hasn't already been vivified somehow
+[00:49] <pmichaud_> but if PAST can analyze the code path to determine that the second $a has to be the same thing as the first, then it can re-use the register it got from the first fetch
+[00:49] <pmichaud_> instead of doing a re-fetch
+[00:50] <pmichaud_> of course, we have to have some way for the compiler to signal "hey, it's possible for re-binds to take place here", so that it doesn't perform that optimization.
+[00:50] <dalek> TT #1141 closed by kjs++: Parrot API changes breaks PIRC
+[00:50] <Coke> msg bacek fperradmsg bacek, I isolate a problem with r42039, see http://nopaste.snit.ch/18440
+[00:50] <purl> Message for bacek stored.
+[00:50] <ttbot> Parrot trunk/ r42058 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/120490.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[00:51] <pmichaud_> the other optimization I'm really looking for is to be able to determine when a block can be inlined instead of generating a separate parrot sub
+[00:51] <bacek> Coke: too late. I already fixed it :)
+[00:51] <pmichaud_> for example:
+[00:51] <pmichaud_> if $b > 3 { say($b); }
+[00:51] <pmichaud_> doesn't really require a separate parrot sub for the block
+[00:52] <pmichaud_> right now it doesn't check for the case of "no new lexicals here, okay to inline"
+[00:52] <pmichaud_> (or other reasons why a block might not be safe to inline)
+[00:53] <dalek> parrot: r42059 | kjs++ | trunk/compilers/pirc/src/bcgen.c:
+[00:53] <dalek> parrot: [pirc] fix some Parrot API invocations, particularly passing STRINGs instead of C strings
+[00:53] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42059/
+[00:55] <ttbot> Parrot trunk/ r42059 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/120509.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[00:55] <pmichaud_> afk for a while
+[00:56] <dalek> parrot: r42060 | kjs++ | trunk/compilers/pirc/src/pirop.c:
+[00:56] <dalek> parrot: [pirc] 'fix' op-signature calculator for stand-alone key operands, as in 'new Packfile?'
+[00:56] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42060/
+[00:58] *** Zak joined
+[00:59] <pmichaud_> chromatic: in fetch/vivify, how hard would it be for the last parameter to be a type instead of an object to be cloned?
+[00:59] <pmichaud_> i.e.:
+[01:00] <ttbot> Parrot trunk/ r42060 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/120540.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[01:00] <pmichaud_> $P0 = fetch $P1, 'key', ['Hash']
+[01:00] <chromatic> That's easy.
+[01:00] <pmichaud_> I might want that.
+[01:00] <pmichaud_> I'm thinking that the aggregate cases are sufficient to warrant fetch/vivify
+[01:00] <chromatic> In addition to or instead of what's there now?
+[01:00] <pmichaud_> I was thinking it would need to be "instead of"
+[01:01] <pmichaud_> if "in addition" is possible, what's the downside?
+[01:01] <kthakore> hello folks is there a place of nightly Rakudo/Parrot tarballs?
+[01:01] <pmichaud_> kthakore: there aren't nightly tarballs for rakudo, but you can always get a tarball from github
+[01:01] <chromatic> The downside is more op variants, but they're easy to create.
+[01:02] <pmichaud_> we can distinguish a constant ['Foo'] from other PMCs?
+[01:02] <chromatic> Yes, that's a Key.
+[01:02] <pmichaud_> there's been some speculation it might not be a Key someday
+[01:02] <pmichaud_> still workable?
+[01:02] <kthakore> pmichaud_: ok.  thanks
+[01:03] <pmichaud_> kthakore: just go to rakudo's github page, click the "download" button, and you can get a current tarball or zip
+[01:03] <chromatic> If it's constant at compile time, that's reasonably easy.
+[01:03] <chromatic> I might have to experiment some though.
+[01:03] <pmichaud_> chromatic: okay, good to know.
+[01:04] <pmichaud_> For now I think I want "instead of"
+[01:04] <pmichaud_> someday I might want "in addition to", but that can be off in the nebulous future
+[01:04] <pmichaud_> so
+[01:04] <chromatic> Instead of is easy.
+[01:04] <pmichaud_> fetch $P0, $P1, key, ['Foo']
+[01:04] <pmichaud_> vivify $P0, $P1, key, ['Foo']
+[01:04] <dalek> parrot-linear-algebra: 2d8fbeb | Whiteknight++ | src/pmc/NumMatrix2D.pmc (2 files):
+[01:04] <dalek> parrot-linear-algebra: expand the matrix pmc a little bit. Add a resize function. Resizing is inefficient, so there is motivation to preallocate
+[01:04] <dalek> parrot-linear-algebra: review: http://github.com/Whiteknight/parrot-linear-algebra/commit/2d8fbebf1e4f459e025cbc8fa77213c89fea2916
+[01:05] <pmichaud_> fetches $P1[key] into $P0, and if it doesn't exist it creates a new instance of ['Foo'] and returns that
+[01:05] <pmichaud_> in the vivify opcode case, creating a new instance of ['Foo'] also does a set_pmc_keyed on $P1[key] for the newly created object
+[01:05] <kthakore> pmichaud_: I am justing going to cron git pull and tar it myself :) Thanks
+[01:06] <pmichaud_> kthakore: that works, although you'd also want to skip the .git directories.
+[01:06] <chromatic> pmichaud_, if you give me a patch to t/op/fetch.t, I can make the other work.
+[01:06] <kthakore> pmichaud_: oh crap ... yeah ... thanks
+[01:06] <pmichaud_> chromatic: okay, I'll send along a patch.  Might be a few hours before I can do that -- have other things I have to do here now.
+[01:06] <chromatic> Ditto.
+[01:07] <pmichaud_> there's no rush on fetch/vivify for me at the moment, I won't get to using them in PAST/NQP until Sunday at the earliest.
+[01:07] <PerlJam> kthakore: git help archive
+[01:07] <pmichaud_> but I think having them will make code gen a lot cleaner, and that's likely worthwhile on its own.
+[01:08] <pmichaud_> if nothing else, it keeps people from looking at it and going "Ewwww...."
+[01:08] <pmichaud_> okay, gotta run.  Thanks.
+[01:10] <kthakore> PerlJam: that saves time thanks
+[01:10] <Whiteknight> okay, now I just need to figure out how build this damn PMC
+[01:10] <dalek> parrot-linear-algebra: 8c86b73 | Whiteknight++ | src/pmc/NumMatrix2D.pmc (2 files):
+[01:10] <dalek> parrot-linear-algebra: add resize function (thought I already did) and fix the exception that gets thrown
+[01:10] <dalek> parrot-linear-algebra: review: http://github.com/Whiteknight/parrot-linear-algebra/commit/8c86b7321bb24732d82d4c247ab414b40a100cbb
+[01:14] <Coke> seen kid51?
+[01:14] <purl> kid51 was last seen on #parrot 23 hours, 43 minutes and 36 seconds ago, saying: must sleep
+[01:16] <Coke> bacek: you added a file but didn't update the manifest.
+[01:16] <Coke> this tends to break the build. :P
+[01:17] <bacek> Coke: *sigh*
+[01:19] <chromatic> Oh, MANIFEST... I've loved you since I was a child.  They're always trying to take you away from me.  Why?  Because you're busy work... and they have... the SPACE!  MADNESS!
+[01:20] *** tokuhirom joined
+[01:23] <Whiteknight> don't even say nice things about MANIFEST in jest
+[01:23] <chromatic> I wasn't aware that proximity to original Ren and Stimpy scripts could reflect well on MANIFEST.
+[01:24] <Whiteknight> ah, that's where it was from
+[01:24] <Whiteknight> knew it sounded a little familiar
+[01:24] <Whiteknight> I haven't seen Ren and Stimpy in years
+[01:25] <chromatic> You were in for serious mockery if you didn't recognize even the name "Ren and Stimpy".
+[01:28] <dalek> parrot-linear-algebra: 6ecabdb | Whiteknight++ | src/pmc/NumMatrix2D.pmc (2 files):
+[01:28] <dalek> parrot-linear-algebra: actually pretend to do the resizing function correctly
+[01:28] <dalek> parrot-linear-algebra: review: http://github.com/Whiteknight/parrot-linear-algebra/commit/6ecabdb4365492f5dc7b87460afb0c2b001ed537
+[01:28] <Whiteknight> I spent more of my formative years in front of Ren and Stimpy than the guidance councelor thought was healthy
+[01:29] <chromatic> Watching the first season in its entirety is unhealthy.
+[01:29] <Whiteknight> powedered toast man, rubber nipples, anthropomorphic mud skippers, etc. they all ruined me
+[01:30] <jsut> don't pee on the electric fence
+[01:31] <Whiteknight> "what do you want to drink?" "MEAT!"
+[01:31] <Whiteknight> "no sir, I don't like it"
+[01:33] <dalek> parrot: r42061 | bacek++ | trunk/src/pmc/callsignaturereturns.pmc:
+[01:33] <dalek> parrot: [core][cage] Add CallSignatureReturns.destroy.
+[01:33] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42061/
+[01:33] <dalek> parrot: r42062 | bacek++ | trunk (2 files):
+[01:33] <dalek> parrot: Use FixedSizeStorage in CallSignatureReturns for small amount of returns. Give us another ~1.5% of performance
+[01:33] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42062/
+[01:33] <dalek> parrot: r42063 | bacek++ | trunk/MANIFEST:
+[01:33] <dalek> parrot: [cage] Add callsignaturereturns.t into MANIFEST. Coke++, MANIFEST--
+[01:33] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42063/
+[01:34] <dalek> parrot-linear-algebra: ab6446f | Whiteknight++ | src/pmc/NumMatrix2D.pmc (2 files):
+[01:34] <dalek> parrot-linear-algebra: fix a stupid typo
+[01:34] <dalek> parrot-linear-algebra: review: http://github.com/Whiteknight/parrot-linear-algebra/commit/ab6446f0f12d359ddf7377200acd8835151e736c
+[01:34] <Whiteknight> yay! the fixed-size allocator swoops in to save the say again!
+[01:34] <bacek> oookey... I can't spot any other big improvements without merging CallSignature and Context (and probably RetContinuation)
+[01:34] <Whiteknight> it's like the Zorro of performance
+[01:36] * Austin sings "When nature's callin', don't be stallin' - use your common sense! Take it slow, find a place to go, but DON'T whiz on the electric fence!"
+[01:36] <ttbot> Parrot trunk/ r42061 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/120603.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[01:36] <ttbot> Parrot trunk/ r42063 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/120605.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[01:36] <Austin> The opcode 'time' returns a Num, but is that in seconds, or what?
+[01:37] *** mikehh joined
+[01:37] *** Zak joined
+[01:40] <chromatic> bacek, how are we versus when we started?
+[01:41] <Coke> Austin: that eventually just invokes system time()
+[01:41] <Austin> Ah.
+[01:41] <bacek> chromatic: almost same as 2 hours ago - ~32% faster comparing to pcc merge.
+[01:41] <Coke> Austin: (presuming I read that right. I may not)
+[01:41] <Austin> :)
+[01:41] <bacek> chromatic: I can retest it
+[01:42] <chromatic> Did you see my ~5% improvement?
+[01:42] <Whiteknight> I'll show you my 5% improvement
+[01:42] <Coke> svn latest just segfaulted building PGE on osx 10.4/intel.
+[01:42] <Coke> re-testing...
+[01:44] <Coke> is there a better way to see if $N1 is a NaN other than stringifying?
+[01:44] <bacek> chromatic: oops, missed it.
+[01:45] <Whiteknight> Coke: I feel like we should have an isnan opcode
+[01:45] <plobsing> isn't NaN the only number where $N1 != $N1
+[01:45] <plobsing> ?
+[01:46] <Coke> Whiteknight: I would tend to agree. esp since I have to do the stringify check a lot.
+[01:47] <Coke> (hurm. segfault is not repeatable.)
+[01:47] <dalek> partcl: d04804f | coke++ | src/mathops.pir:
+[01:47] <dalek> partcl: Improve usage errors and nan handling for several procs in ::tcl::mathop
+[01:47] <dalek> partcl: (worth about 30 spectests)
+[01:47] <dalek> partcl: review: http://github.com/partcl/partcl/commit/d04804fdc9531a1bd2b1a441fe6a8ee8bfeab787
+[01:49] <Austin> Okay, I've found a bug someplace.
+[01:50] <Austin> Or spectacularly bad gc performance.
+[01:54] <nopaste> "bacek" at 114.73.162.96 pasted "Performance tests:" (11 lines) at http://nopaste.snit.ch/18442
+[01:55] <bacek> purl: (8505247882 - 5372280006)/8505247882*100
+[01:55] <purl> 36.8357033147785
+[01:56] <bacek> purl: (6958440380 - 4637738821) /  6958440380 * 100
+[01:56] <purl> 33.3508865818579
+[01:56] <bacek> chromatic: 36% with GC involved, 33% without.
+[01:58] <Austin> Wow. My problem seems to be a pir compiler problem. :(
+[02:04] <bacek> 3519952820 at 1.4 on fast core...
+[02:05] <bacek> (5372280006 - 3519952820) / 3519952820 * 100
+[02:05] <purl> 52.6236367565858
+[02:05] <bacek> *sigh*
+[02:05] <bacek> We are doing something wrong...
+[02:07] <bacek> chromatic: r42058 epically broke TapTinder.
+[02:09] <dalek> partcl: 77b55f1 | coke++ | docs/spectest_skips:
+[02:09] <dalek> partcl: mathop no longer segfaults.
+[02:09] <dalek> partcl: review: http://github.com/partcl/partcl/commit/77b55f14442cba30c88c573f26e824c03af96ba7
+[02:16] <mikehh> bacek: and me - /src/pmc/callsignature.pmc:421: error: ISO C90 forbids mixed declarations and code
+[02:17] *** Zak joined
+[02:36] *** janus joined
+[02:39] *** mikehh joined
+[02:43] *** bacek joined
+[02:46] <bacek> mikehh: thanks for spotting codetest failure.
+[02:47] <dalek> parrot: r42064 | bacek++ | trunk/src/pmc/callsignature.pmc:
+[02:47] <dalek> parrot: [cage] Reorganise CallSignature.get_string variable initialisation to prevent compiler warnings.
+[02:47] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42064/
+[02:50] <ttbot> Parrot trunk/ r42064 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/120717.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[02:57] <Austin> Anyone know if imcc is O(n**2) or something?
+[02:57] *** mikehh_ joined
+[02:59] <bacek> Austin: it can be even n**n...
+[02:59] <Austin> That's optimistic.
+[02:59] <Austin> I just created a pair of subs with 100,000 x 3-line code paragraphs.
+[02:59] <Austin> It's taking a while to compile.
+[03:00] <bacek> Austin: .annotate?
+[03:00] <purl> rumour has it .annotate is described in PDD19, but there's some lower-level details in PDD13
+[03:00] <Austin> Nope.
+[03:00] <bacek> just plain .sub;noop;.end?
+[03:01] <Austin> Just some perl that emits $Pxx = find_lex '$what' ; unless_null $Pxx, branch ; $Pxx = new ['Undef'] ; branch over and over and over.
+[03:02] *** mikehh joined
+[03:03] <bacek> Austin: I suspect register allocator in IMCC
+[03:04] <Austin> Yeah, it's been like an hour.
+[03:04] <Austin> I think I'll kill that.
+[03:04] <Austin> 10,000 wasn't too bad - maybe 2 minutes or so.
+[03:05] <bacek> Austin: try always use $P0
+[03:05] <Austin> I am always using $P11.
+[03:06] <bacek> hmmm... So, it's something different.
+[03:06] <nopaste> "Austin" at 98.235.55.43 pasted "make_fetches() sub" (18 lines) at http://nopaste.snit.ch/18443
+[03:07] <Austin> The vivify_$label is increasing, but everything else is contant.
+[03:08] <Austin> There. 10k fetches took 3m4.4s to compile.
+[03:09] <Austin> I'll try 11k, see what that says.
+[03:09] *** mikehh joined
+[03:12] <dalek> tracwiki: v17 | kurahaupo++ | ArrayTasklist
+[03:12] <dalek> tracwiki: Add reference to RT#56718</a>; tidy page
+[03:12] <dalek> tracwiki: https://trac.parrot.org/parrot/wiki/ArrayTasklist?version=17&action=diff
+[03:13] <Austin> That takes 3m47s, a difference of 43s.
+[03:13] <Austin> purl, 227 / 184.0
+[03:13] <purl> 1.23369565217391
+[03:14] <Austin> purl, 1.1 **2
+[03:14] <purl> 1.21
+[03:14] <Austin> purl, 1.2**2
+[03:14] <purl> 1.44
+[03:14] <bacek> yay, O(N^2)
+[03:14] <Austin> purl, 184 * 1.44
+[03:14] <purl> 264.96
+[03:15] <Austin> I'm running 12000. We'll see if it takes ~ 4m25s
+[03:15] <Austin> SCIENCE!!!
+[03:15] <purl> science is testable
+[03:17] <Austin> http://www.weebls-stuff.com/toons/science/
+[03:17] <Austin> Science, plus epilepsy.
+[03:20] <Austin> 5m17s
+[03:20] <Austin> But with flash in the background. :(
+[03:24] <Austin> 4m8s with minimal activity.
+[03:24] <Austin> I'm going for N**2
+[03:25] <Austin> On the number of labels? Or conditionals?
+[03:25] <Austin> Or number of opcodes?
+[03:25] <purl> number of opcodes is not tightly connected to execution speed.
+[03:26] <Austin> Replacing my matches with 'noop' line-for-line is <1s to compile. Ergo, not on LOC.
+[03:27] <dalek> parrot: r42065 | mikehh++ | trunk/compilers/pirc/src (2 files):
+[03:27] <dalek> parrot: fix codetest failures - trailing spaces and linelength
+[03:27] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42065/
+[03:27] <ttbot> Parrot trunk/ r42065 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/120762.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[03:29] <bacek> Austin: labels?
+[03:29] <purl> labels are really pretty.
+[03:29] <Austin> Yeah, I'm working my way towards that.
+[03:29] <Austin> Putting back a single $P11=find_lex '$foo' followed by 3x noop (12000 times) compiled in 16 s
+[03:30] <Austin> Putting back $P11 = find_lex, then noop, then $P11 = new ['Undef'], noop compiled in 1m2s
+[03:31] <dalek> parrot: r42066 | mikehh++ | trunk/t (2 files):
+[03:31] <dalek> parrot: set svn properties
+[03:31] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42066/
+[03:31] <Austin> Now I'm making the branch be to a single, constant label at the bottom: unless_null, goto done
+[03:31] <ttbot> Parrot trunk/ r42066 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/120786.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[03:32] *** mikehh joined
+[03:32] <Austin> I'm wondering if there's a symbol table that just gets lsearched.
+[03:35] *** colomon joined
+[03:36] <Austin> It's fun when the test case fails. Embarassing, but fun.
+[03:37] <Austin> It's fun when the test case fails. Embarassing, but fun.
+[03:38] <Austin> Still compiling the everything-does-goto-done file.
+[03:38] <Austin> 7m36s
+[03:38] <Austin> Probably due to other stuff on the system.
+[03:38] <dalek> parrot: r42067 | mikehh++ | trunk/t/pmc/callsignaturereturns.t:
+[03:38] <dalek> parrot: fix test failure - 2 tests were run
+[03:38] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42067/
+[03:39] <Austin> I got rid of the unless_null, and brought back the various labels (now all unreferenced.)
+[03:40] *** JimmyZ joined
+[03:41] <ttbot> Parrot trunk/ r42067 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/120822.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[03:42] <dalek> parrot: r42068 | mikehh++ | trunk/src/pmc/callsignaturereturns.pmc:
+[03:42] <dalek> parrot: fix codetest failure - there should be at least one space between a C keyword and any subsequent open parenthesis
+[03:42] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42068/
+[03:42] <Austin> 2m51s for that.
+[03:43] *** mikehh joined
+[03:43] <Austin> So creating labels doubles the compilation time, even when they aren't referenced.
+[03:43] <ttbot> Parrot trunk/ r42068 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/120843.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[03:44] <Austin> Creating branches causes some kind of N**M, where M ~ 2, behavior.
+[03:44] <Austin> Probably trying to shrink the offsets.
+[03:45] <Austin> Or dorking around with blocks.
+[03:55] <mikehh> Has dalek gone to sleep?
+[03:55] <dalek> parrot: r42069 | mikehh++ | trunk/src/ops/experimental.ops:
+[03:55] <dalek> parrot: fix codetest failure - opcode documentation errors
+[03:55] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42069/
+[03:57] <mikehh> still missing 4 previous commits
+[03:58] <ttbot> Parrot trunk/ r42069 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/120889.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[03:58] <mikehh> messages
+[03:58] <Austin> What does "invalid arg type in named portion of args" mean?
+[04:02] <Coke> mikehh: (sleep) "just for a little while."
+[04:04] <Coke> -> (23:57) From Koan, to random:                                                -  ['hip','hip'] (it's a hip hip array!)
+[04:04] <Coke> *groan*
+[04:13] <mikehh> I think my connection is a bit wonky
+[04:20] <chromatic> Yes, everything with a name (label, register, sub, whatever) goes in the same hash in IMCC.
+[04:21] <chromatic> Register allocation performs a *linear scan* of that hash.
+[04:21] <Austin> Ah.
+[04:21] <Austin> That explains the N**2 behavior;
+[04:21] <chromatic> It's technically worse than that, but yes.
+[04:22] <chromatic> I stopped counting at N^2 and realized that fixing that meant rewiring most of IMCC besides the parser (and parts of the parser).
+[04:22] <Austin> :)
+[04:23] <Austin> Well, it does serve to encourage modular design.
+[04:23] <Austin> But it makes profiling harder.
+[04:23] <mikehh> trunk - pre/post-config, smoke (#29353) PASS, fulltest FAIL at r42069 - Ubuntu 9.10 (beta updated) amd64
+[04:23] <mikehh> t/op/annotate-old.t -  Failed test:  1 - in testf and testg (TT #1135)
+[04:23] <mikehh> t/pmc/eval.t - Failed test:  12 - in testr (Segmentation fault)
+[04:23] <mikehh> the remainder of fulltest passes
+[04:23] <Austin> s/profiling/ performance analysis/
+[04:50] * mikehh needs a bit of a break
+[05:36] *** tokuhirom joined
+[06:05] *** eternaleye joined
+[06:07] *** TiMBuS joined
+[06:15] *** eternaleye joined
+[06:36] *** Zak joined
+[06:48] *** fperrad joined
+[06:50] <chromatic> msg whiteknight Does compact_pool actually do anything useful for us now?
+[06:50] <purl> Message for whiteknight stored.
+[07:00] *** bacek joined
+[07:12] *** desertm4x joined
+[07:17] *** desertm4x_ joined
+[07:42] *** cotto joined
+[07:42] <cotto> hi
+[07:42] <cotto> and good night
+[07:53] <dalek> parrot: r42070 | chromatic++ | trunk/src/interp/inter_create.c:
+[07:53] <dalek> parrot: [interp] Fixed a memory leak by freeing the interpreter's gc_sys pointer.
+[07:53] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42070/
+[07:54] <dalek> parrot: r42071 | chromatic++ | trunk/src/gc (3 files):
+[07:54] <dalek> parrot: [GC] Moved Parrot_gc_free_attributes_from_pool() into src/gc/api.c and made it
+[07:54] <dalek> parrot: a static function, so an optimizing compiler can inline it.  This gives a
+[07:54] <dalek> parrot: modest (1.656%) performance improvement to fib.pir.
+[07:54] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42071/
+[07:55] <ttbot> Parrot trunk/ r42071 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/121006.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[07:58] <ttbot> Parrot trunk/ r42070 darwin-thread-multi-2level make error http://tt.ro.vutbr.cz/file/cmdout/121010.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[08:02] *** Zak joined
+[08:03] <chromatic> I don't care for that Windows box.
+[08:24] <dalek> parrot-linear-algebra: fbb3baf | (Markus Mayr)++ | src/pmc/NumMatrix2D.pmc:
+[08:24] <dalek> parrot-linear-algebra: Fixed some minor issues and added the VTABLE function *get_string. I tested this version against parrot and actually used it. Resizing and *get_string work now, but I did not figure out yet, how to use set and get.
+[08:24] <dalek> parrot-linear-algebra: review: http://github.com/Whiteknight/parrot-linear-algebra/commit/fbb3bafa9e1ec01be0f9b8dd2c06dcf9316ba3a2
+[08:33] <chromatic> Hm, we're within 8% of trunk.
+[08:33] <chromatic> pre-merge
+[08:34] *** colomon joined
+[08:35] <chromatic> 7.252%
+[08:35] <purl> 0.07252
+[08:52] <moritz> speed wise?
+[08:53] <chromatic> Yes.
+[08:55] <chromatic> 6.571% now, by my measure.
+[09:00] <chromatic> Another clever hack will get us there.
+[09:02] <dalek> parrot: r42072 | chromatic++ | trunk/src/pmc/callsignaturereturns.pmc:
+[09:02] <dalek> parrot: [PMC] Used attribute access instead of elements() vtable call where speed is a
+[09:02] <dalek> parrot: concern; improves performance of fib.pir by 0.931%.
+[09:02] <dalek> parrot: Tidied code.
+[09:02] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42072/
+[09:02] <dalek> parrot: r42073 | chromatic++ | trunk/src/pmc/callsignaturereturns.pmc:
+[09:02] <dalek> parrot: [PMC] Added allocate_initial_values() static function to CallSignatureReturns
+[09:02] <dalek> parrot: PMC so that set_pointer_keyed_int() and set_integer_native() can inline it.
+[09:02] <dalek> parrot: This gives another 0.729% speed improvement on fib.pir because this is the most
+[09:02] <dalek> parrot: common use of this PMC.
+[09:02] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42073/
+[09:02] <chromatic> --runcore=fast on the command line gives us another 2.119% improvement.
+[09:05] <ttbot> Parrot trunk/ r42073 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/121116.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[09:09] <ttbot> Parrot trunk/ r42072 MSWin32-x86-multi-thread make error http://tt.ro.vutbr.cz/file/cmdout/121133.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[09:36] <mikehh> trunk - pre/post-config, smoke (#29356) PASS, fulltest FAIL at r42073 - Ubuntu 9.10 (beta updated) amd64
+[09:36] <mikehh> t/op/annotate-old.t -  Failed test:  1 - in testf and testg (TT #1135)
+[09:36] <mikehh> t/pmc/eval.t - Failed test:  12 - in testr (Segmentation fault)
+[09:36] <mikehh> the remainder of fulltest passes
+[09:38] * mikehh gotta go to the store - bbl
+[09:38] <dalek> parrot: r42074 | chromatic++ | trunk/src/gc/api.c:
+[09:38] <dalek> parrot: [GC] Deleted apparent vestigial setting of PObj_is_special_flag in
+[09:38] <dalek> parrot: Parrot_gc_new_pmc_header().
+[09:38] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42074/
+[09:40] <ttbot> Parrot trunk/ r42074 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/121229.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[09:44] *** iblechbot joined
+[09:49] *** payload joined
+[09:50] *** kj joined
+[09:50] *** chromatic joined
+[09:52] <chromatic> msg bacek Crazy hack idea: CallSigRet has enough storage space for a single return pointer *without allocating anything else*.
+[09:52] <purl> Message for bacek stored.
+[09:59] <Infinoid> drive-by crazy.
+[10:05] *** desertm4x joined
+[10:10] <dalek> parrot: r42075 | kjs++ | trunk/compilers/pirc/src (5 files):
+[10:10] <dalek> parrot: [pirc] first C-string argument converted into STRING. Needs lots of hacks currently, to keep things working. Currently all strings are stored twice: once as a STRING, once as a C string. Once all is converted to STRINGs, the C-string stuff can be removed.
+[10:10] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42075/
+[10:13] <ttbot> Parrot trunk/ r42075 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/121305.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[10:30] *** baest joined
+[10:36] *** xenoterracide joined
+[10:38] *** kj_ joined
+[10:39] *** payload joined
+[10:58] *** payload joined
+[11:12] *** Whiteknight joined
+[11:21] <Whiteknight> good morning #parrot
+[11:22] <Austin> Guten Morgen, WhiteKnight.
+[11:22] <Whiteknight> purl msg chromatic: I believe compact pool still is used to manage STRING memory. I'll look into it but I don't think we have stopped using it
+[11:22] <purl> Message for chromatic stored.
+[11:22] <Whiteknight> hello Austin
+[11:23] <kj> good morning
+[11:23] <Whiteknight> hello kj
+[11:24] <kj> hi Whiteknight
+[11:36] *** joeri joined
+[11:54] *** bacek joined
+[11:54] <bacek> o hai
+[11:55] <Whiteknight> hello bacek
+[11:55] <bacek> msg chromatic It's really crazy idea. I like it!
+[11:55] <purl> Message for chromatic stored.
+[11:55] <bacek> hi Whiteknight
+[12:02] <bacek> msg chromatic more crazy idea: we can add 3 fields value0, value1, value2 to store first 4 values without additional allocations.
+[12:02] <purl> Message for chromatic stored.
+[12:03] <bacek> purl: (5132872970 - 3088400055) / 5132872970 * 100
+[12:03] <purl> 39.8309665356865
+[12:08] *** ruoso joined
+[12:09] <Whiteknight> desertm4x++ # Work on parrot-linear-algebra Matrix PMC
+[12:11] <Whiteknight> purl msg darbelo: know anything about dynpmcs? We need to get the src/pmc/NumMatrix2D.pmc in parrot-linear-algebra added to the makefile. Then, we can start adding tests and stuff
+[12:11] <purl> Message for darbelo stored.
+[12:14] <Whiteknight> with this PMC working, next step is to start migrating Matrixy to use it instead of the nested RPAs nonsense
+[12:24] <Whiteknight> and we can start adding CBLAS bindings, which is key
+[12:32] <bacek> msg chromatic Do you have anything personal against diamond inheritance? We can easily create "pmclass ParrotContext extend Context extend CallSignature" almost with no code changes.
+[12:32] <purl> Message for chromatic stored.
+[12:33] *** mokurai left
+[12:33] *** flh joined
+[12:36] *** allison joined
+[12:40] *** jan joined
+[12:44] <mikehh> trunk - pre/post-config, smoke (#29358) PASS, fulltest FAIL at r42075 - Ubuntu 9.10 (beta updated) amd64
+[12:44] <mikehh> t/op/annotate-old.t -  Failed test:  1 - in testf and testg (TT #1135)
+[12:44] <mikehh> t/pmc/eval.t - Failed test:  12 - in testr (Segmentation fault)
+[12:44] <mikehh> the remainder of fulltest passes
+[12:45] <dalek> lua: 4450684 | unknown++ | src/pmc/lua (3 files):
+[12:45] <dalek> lua: fix segfault
+[12:45] <dalek> lua: review: http://github.com/fperrad/lua/commit/4450684e168e78e387f69ea0f60af324af8578b1
+[12:45] <dalek> lua: a0384cc | unknown++ | .gitignore:
+[12:45] <dalek> lua: ignore *.patch
+[12:45] <dalek> lua: review: http://github.com/fperrad/lua/commit/a0384cc52ab3609f5fa20853742cd805fb57219d
+[12:45] <dalek> lua: 3223771 | unknown++ | t/lua-TestMore:
+[12:45] <dalek> lua: update submodule lua-TestMore
+[12:45] <dalek> lua: review: http://github.com/fperrad/lua/commit/32237717954c5e8e68de2451034e9abb3b2cc334
+[12:46] <dalek> parrot: r42076 | bacek++ | trunk/src/pmc/callsignaturereturns.pmc:
+[12:46] <dalek> parrot: [cage] Remove CallSignatureReturns.push_pointer.
+[12:46] <dalek> parrot: It was part of initial version which shouldn't be commited at all.
+[12:46] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42076/
+[12:49] <dalek> parrot: r42077 | bacek++ | trunk/src/pmc/callsignaturereturns.pmc:
+[12:49] <dalek> parrot: [doc] Update CallSignatureReturns pod.
+[12:49] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42077/
+[12:51] <ttbot> Parrot trunk/ r42077 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/121549.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[12:54] <ttbot> Parrot trunk/ r42076 darwin-thread-multi-2level make error http://tt.ro.vutbr.cz/file/cmdout/121552.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[13:56] *** plobsing joined
+[14:02] *** szabgab joined
+[14:40] <dalek> parrot: r42078 | kjs++ | trunk/compilers/pirc/src (3 files):
+[14:40] <dalek> parrot: [pirc] remove STRING member of %union in parser for now; it doesn't work yet.
+[14:40] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42078/
+[14:43] <ttbot> Parrot trunk/ r42078 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/121760.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[14:47] <kj> anybody around on windows who can spare a minute?
+[14:51] *** Psyche^ joined
+[14:54] <dalek> TT #906 closed by kjs++: [PIR] Assignment syntactic sugar restricted to destination parameters
+[14:56] *** fperrad joined
+[14:57] <dalek> partcl: b617453 | coke++ | docs/spectest- (2 files):
+[14:57] <dalek> partcl: another spectest - reclaim mathop.test
+[14:57] <dalek> partcl: review: http://github.com/partcl/partcl/commit/b617453a05d1e2ed25c1dccd31f651f1ca7e2979
+[15:05] <dalek> lua: 21c7436 | fperrad++ | src/lib/luatable.pir:
+[15:05] <dalek> lua: table.insert throws an error when too many arg
+[15:05] <dalek> lua: review: http://github.com/fperrad/lua/commit/21c74368b7c68434da5e7ac074b3d3f869f7a7dc
+[15:06] <dalek> parrot: r42079 | kjs++ | trunk/compilers/pirc/src/pircompunit.c:
+[15:06] <dalek> parrot: [pirc] check duplicate declarations of .lex'icals. Implementation of TT1073
+[15:06] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42079/
+[15:07] <ttbot> Parrot trunk/ r42079 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/121815.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[15:11] <dalek> TT #1113 closed by coke++: segfault in ??
+[15:14] *** Psyche^ joined
+[15:19] <dalek> parrot: r42080 | kjs++ | trunk/compilers/pirc/src/pircompunit.c:
+[15:19] <dalek> parrot: [pirc] clean up code a bit, remove need for another auto var in set_lex_flag(); only set the .lex flag on a target if it wasn't done so already
+[15:19] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42080/
+[15:21] <dalek> TT #906 reopened by coke++: [PIR] Assignment syntactic sugar restricted to destination parameters
+[15:21] <kj> Coke: hi
+[15:22] <kj> Coke: ok, got your comment in the ticket. never mind!
+[15:23] <ttbot> Parrot trunk/ r42080 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/121867.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[15:28] *** payload joined
+[15:29] <dalek> parrot: r42081 | kjs++ | trunk/compilers/pirc/src/pircompunit.c:
+[15:29] <dalek> parrot: [pirc] add function doc for a (static) function; the constructor for key_entry objects
+[15:29] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42081/
+[15:32] <ttbot> Parrot trunk/ r42081 i386-linux-thread-multi make error http://tt.ro.vutbr.cz/file/cmdout/121910.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[15:43] *** theory joined
+[15:54] <PacoLinux> I have core dumped with latest parrot in linux : http://pastebin.com/m680d2510
+[15:59] *** chromatic joined
+[16:04] <Coke> kj - i was going to make you reopen it, but apparently replying to was sufficient. =-)
+[16:07] <kj> Coke: well i can see in a way you want it open, but (1) the desired/required behaviour has been specced in pdd19, (2) the behavior has been implemented in PIRC, and (3), it's a wontfix for IMCC...
+[16:07] <kj> ...for which the ticket was opened.
+[16:15] <Coke> the ticket is opened for /parrot/
+[16:15] <purl> Hmm.  No matches for that, Coke.
+[16:15] <Coke> and parrot can't do that yet.
+[16:15] <Coke> it was opened for imcc because pirc didn't exist when the ticket was opened.
+[16:24] *** particle joined
+[16:39] <mikehh> trunk - pre/post-config, smoke (#29359) PASS, fulltest FAIL at r42081 - Ubuntu 9.10 (beta updated) amd64
+[16:39] <mikehh> t/op/annotate-old.t -  Failed test:  1 - in testf and testg (TT #1135)
+[16:39] <mikehh> t/pmc/eval.t - Failed test:  12 - in testr (Segmentation fault)
+[16:39] <mikehh> the remainder of fulltest passes
+[16:40] <mikehh> IOW we have three failing tests at the moment - two of which are the same test in different runcores
+[16:53] <PacoLinux> with --optimize, parrot dont do core dump
+[16:54] <mikehh> PacoLinux: I haven't tested without --optimize for ages - maybe I need to try
+[16:58] *** davidfetter joined
+[17:33] <Coke> PacoLinux: do you mean, that /without/ optimize, parrot doesn't core dump?
+[17:34] <PacoLinux> without optimize does core dump : http://pastebin.com/m680d2510
+[17:41] <chromatic> hm.
+[17:41] <chromatic> Confirmed.
+[17:53] <chromatic> I think I've fixed it too.
+[18:14] *** theory joined
+[18:15] <flh> I'm playing with the new (shiny) PCC, but I think I need to know a bit more about continuations in Parrot to go on
+[18:16] <flh> can I use any PMC which can be invoked as a continuation?
+[18:21] <chromatic> I think so, but I'm not sure what you're asking.
+[18:22] <flh> it looks like Parrot has a default "Continuation" PMC which only restores a few settings in the context
+[18:23] <chromatic> Right.
+[18:23] <flh> I want to do more complicated things when a sub returns
+[18:24] *** nbrown_ joined
+[18:24] <chromatic> What do you have in mind?
+[18:24] <flh> So I'm writing my own Sub PMC and my own Continuation PMC: when MySub is invoked, it actually sets MyContinuation as someone's continuation (not sure yet about that "someone")
+[18:26] <flh> I'm trying to implement something like that : take a sub f which takes an argument and returns a sub, which itself takes another argument
+[18:26] <flh> in PIR, I would write something (equivalent) to (f(first_arg))(second_arg)
+[18:27] <chromatic> You want your sub to return somewhere else, based on the continuation you pass in?
+[18:27] <flh> but I want f(first_arg, second_arg) to work: so I'm writing my own sub which handles the "too many params" case, and sets a continuation which will actually call the result on the remaining argument
+[18:28] <flh> I think the answer to your question is yes: I want the sub to return somewhere else
+[18:29] <chromatic> Makes sense.
+[18:30] <flh> actually, I've just seen the returncc opcode: it does "goto ADDRESS(dest)", where "dest" is given by invoke'ing the continuation
+[18:31] <flh> I'll just pretend I haven't seen the tailcall opcode, which seems to expect more things about the continuation
+[18:31] <flh> parrot doesn't have a "stack" of continuations, right?
+[18:33] <chromatic> Right.  It's a graph.
+[18:33] <dalek> parrot: r42082 | chromatic++ | trunk/src/pmc/retcontinuation.pmc:
+[18:33] <dalek> parrot: [PMC] Fixed RetContinuation recycling in invoke() by invalidating the from
+[18:33] <dalek> parrot: context's pointer to the RetCont PMC.  This fixes an assert in an unoptimized
+[18:33] <dalek> parrot: build in PGE, created by r42058.  This also requires that the RetCont's
+[18:33] <dalek> parrot: from_ctx pointer can't point to the same place as its to_ctx, or else the wrong
+[18:33] <dalek> parrot: context gets nulled out.
+[18:33] <dalek> parrot: Something may not set the from_ctx pointer correctly before invoking the
+[18:33] <dalek> parrot: RetCont.
+[18:33] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42082/
+[18:34] *** nopaste joined
+[18:35] <flh> sorry, I'm not sure to understand what you mean by a "graph" of continuations
+[18:37] <flh> it seems that each context has only one continuation (stored "current_cont")
+[18:43] <ttbot> Parrot trunk/ r42082 MSWin32-x86-multi-thread make error http://tt.ro.vutbr.cz/file/cmdout/122120.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[18:48] <dukeleto> languages?
+[18:48] <purl> rumour has it languages is https://trac.parrot.org/parrot/wiki/Languages
+[18:50] *** Zak joined
+[18:54] <mikehh> ok that works - r42082 builds and tests without --optimize
+[18:58] <dalek> tracwiki: v102 | dukeleto++ | Languages
+[18:58] <dalek> tracwiki: https://trac.parrot.org/parrot/wiki/Languages?version=102&action=diff
+[19:08] *** mokurai joined
+[19:26] <mikehh> trunk - pre/post-config, smoke (#29360) PASS, fulltest FAIL at r42082 - Ubuntu 9.10 (beta updated) amd64
+[19:26] <mikehh> t/op/annotate-old.t -  Failed test:  1 - in testf and testg (TT #1135)
+[19:26] <mikehh> t/pmc/eval.t - Failed test:  12 - in testr (Segmentation fault)
+[19:26] <mikehh> the remainder of fulltest passes
+[19:28] <dalek> TT #1142 created by mikehh++: test 12 of t/pmc/eval.t fails in testr (passes in other runcores)
+[19:34] *** joeri left
+[19:38] <Coke> I am having trouble with parrot r42082
+[19:38] <Coke> installs fine, but then building partcl fails with:
+[19:39] <Coke> PackFile_unpack: This Parrot cannot read bytecode files with version 5.3.
+[19:39] <Coke> Parrot VM: Can't unpack packfile /home/coke/sandbox/parrot/runtime/parrot/library/PGE.pbc.
+[19:43] *** eternaleye joined
+[19:45] *** nbrown_ joined
+[19:46] <mikehh> just updated my Ubuntu 9.10 beta and it requires a restart - bbiab
+[19:54] *** mikehh joined
+[20:20] <chromatic> By my measurements, that's 0.546% faster than pre-merge.
+[20:20] <dalek> parrot: r42083 | chromatic++ | trunk/src/gc/mark_sweep.c:
+[20:20] <dalek> parrot: [GC] Tidied code and rearranged a couple of branch conditions.  No functional
+[20:21] <dalek> parrot: changes.
+[20:21] <purl> somebody said changes was part of the communication in a release, and should involve actual human thought
+[20:21] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42083/
+[20:21] <dalek> parrot: r42084 | chromatic++ | trunk/src/call/args.c:
+[20:21] <dalek> parrot: [PCC] Replaced vtable calls to FIA when passing and returning with macro
+[20:21] <dalek> parrot: accessors.  This allows direct looping over the FIA array, which produces at
+[20:21] <dalek> parrot: least a 3.207% speed improvement on the fib.pir benchmark.
+[20:21] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42084/
+[20:29] <ttbot> Parrot trunk/ r42083 MSWin32-x86-multi-thread make error http://tt.ro.vutbr.cz/file/cmdout/122247.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[20:29] <ttbot> Parrot trunk/ r42084 MSWin32-x86-multi-thread make error http://tt.ro.vutbr.cz/file/cmdout/122248.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[20:37] <dalek> parrot: r42085 | chromatic++ | trunk/src/gc/api.c:
+[20:37] <dalek> parrot: [GC] Allowed Parrot_gc_allocate_fixed_size_storage() to look up fixed-size pool
+[20:37] <dalek> parrot: directly, which bypasses a function call elsewhere in the (likely) event
+[20:37] <dalek> parrot: there's a pool already created.  This gives fib.pir a 1.592% performance
+[20:37] <dalek> parrot: increase.
+[20:37] <purl> it has been said that increase is from processing gains.
+[20:37] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/42085/
+[20:39] *** colomon joined
+[20:40] *** kurahaupo joined
+[20:46] <ttbot> Parrot trunk/ r42085 MSWin32-x86-multi-thread make error http://tt.ro.vutbr.cz/file/cmdout/122325.txt ( http://tt.ro.vutbr.cz//buildstatus/pr-Parrot/rp-trunk/ )
+[20:48] *** kthakore joined
+[20:59] *** bacek joined
+[21:00] <chromatic> bacek, time for one more benchmark.
+[21:01] <mikehh> chromatic: one of the things I wanted to do this weekend was to try and remove skipped tests - TODO if possible or check if they pass
+[21:02] <mikehh> any suggestions where I should start
+[21:03] <chromatic> Anything related to the JIT core is low-hanging fruit.
+[21:03] <chromatic> If you can get rid of arch-specific skips, that's good too.
+[21:04] <mikehh> ok I'll start there
+[21:04] * chromatic must run; will backlog
+[21:08] <mikehh> according to my latest smolder report #29362 at r42085 - 11,203 ok, 0 failed, 260 todo, 572 skipped and 0 unexpectedly succeeded
+[21:09] *** TiMBuS joined
+[21:09] <mikehh> that's 572 skipped tests to check :-} (that's not including the ones in fulltest)
+[21:10] <bacek> good morning
+[21:12] <bacek> purl: (8505247882 - 4831058690)/8505247882*100
+[21:12] <purl> 43.1990841769096
+[21:13] <bacek> purl: 4831058690/3088400055*100
+[21:13] <purl> 156.425935888024
+[21:14] <bacek> msg chromatic trunk is 43.2% faster then after merge, still 56% slower that 1.4
+[21:14] <purl> Message for chromatic stored.
+[21:17] *** Austin joined
+[21:18] <mikehh> hi bacek - less that two hours to go before morning for me and then they go back from BST to GMT or whatever
+[21:21] <bacek> mikehh: day light saving?
+[21:22] <mikehh> we lose it in a couple of hours here
+[21:23] * bacek think that Day Light saving is most useless idea...
+[21:23] <mikehh> trunk - pre/post-config, smoke (#29362) PASS, fulltest FAIL at r42085 - Ubuntu 9.10 (beta updated) amd64
+[21:23] <mikehh> t/op/annotate-old.t -  Failed test:  1 - in testf and testg (TT #1135)
+[21:23] <mikehh> t/pmc/eval.t - Failed test:  12 - in testr (Segmentation fault)
+[21:23] <mikehh> the remainder of fulltest passes
+[21:24] <mikehh> ok - I am going to TODO thos tests for the moment
+[21:24] <mikehh> those
+[21:25] <bacek> mikehh: try to steal autounfudge.pl from Rakudo
+[21:28] *** mikehh joined
+[21:31] *** ruoso joined
+[21:32] <dalek> TT #1143 created by bacek++: examples/benchmarks/overload.pir requires rewriting.
+[21:39] *** mikehh joined
+[21:56] <Coke> seen moritz?
+[21:56] <purl> moritz was last seen on #parrot 13 hours, 4 minutes and 10 seconds ago, saying: speed wise?
+[21:59] <Coke> verrrry big rain here.
+[21:59] <moritz> re
+[22:00] <Coke> moritz: OHAI.
+[22:00] <Coke> any chance you can install infinoid svn-bisect CPAN package for me?
+[22:00] <moritz> OMGIZCOKE
+[22:00] <Coke> (if not, I can just build my own perl )
+[22:00] <Coke> infinoid's, that i.s
+[22:01] * moritz takes a look at the dependencies
+[22:02] <Infinoid> what huh?  who's installing me from CPAN where?
+[22:05] <moritz> Coke: installed
+[22:05] <purl> installed is easy as well.
+[22:05] <moritz> at least App::SVN::Bisect, hope that's fine
+[22:05] * moritz -> sleep
+[22:12] <Coke> yes, moritz++
+[22:15] <Infinoid> wow, that is some serious rain.
+[22:18] <Coke> Infinoid: did you check the radar or somethign?
+[22:20] *** bacek joined
+[22:22] <Coke> bisecting...
+[22:22] <purl> hmmm... bisecting is a lot harder than I expected
+[22:22] <Coke> no, bisecting is easy if you use svn-bisect
+[22:22] <purl> okay, Coke.
+[22:23] <Coke> Infinoid++
+[22:23] <Coke> Infinoid: add svn-bisect run so I can kill my module! =-)
+[22:29] <Infinoid> Coke: it was raining cats and dogs here when I said that
+[22:30] <Infinoid> domestic pets are dangerous when they fall from the sky.
+[22:30] <Coke> aha. bacek broke the build.
+[22:30] <bacek> Coke: no way! it was chromatic!
+[22:31] <Coke> bacek: https://trac.parrot.org/parrot/changeset/42055 breaks installed PGE.
+[22:31] <Coke> (which breaks partcl.)
+[22:31] <Coke> trying with HEAD minus that rev.
+[22:31] <bacek> "Installed PGE"?
+[22:32] <Coke> yes. I can no longer build partcl using the installed PGE at that point.
+[22:33] <Coke> complains about invalid bytecode version.
+[22:33] <bacek> hmm... I just successfully build partcl on my box from parrot trunk.
+[22:34] <Coke> using partcl from github?
+[22:34] <bacek> Coke: Hey. Did you make realclean after r42038?
+[22:34] <bacek> (yes, from github)
+[22:34] <Coke> bacek: i /always/ make realclean.
+[22:34] *** joeri joined
+[22:35] <bacek> Coke: it's... weird... I broke PBC compatibilty in r42038...
+[22:35] <Coke> retrying with head...
+[22:37] <Coke> damnit, it works again.
+[22:37] <Coke> I mean, YAY.
+[22:37] <bacek> :)
+[22:37] <Coke> I am tempted to track down when it was re-fixed, but iznotworthit.
+[22:37] <Coke> bacek++ # trying it to make sure.
+[22:40] <bacek> gotta go. It's my kids birthday party today.
+[22:40] <bacek> see you!
+[22:41] <dalek> tracwiki: v39 | bacek++ | ParrotQuotes
+[22:41] <dalek> tracwiki: https://trac.parrot.org/parrot/wiki/ParrotQuotes?version=39&action=diff
+[22:47] <Coke> me kicks off YA spec test run.
+[22:51] * dukeleto is hanging out in a parrallelization session at the gsoc conf. anybody have any questions they want asked?
+[22:52] *** mokurai joined
+[22:57] * Austin kicks the @#$%@#%@# C3 algorithm.
+[23:03] *** Whiteknight joined
+[23:05] <Whiteknight> good evening #parrot
+[23:11] *** Eevee joined
+[23:12] <dukeleto> 'ello
+[23:16] * Austin sings "Boom di yada, boom di yada, boom di yada, boom di yada.."
+[23:17] <Austin> Props to Stephen Hawking for appearing in a campfire girls video...
+[23:18] *** mikehh joined
+[23:20] <Whiteknight> hello dukeleto, Austin
+[23:21] <Austin> Stupid cache.
+[23:21] <Austin> Hello Whiteknight
+[23:24] <Whiteknight> ls
+[23:24] <Austin> ls?
+[23:24] <purl> ls: cannot access /dev: Input/output error
+[23:24] <Austin> :)
+[23:24] <Austin> botsnack
+[23:24] <purl> :)
+[23:25] <Whiteknight> ...typed that in the wrong window
+[23:25] <Austin> Really?
+[23:25] <Coke> or, "ww"
+[23:34] *** kj joined
+[23:38] <dalek> parrot-linear-algebra: c9a372f | Whiteknight++ | src/pmc/NumMatrix2D.pmc:
+[23:38] <dalek> parrot-linear-algebra: add some stub methods to the PMC
+[23:38] <dalek> parrot-linear-algebra: review: http://github.com/Whiteknight/parrot-linear-algebra/commit/c9a372f8930a544e1eab1b86f0a30fc3b8ffbd9a
+[23:38] <dalek> parrot-linear-algebra: f3e3e20 | Whiteknight++ | config/Makefile.in:
+[23:38] <dalek> parrot-linear-algebra: add some stuff to the makefile which I blantantly (and ignorantly) stole from Rakudo. I don't even know what this does, but it seems like a good start
+[23:38] <dalek> parrot-linear-algebra: review: http://github.com/Whiteknight/parrot-linear-algebra/commit/f3e3e2019c65c37838d7cb0859e5094023164b62
+[23:44] *** eternaleye joined
+[23:50] <Whiteknight> anybody around here have strong makefile-foo?
+[23:50] <Whiteknight> specifically, I'm looking to build a dynpmc into a library
+[23:51] *** patspam joined
+[23:54] <dukeleto> 'ello
+[23:54] <plobsing> Whiteknight: isn't it the same as any other C file?
+[23:55] *** joeri left
+[23:55] <Coke> Whiteknight: partcl does that.
+[23:55] <Coke> look for the section ## pmcs
+[23:55] <dukeleto> Whiteknight: looks like you have been working hard on parrot-linear-algebra, i hope I can start hacking on it soon
+[23:57] <Whiteknight> plobsing: it uses the Pmc2c file to translate the PMC file into C code
+[23:57] <Whiteknight> and I'm not entirely sure how that happens, since all the examples I've seen are more complicated then I expected them to be
+[23:58] <Whiteknight> dukeleto: yeah, I think we have a good prototype for the matrix PMC in place now
+[23:59] <dukeleto> Whiteknight: exciting!
+[23:59] <purl> i heard exciting was good enough.

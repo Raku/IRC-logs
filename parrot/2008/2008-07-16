@@ -1,0 +1,772 @@
+[00:07] *** donaldh joined
+[00:09] *** AndyA joined
+[00:22] *** Psyche^ joined
+[00:23] *** Zaba joined
+[00:31] <kid51> I've got my coverage reports working again:  http://thenceforward.net/parrot/coverage/configure-build/coverage.html
+[00:40] <Whiteknight> chromatic, you still here?
+[00:49] <chromatic> Briefly.  What's on your mind?
+[00:50] <Whiteknight> just going to invite you, if you have some tuits, to take a  look at my branch
+[00:50] <chromatic> Give me 15 - 20 to get back to my hotel and I will.
+[00:51] <Whiteknight> I gutted the sweep code, simplified it down to nothingness, and I'm still getting prematurely freed PMCs
+[00:51] <Whiteknight> no rush, but I'm basically blocked on this
+[00:51] <chromatic> Okay.
+[00:51] <chromatic> Did you follow my "How to debug GC problems" guide?  (sorry, I have to ask)
+[00:56] <Whiteknight> Yeah, but I'll read it again and make sure I'm not missing anything
+[01:02] *** AndyA joined
+[01:10] <Limbic_Region> Whiteknight - they have pills for that
+[01:10] <Limbic_Region> premature freeing that is
+[01:10] *** chromatic joined
+[01:14] <Whiteknight> it's the number one problem among male programmers
+[01:15] <chromatic> GC?
+[01:15] <purl> GC is the boehm conservative garbage collector at http://reality.sgi.com/boehm/cg.html or a really really bad perl "programmer" or GrandCentral.com
+[01:18] <Whiteknight> purl can be remarkably unhelpful sometimes
+[01:18] <purl> Whiteknight: huh?
+[01:18] <Whiteknight> purl, GC is also branches/gsoc_pdd09
+[01:18] <purl> okay, Whiteknight.
+[01:18] <Whiteknight> purl, GC is also a travesty against god
+[01:18] <purl> okay, Whiteknight.
+[01:19] <Limbic_Region> Whiteknight - consider that purl's factoid database is cross channel - so certain entries don't make sense out of context (#parrot)
+[01:19] <Whiteknight> it's my goal to ensure that none of them make sense to anybody
+[01:23] <Limbic_Region> Whiteknight++
+[01:28] <Whiteknight> I'm failing all the PGE tests, which makes sense because I can't build PGE
+[01:28] <Whiteknight> a lot of other tests are passing though, so that's reassuring
+[01:31] *** Zaba joined
+[01:31] *** s1n joined
+[01:36] *** Zaba_ joined
+[01:39] <chromatic> Whiteknight, see t/op/string.t
+[01:39] <chromatic> Some interesting failures there; they look suspicious.
+[01:40] <Whiteknight> the string subsystem has been bonkers for a while though. I suspect the same kinds of offset failures from the compacting code are coming into the rest of the string system
+[01:41] <Whiteknight> you are right, lots of interesting failures
+[01:41] <chromatic> Did you re-enable compacting?
+[01:42] <Whiteknight> no
+[01:42] <Whiteknight> i am making the blind assumption that compacting isn't necessary for proper operation
+[01:42] *** Zaba joined
+[01:43] <Whiteknight> Certainly bad for efficiency to disable it, but I don't think it's strictly necessary
+[01:43] <chromatic> Agreed.
+[01:43] <chromatic> That means compacting isn't the problem here.
+[01:43] <Whiteknight> A good test might be to disable compacting in my trunk checkout and run the test suite there
+[01:43] <Whiteknight> but that's time I would rather not waste right now
+[01:44] <chromatic> The good news is that most of the string tests are small and self-contained, so they'll be easy-ish to fix.
+[01:44] <chromatic> Compared to PGE anyway.
+[01:45] <Whiteknight> Of course, disabling the compacting code doesn't necessarily fix that problem we were having with string pointers being messed up
+[01:45] <Whiteknight> so maybe it's just hiding a symptom, not the problem
+[01:46] <chromatic> Right.
+[01:47] <Whiteknight> with compacting enabled, it makes it to the same point in the build process. I'll debug to see if I am getting the same segfault
+[01:47] *** kid51 joined
+[01:48] <Whiteknight> ...yes, exact same error at the same point. The compacting code isn't affecting it at all
+[01:49] <chromatic> Good to know, but let's leave the compacting code off for now.
+[01:50] <dalek> r29503 | chromatic++ | gsoc_pdd09:
+[01:50] <dalek> : [src] Fixed some codingstandards violations.  No functional changes.
+[01:50] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29503
+[01:50] <chromatic> ./parrot t/op/string_3.pasm
+[01:50] <chromatic> should print 4
+[01:53] <chromatic> If I set a breakpoint at Parrot_length_i_s and step into string_length, the string looks correct.
+[01:53] *** Zaba joined
+[01:56] <chromatic> If I set a breakpoint after that at Parrot_print_i and look at the contents of IREG(1), it's also correct.
+[01:58] <chromatic> Within PIO_printf, the string created for printing is also correct.
+[01:58] <chromatic> Hmm.
+[02:04] <chromatic> AHA
+[02:04] <Whiteknight> !!!?
+[02:04] <chromatic> if I add print "\\n" to the end of the code, it prints
+[02:04] <chromatic> so we're not flushing a buffer
+[02:04] <chromatic> PROBABLY
+[02:04] <chromatic> because the buffer gets flushed during destruction?
+[02:04] *** cjfields joined
+[02:04] <Whiteknight> You think that's the case?
+[02:05] <chromatic> That explains a lot of these failures.
+[02:05] *** Andy joined
+[02:05] <chromatic> PIO by default is line buffered, but when Parrot exits it needs to flush these buffers.
+[02:05] <chromatic> That's good though.
+[02:05] <chromatic> It means at least this part of strings isn't broken.
+[02:05] <Whiteknight> Sweep code for strings and the sized pools is disabled
+[02:05] <Whiteknight> and the finalization is caput
+[02:06] <chromatic> I think it's PIO finalization that we're missing here.
+[02:06] <Whiteknight> I can't enable finalization as-is without introducing new order-of-destruction errors
+[02:06] <chromatic> Even sweeping backwards?
+[02:07] <Whiteknight> it sweeps starting at the last arena
+[02:07] <Whiteknight> but in each arena, it sweeps back-to-front
+[02:07] <Whiteknight> I could redo that tonight/tomorrow and try it again
+[02:08] <chromatic> It works in trunk, so the algorithm can't be entirely wrong.
+[02:09] <chromatic> ./parrot t/op/gc_4.pasm
+[02:09] <chromatic> There's a segfault.
+[02:09] <chromatic> src/scheduler.c:692
+[02:10] <chromatic> sched_struct->wait_index gets reaped early (its vtable is 0xdeadbeef)
+[02:10] <Whiteknight> yeah, that's like errors I was seeing
+[02:10] <Whiteknight> somehow, some PMCs are still being sweeped early
+[02:11] <Whiteknight> which means either my crippled sweep code is still wrong, or my mapping from card<->pobj isn't correct
+[02:11] <chromatic> Is pobject_lives calling mark appropriately?
+[02:11] <Whiteknight> it should be, it looks it to me
+[02:11] <Whiteknight> I'm thinking about ditching the separate cards and using the PObj flags like in PDD09
+[02:12] <Whiteknight> We lose some speed in the sweep (at least, when the sweep is running at full-speed), but other then that cache locality should keep the cost low
+[02:13] <chromatic> Let's benchmark it when we get it working.
+[02:13] *** Zaba joined
+[02:14] <chromatic> Interesting.
+[02:15] <chromatic> The scheduler gets marked and marks its kids, but they get swept and it doesn't.
+[02:15] <chromatic> How confident are you of your state transitions?
+[02:16] <Whiteknight> becoming less and less
+[02:16] <chromatic> The child PMCs of the Scheduler are mostly all ResizablePMCArrays.
+[02:16] <Whiteknight> I've kept state transitions to a minimum for this exact reason
+[02:17] <Whiteknight> those would trigger the PObj_data_is_PMC_array flag
+[02:17] <chromatic> I'm just waiting for something to click in your head again while I explore.
+[02:18] <Whiteknight> I'm racking my brain here, it all seems like it should work
+[02:19] <chromatic> Here's my strategy.
+[02:19] <chromatic> I'm going to look for a fork and see if there are still cookies in the lobby.
+[02:20] <chromatic> You (if you want) should set a breakpoint in Parrot_Scheduler_mark, grab the address of one of the child PMCs, and then set a conditional breakpoint somewhere in the sweep code to check for the conditions which trigger the sweep for that PMC.
+[02:20] <chromatic> And also hope that there are cookies in the lobby, because I want one and I don't really want to walk across the street to the grocery store.
+[02:20] <Whiteknight> Okay. I probably don't have the time tonight, but I can do that tomorrow
+[02:21] <Whiteknight> shit, if we can get this resolved I'll bake you a batch of cookies
+[02:22] <Whiteknight> quick question, in gdb if I have the address of a PObj, how can I look at the adjacent header?
+[02:22] <Whiteknight> can I do pointer arithmetic on it?
+[02:23] <chromatic> I believe so.
+[02:23] <chromatic> (no cookies, but I did find a microwave and plastic utensils, so not all a failure)
+[02:23] <Whiteknight> Okay, I'll play with that. If I can see the header, I can find the corresponding card and track when it gets updated
+[02:24] <chromatic> Looks like setting a conditional breakpoint on Parrot_dod_free_pmc will catch the point at which we collect the PMC.
+[02:25] <Whiteknight> right, but even for simple programs we call that function a hundred times or so
+[02:25] <chromatic> break Parrot_dod_free_pmc if pmc == 0x822a52c
+[02:26] <Whiteknight> can you do that?
+[02:26] * Whiteknight is still a gdb newbie
+[02:27] <chromatic> You can and it's awesome.
+[02:28] *** Zaba_ joined
+[02:28] <s1n> conditionals rock
+[02:29] <chromatic> and it's getting called from gc_it_sweep_PMC_arenas
+[02:29] <chromatic> mark == GC_IT_CARD_WHITE is true
+[02:30] <chromatic> #  define IT_HDR_to_PObj(p) ((PObj*)((Gc_it_hdr*)(p)+1))
+[02:30] <chromatic> Is that right?
+[02:30] <chromatic> The PObj is one byte after the GC header?
+[02:32] <Whiteknight> it's pointer arithmetic, it's 1 Gc_it_hdr after it
+[02:33] <Whiteknight> Let me throw in some more parens there and see if that fixes anything
+[02:33] <chromatic> You don't need sizeof (Gc_it_hdr)?
+[02:34] <Whiteknight> no, in C pointers and arrays are interchangable, the compiler does the sizeof calculations for pointers automatically
+[02:34] <Whiteknight> p + 1 == p[1]
+[02:35] <chromatic> Where's the array though?
+[02:37] <Whiteknight> it doesn't matter where, C just does the pointer arithmetic as if it were an array
+[02:37] <Whiteknight> at least, it's supposed to
+[02:37] <chromatic> Right, but how does C know in this case that 1 means sizeof (Gc_it_hdr)?
+[02:38] <Whiteknight> because of the cast to (Gc_it_hdr*) I jammed in there
+[02:38] <Whiteknight> we cast the pointer to (Gc_it_hdr*), then add 1, and then cast the result to (PObj*)
+[02:39] <Whiteknight> The PObj_to_IT_HDR macro does the process in reverse
+[02:39] <chromatic> Ah, so that's why you wonder if adding more parentheses might help.
+[02:39] <Whiteknight> right
+[02:39] <Whiteknight> in (cast)p + 1, I can't remeber whether (cast) or + bind more tightly
+[02:39] <chromatic> I never trusted casts like that myself.
+[02:39] <Whiteknight> I assumed the cast did
+[02:39] <chromatic> /* Increase allocated space to account for GC header */
+[02:39] <chromatic> pool->object_size += sizeof (Gc_it_hdr);
+[02:40] <Whiteknight> right, I allocate the headers directly next to the objects, so the allocated space needs to be big enough for both of them
+[02:40] <Whiteknight> ...and more parenthesis produces the same segfaults
+[02:41] <chromatic> I modified the macros.
+[02:44] <Whiteknight> that's fine, modify away
+[02:44] <Whiteknight> by the time I'm done debugging, not a shred of my original design is going to be left
+[02:44] <Whiteknight> of course, that's probably for the best
+[02:44] <chromatic> Hash problems.
+[02:44] <chromatic> Blah.
+[02:46] <chromatic> #  define PObj_to_IT_HDR(o) ((Gc_it_hdr *)((o)        - sizeof (Gc_it_hdr)))
+[02:46] <chromatic> #  define IT_HDR_to_PObj(p) ((PObj *)((p)             + sizeof (Gc_it_hdr)))
+[02:46] <chromatic> #  define cPObj_to_IT_HDR(o) ((const Gc_it_hdr *)((o) - sizeof (Gc_it_hdr)))
+[02:48] *** cjfields_ joined
+[02:49] <Whiteknight> just to be sure, cast the arguments to (char*) to make sure it's all in bytes
+[02:49] <Whiteknight> ((Gci_it_hdr *)((char*)(o) - sizeof(Gc_it_hdr)))
+[02:50] <Whiteknight> beyond that, I'm fine with the change
+[02:50] <chromatic> Ah, much better.
+[02:50] *** cjfields joined
+[02:51] <chromatic> That didn't fix anything though.
+[02:55] <Whiteknight> Okay, don't waste any more of your time. I'm going to bed. I'll get into gdb nirvana tomorrow after work and see if I can find anything
+[02:55] <chromatic> Okay.
+[02:55] <chromatic> Hmmm.
+[02:55] <chromatic> Here's a thought.
+[02:55] <Whiteknight> ?
+[02:55] <chromatic> Are you flipping all marked cards back to unmarked when you sweep?
+[02:56] <Whiteknight> yes, right during the sweep. If it's white, we free them, and if it's black we switch it to white
+[02:56] <Whiteknight> I could separate that out into two steps, but since I differentiate between free and white cards, I can't do a memset
+[02:56] <chromatic> Makes sense.
+[02:57] <chromatic> I see the code now.
+[02:58] <Whiteknight> I do that so in the sweep code I don't  try to finalize anything that's already free
+[02:58] <Whiteknight> but I suppose i can determine that a different way
+[02:59] <chromatic> I ran into this when I was working with constants.
+[02:59] <chromatic> If something's already marked live, we don't mark its kids.
+[02:59] <chromatic> So if the Scheduler gets created and doesn't have its card flipped, the second GC run will sweep up its kids.
+[03:02] <Whiteknight> But every time the scheduler is marked, the kids should be marked during the trace too
+[03:02] <Whiteknight> I could be more aggressive marking the kids in pobject_lives or something
+[03:03] <chromatic> Let me try that.
+[03:05] <chromatic> Doesn't seem to fix it either.
+[03:06] <Whiteknight> I must have some mixup in the trace code, it must not be marking children black like I think it should be
+[03:06] <chromatic> Seems as plausible as anything.
+[03:07] <Whiteknight> Okay, i'm definitely heading to bed now. Thanks for everything tonight. I'll run with some of your suggestions tomorrow and see what happens
+[03:09] <Whiteknight> goodnight
+[03:09] <chromatic> good luck!
+[03:09] <purl> it has been said that good luck is all I can say.
+[03:23] *** tjh joined
+[03:42] *** cjfields joined
+[03:53] *** Zaba joined
+[04:08] *** Zaba_ joined
+[04:45] *** verve joined
+[04:45] *** Theory joined
+[05:09] *** Zaba joined
+[05:12] *** Ademan joined
+[05:24] *** iblechbot joined
+[05:25] *** Zaba joined
+[05:30] <Tene> I just pulled out all of the expr-parse and var-or-function mess in lolcode.
+[05:30] <Tene> All tests pass.
+[05:30] <purl> Time to write more tests!
+[05:30] <Tene> purl++
+[05:32] *** verve joined
+[05:38] <cotto_home> purl++ indeed
+[05:40] *** Ademan joined
+[05:45] *** Psyche^ joined
+[05:50] *** teknomunk_ joined
+[05:52] *** Zaba_ joined
+[06:00] *** donaldh joined
+[06:12] *** uniejo joined
+[06:14] *** uniejo joined
+[06:21] <dalek> r29504 | fperrad++ | trunk:
+[06:21] <dalek> : [install]
+[06:21] <dalek> : - clean up test.php
+[06:21] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29504
+[06:21] <dalek> r29505 | fperrad++ | trunk:
+[06:21] <dalek> : [Lua] shootout
+[06:21] <dalek> : - more TODO & SKIP
+[06:21] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29505
+[06:22] *** Zaba joined
+[06:23] *** bacek joined
+[06:32] *** UltraDM joined
+[06:35] *** Ademan joined
+[06:44] *** Zaba_ joined
+[06:54] *** barney joined
+[07:02] *** masak joined
+[07:06] *** Ademan joined
+[07:10] *** Tango_ joined
+[07:39] *** Zaba joined
+[07:42] <dalek> r29506 | bernhard++ | trunk:
+[07:42] <dalek> : [build] remove directory OpLib with $(RM_RF) instead of $(RM_F)
+[07:42] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29506
+[08:08] <dalek> r29507 | bernhard++ | trunk:
+[08:08] <dalek> : [test] Adapt test plan, as a test was removed.
+[08:08] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29507
+[08:23] *** Zaba joined
+[08:35] *** Zaba_ joined
+[08:45] <dalek> r29508 | julianalbo++ | trunk:
+[08:45] <dalek> : Fixed parrot_debugger test
+[08:45] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29508
+[09:00] <dalek> r29509 | julianalbo++ | trunk:
+[09:00] <dalek> : Fix Revision.pm for non sh shells
+[09:00] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29509
+[10:49] *** bacek joined
+[11:12] *** barney joined
+[11:13] *** kid51 joined
+[11:18] *** ruoso joined
+[11:25] *** iblechbot joined
+[11:26] *** bacek joined
+[12:14] <dalek> r29510 | bernhard++ | remove_getfd:
+[12:14] <dalek> : #48312: [TODO] add get_fd method to ParrotIO
+[12:14] <dalek> : add a TODO comment, referencing RT #48312.
+[12:14] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29510
+[12:19] *** verve joined
+[12:24] <dalek> r29511 | jkeenan++ | parallel:
+[12:24] <dalek> : Consolidate multiple test files per configuration step into a single file.
+[12:24] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29511
+[12:31] *** masak joined
+[12:40] *** ruoso joined
+[12:41] *** Andy joined
+[12:45] <dalek> r29512 | bernhard++ | remove_getfd:
+[12:45] <dalek> : [build] Some beautifications in Parrot::Ops2pm::Utils
+[12:45] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29512
+[12:53] <barney> cotto_home: good point,  there are too many unclosable tickets in RT
+[12:55] * barney refered to cotto's reply to RT #40631
+[12:56] <moritz> aye, very good one
+[13:07] <cotto_home> thanks
+[13:09] *** gryphon__ joined
+[13:10] <cotto_home> I'd be glad to help find more such tickets
+[13:11] <moritz> I'm going through the perl6 queue
+[13:13] <cotto_home> do you have any suggestions on preventing them from being warnocked?
+[13:14] *** Zaba joined
+[13:14] <moritz> send at most 5 a day to the list ;-)
+[13:14] *** jhorwitz joined
+[13:15] <masak> what gets warnocked and what doesn't seems to be a very complex thing
+[13:15] <masak> I wanted to reply to pmichaud's closure mail, but I found I couldn't
+[13:16] <masak> so I took it up on IRC instead
+[13:16] <moritz> what prevent you from replying on list?
+[13:19] <masak> the fact that I thought that the answer was obvious :)
+[13:19] <moritz> ;)
+[13:19] <masak> even now, I have difficulty seeing the difficulty, even after pmichaud explained it to me
+[13:19] <masak> I wish it were as easy to implement the correct answers as it is to imagine them...
+[13:21] <dalek> r29513 | bernhard++ | remove_getfd:
+[13:21] <dalek> : #48310: [TODO] remove the getfd opcode
+[13:21] <dalek> : Remove the getfd opcode.
+[13:21] <dalek> : Renumber the ops with tools/dev/ops_renum.mak
+[13:21] <dalek> : Add implementation hints for method get_fd() in the ParrotIO PMC.
+[13:21] <dalek> : Rewrite some tests in  t/pmc/io.t, marking them as TODO, as there is get_fd method yet.
+[13:21] <dalek> : Invalidate PBC by editing PBC_COMPAT.
+[13:21] <dalek> : ===================================================================
+[13:21] <dalek> : --- t/pmc/io.t\t(Revision 29488)
+[13:21] <dalek> : +++ t/pmc/io.t\t(Arbeitskopie)
+[13:21] <dalek> : @@ -1,10 +1,11 @@
+[13:21] <dalek> :  #! perl
+[13:21] <dalek> : -# Copyright (C) 2001-2007, The Perl Foundation.
+[13:21] <dalek> : +# Copyright (C) 2001-2008, The Perl Foundation.
+[13:21] <dalek> :  # $Id$
+[13:21] <dalek> :
+[13:21] <dalek> :  use strict;
+[13:21] <dalek> :  use warnings;
+[13:21] <dalek> :  use lib qw( . lib ../lib ../../lib );
+[13:21] <dalek> : +
+[13:21] <dalek> :  use Test::More;
+[13:21] <dalek> :  use Parrot::Test tests => 45;
+[13:21] <dalek> :
+[13:21] <moritz> wtf?
+[13:21] <szbalint> hm
+[13:21] <dalek> : @@ -111,9 +112,11 @@
+[13:21] <dalek> :  a line
+[13:21] <dalek> :  OUTPUT
+[13:21] <dalek> :
+[13:21] <dalek> : -pasm_output_is( <<'CODE', <<'OUTPUT', "getfd/fdopen" );
+[13:21] <dalek> : -        getstdout P0
+[13:21] <dalek> : -        getfd I0, P0
+[13:21] <szbalint> I sense something went wrong with this one :)
+[13:21] <dalek> : +# RT#46843
+[13:21] <dalek> : +pir_output_is( <<'CODE', <<'OUTPUT', "getfd/fdopen", todo => 'get_fd() not implemented yet' );
+[13:21] <dalek> : +.sub main :main
+[13:22] <dalek> : +    getstdout P0
+[13:22] <moritz> anybody wants to kick dalek ?
+[13:22] <dalek> : +    I0 = P0.get_fd()
+[13:22] <dalek> :      fdopen P1, I0, ">"
+[13:22] <dalek> :      defined I0, P1
+[13:22] <dalek> :      unless I0, nok
+[13:22] <dalek> : @@ -122,14 +125,16 @@
+[13:22] <dalek> :      end
+[13:22] <dalek> :  nok:
+[13:22] <dalek> :      print "fdopen failed\\n"
+[13:22] <dalek> : -    end
+[13:22] <dalek> : +.end
+[13:22] <dalek> :  CODE
+[13:22] <dalek> :  ok
+[13:22] <dalek> :  OUTPUT
+[13:22] <dalek> :
+[13:22] <dalek> : -pasm_output_is( <<'CODE', <<'OUTPUT', "fdopen - no close" );
+[13:22] <dalek> : -        getstdout P0
+[13:22] <dalek> : -        getfd I0, P0
+[13:22] <dalek> : +# RT#46843
+[13:22] <dalek> : +pir_output_is( <<'CODE', <<'OUTPUT', 'fdopen - no close', todo => 'get_fd() not implemented yet' );
+[13:22] <dalek> : +.sub main :main
+[13:22] <dalek> : +    getstdout P0
+[13:22] <dalek> : +    I0 = P0.get_fd()
+[13:22] <dalek> :      fdopen P1, I0, ">"
+[13:22] <dalek> :      defined I0, P1
+[13:22] <dalek> :      unless I0, nok
+[13:22] <dalek> : @@ -137,7 +142,7 @@
+[13:22] <dalek> :      end
+[13:22] <dalek> :  nok:
+[13:22] <dalek> :      print "fdopen failed\\n"
+[13:22] <dalek> : -    end
+[13:22] <dalek> : +.end
+[13:22] <dalek> :  CODE
+[13:22] <dalek> :  ok
+[13:22] <dalek> :  OUTPUT
+[13:22] <dalek> : @@ -454,22 +459,24 @@
+[13:22] <dalek> :
+[13:22] <dalek> :  unlink("temp.file");
+[13:22] <dalek> :
+[13:22] <dalek> : -pasm_output_is( <<'CODE', <<'OUT', 'standard file descriptors' );
+[13:22] <dalek> : +# RT#46843
+[13:22] <dalek> : +pir_output_is( <<'CODE', <<'OUT', 'standard file descriptors', todo => 'get_fd() not implemented yet' );
+[13:22] <dalek> : +.sub main :main
+[13:22] <dalek> :         getstdin P0
+[13:22] <dalek> : -       getfd I0, P0
+[13:22] <dalek> : +       I0 = P0.get_fd()
+[13:22] <dalek> :         # I0 is 0 on Unix and non-Null on stdio and win32
+[13:22] <dalek> :         print "ok 1
+[13:22] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29513
+[13:23] <cotto_home> botfail
+[13:24] <moritz> no, barneyfail ;-)
+[13:24] <szbalint> actually, the bot just failed to limit the amount of text it's supposed to output from the commit log
+[13:24] <cotto_home> just noticed
+[13:24] <moritz> the commmit message contained the patch
+[13:25] <jonathan> ...well, that's one way to get more code review.
+[13:25] <dalek> r29514 | bernhard++ | remove_getfd:
+[13:25] <dalek> : #48310: [TODO] remove the getfd opcode
+[13:25] <dalek> : Adapt test description.
+[13:25] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29514
+[13:28] <dalek> r29515 | bernhard++ | remove_getfd:
+[13:28] <dalek> : #48310: [TODO] remove the getfd opcode
+[13:28] <dalek> : get rid of 'getfd' in languages/PIR.
+[13:28] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29515
+[13:29] <cotto_home> moritz, what about a rt that depended on any uncloseable tickets
+[13:29] <barney> did everybody see the coding error?  :=)
+[13:29] <cotto_home> that'd at least help with accounting
+[13:30] <moritz> cotto_home: make that dependency closable?
+[13:30] <cotto_home> barneyfail++
+[13:30] <dalek> r29516 | bernhard++ | remove_getfd:
+[13:30] <dalek> : #48310: [TODO] remove the getfd opcode
+[13:31] <dalek> : Get rid of 'getfd' in compilers/pirc.
+[13:31] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29516
+[13:32] <moritz> ok, down to 45 tickets in the perl6 queue
+[13:34] <cotto_home> moritz, I don't know if such a ticket would be closeable, but it'd at least help get rid of other uncloseable tickets
+[13:35] <cotto_home> it'd probably have to depend on itself ;)
+[13:36] <masak> is there a gsoc meeting today? in which channel is it?
+[13:38] <moritz> masak: it's in #perl6-soc on freenode
+[13:38] <masak> moritz: ah, thanks
+[13:38] <moritz> masak: yw. Mostly interesting for Perl 6 testing
+[13:39] <masak> I'm interested in Perl 6 testing
+[13:39] <moritz> good ;-)
+[13:39] <masak> what time will the meeting be?
+[13:40] <moritz> 19:30 UTC
+[13:40] <moritz> which is 21:30 middle european time
+[13:43] <masak> excellent
+[13:47] <cotto_home> should unresolvable tickets be children or dependencies of the "too many unresolvable tickets" ticket?
+[13:49] <barney> children,   they donÄt have to be resolved, in order to become resolvable
+[13:54] <dalek> r29517 | bernhard++ | remove_getfd:
+[13:54] <dalek> : #48312: [TODO] add get_fd method to ParrotIO
+[13:54] <dalek> : Add the method get_fd(), take code from the implemention
+[13:54] <dalek> : of the removed opcode 'getfd'.
+[13:54] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29517
+[13:57] <cotto_home> thanks
+[13:57] <cotto_home> work &
+[14:00] <dalek> r29518 | coke++ | trunk:
+[14:00] <dalek> : [tcl] use a tailcall
+[14:00] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29518
+[14:09] <dalek> r29519 | coke++ | tcl_pct:
+[14:09] <dalek> : Remove experimental branch for converting tcl to PCT from scratch.
+[14:09] <dalek> : A better approach will probably be to convert it in place to PCT,
+[14:09] <dalek> : then begin adding optimizations, rather than starting over from
+[14:09] <dalek> : scratch.
+[14:09] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29519
+[14:34] *** Zaba_ joined
+[14:44] *** NotFound joined
+[14:52] *** sjansen joined
+[14:53] <dalek> r29520 | bernhard++ | remove_getfd:
+[14:53] <dalek> : [codingstd] remove trailing spaces
+[14:53] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29520
+[14:58] <dalek> r29521 | bernhard++ | trunk:
+[14:58] <dalek> : [docs] Rephrase recommendation of test before comitting.
+[14:58] <dalek> : Especially mention 'make codetest'.
+[14:58] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29521
+[15:04] *** cjfields joined
+[15:27] *** davidfetter joined
+[15:35] <dalek> r29522 | bernhard++ | trunk:
+[15:35] <dalek> : Merge the changes from branch 'remove_getfd' back into trunk.
+[15:35] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29522
+[15:39] *** cotto_work joined
+[15:41] * davidfetter waves to cotto_work
+[15:42] <dalek> r29523 | tene++ | trunk:
+[15:42] <dalek> : [lolcode]
+[15:42] <dalek> : * Do everything at compile time.  No more expr_parse.
+[15:42] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29523
+[15:42] <Tene> That was a very satisfying commit
+[15:43] <NotFound> LOL!
+[15:43] <moritz> aye
+[15:43] <moritz> do *everything* at compile time. Includes eating chicken at compile time ;-)
+[15:44] <Tene> Yes.
+[15:45] <Tene> I need to do some crazy stuff for cardinal.
+[15:46] <Tene> To get it to parse properly, I'll need to do similar lookups and symbol tables at *parse* time.
+[15:46] <dalek> r29524 | bernhard++ | trunk:
+[15:46] <dalek> : Update TODO comment: RT#42373 is part of RT#48312.
+[15:46] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29524
+[15:47] <cotto_work> davidfetter, hi
+[15:47] <Tene> I really should talk with pmichaud about it eventually.
+[15:48] <moritz> Tene: Perl 6 will need that too, for tracking type names
+[15:48] <jonathan> Tene: I think for Rakudo we'll...yes, moritz said it.
+[15:49] <jonathan> I want to do that in Rakudo soonish, but need to talk with PM first.
+[15:49] <davidfetter> cotto_work, any word from your cow orkers?
+[15:50] <cotto_work> no, but after lunch today will be a good day to ask them about it
+[15:51] <davidfetter> i'd really appreciate your help on this :)
+[15:52] <cjfields> jonathan: I found an odd issue when implementing match (method form of m//).  Pretty sure it involves lexicals.
+[15:53] <cotto_work> one thing; your request is on how to make postgres more attractive to windows developers, right?
+[15:53] <davidfetter> yep
+[15:54] <cotto_work> that seems a little vague
+[15:54] <davidfetter> well, for example, it relies at the moment on automake, etc. for top-level developers
+[15:55] <cotto_work> so compatibility with windows build tools is a goal?
+[15:55] <cotto_work> er, MS build tools
+[15:55] <davidfetter> compatibility is to some degree already there. "attractiveness" is a little closer
+[15:55] *** Theory joined
+[15:56] <davidfetter> as in, it's possible to build it using msvc 2008 or whatever it's called
+[15:56] <davidfetter> oh, and apparently development *with* postgres (as opposed to *on* postgres) seems to have a few holes like lack of LINQ
+[15:56] <davidfetter> any good refs on that?
+[15:57] * davidfetter waves to Theory
+[15:57] <jonathan> cjfields: OK, either ticket it or write to perl6-compiler, and I or pmichaud can take a look.
+[15:57] <jonathan> Or anyone else with answers. :-)
+[15:58] <cjfields> I'll send it to p6-compiler then.  May be something I'm not getting.
+[15:58] <jonathan> davidfetter: LINQ is awesome; I can hardly imagine .Net dev without it any more.
+[15:58] <cotto_work> davidfetter, I'm clue-poor in that area, but pgsql LINQ and building with MS tools sound like some good concrete goals.
+[15:58] <dalek> r29525 | bernhard++ | remove_getfd:
+[15:58] <dalek> : Delete branch after merge with trunk.
+[15:58] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29525
+[15:58] <davidfetter> cotto_work, thanks for helping me refine my questions :)
+[15:58] <jonathan> I know that the way LINQ is architected is meant to allow other DBs to be able to implement "drivers" for it.
+[15:59] <Theory> heya davidfetter
+[15:59] <purl> davidfetter is looking to put together PL/Parrot
+[15:59] <cotto_work> davidfetter, anything else you'd like to see happen?
+[16:00] <davidfetter> cotto_work, those would be gigantic by themselves
+[16:00] <davidfetter> cotto_work, although of course sponsorship, inclusion in ms products, etc. would be nice, too ;)
+[16:00] <cotto_work> ok.  I'll send of a mail and do a meatspace poke later today
+[16:01] <davidfetter> ms has a very long history of using bsd-licensed code :)
+[16:01] <cotto_work> It's very corporate-friendly.
+[16:08] <cotto_work> davidfetter, do you know of someone who'd be able to implement either of those requests, or is finding those people the issue?
+[16:10] * barney heads for Munich Perl Monger meeting
+[16:12] *** mj41_ joined
+[16:17] *** iblechbot joined
+[16:31] *** Tango_ joined
+[16:35] *** rurban joined
+[16:35] <rurban> parrot-0.6.3-1 is now officially included cygwin, 0.6.4-1 still needs some care (today or tomorrow)
+[16:43] <NotFound> rurban++
+[16:46] <rurban> thanks for the new name parrot_debugger btw.
+[16:47] <rurban> It came just in time for me. I still haven't checked if it was patched correctly. I found a lot of missing places in my first patch today.
+[16:47] <rurban> man(1) pages somewhen planned? And how?
+[16:49] *** cj joined
+[16:49] <rurban> And I want to discuss the libparrot_shared name for cygwin: I found an very old patch (warnocked) which renames it to cygparrot$major_$minor.dll. I did it now too.
+[16:51] <rurban> oops. even major_minor_subrelease.dll. I just do $dllsuffix = join("_",@parrot_version);
+[16:53] *** bgeron left
+[16:54] <rurban> My next work is now to remove the funky /usr/runtime/parrot/include /usr/runtime/parrot and /usr paths from the .include searchpath. I found this via strace and looks wrong.
+[17:01] <NotFound> rurban: open a ticket for discussing that.
+[17:02] <NotFound> The dll renaming, I mean.
+[17:02] <rurban> just did
+[17:03] *** masak joined
+[17:13] <rurban> hmm, subrelease is officially called PATCH in config_lib.pasm. I would expect PATCH to be the subversion revisionlevel (.parrot_current_rev)
+[17:15] <Tene> What was the problem with pdb?
+[17:15] <Tene> Well, with "pdb"?
+[17:15] <rurban> that /usr/bin/pdb alrady exists
+[17:15] <rurban> the python debugger, and on IBM machines the portable debugger
+[17:15] <Tene> ah
+[17:16] <rurban> of course you can always symlink it to pdb
+[17:16] <rurban> (in case you avoid python :)
+[17:18] <rurban> And disassemble was also a bit to broad for general packaging
+[17:19] <NotFound> rurban: PATCH is taken from the VERSION file.
+[17:19] *** chromatic joined
+[17:20] <rurban> NotFound: I know. Just a split of ".". But the key in the config hash is a bit strange.
+[17:21] <rurban> Anyway. I'm not bothered too much. It just looked strange at first sight.
+[17:23] <NotFound> rurban: the intention, as I hear recently, is that svn release number are not included in distribution packages.
+[17:23] <rurban> perl5 names the third version digit PERL_SUBVERSION, and the PERL_PATCHLEVEL is the revision number.
+[17:24] <rurban> NotFound: Empty svn release numbers are okay. This is the same everywhere. You have to see iin a bugreport if its a development version or a release.
+[17:24] <particle> if we include a revision number, it'll be called _REVISIONNUMBER and not _PATCHLEVEL
+[17:24] <particle> that's just silly
+[17:25] <rurban> hmm.
+[17:25] <rurban> perl5 naming: version_patchlevel_string='version 11 subversion 0 patch 34136'
+[17:26] <particle> we have major minor patch
+[17:26] <rurban> perl6 naming: minor 6 patch 3 revision 29497
+[17:26] <particle> parrot naming, not perl 6 naming
+[17:26] <rurban> ah sorry, yes.
+[17:27] <rurban> Anyway, too late.
+[17:27] <particle> sure
+[17:27] <particle> there's always next time :)
+[17:27] <rurban> It just looks odd.
+[17:27] <NotFound> The name 'subversion' is also confusing in the current development model.
+[17:27] <rurban> :)
+[17:27] <particle> perl5 uses perforce, so it's not confusing to them
+[17:27] <particle> but, yes, it's an unfortunate name
+[17:28] <NotFound> We can call it perforce number, to counter attack X-)
+[17:28] <rurban> The perl5 names are also questionable: it should be version_patchlevel_string='minor 11 subrelease 0 patch 34136'
+[17:29] <NotFound> We have enough own items to discuss, let perl5 ones alone.
+[17:29] <rurban> ok. I'll finish now the parrot-0.6.4 release for cygwin...
+[17:31] <rurban> And then I'll start fixing the makefiles to add LD_RUN_PATH/PATH=pwd/blib/lib to each parrot call. This is the last quirks I see.
+[17:34] *** Theory joined
+[17:45] <rurban> Where can I set at perl5 Configure.pl breakpoint to fix auto::opengl::_add_to_libs() ?
+[17:47] <japhb> rurban: huh  what?  (This window just pinged me, probably because you mentioned OpenGL)
+[17:47] <japhb> (And sorry I have not dealt with OpenGL issues in the last week, $real_life interfered)
+[17:47] <rurban> BTW: There are way too many gcc -W switched in effect. Most of them are already implied by -Wall and -Wextra. Should I open a ticket with my list?
+[17:48] <rurban> japhb: I want to get rid of the logic preferring not existing native mingw libs over existing cygwin glut libs.
+[17:49] <japhb> OK, give me a sec to pull up auto::opengl and reacquaint my brain
+[17:49] <particle> rurban: config/auto/opengl.pm
+[17:50] <rurban> That's the easy part. I also provided a pach, but this doesn't work.
+[17:50] <rurban> perl -d Configure.pl ....
+[17:50] <NotFound> rurban: not all gcc versions support -Wextra
+[17:50] <japhb> rurban: OK, right, was this about the fact that you and donald hunter chose different ways to get your OpenGL support?  (One of you choosing X11, the other choosing native libs?)
+[17:51] <japhb> NotFound: do we have to support those gcc versions?
+[17:51] <rurban> I can only take X11 because I only have them and I have to assume for the cygwin package that all others also have no native mingw libs.
+[17:51] <rurban> Privately I'm fine with the native libs, because I'll need no X then.
+[17:51] <NotFound> japhb: if the price to pay is having some extra args, I will pay it.
+[17:52] <rurban> NotFound: I read info gcc => Invoke => Warnings and read that most of the switches are not needed. gcc-3.4.4 so quite old.
+[17:53] <rurban> some paste: TODO:
+[17:53] <rurban> remove warnings implied by -W -Wall:
+[17:53] <rurban> -Wchar-subscripts -Wcomment -Wformat -Winit-self -Wimplicit-int -Wimplicit-function-declaration -Wmain  -Wmissing-braces -Wparentheses -Wsequence-point -Wreturn-type -Wswitch -Wswitch-default -Wtrigraphs -Wstrict-aliasing
+[17:53] <rurban> -Wnonnull (implied by -Wformat also)
+[17:53] <rurban> -Wimplicit (same as -Wimplicit-int -Wimplicit-function-declaration)
+[17:53] <rurban> unclear:   -Wformat-extra-args -Wformat-nonliteral -Wformat-security -Wformat-y2k
+[17:53] <japhb> NotFound: I wasn't arguing that.  I was asking if we were supporting the old gcc's in one place (the flags list), but not in another (say, src/), for hysterical raisins.  Just like we have discovered in the past that we were actually requiring newer perls, so sops to ancient perls were just historical cruft.
+[17:53] <rurban> ok -W -Wall -Wextra -Waggregate-return -Wcast-align -Wcast-qual -Wdisabled-optimization -Wendif-labels  -Wimport -Winline -Winvalid-pch -Wno-missing-format-attribute -Wpacked -Wpointer-arith -Wno-shadow -Wsign-compare -Wstrict-aliasing=2 -Wundef -Wunknown-pragmas -Wno-unused -Wwrite-strings -Wbad-function-cast -Wdeclaration-after-statement -Wmissing-declarations -Wmissing-prototypes...
+[17:53] <rurban> ...-Wnested-externs
+[17:55] <rurban> And I'm annoyed about the debugging into the Configure runstep hierarchy
+[17:57] <rurban> DB<3> b Parrot::Configure::Step::auto::opengl::runstep
+[17:57] <rurban> Subroutine Parrot::Configure::Step::auto::opengl::runstep not found.
+[17:58] <rurban> Or cannot I just override the opengl libs that in hints/cygwin.pm? Ugly though.
+[18:00] <japhb> rurban: I don't think you need to breakpoint in runstep.  You want _add_to_libs, which is in one of the superclasses.
+[18:01] <japhb> Looks like Parrot::Configure::Step::Methods
+[18:02] <rurban> I see. I'm in the same boat as mingw.
+[18:02] <rurban> win32_gcc is both
+[18:03] <rurban> can I have a specialcase cygwin platform there? I'll write such a simple patch. The fallback for cygwin would be either win32_gcc or default.
+[18:04] <japhb> rurban: And I don't think this should be in hints/cygwin.pm, at least not directly.  donaldh pointed out last week that cygwin can *either* use packages w32api + opengl *or* xorg-x11-* + libglut*.  Which is a pain in the keister.  And mixing them, as he pointed out, blows up.
+[18:04] <rurban> I'll rather prefer probing the libs as in a real Configure
+[18:04] <rurban> As that done somewhere. So we can please everybody.
+[18:05] <rurban> sorry: Is that done somewhere?
+[18:05] <japhb> rurban: how do you propose to probe the libs?
+[18:05] <rurban> well, bash magic :)
+[18:05] <rurban> no, of course not. search some libpaths for my special platforms.
+[18:06] <NotFound> japhb: don't know about that, don't have any at hand to test.
+[18:06] *** Ron joined
+[18:06] <japhb> NotFound: "that" == what?
+[18:06] <NotFound> japhb: old gccs
+[18:06] <japhb> NotFound: ah, gotcha, wrong continuation.  :-)
+[18:07] <rurban> but we already know the gcc version from Configure
+[18:08] <japhb> rurban: I don't relish the debugging when we change our warnings list based on gcc version (especially when a new version arrives).
+[18:08] <NotFound> rurban: I think redundant flags do not harm, and trying to avoid them will be a boring and error prone task.
+[18:08] <japhb> (... and someone gets a warning on a gcc none of us has, so can't replicate)
+[18:09] <rurban> hmm. my commandline looks pretty long now, I'm worried that it well get too long without noticing
+[18:09] <NotFound> rurban: Are you compiling in ms-dos or something? ;)
+[18:09] <rurban> stupid windows shells of course only
+[18:09] <japhb> Isn't the limit something fairly large like 4K?
+[18:10] <rurban> I'm on a bash on cygwin 1.5. cygwin-1.7 will be much better
+[18:11] <rurban> Where should paste my -Wall findings to? perl6-internals?
+[18:12] <rurban> So that the next will not have to wade through gcc docs again
+[18:14] <NotFound> rurban: I don't see the need to worry about that. We can just add a note "Don't worry about redundant flags" in the gcc config part.
+[18:15] <rurban> At my $ccwarn = $conf->data->get('ccwarn'); as comment in the code just?
+[18:16] <NotFound> In the section with the list of flags to add an test will be better, I think.
+[18:17] <japhb> rurban: (opengl) if you include a -lfoo on a cygwin or mingw gcc command line, and 'foo.dll' and 'libfoo.dll' don't exist, what happens?
+[18:18] <rurban> unresolved symbols error. I konw what you mean. you dirty...
+[18:18] <rurban> put it all together... I'm testing this
+[18:30] <japhb> rurban: having any luck?
+[18:30] <rurban> wait a bit...
+[18:31] <rurban> -licuuc -licudata -lpthread -lm -lnotexists -lopengl32
+[18:31] <rurban> /usr/lib/gcc/i686-pc-cygwin/3.4.4/../../../../i686-pc-cygwin/bin/ld: cannot find -lnotexists
+[18:31] <rurban> collect2: ld returned 1 exit status
+[18:31] <rurban> too bad.
+[18:32] <rurban> No, I'm happy with fixing the lib detection logic.
+[18:33] <rurban> For I've just removed the cygwin case for win32_gcc so thatI will fall back todefault, which is better for the package, but not for svn.
+[18:33] <rurban> s/For /For now/
+[18:34] *** Theory joined
+[18:37] <japhb> rurban: explain?
+[18:37] <japhb> You're doing something different in the cygwin package than what you have checked in?
+[18:38] <rurban> sure. my src.patch is already 53kb
+[18:38] <japhb> eww
+[18:38] <rurban> the 0.6.3 patch was just 46kb
+[18:39] <rurban> It's so big because of all the binary renamings. The rest is tools/dev/install_files.pl which is broken
+[18:40] <rurban> The ffi names pointing to non-existing dll's need also to be fixed for cygwin
+[18:41] <rurban> And some improtant patches were forgotten in 0.6.4, such as the cygwin jit fix.
+[18:42] <NotFound> I've found that I still have a gcc-3.4 Not very old, but I tested building with it, and no problem.
+[18:42] <rurban> the implib patch (import library), the recent parrot_debugger renaming, ...
+[18:43] <rurban> the cygwin dll naming, ...
+[18:44] <particle> i don't expect to support parrot on any gcc older that 3.4
+[18:45] <chromatic> and 3.x probably only because Mac OS X and OpenBSD haven't finished moving to 4.x yet.
+[18:45] <particle> yep
+[18:46] <NotFound> particle: you're luck that at my work they recently retired the last hp-ux 10.20 system, I had a 2.9 on them X-)
+[18:48] <japhb> chromatic: What are OS X and OpenBSD still using 3.x for, anyway?  I thought OS X had run 4.x for a while now ...
+[18:48] <chromatic> japhb, I don't know about 10.5, but with 10.4 gcc 3.x was still an option.
+[18:48] <rurban> japhb: I have now a good opengl cygwin compromise patch. I'll add to to the tracker.
+[18:48] <cjfields> OS X 10.5 uses gcc 4.0.1
+[18:48] <japhb> rurban: cool, I'll look for it.
+[18:48] <chromatic> OpenBSD ... well, they're writing their own version of CVS.  I'll stop there.
+[18:49] * japhb squeezes his eyes shut in pain
+[18:49] <japhb> That's just ... disturbing.
+[18:49] <davidfetter> chromatic, ugh
+[18:49] <szbalint> instead of letting CVS die a pensioner's death...
+[18:49] <davidfetter> and going with a DSCM would be bad is wrong because...?
+[18:50] <japhb> It's amazing how sometimes brilliant people have a mental block about something very, very wrong.
+[18:50] <davidfetter> er, s/would be bad//
+[18:50] <japhb> davidfetter: Just taking a random guess, perhaps because they don't feel they could do a full security sweep of something as big as a DSCM?
+[18:51] <NotFound> gcc-3.4 build pass all test. Want a smoke?
+[18:51] * davidfetter thinks people who imagine they can do a "full security sweep" of *anything* are delusional
+[18:53] <japhb> davidfetter: OpenBSD does iterative sweeps.  Every time a new class of bug is discovered, they sweep their entire code base for it.  And any time a piece of code is too complex to feel like they can secure it properly, they rewrite.
+[18:54] <davidfetter> what happens when they find a class break in TCP?
+[18:54] <davidfetter> or DNS?
+[18:54] <purl> rumour has it DNS is the way to hack the Internet
+[18:54] <moritz> davidfetter: pray they don't ;-)
+[18:54] <japhb> They're more than a bit nutters, but then again they often get to go 'nya-nya-nya-nya-nyaaaah' every time other distros say 'I didn't know you could do *that* to *that* ...'
+[18:55] <japhb> davidfetter: You mean a fundamental design flaw?  Like the one from last week?
+[18:55] <davidfetter> japhb, yep
+[18:55] <moritz> .oO( they fix it? )
+[18:56] <japhb> davidfetter: half the time, their paranoia means that the bug could never have been exploited on their system.  Just like djbdns was not exploitable, because DJB had long ago said 'randomizing source port is just good layered security, even though I don't know what I'm protecting against'.
+[18:57] <davidfetter> "security" like "meaning" is not context-free
+[18:57] <japhb> That's why, for instance, long ago OpenBSD went to randomized process IDs.  Because too many people think a process ID is a good random seed, and they're wrong.
+[18:57] <davidfetter> so saying something is just generally "good security" is missing the point
+[18:58] <davidfetter> randomizing process ids is good, but only in the context of that threat model :)
+[18:58] <japhb> davidfetter: Sure.  But you can say 'fits a pattern of known good security practices in other places'
+[18:58] <moritz> but you have to admit that they have very good ideas from time to time ;-)
+[18:58] <davidfetter> fair enough
+[19:00] <japhb> OK, popping that discussion off the stack ... we clearly support gcc 3.4.  How much older than that do we still support?
+[19:00] <rurban> 3.3 ?
+[19:00] <particle> no
+[19:00] <davidfetter> stack? i thought we used registers here ;)
+[19:00] <particle> and don't even ask about 2.7
+[19:01] <NotFound> Smoke passed and sended for 3.4
+[19:01] <rurban> 2.95 is still quite popular in academia
+[19:01] <chromatic> Academia should freakin' go outside once in a while.
+[19:01] <japhb> chromatic++
+[19:01] <chromatic> HELLO FROM THE 21ST CENTURY PLEASE JOIN US THE WATER IS FINE
+[19:01] <rurban> then they would get some fresh air. better not
+[19:01] <NotFound> What academia? Plato's one?
+[19:02] <japhb> davidfetter: OK, I mark the PMC holding that conversation continuation for garbage collection ...
+[19:03] <davidfetter> heh
+[19:04] <rurban> Another packaging thingo. I believe it's good to add a local_patches list to myconfig, as with perl5 local_patches[]
+[19:04] <rurban> So that you (and I ) can identify bugreports
+[19:15] <dalek> r29526 | coke++ | trunk:
+[19:15] <dalek> : [tcl] update XXX comment regarding HLL_map issue in [list]
+[19:15] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29526
+[19:16] <rurban> I have to go now. Bye!
+[19:31] <moritz> #perl6-soc now (if pmichaud or particle are around)
+[19:35] *** Zaba joined
+[19:46] *** Ademan joined
+[19:54] *** donaldh joined
+[20:13] *** moritz joined
+[20:19] *** Zaba joined
+[20:31] <dalek> r29527 | julianalbo++ | trunk:
+[20:31] <dalek> : add an assertion to src/debug.c
+[20:31] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29527
+[20:38] *** sjansen joined
+[20:38] *** rurban_ joined
+[20:41] *** Zaba joined
+[20:47] *** Whiteknight joined
+[20:48] <dalek> r29528 | Whiteknight++ | gsoc_pdd09:
+[20:48] <dalek> : [gsoc_pdd09] a few small changes I made while debugging
+[20:48] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29528
+[20:49] *** Ademan joined
+[20:52] <dalek> r29529 | Whiteknight++ | gsoc_pdd09:
+[20:52] <dalek> : [gsoc_pdd09] update to trunk r29527
+[20:52] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29529
+[21:04] *** Zaba joined
+[21:05] *** bacek joined
+[21:17] *** Limbic_Region joined
+[21:25] *** cjfields joined
+[21:26] <cjfields> chromatic++ (and that's coming from an academic)
+[21:38] <dalek> r29530 | julianalbo++ | trunk:
+[21:38] <dalek> : some more work in debugger
+[21:38] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29530
+[21:49] *** AndyA joined
+[21:55] *** sjansen joined
+[22:01] *** slightlyoff joined
+[22:02] <dalek> r29531 | julianalbo++ | trunk:
+[22:02] <dalek> : codingstd in debug.c
+[22:02] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29531
+[22:05] *** slightlyoff left
+[22:06] <Tene> pmichaud: ping
+[22:08] *** Zaba_ joined
+[22:09] <Limbic_Region> pmichaud ping
+[22:09] <Tene> HAY I PINGED HIM FIRST
+[22:09] <Limbic_Region> FILO
+[22:09] <NotFound> drop icmp echo
+[22:10] <Tene> Limbic_Region: so if I ping him again, I get another spot on the stack?
+[22:12] <chromatic> No stack; it's asynchronous CPS.
+[22:14] *** YorkeAndVedder joined
+[22:16] *** teknomunk joined
+[22:17] *** YorkeAndVedder left
+[22:31] *** Zaba joined
+[22:38] *** kid51 joined
+[22:44] *** ruoso joined
+[23:02] <dalek> r29532 | jkeenan++ | parallel:
+[23:02] <dalek> : Add inline comments to clarify what each section of file is doing.
+[23:02] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29532
+[23:07] <dalek> r29533 | Whiteknight++ | gsoc_pdd09:
+[23:07] <dalek> : [gsoc_pdd09] Add in a new last-first finalizing algorithm. Segfaults worse then before.
+[23:07] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29533
+[23:13] <dalek> r29534 | jkeenan++ | parallel:
+[23:13] <dalek> : Adjust POD in '=for' block.
+[23:13] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29534
+[23:16] *** Ademan joined
+[23:23] *** bacek joined
+[23:27] *** teknomunk_ joined
+[23:36] <dalek> r29535 | coke++ | trunk:
+[23:36] <dalek> : [tcl] Make this function more maintainable (get rid of old PASM style var
+[23:36] <dalek> : names, splitting them up into saner chunks.)
+[23:36] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29535
+[23:38] <dalek> r29536 | coke++ | trunk:
+[23:38] <dalek> : [tcl] http://code.google.com/p/partcl/issues/detail?id=58
+[23:38] <dalek> : Rename to avoid many (but not all) '__foo' style names
+[23:38] <dalek> diff: http://www.parrotvm.org/svn/parrot/revision?rev=29536
+[23:47] *** teknomunk__ joined
+[23:49] *** davidfetter joined
+[23:52] <chromatic> "Segfaults worse than before" made me laugh a sad, sardonic laugh.

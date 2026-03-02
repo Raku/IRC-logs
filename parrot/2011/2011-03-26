@@ -1,0 +1,694 @@
+[00:02] <whiteknight> plobsing: I added a debugging statement to the PtrObj destroy function for packfiles coming out of IMCC. When I add that GC_unblock statement in that conditional, three PackFile PtrObj pmcs are destroyed before the segfault
+[00:03] <plobsing> so then the PtrObj objects aren't being correctly marked by whatever is holding them?
+[00:03] <plobsing> if you want a workaround, you could gc register the PtrObj PackFiles. that would somewhat defeat the point of keeping them in GCables however.
+[00:05] <whiteknight> I think I fixed it
+[00:05] <whiteknight> I pass the new PtrObj pmc as the third argument to PackFile_fixup_subs
+[00:05] <whiteknight> that way it gets marked when Subs get marked
+[00:06] *** bacek left
+[00:08] <plobsing> the subs reference the bytecode using struct pointers still? yeah, that would be a problem.
+[00:09] *** lucian left
+[00:09] <whiteknight> ...no, that doesnt seem to fix it
+[00:09] <whiteknight> just looked that way for a second
+[00:10] <plobsing> you could mark the object when the bytecode segments get marked.
+[00:10] <plobsing> *the interp's bytecode segments
+[00:10] <plobsing> it means we still leak bytecode, but if I'm not mistaken, that isn't the primary objective of this branch
+[00:11] *** lucian joined
+[00:11] <whiteknight> not the primary objective, no
+[00:11] <whiteknight> certainly in my sights
+[00:14] <whiteknight> hmm...weird. I gc_register the packfile PMC as soon as I create it, and I never unregister it. the build gets past the PGE, but segfaults in TGE build now
+[00:16] <plobsing> do the PtrObj PMCs get collected somehow?
+[00:16] <whiteknight> no. I added a custom destroy function with debugging info in it, and the PtrObj doesn't get destroyed now
+[00:16] <whiteknight> it was getting destroyed before registering it
+[00:18] <whiteknight> what's weird is that in the TGE build, it segfaults in exactly the same place in PCC
+[00:19] <whiteknight> I don't know if that's a coincidence or something more sinister
+[00:29] <whiteknight> this issue is bigger because I suspect it's not specific to my branch, it's only getting exposed here
+[00:32] *** nwellnhof left
+[00:33] <dukeleto> ~~
+[00:34] *** Coke left
+[00:34] *** Coke joined
+[00:47] *** jsut_ joined
+[00:48] *** bacek joined
+[00:50] <whiteknight> blahblahblah
+[00:50] <whiteknight> IMCC is the devil
+[00:51] <plobsing> deja vu?
+[00:52] <dukeleto> whiteknight: shall I sacrifice a virgin yak to the IMCC elder gods for you?
+[00:52] *** jsut left
+[00:52] * dukeleto mumbles "release the yaks" in latin
+[01:00] <whiteknight> okay, here's something I don't understand
+[01:01] <whiteknight> I added in debug statements to gc_block_mark and gc_unblock_mark
+[01:01] <whiteknight> these statements print out the current gc block level
+[01:01] <whiteknight> with/without the extra gc_unblock statement in Parrot_load_bytecode, the counts are the same
+[01:07] *** dmalcolm left
+[01:09] <dukeleto> whiteknight: funky
+[01:09] <dukeleto> whiteknight: is something being optimized away in certain situations?
+[01:09] <dukeleto> whiteknight: are you compiling with optimization?
+[01:10] <whiteknight> no, I was looking at the wrong sequence. The counts are different
+[01:11] <whiteknight> in the branch, without that gc block, the counts go up and GC never turns back on
+[01:13] *** cotto joined
+[01:15] <whiteknight> and now I put a debugging statement in Parrot_gc_mark_and_sweep, and it never appears to be getting called
+[01:17] <whiteknight> I moved it , and now it is getting called
+[01:20] <whiteknight> okay, the PackFile PMCs are definitely getting marked and are not getting collected. That's a good sign
+[01:25] *** hercynium joined
+[01:26] *** hercynium left
+[01:29] <dukeleto> whiteknight: nice blog post about the PL/Parrot gsoc idea
+[01:29] <whiteknight> thanks
+[01:30] <dukeleto> whiteknight: the project will be mostly C, but a little bit of PIR, Perl 6 and SQL will be needed too
+[01:30] <dukeleto> whiteknight: we might want to tell the students that
+[01:31] <whiteknight> okay
+[01:31] <dukeleto> whiteknight: the Perl 6 might not be required, if the glue code that loads PL/Perl6 doesn't need to be changed
+[01:31] <dukeleto> whiteknight: but it should be a tiny change if one is needed
+[01:32] <dukeleto> whiteknight: 95% C and 5% other would be my estimate
+[01:32] <whiteknight> yeah, that's what I was thinking
+[01:32] <dukeleto> whiteknight: i really like your blog infrastructure
+[01:32] <dukeleto> whiteknight: have you written something up about it?
+[01:33] <whiteknight> it's the bog-standard github pages feature
+[01:33] <dukeleto> whiteknight: i don't blog frequently and I blame it on hating all blog frameworks
+[01:33] <dukeleto> whiteknight: bog-standard!
+[01:33] <whiteknight> dukeleto: It's just a git repo. I write files, commit, push
+[01:33] <whiteknight> github does the rest
+[01:33] <dukeleto> whiteknight: do you write them in Markdown?
+[01:33] *** lucian left
+[01:33] <dukeleto> whiteknight: what is the input format for the blog posts?
+[01:34] <whiteknight> yeah, I use markdown. I tried textile for a while, but didnt like the format
+[01:35] <whiteknight> github supports a bunch of formats. I think they even support POD if anybody wanted to blog with that
+[01:39] <whiteknight> plobsing: the raw_sig PMC which is causing the segfault is a constant PMC. So it should be getting marked with the PackFile, right?
+[01:40] <plobsing> that's the args FIA right? yeah, that should get marked with the packfile, and with the interps segments
+[01:42] <whiteknight> yeah, that's the FIA
+[01:43] <whiteknight> the PackFile* structure is being marked
+[01:44] <whiteknight> this is ... weird
+[01:45] <whiteknight> constant segments are getting marked
+[01:46] <whiteknight> the TGE build that is segfaulting now only runs 1 GC mark/sweep
+[01:46] <whiteknight> it runs GC right before the invoke which causes the segfault
+[01:52] <whiteknight> this is a very very interesting bug
+[01:55] <whiteknight> I think I need sleep
+[01:56] <whiteknight> goodnight
+[01:56] *** whiteknight left
+[02:04] *** contingencyplan left
+[02:38] *** ShaneC1 left
+[02:38] *** ShaneC1 joined
+[02:43] <dalek> TT #2069 created by ekvkezbzz3++: The internet Method of keeping a person Knowledgeable regarding Deals
+[02:43] <dalek> TT #2069: http://trac.parrot.org/parrot/ticket/2069
+[02:43] <dalek> Heuristic branch merge: pushed 47 commits to nqp by jnthn
+[02:44] *** ShaneC1 left
+[02:45] <benabik> spammers--
+[02:55] *** theory joined
+[03:06] *** Andy_ joined
+[03:14] <dalek> TT #2070 created by ehqbqstmpgn8++: Accept The New Technology Of E-cigarette
+[03:14] <dalek> TT #2070: http://trac.parrot.org/parrot/ticket/2070
+[03:27] *** theory left
+[03:28] *** theory joined
+[03:30] <dalek> parrot/jit_prototype: 778e759 | bacek++ | compilers/opsc/ (3 files):
+[03:30] <dalek> parrot/jit_prototype: Add stub for JITter
+[03:30] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/778e759948
+[03:30] <dalek> parrot/jit_prototype: 859188f | bacek++ | t/jit/proto.t:
+[03:30] <dalek> parrot/jit_prototype: Add proto.t for prototyping.
+[03:30] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/859188fc2b
+[03:30] <dalek> parrot/jit_prototype: e06d5f2 | bacek++ | compilers/opsc/opsc.pir:
+[03:30] <dalek> parrot/jit_prototype: Include JIT into opsc.
+[03:30] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/e06d5f2627
+[03:30] <dalek> parrot/jit_prototype: f376e0a | bacek++ | compilers/opsc/src/Ops/JIT.pm:
+[03:30] <dalek> parrot/jit_prototype: Load PBC in JIT.new
+[03:30] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/f376e0a8b0
+[03:30] <dalek> parrot/jit_prototype: 4418be2 | bacek++ | compilers/opsc/src/Ops/JIT.pm:
+[03:30] <dalek> parrot/jit_prototype: Minor style changes.
+[03:30] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/4418be2ab1
+[03:30] <dalek> parrot/jit_prototype: 9093704 | bacek++ | compilers/opsc/src/Ops/JIT.pm:
+[03:30] <dalek> parrot/jit_prototype: Generate %!ops for lookup ops. Redispatch PAST::Op deeper inside.
+[03:30] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/9093704191
+[03:30] <dalek> parrot/jit_prototype: c53341e | bacek++ | / (2 files):
+[03:30] <dalek> parrot/jit_prototype: Load jitted_ops.bc as module with all precompiled stuff
+[03:30] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/c53341e6ff
+[03:30] <dalek> parrot/jit_prototype: 51c269f | bacek++ | compilers/opsc/src/Ops/JIT.pm:
+[03:30] <dalek> parrot/jit_prototype: Add LLVM::Builder. We'll need it.
+[03:30] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/51c269f47e
+[03:30] <dalek> parrot/jit_prototype: 3f3f651 | bacek++ | compilers/opsc/src/Ops/JIT.pm:
+[03:30] <dalek> parrot/jit_prototype: Flesh out future JIT algorithm
+[03:30] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/3f3f651476
+[03:37] <plobsing> ping bacek
+[03:37] <bacek> plobsing, pog
+[03:38] <bacek> pong
+[03:38] <plobsing> I have an idea of how JIT can work with dynops.
+[03:39] <bacek> plobsing, go ahead.
+[03:39] <plobsing> JIT is basically a different runcore. Runcores which differ in mechanism (eg: fast vs cgp) are going to need to represent ops in different ways. This should be delegated to opsc in the creation of libraries
+[03:40] <plobsing> we don't want an N-wise explosion in size of ops libraries of course, so runcore (in the mechanism sense) should be compile-time selected.
+[03:41] <plobsing> s/compile/configure/
+[03:41] <bacek> it's runtime selected now
+[03:41] <plobsing> yes, but those are only runcores in the not-really-a-different-type-of-runcore sense
+[03:41] <bacek> afk # kids
+[03:42] <plobsing> we don't really support runcores that differ in *interesting* ways right now
+[03:42] <plobsing> we did, but we removed that along with the interesting runcores
+[03:54] *** woosley left
+[04:02] *** woosley joined
+[04:06] *** woosley left
+[04:25] *** theory left
+[04:28] *** theory joined
+[04:41] *** particle left
+[04:43] *** lucian joined
+[04:45] *** redicaps joined
+[04:56] <dalek> parrot: 23b323e | plobsing++ | / (2 files):
+[04:56] <dalek> parrot: HAS_INT64 => PARROT_HAS_INT64 and HAS_LONGLONG => PARROT_HAS_LONGLONG after config changes doing the same
+[04:56] <dalek> parrot: review: https://github.com/parrot/parrot/commit/23b323ea5e
+[04:56] <dalek> parrot: 1372111 | plobsing++ | src/pmc/key.pmc:
+[04:56] <dalek> parrot: support generating PBC containing PMC-register keys
+[04:56] <dalek> parrot: review: https://github.com/parrot/parrot/commit/137211165c
+[04:56] <dalek> parrot: 4c9efee | plobsing++ | MANIFEST.generated:
+[04:56] <dalek> parrot: make ncidef2pir tool installable
+[04:56] <dalek> parrot: review: https://github.com/parrot/parrot/commit/4c9efee189
+[04:56] <dalek> parrot: 79ae153 | plobsing++ | src/pmc/key.pmc:
+[04:56] <dalek> parrot: allow thawing of PMC-register keys
+[04:56] <dalek> parrot: review: https://github.com/parrot/parrot/commit/79ae15388c
+[04:56] <dalek> parrot: 7df21a4 | plobsing++ | src/pmc/structview.pmc:
+[04:56] <dalek> parrot: implement serialization/deserialization for structview
+[04:56] <dalek> parrot: review: https://github.com/parrot/parrot/commit/7df21a4552
+[04:56] <dalek> parrot: 475136c | plobsing++ | src/pmc/structview.pmc:
+[04:56] <dalek> parrot: implement array_offs and elt_offs methods on structview for array and element offset pointer arithmentic
+[04:56] <dalek> parrot: review: https://github.com/parrot/parrot/commit/475136cb57
+[04:56] <dalek> parrot: 818cc19 | plobsing++ | src/pmc/structview.pmc:
+[04:56] <dalek> parrot: reset key in keyed vtable preamble - fixes delegation issues in [gs]et_pmc_keyed
+[04:56] <dalek> parrot: review: https://github.com/parrot/parrot/commit/818cc19149
+[05:02] <cotto> ~~
+[05:06] *** lucian left
+[05:12] *** theory left
+[05:18] *** theory joined
+[05:20] <plobsing> aloha: msg NotFound since includes.pasm is the de facto mechanism for exposing constants in Parrot, would it be possible to get winxed to output such files for file-scope const variables? I'd like to be able to expose library constants, and this seems like the most efficient and most common approach.
+[05:20] <aloha> plobsing: OK. I'll deliver the message.
+[05:58] *** particle joined
+[06:00] *** jsut joined
+[06:03] *** sykrex joined
+[06:05] *** jsut_ left
+[06:10] *** theory left
+[06:20] *** fperrad joined
+[06:25] *** fperrad_ joined
+[06:28] *** fperrad left
+[06:28] *** fperrad_ is now known as fperrad
+[06:29] *** Andy__ joined
+[06:29] *** Andy_ left
+[06:29] *** sykrex left
+[06:46] *** bacek left
+[06:56] *** fperrad left
+[06:56] *** fperrad_ joined
+[06:56] *** fperrad_ is now known as fperrad
+[07:10] *** rurban left
+[07:11] *** rurban joined
+[07:24] *** fperrad_ joined
+[07:25] *** fperrad left
+[07:25] *** fperrad_ is now known as fperrad
+[08:18] <dalek> parrot: 878c837 | jonathan++ | src/pmc/sub.pmc:
+[08:18] <dalek> parrot: Auto-close did not work for more than a single frame deep. Discovered this bug when tracking down why static lexpad symbol handling didn't work out in NQP.
+[08:18] <dalek> parrot: review: https://github.com/parrot/parrot/commit/878c837ff2
+[08:21] <dalek> nqp/ctmo: e04b77c | jonathan++ | src/metamodel/how/NQPClassHOW.pm:
+[08:21] <dalek> nqp/ctmo: Make a comment reflect reality a little more.
+[08:21] <dalek> nqp/ctmo: review: https://github.com/perl6/nqp/commit/e04b77c8bf
+[08:21] <dalek> nqp/ctmo: 4150953 | jonathan++ | build/PARROT_REVISION:
+[08:21] <dalek> nqp/ctmo: Bump to latest Parrot to get fixes to make static lexpad bits work in non-trivial cases.
+[08:21] <dalek> nqp/ctmo: review: https://github.com/perl6/nqp/commit/4150953aa2
+[08:21] <dalek> nqp/ctmo: 47001b3 | jonathan++ | src/NQP/Actions.pm:
+[08:21] <dalek> nqp/ctmo: Install $?CLASS as a lexical symbol, not package. Now consistent with roles and classes, and also with nqpclr.
+[08:21] <dalek> nqp/ctmo: review: https://github.com/perl6/nqp/commit/47001b3027
+[08:32] *** redicaps left
+[08:37] *** woosley joined
+[08:46] *** Andy__ left
+[08:53] *** dodathome joined
+[08:56] *** cgaertner joined
+[09:37] *** contingencyplan joined
+[09:38] *** mj41 joined
+[09:58] *** cgaertner left
+[10:16] *** bacek joined
+[11:17] *** cgaertner joined
+[11:18] <cgaertner> hi
+[11:18] <nopaste> "cgaertner" at 192.168.1.3 pasted "gobject interop proposal" (16 lines) at http://nopaste.snit.ch/38712
+[11:18] <cgaertner> ^ comments appreciated
+[11:20] <moritz> cgaertner: sounds nice
+[11:20] <moritz> and worthwhile
+[11:20] <moritz> don't forget: tests, tets, tests :-)
+[11:20] <cgaertner> ;)
+[11:22] <cgaertner> if that's something parrot wants, I'm going to take a closer look at Parrot/GObject to see if it's actually feasible
+[11:24] <dalek> parrot/opsc_llvm: 4ac7226 | bacek++ | / (2 files):
+[11:24] <dalek> parrot/opsc_llvm: Function.first_basic_block and .last_basic_block
+[11:24] <dalek> parrot/opsc_llvm: review: https://github.com/parrot/parrot/commit/4ac7226425
+[11:27] <dalek> parrot/jit_prototype: 6d03e93 | bacek++ | compilers/opsc/src/Ops/JIT.pm:
+[11:27] <dalek> parrot/jit_prototype: Create jitted_sub
+[11:27] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/6d03e93b74
+[11:27] <dalek> parrot/jit_prototype: a8ec0bc | bacek++ | runtime/parrot/library/LLVM.pm:
+[11:27] <dalek> parrot/jit_prototype: Load LLVM_engine in LLVM.pm
+[11:27] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/a8ec0bca3a
+[11:27] <dalek> parrot/jit_prototype: d371c74 | bacek++ | t/compilers/opsc/20-jit.t:
+[11:27] <dalek> parrot/jit_prototype: Proper test file
+[11:27] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/d371c7474f
+[11:27] <dalek> parrot/jit_prototype: 4beb14b | bacek++ | compilers/opsc/src/Ops/JIT.pm:
+[11:27] <dalek> parrot/jit_prototype: Move creating of jit_context into separate function to simplify testing.
+[11:27] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/4beb14b2db
+[11:27] <dalek> parrot/jit_prototype: 8932af7 | bacek++ | compilers/opsc/src/Ops/JIT.pm:
+[11:27] <dalek> parrot/jit_prototype: Return self when needed.
+[11:27] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/8932af7bb3
+[11:27] <dalek> parrot/jit_prototype: 05ef4a8 | bacek++ | / (2 files):
+[11:27] <dalek> parrot/jit_prototype: Move all LLVM initialization into _llvm_init
+[11:27] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/05ef4a839b
+[11:27] <dalek> parrot/jit_prototype: f4ac5af | bacek++ | t/jit/proto.t:
+[11:27] <dalek> parrot/jit_prototype: Remove code migrated to Ops::JIT
+[11:27] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/f4ac5afec4
+[11:27] <dalek> parrot/jit_prototype: 4ac7226 | bacek++ | / (2 files):
+[11:27] <dalek> parrot/jit_prototype: Function.first_basic_block and .last_basic_block
+[11:27] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/4ac7226425
+[11:27] <dalek> parrot/jit_prototype: 5ad0e00 | bacek++ | / (9 files):
+[11:27] <dalek> parrot/jit_prototype: Merge branch 'opsc_llvm' into jit_prototype
+[11:27] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/5ad0e007f3
+[11:29] *** Eduardow left
+[11:30] *** whiteknight joined
+[11:40] <whiteknight> good morning, #parrot
+[11:41] <cgaertner> good morning, whiteknight
+[11:42] <whiteknight> hello cgaertner, how are you doing today?
+[11:43] <cgaertner> fine so far, but the weather is not as nice as it has been :(
+[11:44] <cgaertner> any comments on http://nopaste.snit.ch/38712 ?
+[11:46] <whiteknight> that looks like a very good start
+[11:47] <cgaertner> as far as I can see, just exposing the vtables won't be enough to do anything useful, like call subs
+[11:47] <cgaertner> you need Parrot_ext_Call() for that, correct?
+[11:48] <whiteknight> yeah. VTABLE_find_method is used to find method objects. Parrot_ext_call will be used to invoke them
+[11:49] <cgaertner> afk for a bit (~1/2 hour), but I have some more questions ;)
+[11:50] <whiteknight> ok. We'll be here
+[11:51] *** Psyche^ joined
+[11:53] *** Patterner left
+[11:53] *** Psyche^ is now known as Patterner
+[11:59] <dalek> parrot/jit_prototype: b84f770 | bacek++ | t/compilers/opsc/20-jit.t:
+[11:59] <dalek> parrot/jit_prototype: Add test for BB creating.
+[11:59] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/b84f770885
+[11:59] <dalek> parrot/jit_prototype: ed2c889 | bacek++ | / (2 files):
+[11:59] <dalek> parrot/jit_prototype: Implement generating of BasicBlocks for jitted Sub
+[11:59] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/ed2c889581
+[12:17] <cgaertner> whiteknight: ping
+[12:17] <whiteknight> pong
+[12:18] <cgaertner> it should be possible to seemlessly integrate gobject into parrot - there's prior art for that (pygobject)
+[12:18] <cgaertner> php will also probably get that capability
+[12:18] <cgaertner> however, the other direction is not so simple
+[12:19] <cgaertner> gobject methods are just C functions (ie must be known at compile-time), so that's out
+[12:19] <cgaertner> but there's a signalling mechanism for event-drivent programming
+[12:19] <cgaertner> ...which won't probably work because it expects a fixed signature (arity+types)
+[12:20] <cgaertner> so the best one could do is probably expose an interface like Parrot_ext_call on a ParrotObject GObject
+[12:22] <cgaertner> what I intend to do is create a base class which exposes all PMC vtable function (auto-generated from vtable.tnl) and then create subclasses for specific core PMCs, forming a proper API
+[12:23] <cgaertner> eg you could habe a ParrotSub GObject class with an invoke() method as a wrapper over Parrot_ext_call() and a ParrotObject class as a wrapper over find_method() vtable + the subs incoke()
+[12:23] <cgaertner> is that a sane approach?
+[12:28] <cgaertner> that should have read "[...] a ParrotObject class with a call() method as a wrapper over the find_method() vtable function + the returned subs invoke()"
+[12:32] <dalek> parrot/jit_prototype: 49e1ad5 | bacek++ | compilers/opsc/src/Ops/JIT.pm:
+[12:32] <dalek> parrot/jit_prototype: Jump from "entry" block to first op.
+[12:32] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/49e1ad5e18
+[12:32] <dalek> parrot/jit_prototype: 0f272d9 | bacek++ | compilers/opsc/src/Ops/JIT.pm:
+[12:33] <dalek> parrot/jit_prototype: Fix starting of jit. Factor out _keep_going function.
+[12:33] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/0f272d9e9c
+[12:33] <dalek> parrot/jit_prototype: 0f7940e | bacek++ | compilers/opsc/src/Ops/JIT.pm:
+[12:33] <dalek> parrot/jit_prototype: Change _count_args to _opsize.
+[12:33] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/0f7940e22e
+[12:33] <dalek> parrot/jit_prototype: 6e4e308 | bacek++ | compilers/opsc/src/Ops/JIT.pm:
+[12:33] <dalek> parrot/jit_prototype: Add more skeleton stubs for processing ops.
+[12:33] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/6e4e308ba7
+[12:33] <dalek> parrot/jit_prototype: 15d07dd | bacek++ | compilers/opsc/src/Ops/JIT.pm:
+[12:33] <dalek> parrot/jit_prototype: Add totally untested _jit_ops
+[12:33] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/15d07ddee9
+[12:34] *** jsut_ joined
+[12:35] <cgaertner> on to the parrot side of things:
+[12:35] <cgaertner> how does a HLL implement its object system?
+[12:35] <cgaertner> subclass the Class PMC from PIR?
+[12:36] <cgaertner> from parrot's point of view, gobject will ideally just be another HLL
+[12:38] <cgaertner> (except where it's not ;))
+[12:39] *** jsut left
+[12:44] <whiteknight> a GObjectSub PMC type with a custom invoke would be a good idea
+[12:44] <whiteknight> that would encapsulate a call, and allow you to pass it around as an object to other libraries
+[12:52] <cgaertner> whiteknight: that's the parrot side of things, corrct? I was talking about calling into Parrot from GObject before (sorry if that wasn't clear)
+[12:56] <whiteknight> yes, you could set up a small callback function to do that
+[12:56] <whiteknight> it would have fixed parameters, the GObjectSub PMC and maybe an interp. The GObjectSub could hold an array of other arguments
+[12:58] *** ambs joined
+[13:08] <dalek> parrot/jit_prototype: 474a43b | bacek++ | / (2 files):
+[13:08] <dalek> parrot/jit_prototype: Finish creating of basic skeleton for JITted Sub
+[13:08] <dalek> parrot/jit_prototype: review: https://github.com/parrot/parrot/commit/474a43b017
+[13:20] <dalek> TT #2071 created by yjdqgckirtmqt0++: Chatroulette: Key in to a Superficial World
+[13:20] <dalek> TT #2071: http://trac.parrot.org/parrot/ticket/2071
+[13:22] *** kid51 joined
+[13:36] <dalek> TT #1411 closed by jkeenan++: [BUG] configure problem on the arm architecture
+[13:36] <dalek> TT #1411: http://trac.parrot.org/parrot/ticket/1411
+[13:44] *** woosley left
+[14:03] <whiteknight> cgaertner: are you on github?
+[14:07] *** rohit_nsit08 joined
+[14:07] <rohit_nsit08> hello everyone
+[14:07] <rohit_nsit08> whiteknight: hi
+[14:08] <rohit_nsit08> dukeleto: hi
+[14:08] <whiteknight> rohit_nsit08: good morning
+[14:08] <whiteknight> rohit_nsit08: are you on github?
+[14:09] <rohit_nsit08> whiteknight: i made account some time back , i have it installed in my linux box
+[14:09] <rohit_nsit08> whiteknight: shall i make it again?
+[14:10] <whiteknight> rohit_nsit08: github is where parrot's code is, and it's a convenient place to start putting together a proposal
+[14:11] <rohit_nsit08> whiteknight: i used git to clone parrot source code , i will now join it , just a few minutes, i was making my project proposal today  , some details are missing will complete and mail u today for review , so that we can refine it further
+[14:12] <whiteknight> rohit_nsit08: you can create a "gist" on github, which is something that can be edited, and that we can make comments on
+[14:13] <rohit_nsit08> whiteknight: i'm on it , ya that will be a better way , i'm familiar to bazaar , didn't used git for quite long time
+[14:14] <rohit_nsit08> whiteknight: give me few minutes and i'll set up everything
+[14:14] <whiteknight> okay, awesome
+[14:15] <cgaertner> whiteknight: I just created a cgaertner github account
+[14:16] <cgaertner> personally, I'm more of a mercurial guy...
+[14:16] <whiteknight> cgaertner: okay, awesome. I'm following you on github now
+[14:17] <whiteknight> cgaertner: you can create a fork of the parrot repo if you want to start playing around. Also, create a gist for your proposal, so you can update it and we can follow along
+[14:20] *** bacek left
+[14:30] <rohit_nsit08> whiteknight: made my account , now filling details in the proposal
+[14:31] <whiteknight> awesome
+[14:32] <whiteknight> rohit_nsit08: what is your github username?
+[14:37] <rohit_nsit08> whiteknight: rohit-nsit08
+[14:38] <whiteknight> Okay, I'm following you too
+[14:38] <cgaertner> whiteknight: what API should be targeted for the wrapper over libparrot - embed_new?
+[14:38] <whiteknight> cgaertner: for the embedding API, yes. That's what you use if you're embedding Parrot in a larger project
+[14:40] <whiteknight> for the GObject project, you're probably not going to use embedding stuff
+[14:40] <whiteknight> because the GObject code gets called from inside Parrot
+[14:40] <cgaertner> whiteknight: if time permits, I'm going to try for two-way interop
+[14:40] <cgaertner> first make gobject work from parrot
+[14:40] <cgaertner> then (if there's enough time), make parrot work from gobject
+[14:43] <whiteknight> ok
+[14:53] *** rohit_nsit08 left
+[14:56] *** kid51 left
+[15:04] *** rohit_nsit08 joined
+[15:09] *** rurban left
+[15:09] <dalek> TT #2072 created by xgudmzpeseefb5++: Efficacy of Movie reviews
+[15:09] <dalek> TT #2072: http://trac.parrot.org/parrot/ticket/2072
+[15:11] *** rurban joined
+[15:15] *** woosley joined
+[15:15] *** Eduardow joined
+[15:22] *** woosley left
+[15:24] <dalek> parrot: 8ff4abd | mikehh++ | src/pmc/structview.pmc:
+[15:24] <dalek> parrot: fix codetest failure - line length
+[15:24] <dalek> parrot: review: https://github.com/parrot/parrot/commit/8ff4abd2d3
+[15:24] <dalek> parrot: 1de5200 | mikehh++ | src/pmc/sub.pmc:
+[15:24] <dalek> parrot: fix codetest failure - line length
+[15:24] <dalek> parrot: review: https://github.com/parrot/parrot/commit/1de520023d
+[15:38] *** lucian joined
+[15:39] <cgaertner> whiteknight: https://gist.github.com/888382
+[15:39] <whiteknight> awesome
+[15:39] <whiteknight> cgaertner: Myself and other Parrot devs can make comments on it now, and you can edit it to make changes as needed
+[15:40] <whiteknight> this way we can help you get a great proposal
+[15:40] <dalek> TT #2073 created by taymvcddktleoy3++: Each and every individuals desire can become a real possibility along with ...
+[15:40] <dalek> TT #2073: http://trac.parrot.org/parrot/ticket/2073
+[15:44] <whiteknight> damnit
+[15:44] <Hackbinary> cd
+[15:50] <whiteknight> plobsing: ping
+[15:50] <whiteknight> hello Hackbinary, how are you doing today?
+[15:51] <Hackbinary> I'm good, I just finished making Eclipse 3.6 packages for Ubuntu / Debian that work!
+[15:51] <whiteknight> msg plobsing I fixed the GC bug. Testing now and will commit a fix as soon as I clear out my debugging garbage
+[15:51] <aloha> OK. I'll deliver the message.
+[15:51] <Hackbinary> I'm chuffed to bits over that really
+[15:52] <Hackbinary> how are you whiteknight?
+[15:53] <whiteknight> Hackbinary: much better now. I just fixed a bug that I've been stuck on for two weeks
+[15:53] <Hackbinary> nice!
+[15:53] <Hackbinary> I hate being stuck on things
+[15:54] <whiteknight> We've been busy this week talking to GSoC students too. We have a lot of them this year
+[15:54] <Hackbinary> yeah, I seen the messages on the list
+[15:55] <Hackbinary> it looks like parrot will do pretty good with GSoC
+[15:56] <lucian> whiteknight: try a few months stuck on a bug
+[15:56] <lucian> it's dreadful
+[15:56] <whiteknight> lucian: I would hit a threshold where I would have to go back and start from scratch
+[15:57] <lucian> whiteknight: there are times when that's not possible. i'm embedding xulrunner in a gtk app. it's a xulrunner bug somewhere, but i can rarely reproduce it (likely race condition)
+[15:59] <whiteknight> oh, that sucks
+[15:59] <whiteknight> well, that's not a bug you created. In this imcc_compiler_pmc branch, it was a bug I introduced
+[15:59] <whiteknight> or, at least a bug I exposed
+[16:02] <lucian> i se
+[16:08] <dalek> parrot/whiteknight/imcc_compreg_pmc: 47d6211 | Whiteknight++ | / (9 files):
+[16:08] <dalek> parrot/whiteknight/imcc_compreg_pmc: remove TT #1990 hack from Parrot_load_bytecode. This should prevent Parrot from eating up all RAM in certain situations
+[16:08] <dalek> parrot/whiteknight/imcc_compreg_pmc: review: https://github.com/parrot/parrot/commit/47d621105d
+[16:08] <dalek> parrot/whiteknight/imcc_compreg_pmc: a3bba04 | Whiteknight++ | / (4 files):
+[16:08] <dalek> parrot/whiteknight/imcc_compreg_pmc: whatever
+[16:08] <dalek> parrot/whiteknight/imcc_compreg_pmc: review: https://github.com/parrot/parrot/commit/a3bba045f3
+[16:10] <whiteknight> it makes me so happy to be able to push that commit
+[16:11] * lucian claps for whiteknight
+[16:11] <whiteknight> thanks. this is a big deal
+[16:11] <whiteknight> at least, for me
+[16:14] <dalek> parrot/whiteknight/imcc_compreg_pmc: 3167be3 | Whiteknight++ | / (37 files):
+[16:14] <dalek> parrot/whiteknight/imcc_compreg_pmc: fix conflicts
+[16:14] <dalek> parrot/whiteknight/imcc_compreg_pmc: review: https://github.com/parrot/parrot/commit/3167be3562
+[16:20] *** kid51 joined
+[16:21] *** M_o_C joined
+[16:22] <whiteknight> kid51: ping
+[16:24] <whiteknight> msg kid51 when you get a chance can you run tests on the whiteknight/imcc_compreg_pmc branch? I think I fixed that memory bug you had with it last time. checkdepend.t is failing right now, that one is not high priority for me to fix
+[16:24] <aloha> OK. I'll deliver the message.
+[16:29] <whiteknight> msg kid51: also codestd is going to be a mess.
+[16:29] <aloha> OK. I'll deliver the message.
+[16:31] <rohit_nsit08> whiteknight: hi, here is my 1st version of proposal : git://gist.github.com/888418.git
+[16:31] <kid51> whiteknight: Do you recall whether I reported those bugs on linux or darwin?
+[16:31] <rohit_nsit08> whiteknight: sorry it's here https://gist.github.com/888418
+[16:32] <whiteknight> kid51: no idea. I'm sure it would have manifested on any mem-constrained platform
+[16:32] <whiteknight> kid51: I know what to get your for christmas this year. RAM.
+[16:32] <whiteknight> :)
+[16:33] <whiteknight> rohit_nsit08: awesome. Great first draft
+[16:33] *** M_o_C left
+[16:33] <kid51> I need time free from dealing with spammers to think about getting a new laptop
+[16:33] <whiteknight> rohit_nsit08: we'll read it over and make comments
+[16:33] *** M_o_C joined
+[16:35] <rohit_nsit08> whiteknight: yup, and till than i'll finish my setup with cafe , i'm reading the code , had some conversation with zaach he confirmed some issues , he agreed to test the current node and reply by tomorrow so i have some time to study more about the cafe :-)
+[16:41] <dalek> parrot: ee4b813 | mikehh++ | MANIFEST.generated:
+[16:41] <dalek> parrot: fix sort order
+[16:41] <dalek> parrot: review: https://github.com/parrot/parrot/commit/ee4b813957
+[16:50] *** M_o_C left
+[16:51] *** cgaertner left
+[16:52] *** M_o_C joined
+[16:52] <plobsing> whiteknight: a3bba04 appears to reintroduce the block-leak
+[16:53] <whiteknight> oh shoot, that was a merge.
+[16:53] <whiteknight> it was working before that merge
+[16:53] <whiteknight> anyway, We are heading out, I can't fix it now
+[16:55] *** M_o_C left
+[16:58] <whiteknight> I'll be back later
+[16:58] *** whiteknight left
+[17:00] *** kid51 left
+[17:20] <mikehh> All tests PASS (pre/post-config, make corevm/make coretest, smoke (#13161) fulltest) at 3_2_0-49-gee4b813 - Ubuntu 10.10 i386 (g++-4.5)
+[17:38] *** mj41 left
+[17:45] *** M_o_C joined
+[17:46] <rohit_nsit08> hi, what is .jiy file extention for ?
+[18:00] *** M_o_C left
+[18:01] <dalek> TT #2075 created by ryywlvbrqut4++: Insure your car to provide the actual penalties a miss
+[18:01] <dalek> TT #2075: http://trac.parrot.org/parrot/ticket/2075
+[18:02] *** M_o_C joined
+[18:10] *** mj41 joined
+[18:10] *** ambs left
+[18:13] <dukeleto> tracspam--
+[18:13] *** hudnix left
+[18:13] <dukeleto> rohit_nsit08: where is this .jiy file you speak of?
+[18:14] <rohit_nsit08> dukeleto: hi it's here https://github.com/zaach/cafe/tree/master/lib/js i guess it defines the grammar of language
+[18:16] <rohit_nsit08> dukeleto : i'm trying to see what lexer.jil file is doing , i have read that lexer divides the input stream into tokens
+[18:16] <dalek> TT #2076 created by tgalcajnk0++: Careful Expense in Penny stocks
+[18:16] <dalek> TT #2076: http://trac.parrot.org/parrot/ticket/2076
+[18:32] <dalek> TT #2077 created by rzfgjpakd3++: Buy blossoms within wholesale
+[18:32] <dalek> TT #2077: http://trac.parrot.org/parrot/ticket/2077
+[18:35] <dukeleto> sorry dalek, but I don't like the taste of spam
+[18:37] <dukeleto> rohit_nsit08: some kind of jison-ish yacc thingy
+[18:40] <rohit_nsit08> dukeleto: my interpratation from code -> it's containing cfg for language and server as the input for jison to generate a parser for the language ,
+[18:41] <rohit_nsit08> dukeleto: cafe is lexer.jil also as input to jison , but when i tried to do it independently , gave some error that grammar is not specified properly
+[18:41] <rohit_nsit08> dukeleto: any idea about lexer's code ?
+[18:51] <dukeleto> rohit_nsit08: nope, i haven't fiddled with cafe
+[18:54] <rohit_nsit08> dukeleto: fyn, no problem , i'll try to understand as much as possible , btw i was seeing jasper rightnow and it seemed abondoned , in what stage was that before it happened , and can i know what problems were faced?
+[18:57] <dukeleto> rohit_nsit08: not so much abandoned as back-burnered
+[18:57] <dukeleto> rohit_nsit08: i was getting some errors from node.js trying to actually parse a file with the PEG.js javascript grammar
+[18:57] <dukeleto> rohit_nsit08: can you get to that stage?
+[18:57] <dukeleto> rohit_nsit08: then we can both debug it :)
+[18:58] <rohit_nsit08> dukeleto: will love to  :-)
+[19:00] <dukeleto> rohit_nsit08: if you run : node ./jaspers.js, it complains about an object not having a parse method
+[19:00] <dukeleto> rohit_nsit08: the object *should* have that method, so something is wrong in the setup code
+[19:00] <rohit_nsit08> dukeleto: let me check the jaspers.js file
+[19:01] <dukeleto> rohit_nsit08: jsParser isn't getting initialized correctly
+[19:01] * dukeleto tries something
+[19:03] <rohit_nsit08> dukeleto: does it specify from  which object parse method missing ? any other details ?
+[19:03] <dukeleto> rohit_nsit08: seems like jsParser is the empty object, and hence has no parse method
+[19:03] <dukeleto> rohit_nsit08: jsParser
+[19:03] <dukeleto> rohit_nsit08: the jsParser = require('...') line is where the bug is
+[19:04] <dukeleto> rohit_nsit08: require is not returning the object
+[19:05] <dukeleto> rohit_nsit08: fixed it!
+[19:06] <dukeleto> rohit_nsit08: update your jaspers repo
+[19:07] <dukeleto> rohit_nsit08: git pull --rebase
+[19:07] <rohit_nsit08> dukeleto: still going through the code , will try this on node  to see the exact error
+[19:08] <dukeleto> rohit_nsit08: the javascriptParser.js is generated by PEG.js. Don't spend too much time reading it :)
+[19:08] <rohit_nsit08> dukeleto: wow , will update in some while  , right now on windows
+[19:09] <rohit_nsit08> dukeleto: so i should just use it to get the parser , and that's it ?, i'm using jison for now
+[19:11] <rohit_nsit08> dukeleto: switching to linux , will be back in a while
+[19:11] *** rohit_nsit08 left
+[19:16] *** rohit_nsit08 joined
+[20:00] <mikehh> dukeleto: the spam has nothing to do with dalek
+[20:01] *** bubaflub joined
+[20:01] <mikehh> dukeleto: all the last 20+ tickets have been spam
+[20:02] <mikehh> dukeleto: dalek also reports commits which are very useful, and normally so are tickets
+[20:04] <mikehh> i get the tickets and parrot commits as email, but dalek reports others
+[20:05] *** perlite_ joined
+[20:05] <mikehh> I find it very useful to check here before commiting fixes, as there is quite a delay in the email
+[20:05] <mikehh> or at least pushing
+[20:08] *** perlite left
+[20:08] *** perlite_ is now known as perlite
+[20:16] *** whiteknight joined
+[20:20] <whiteknight> good afternoon, #parrot
+[20:22] <bubaflub> afternoon whiteknight
+[20:23] <bubaflub> whiteknight: i noticed on your blog that there is also a GSoC proposal for updating the PL/Parrot to the new embed API
+[20:23] <whiteknight> yeah
+[20:23] <bubaflub> i'm kinda torn between doing the GMP bindings and that one
+[20:23] <bubaflub> which one do you think would be more beneficial?
+[20:23] <whiteknight> that's a good question
+[20:24] <bubaflub> i know dukeleto has been working on a perl grant to do the embed api
+[20:24] <bubaflub> maybe it'd be best to do it while he's still working on that
+[20:29] <whiteknight> we should definitely talk to him about what needs to be done there
+[20:30] <whiteknight> somebody with your talents could do a lot more than just rewrite it to use a new API
+[20:37] <whiteknight> plobsing++
+[20:40] <bubaflub> whiteknight: sounds good. i'll ping dukeleto and see which he'd prefer / what needs to be done
+[20:40] <whiteknight> bubaflub: Any other ideas floating around in your head?
+[20:40] <bubaflub> i could do the LAPACK stuff, but just on a VM
+[20:40] <whiteknight> the ones you have are good, I just want to make sure we're looking at all options
+[20:40] <bubaflub> i'd do something for cardinal, but have no idea what
+[20:41] <bubaflub> i know Tene is working on getting 6model into it
+[20:45] <whiteknight> bubaflub: yeah, I'm sure a lot of Cardinal work is dependent on getting the object model working
+[20:46] <whiteknight> depending on Tene's schedule, adapting 6model to work with Cardinal might make a great project
+[20:49] <lucian> and would help other languages as well
+[20:49] <lucian> also, Tene has good ideas about language interop
+[20:50] <whiteknight> language interop is a great feature of Parrot, but I can't really think of a way to turn that into a GSoC project
+[20:51] <whiteknight> maybe setting up some kind of automated testing system for building multiple compilers, and using them together in weird combinations
+[20:52] <lucian> i just meant Tene stewarding 6model + ruby work would help 6model deal with inter-language interop
+[20:52] <lucian> i don't think it's possible until languages actually work
+[20:53] <whiteknight> true
+[20:53] <whiteknight> bubaflub: If you are interested in porting 6model to Cardinal for GSoC, we can talk to Tene about it
+[20:53] <whiteknight> he had mentioned at one point he might be interested in mentoring such a project
+[20:54] <whiteknight> the benefits for Cardinal are undisputed
+[20:54] <whiteknight> might be a great kick-start for that project
+[20:55] <bubaflub> whiteknight: i'll ping him as well
+[20:55] <whiteknight> by the end of this summer, if all goes well, we could have a working Python compiler and a working JavaScript compiler
+[20:55] <whiteknight> getting Cardinal back on track at the same time would be awesome
+[20:56] <bubaflub> whiteknight: yeah, there is an official Ruby 1.9.2 spec, but apparently will take a lot of work to get up and running
+[20:56] *** particle left
+[20:56] <bubaflub> i'd like to see the spec running, cause then we've got something solid to test against
+[20:57] <lucian> well, rubyspec is a large test
+[20:57] <lucian> but like with python, objects are needed for even the simplest tests
+[20:58] <bubaflub> yep... gotta get a lot of guts correct before that happens
+[20:58] *** ambs joined
+[20:59] <whiteknight> Getting to the point where Cardinal could run rubyspec, even if there are plenty of failures, would be a good start
+[21:00] *** particle joined
+[21:03] *** M_o_C left
+[21:04] <lucian> yes, that would mean the first 90% would be done
+[21:04] <lucian> just 90% more from there
+[21:04] <bubaflub> hahah
+[21:11] *** ambs left
+[21:11] *** kid51 joined
+[21:11] *** lucian left
+[21:14] <kid51> whiteknight ping
+[21:14] <whiteknight> pong
+[21:15] <kid51> whiteknight: The version of your branch you asked me to test earlier today froze my darwin/ppc
+[21:15] <whiteknight> damnit
+[21:15] <kid51> I could tell that it was taking a long time to compile Compiler/Actions.pm.
+[21:15] <whiteknight> ok
+[21:15] <whiteknight> how much ram does that box have?
+[21:16] <kid51> ... and I noticed that I couldn't command-tab between programs ...
+[21:16] <kid51> ... and then I noticed that the time displayed on the desktop said 4:43 pm -- when it was now 5:07 pm.
+[21:16] <kid51> ... so your branch stopped time!
+[21:16] <kid51> 256M RAM ... same as it ever was.
+[21:17] <kid51> Same box I've been testing Parrot on since I came into the project.
+[21:18] <kid51> It does seem to have taken regular amount of time to 'make' on linux/i386, but got failures in 3 tests
+[21:18] <whiteknight> okay, I'm going to set up a VM with that little memory and see if I can duplicate any kind of problems
+[21:18] <whiteknight> unfortunately I don't have a version of darwin to test with
+[21:19] <kid51> I will now try a full configure/build/smolder on that box on master.
+[21:20] <whiteknight> ok
+[21:26] *** lucian joined
+[21:29] <kid51> whiteknight/imcc_compreg_pmc branch: linux/i386: FAIL in t/src/checkdepend.t
+[21:30] <nopaste> "kid51" at 192.168.1.3 pasted "imcc_compreg_pmc branch 'make test' failure" (187 lines) at http://nopaste.snit.ch/38738
+[21:31] *** M_o_C joined
+[21:32] *** bacek joined
+[21:32] *** ambs joined
+[21:33] *** cotto left
+[21:36] *** lucian left
+[21:40] <kid51> whiteknight: FYI on my darwin/ppc master configures and builds in what passes for normal time these days: ~ 19 minutes
+[21:47] *** dodathome left
+[21:48] *** hudnix joined
+[21:48] <ttbot> Parrot 8dcf07d1 i386-linux-thread-multi make error http://tt.taptinder.org/cmdinfo/58643
+[21:49] <ttbot> Parrot 8dcf07d1 i386-linux-thread-multi make error http://tt.taptinder.org/cmdinfo/58648
+[21:49] <ttbot> Parrot 8dcf07d1 i386-linux-thread-multi make error http://tt.taptinder.org/cmdinfo/58647
+[21:52] <kid51> Appears that x86_64, linux, i386-linux-thread-multi doesn't like HEAD in compreg_imcc branch
+[21:52] <kid51> Oh, maybe my syntax error.
+[21:54] *** soh_cah_toa joined
+[21:57] *** lucian joined
+[21:57] *** lucian left
+[22:05] <kid51> darwin/ppc: master still compiles and passes make test:  http://smolder.parrot.org/app/projects/report_details/13181
+[22:10] <Tene> lucian/whiteknight: I plan to work on language interop after I get cardinal running on new opbect model
+[22:11] <Tene> whiteknight: I have no idea of the suitability of 6model cardinal for gsoc
+[22:12] <Tene> bubaflub/whiteknight: Yes, without an almost-fully-implemented object model, we can't actually run the rubyspec tests.  They are *NOT* set up to be gradually-usable like the Perl 6 tests are.
+[22:13] <bubaflub> Tene: any ideas for a cardinal gsoc?
+[22:14] <Tene> bubaflub: I have a very poor understanding of what tasks are appropriate for gsoc.  If you could explain that better, I can likely generate suggestions for you.
+[22:14] <Tene> bubaflub: but, I'm afk for like 5 minutes right now.  brb
+[22:14] <soh_cah_toa> speaking of gsoc, has there been anyone else interested in the debugger project that I could brainstorm with?
+[22:15] *** fperrad left
+[22:15] <soh_cah_toa> or would i be the lone wanderer? :)
+[22:15] <bubaflub> Tene: ok.  task should be about 3 - 3.5 months in length and have deliverables at the end and maybe even at the midpoint.  a project should have measurable / quantifiable work and can't be just documentation.
+[22:16] *** rohit_nsit08 left
+[22:16] *** rohit_nsit08 joined
+[22:27] *** ambs left
+[22:29] <whiteknight> soh_cah_toa: no other students have expressed an interest in it, but many parrot devs are interested
+[22:29] <whiteknight> soh_cah_toa: what do you want to chat about
+[22:29] <whiteknight> ?
+[22:30] <soh_cah_toa> whiteknight: just curious as to what new features we could implement
+[22:30] <soh_cah_toa> whiteknight: right now, i'm going through parrot-instrument source and i think instrumentation support would be nice
+[22:37] <soh_cah_toa> whiteknight: i also just wanted to get an idea of who i might be working with, should i be accepted
+[22:38] <whiteknight> soh_cah_toa: I'll put some effort into Parrot-Instrument tomorrow, to try and get it to run again
+[22:40] <soh_cah_toa> whiteknight: great. i don't see a Makefile or anything so i'm not sure about installation. i think the github repo said it was just a proof of concept
+[22:45] *** ShaneC left
+[22:49] <whiteknight> soh_cah_toa: the setup.pir script is the replacement for makefile
+[22:49] <soh_cah_toa> whiteknight: i had a feeling that was the case
+[22:51] <soh_cah_toa> whiteknight: where can i find documentation on the load_bytecode op? it was in setup.pir file for distutils.pbc but i can't that file anywhere
+[22:52] <soh_cah_toa> whiteknight: what i'd like to know is where load_bytecode searches for files
+[22:52] *** lucian joined
+[22:52] <whiteknight> parrot has a list of search paths
+[22:53] <whiteknight> runtime/parrot/library/ in the repo
+[22:53] *** lucian left
+[22:53] <whiteknight> that should be the same for the installed Parrot too, in the install directory
+[22:54] <whiteknight> for me, the files would be in /usr/local/lib/parrot/*
+[22:54] <soh_cah_toa> wow, there it is. locate reported nothing. even after an updatedb. ugh...
+[22:56] <soh_cah_toa> just out of curiousity, is parrot's search path modifiable through an environment variable or something like @INC
+[22:56] <whiteknight> it may be, I need to check
+[22:56] <soh_cah_toa> alright
+[23:05] *** mj41 left
+[23:06] *** rohit_nsit08 left
+[23:11] *** rurban left
+[23:11] *** rurban joined
+[23:18] <whiteknight> soh_cah_toa: the -L commandline switch can add a new path
+[23:20] <soh_cah_toa> whiteknight: okay thanks
+[23:22] <whiteknight> soh_cah_toa: src/library.c:parrot_init_library_paths is where that all gets set up
+[23:22] <whiteknight> the function is big and far too complicated, but that's where the magic happens
+[23:22] *** cognominal left
+[23:23] *** cognominal joined
+[23:24] <whiteknight> soh_cah_toa: cleaning that function up might be a nice way for a new user to get started...
+[23:25] <soh_cah_toa> whiteknight: yeah, no kidding :)
+[23:33] <whiteknight> there is a PARROT_LIBRARY environment variable, apparently
+[23:34] *** ShaneC joined
+[23:34] <kid51> Where did dalek go?
+[23:34] <whiteknight> to bot heaven
+[23:34] <whiteknight> i have no idea
+[23:35] <soh_cah_toa> whiteknight: yeah, i just saw that in src/library.c. it's experimental though
+[23:37] <whiteknight> it's listed as "experimental" but it's been in the code, unaltered, for years
+[23:38] <soh_cah_toa> whiteknight: alright
+[23:40] <soh_cah_toa> whiteknight: exactly what needs to be improved in the debugger? i know i've asked this before but i'm still a little unsure of what i can put in my proposal
+[23:41] <whiteknight> increasing the amount of "working correctly" that the debugger does would be awesome
+[23:41] <soh_cah_toa> whiteknight: in the project description it mentions that the debugger should be able to add breakpoints and watchpoints etc. but the debugger already has all that
+[23:41] <whiteknight> rewriting it so it isn't made of fail and spider webs internally would be very nice
+[23:41] <whiteknight> soh_cah_toa: the project description was for writing a new debugger, not fixing the old one
+[23:42] <whiteknight> does the debugger even work currently? Can you run it and do anything with it?
+[23:44] <soh_cah_toa> i'm messing around with it now that i know a little more about pir and pbc
+[23:44] <whiteknight> soh_cah_toa: even if it does work, it's still an evil mess. We really want it to be done bettr
+[23:45] <whiteknight> for instance, we don't want debugger code compiled in to Parrot, except for the bare-minimum necessary hooks
+[23:45] <whiteknight> we would like the debugger to be usable for HLLs, not just PIR
+[23:46] <whiteknight> and if portions of it were running on top of Parrot, we could subclass it from HLLs, or add new features from HLLs
+[23:46] <soh_cah_toa> whiteknight: okay but the only parrot- supported language i know is perl
+[23:46] <whiteknight> once we have a basic core of the debugger written in whatever language, I would like to be able to extend it in any parrot language
+[23:46] <soh_cah_toa> but it's not like i don't have time to learn more
+[23:47] <whiteknight> we have several compilers: Rakudo Perl6 is the most complete HLL, but we have NQP, Winxed (my personal favorite), Cardinal, Lua, Partcl
+[23:47] <whiteknight> we should be able to debug all of them, or be able to write extensions for the debugger in any of them
+[23:47] <soh_cah_toa> btw, how do you guys pronounce winxed? i've been saying it "winks"
+[23:47] <whiteknight> in my head I always say "Win-Zed". NotFound, the author of it, says "winged"
+[23:48] <soh_cah_toa> new gsoc project: properly pronounce winxed?
+[23:49] <whiteknight> can't be done in a single summe
+[23:49] <whiteknight> summer
+[23:49] <soh_cah_toa> :)
+[23:50] <ttbot> Parrot 6ee33b49 i386-linux-thread-multi make error http://tt.taptinder.org/cmdinfo/58849
+[23:52] <ttbot> Parrot 6ee33b49 i386-linux-thread-multi make error http://tt.taptinder.org/cmdinfo/58875
+[23:52] <whiteknight> soh_cah_toa: the basic idea is this: Anything that runs on top of parrot (as opposed to running inside parrot) has a number of advantages: We can subclass features, we can inject features, we can introspect things, we can manipulate things, we can save details to portable bytecode instead of having to make it run natively on all platforms, etc
+[23:52] <whiteknight> soh_cah_toa: so if the debugger, likewise, runs on top of parrot, we get all those benefits for it
+[23:53] <whiteknight> From inside Parrot, we don't have many options. It's going to be written in C and most developers won't want to maintain it or develop for it
+[23:54] <soh_cah_toa> okay
+[23:55] <soh_cah_toa> what would it take to implement perl 6 support for the debugger?
+[23:55] <whiteknight> let's say I'm a JavaScript developer working on Parrot's new JavaScript compiler. I'm tracking down a bug, and want to get a custom report out of the debugger. What do I have to write that custom report it?
+[23:55] <whiteknight> The correct answer in parrot-land is "anything you want". The current answer is "Really badly-written C"
+[23:55] <whiteknight> JavaScript programmers write JavaScript because they don't like C or other alternatives
+[23:57] <soh_cah_toa> i did go through a web development phase a few months ago so i'm familiar with the basics of javascript. learning winxed can't be that hard
+[23:58] <whiteknight> winxed is very easy. It's inspired by JavaScript and C++. It's a very low-level language that exposes the power of Parrot but uses a nicer syntax than PIR
+[23:58] <whiteknight> if I could go back in time 10 years, I would make Winxed the default Parrot language instead of PIR
+[23:58] <whiteknight> and I would buy a truckload of Google stock
+[23:59] <soh_cah_toa> haha, wow. i guess my next task is to familiarize myself w/ winxed

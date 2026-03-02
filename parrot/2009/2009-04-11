@@ -1,0 +1,400 @@
+[00:01] <cotto> I'll see if I can get our friendly neighborhood jit hacker to fix it.
+[00:02] <cotto> seen tewk
+[00:02] <purl> tewk was last seen on #parrot 3 days, 4 hours, 16 minutes and 37 seconds ago, saying: Thats a good sign.    [Apr  7 19:43:50 2009]
+[00:08] <cotto> Whiteknight, I'd appreciate it if you could file a bug on that and point tewk toward it if he shows up.
+[00:08] * cotto is going afk
+[00:09] *** AndyA joined
+[00:11] * cotto is really afk now
+[00:12] <dalek> parrot: r38042 | cotto++ | trunk (6 files):
+[00:12] <dalek> parrot: [PMC] get rid of PMC_int_val, the last of the PMC UnionVal macros
+[00:12] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38042/
+[00:13] <bacek> hooray! UnionVal is dead!
+[00:13] <jonathan> So, this means every PMC is using ATTRs now? :-)
+[00:19] <COKEINATORINATOR_AF> can we remove the deprecated noteice?
+[00:20] <bacek> jonathan: I've got some "answers" of Packfile PMCs :)
+[00:21] <bacek> in r38026
+[00:22] <bacek> Two main points: 1. PackfileSegment.pack is pretty useless. It's almost impossible to pack segments individually because Directory contains offsets to them.
+[00:23] <bacek> 2. Current implementation of PackFile_*_pack functions based on polymorphic functions in PackFile.PackFuncs. So it's impossible to pack segment without PackFile.
+[00:24] <jonathan> OK, my aim with this was that we'd call .pack on each segment
+[00:24] <jonathan> So the directory PMC would hold the segments.
+[00:24] <bacek> PackfileDirectory.pack requires to pack all segments upfront.
+[00:24] <jonathan> And .pack on the directory would .pack each thing and fill out the directory as it learned the lengths up front.
+[00:24] <jonathan> erm
+[00:25] <jonathan> s/up front//
+[00:25] <bacek> What's the point?
+[00:25] <jonathan> Why? You can .pack each segment and then know that segment's length.
+[00:25] <jonathan> And then construct the directory from knowing that.
+[00:26] <jonathan> I saw this interface replacing the current bunch of polymorphic functions...
+[00:26] <jonathan> Such that in the end most of packfile.c as it stands today would go away.
+[00:26] <bacek> What about "pure C" interface?
+[00:26] <jonathan> And each segment type PMC would have the stuff inside it that knew how to pack and unpack that sort of segment.
+[00:26] <bacek> Like in IMCC
+[00:27] <jonathan> You can interact with PMCs from C. And there's nothing wrong with having a trixy way to get at the raw bit of memory backing, say, the bytecode segment.
+[00:27] <jonathan> If IMCC has to work through more of an interface, that's probably a Good Thing for maintainability.
+[00:28] <bacek> IMCC works with Interpret directly... And than just pack it.
+[00:28] <jonathan> I don't consider this a good thing.
+[00:29] <bacek> It's definitely not
+[00:29] <jonathan> But I can appreciate that it's a _lot_ of work to tease this lot out.
+[00:30] <bacek> Indeed. What about Interpret by itself? It still need "unpack".
+[00:30] <bacek> Preferably in pure C without PMCs overhead.
+[00:31] <jonathan> Yeah, true.
+[00:31] <jonathan> I figured we'd probably cheat quite a bit behind the PMCs at times...
+[00:31] <jonathan> (Example: I figured we'd always have a pointer to the memory behind the constants PMC for fast constant access and not force that through the PMC.)
+[00:32] <bacek> I "cheated" little bit in my patch - create underlying C structs from PMCs and pack it.
+[00:32] <jonathan> So basically .pack exists at the "top level"?
+[00:32] <jonathan> But not on each segment?
+[00:32] <bacek> No
+[00:33] <jonathan> Is that No to the first or second? :-)
+[00:33] <bacek> Ad top level it's "Packfile.get_string" according to pdd13
+[00:33] <bacek> s/Ad/At/
+[00:33] <bacek> But it's technically top-level "pack"
+[00:34] <bacek> (And it's faster because uses VTABLE get_pointer :)
+[00:34] <jonathan> bacek: Ah, yes, you're right.
+[00:35] <bacek> I thinks that no one need PackfileSegment.pack in public API. It's implementation details
+[00:36] <bacek> But we need PackfileRawSegment.get_type/set_type for creating DEBUG segments.
+[00:36] <bacek> Or create PackfileDebugSegment.
+[00:36] <bacek> (For consistency sake)
+[00:37] <bacek> And rename Raw to Bytecode
+[00:37] <jonathan> The reason it's Raw is because it can be used for more than just bytecdoe.
+[00:37] <jonathan> It was also going to be the PMC in front of the now-gone PIC segment, for example.
+[00:37] <bacek> Bytecode and Debug IIUC
+[00:37] <jonathan> Yes, Debug too
+[00:37] <jonathan> So IMO that watns to stay as Raw
+[00:38] <jonathan> To indicate it's not *just* for bytecode.
+[00:38] <bacek> But we can subclass it to Bytecode and Raw.
+[00:38] <bacek> Otherwise we can't pack it.
+[00:38] <bacek> Because of Segment.type
+[00:39] <bacek> (subclass to Bytecode and Debug)
+[00:41] <jonathan> Oh, now I see what you mean about get_type and set_type
+[00:41] <jonathan> I'd go for that approach rather than subclass.
+[00:41] <jonathan> Don't want too many PMCs...
+[00:41] <bacek> Ok, I prefer this for such trivial things too.
+[00:41] <jonathan> OK, good.
+[00:42] <bacek> So, 1. Remove public PackfileSegment.pack; 2. Add get_type/set_type accessors to RawSegment. ?
+[00:42] <jonathan> 2 for sure
+[00:42] <jonathan> Let me ponder (1) a bit more.
+[00:43] <jonathan> I get your point about it not being so useful in the public API.
+[00:43] <bacek> Ok.
+[00:43] <jonathan> Well
+[00:43] <jonathan> I get it's not too useful from PIR probably.
+[00:44] <jonathan> But I like the way it points to an implementation where each segment can know about itself in a clean, isolated way.
+[00:45] <bacek> BTW. RawSegment named incorrectly in PDD. I think it should be PackfileRawSegment
+[00:45] <jonathan> *nod*
+[00:45] <jonathan> Consistency FTW.
+[00:46] <bacek> jonathan: I prefer too. But current PBC structure holds forward offsets to segments...
+[00:48] <jonathan> Yes, but I don't see how that gets in the way.
+[00:48] <bacek> without them we can implement "streaming" packing.
+[00:49] <bacek> But it will require to read full PBC on unpack...
+[00:53] <dalek> parrot: r38043 | bacek++ | branches/packfile_revamp/src/pmc/packfilerawsegment.pmc:
+[00:53] <dalek> parrot: Fix PackfileRawSegment creating.
+[00:53] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38043/
+[00:53] <dalek> parrot: r38044 | bacek++ | branches/packfile_revamp/t/pmc/packfilerawsegment.t:
+[00:53] <dalek> parrot: Convert t/pmc/packfilerawsegment.t to PIR.
+[00:53] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38044/
+[00:53] <dalek> parrot: r38045 | bacek++ | branches/packfile_revamp/docs/pdds/pdd13_bytecode.pod:
+[00:53] <dalek> parrot: [pdd13] Rename RawSegment to PackfileRawSegment for consistency.
+[00:53] <dalek> parrot: Add get_type/set_type accessors.
+[00:53] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38045/
+[01:01] <bacek> jonathan: what about adding iterator interface to all Packfile*Table?
+[01:05] *** eternaleye joined
+[01:10] <jonathan> bacek: Could be a nice thing, yes.
+[01:10] <jonathan> bacek: Maybe to directory to, to iterate the segs?
+[01:10] <jonathan> *too
+[01:11] <bacek> Directory is a Hash. At least AFAIU
+[01:11] <bacek> (From external point of view)
+[01:13] <bacek> We probably need something like "find_by_type" for it
+[01:14] <jonathan> OK, I need sleep now
+[01:14] <jonathan> Thanks for working on packfile stuff :-)
+[01:15] <bacek> good night :)
+[01:15] <bacek> I'll have more stuff for you tomorrow
+[01:19] <jonathan> uh-oh ;-)
+[01:19] <jonathan> night! :-)
+[01:26] *** Whiteknight joined
+[01:37] <Coke> irc logs?
+[01:37] <purl> irc logs are nothing like http logs...  very low overhead and storage
+[01:37] <Coke> irclogs?
+[01:37] <purl> irclogs is http://irclog.perlgeek.de/parrot/today or see also: infrared clogs
+[02:01] *** japhb joined
+[02:03] *** braceta joined
+[02:13] *** TiMBuS joined
+[02:25] <dalek> parrot: r38046 | bacek++ | branches/packfile_revamp/include/parrot/packfile.h:
+[02:25] <dalek> parrot: Explicitly set PF_*_SEG enum values and generate packfile_segments.pasm
+[02:25] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38046/
+[02:25] <dalek> parrot: r38047 | bacek++ | branches/packfile_revamp/src/pmc/packfilefixupentry.pmc:
+[02:25] <dalek> parrot: Fully implement PackfileFixupEntry.
+[02:25] <dalek> parrot: * Use attributes for storing data.
+[02:25] <dalek> parrot: * Use set_pointer to initialize from PackFile_FixupEntry
+[02:25] <dalek> parrot: * Use get_pointer to create PackFile_FixupEntry
+[02:25] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38047/
+[02:25] <dalek> parrot: r38048 | bacek++ | branches/packfile_revamp/t/pmc/packfile_common.pir:
+[02:25] <dalek> parrot: Add helper function _get_fixup_table
+[02:25] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38048/
+[02:25] <dalek> parrot: r38049 | bacek++ | branches/packfile_revamp/t/pmc/packfilefixupentry.t:
+[02:26] <dalek> parrot: Rewrite t/pmc/packfilefixupentry in PIR
+[02:26] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38049/
+[02:26] <dalek> parrot: r38050 | bacek++ | branches/packfile_revamp/src/pmc/packfilefixuptable.pmc:
+[02:26] <dalek> parrot: Imlement PackfileFixupTable set_pointer/get_pointer
+[02:26] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38050/
+[02:26] <dalek> parrot: r38051 | bacek++ | branches/packfile_revamp/t/pmc/packfile.t:
+[02:26] <dalek> parrot: Add test for FixupTable/FixupEntry pack/unpack
+[02:26] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38051/
+[02:29] *** wayland76 joined
+[02:32] *** braceta left
+[02:32] *** braceta joined
+[02:41] *** janus joined
+[02:51] *** braceta joined
+[03:17] <Whiteknight> anybody here on i386?
+[03:22] <dalek> parrot: r38052 | whiteknight++ | trunk/src/jit/i386/jit_defs.c:
+[03:22] <dalek> parrot: attempted JIT fix, since my earlier commit apparently broke it. I'm not on i386, so if anybody is, please test this and let me know if I borked it worse please
+[03:22] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38052/
+[03:22] <Whiteknight> TO BED! I AM OFF!
+[03:55] <dalek> parrot: r38053 | coke++ | trunk (2 files):
+[03:55] <dalek> parrot: [docs] Keep news up to date.
+[03:55] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38053/
+[04:05] *** davidfetter joined
+[04:16] *** particle1 joined
+[04:46] *** msmatsko joined
+[05:43] *** amoc joined
+[05:54] *** Theory joined
+[07:09] *** Tene joined
+[07:33] *** Khisanth joined
+[07:33] *** Santtu joined
+[07:43] <dalek> parrot: r38054 | fperrad++ | trunk/compilers/pct/src/POST/Compiler.pir:
+[07:43] <dalek> parrot: [pct] code cleanup
+[07:43] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38054/
+[07:53] <bacek> Someone have to update pdd17. There is no UnionVal anymore.
+[07:56] *** iblechbot joined
+[07:59] <cotto> bacek, docs are next on my todo list
+[07:59] <cotto> as soon as I admit defeat to the jit code
+[07:59] * bacek always happy to add item to someone else todo list
+[08:01] <cotto> There's a curious parallel between the perl code that generates src/nci.c and the NCI jitting code.
+[08:03] <bacek> I don't understand JIT code at all.
+[08:03] <bacek> Last assembly language I learn was for Soviet clone of PDP9
+[08:03] * cotto admits defeat
+[08:16] <dalek> parrot: r38055 | bacek++ | branches/packfile_revamp/src (7 files):
+[08:16] <dalek> parrot: [cage] coding standard fixes: whitespaces, comments
+[08:16] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38055/
+[08:16] <dalek> parrot: r38056 | bacek++ | branches/packfile_revamp/t/pmc/packfile_common.pir:
+[08:16] <dalek> parrot: Add _find_segment_by_type to packfile_common.pir
+[08:16] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38056/
+[08:16] <dalek> parrot: r38057 | bacek++ | branches/packfile_revamp/t/pmc/packfile.t:
+[08:16] <dalek> parrot: Add tests for PackfileConstantTable pack/unpack
+[08:16] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38057/
+[08:16] <dalek> parrot: r38058 | bacek++ | branches/packfile_revamp/src/pmc/packfileconstanttable.pmc:
+[08:16] <dalek> parrot: Distinguish Keys from other PMCs in PackfileConstantTable.set_pmc_keyed_int.
+[08:16] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38058/
+[08:16] <dalek> parrot: r38059 | bacek++ | branches/packfile_revamp/src/pmc/packfileconstanttable.pmc:
+[08:16] <dalek> parrot: Finish implementing PackfileConstantTable.get_pointer
+[08:16] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38059/
+[08:28] *** bsdz joined
+[09:39] <dalek> parrot: r38060 | bacek++ | branches/packfile_revamp/t/pmc/packfile.t:
+[09:39] <dalek> parrot: Oops. Comment out debug code in test.
+[09:39] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38060/
+[09:40] *** jimmy joined
+[09:46] <dalek> parrot: r38061 | bacek++ | branches/packfile_revamp/docs/pdds/pdd13_bytecode.pod:
+[09:46] <dalek> parrot: [pdd13/spec] Add get_iter vtable methods to ConstantTable, FixupTable and RawSegment.
+[09:46] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38061/
+[09:56] <mikehh> t/pmc/nci.t - Failed 2/69 subtests
+[09:57] <mikehh> http://smolder.plusthree.com/app/public_projects/report_details/19777
+[09:57] <shorten> mikehh's url is at http://xrl.us/beomw3
+[09:58] <mikehh> Failed tests:  66, 69
+[09:58] <mikehh> 11,729 ok, 2 failed, 238 todo, 563 skipped and 0 unexpectedly succeeded
+[10:01] <mikehh> # Segmentation fault in both cases
+[10:19] <bacek> purl msg jonathan What about adding PackfileConstant PMC? It will be helpful for iterating over PackfileConstantTable.
+[10:19] <purl> Message for jonathan stored.
+[11:00] <nopaste> "mikehh" at 90.206.38.51 pasted "trace of failing tests in t/pmc/nci.t - nci_66.pir and nci_69.pir" (21 lines) at http://nopaste.snit.ch/16248
+[11:03] <mikehh> both tests fail with a Segmentation fault after invokecc on "nci_vV", "vV"
+[11:13] <bacek> mikehh: fail but without segfault on my box.
+[11:26] <mikehh> bacek: what are you on - mine is Kubuntu Intrepid i386
+[11:26] <bacek> Lenny/i386.
+[11:27] <mikehh> should give the same results Perl? - 5.10.0
+[11:27] <dalek> tracwiki: v11 | bacek++ | IOTasklist
+[11:27] <dalek> tracwiki: Remove links to  resolved or rejected tickets from IOTasklist
+[11:27] <dalek> tracwiki: https://trac.parrot.org/parrot/wiki/IOTasklist?version=11&action=diff
+[11:27] <shorten> dalek's url is at http://xrl.us/beom89
+[11:27] <bacek> it depends. But looks like memory overrun for me
+[11:32] <bacek> bacek@icering:~/src/parrot$ git bisect good
+[11:32] <bacek> Bisecting: 1 revisions left to test after this
+[11:32] <bacek> [f29221e2854e2d86d40f1214b391e07ce865426d] add a custom destroy method to the Pointer PMC, so it can free the new memory that it allocates
+[11:32] <bacek> strange...
+[11:32] <purl> strange is but true
+[11:41] *** bsdz joined
+[12:13] *** kid51 joined
+[12:20] *** iblechbot joined
+[12:26] <bacek> ok, cotto broke it.
+[12:28] <bacek> purl msg cotto Looks like r38040 is main cause for segfault reported by mikehh++. There is a little bit difference between &PARROT_POINTER->pointer and VTABLE_get_pointer.
+[12:28] <purl> Message for cotto stored.
+[12:30] <mikehh> was just looking at that - I figgured it had to be pointer related
+[12:32] <mikehh> had to go and get everyine some lunch at KFC - a *BIG* bucket
+[12:50] <dalek> parrot: r38062 | jkeenan++ | branches/install_tools (5 files):
+[12:50] <dalek> parrot: Applying patch submitted by wayland in
+[12:50] <dalek> parrot: https://trac.parrot.org/parrot/ticket/426.
+[12:50] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38062/
+[12:51] *** Whiteknight joined
+[12:54] *** Tene joined
+[13:17] *** joubert joined
+[13:23] <dalek> parrot: r38063 | whiteknight++ | trunk (3 files):
+[13:23] <dalek> parrot: remove some mentions of PMC_*_val from a few documentation sources, so people don't think that they still exist
+[13:23] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38063/
+[13:27] *** jimmy joined
+[13:39] <dalek> parrot: r38064 | whiteknight++ | trunk (2 files):
+[13:39] <dalek> parrot: Remove src/pmc/scalar.pmc:clone(), which only copied the UnionVal of a PMC. However, since UnionVals aren't used anymore, this is essentially a no-op. Also, remove the PMC_union() macro, which was only used in this location
+[13:39] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38064/
+[13:40] <mikehh> BTW apart from the test I was failing before (t/op/trans) and the new one (t/pmc/nci.t) make testj passes the rest at r38059 om Kubuntu Intrepid i386
+[13:41] <mikehh> I had some more fun with t/op/trans in the jit core - TT#530
+[13:48] <Whiteknight> mikeh++
+[13:48] <Whiteknight> what rev are you at? because I committed a JIT change last night that I wasn't able to test (I'm not on i386)
+[13:52] <dalek> parrot: r38065 | whiteknight++ | branches/kill_unionval:
+[13:52] <dalek> parrot: Create a new branch to finally kill the UnionVal structure in all the places it's still hiding in
+[13:52] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38065/
+[13:59] *** wayland76 joined
+[14:00] <mikehh> Whiteknight: r38059 at the moment
+[14:01] <Whiteknight> okay good. My fix was r38052, so you must be using it without problems
+[14:01] <mikehh> I noticed that and thought I would let you know
+[15:06] *** amoc joined
+[15:14] <dalek> parrot: r38066 | whiteknight++ | branches/kill_unionval:
+[15:14] <dalek> parrot: not quite ready to remove UnionVal yet, it's still too entrenched in too many places.
+[15:14] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38066/
+[15:23] *** TMC joined
+[15:23] <TMC> hihi
+[15:24] <mikehh> hi de hi
+[15:25] <TMC> I was wondering if anyone could answer a question:
+[15:25] <TMC> how big is parrot, compiled?
+[15:26] <TMC> with everything unnecessary removed
+[15:26] <TMC> no libraries, no compiler or parser or anything
+[15:26] <TMC> wondering if it's lightweight enough for use on handhelds
+[15:27] <mikehh> 75385 BUT needs libraries and stuff
+[15:27] <Whiteknight> that's not a terrible estimate
+[15:28] <Whiteknight> I don't think we can even build it right now without IMCC
+[15:28] <mikehh> roll in PIRC
+[15:28] <mikehh> s/in/om/
+[15:29] <mikehh> on
+[15:29] <TMC> 75kb?
+[15:29] <Whiteknight> I'm sure there is a lot of fat that could be cut for bare-bones operation, precompiled JIT thunks come to mind
+[15:29] <TMC> IMCC?
+[15:29] <purl> i think IMCC is the c of parrot or the problem or the intermediate code compiler
+[15:29] <mikehh> this keyboard is killing me - got to get another one
+[15:29] <Whiteknight> the CG, PCG, and Switch runcores can disappear too probably
+[15:31] <jonathan> TMC: I think the most honest answer is, we actually don't really know because nobody has found time to try and really strip it down just yet.
+[15:31] <TMC> ok
+[15:31] <jonathan> What you need probably depends on what you want to run too.
+[15:32] <jonathan> Example: if you want to run a HLL on top of Parrot that can eval code at runtime, you'll need to have the Parrot Compiler Toolkit library in many cases.
+[15:32] <TMC> that won't be needed
+[15:32] <mikehh> AFAIK there has been work on embeded Parrot but there are still problems there
+[15:33] <TMC> is it possible to precompile PASM, so that (in theory, if it's not currently possible) neither MDCC nor PIRC will be required?
+[15:33] <jonathan> Yes, compiling to PBC (bytecode format, which the interpreter then can run directly) already works just fine. :-)
+[15:34] <TMC> great :)
+[15:34] <TMC> thanks very much, everyonr
+[15:34] <jonathan> But the way things are at the moment, choosing to not have IMCC, etc, isn't something that can be trivially done.
+[15:34] <TMC> *everyone
+[15:35] <jonathan> I'd love that to change, but like everything, time, effort. :-)
+[15:40] *** iblechbot joined
+[15:49] *** bsdz joined
+[15:52] *** Psyche^ joined
+[16:09] *** tetragon joined
+[16:10] *** eternaleye joined
+[16:27] <Whiteknight> tewk: ping
+[16:56] <dalek> parrot: r38067 | whiteknight++ | trunk/src/pmc/coroutine.pmc:
+[16:56] <dalek> parrot: removing RT note for a ticket that I'm rejecting for now. More information will be added shortly to RT #46699
+[16:56] <dalek> parrot: review: https://trac.parrot.org/parrot/changeset/38067/
+[17:01] *** joubert joined
+[17:03] <dalek> rakudo: e931dc0 | pmichaud++ | docs/spectest-progress.csv:
+[17:03] <dalek> rakudo: spectest-progress.csv update: 359 files, 10300 passing, 0 failing
+[17:03] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/e931dc08bb530f569fc9d1e5049afc2bc761f32f
+[17:03] <shorten> dalek's url is at http://xrl.us/beonvz
+[17:07] *** joubert_ joined
+[17:10] <dalek> rakudo: bb664df | jnthn++ | src/classes/Object.pir:
+[17:10] <dalek> rakudo: Make .?, .+ and .* more likely to work with foreign objects, and also make them able to call methods that were mixed in.
+[17:10] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/bb664dfda5f288da526c8785f040531136e2ab2d
+[17:10] <shorten> dalek's url is at http://xrl.us/beonws
+[17:10] <dalek> rakudo: 5b679a9 | jnthn++ | :
+[17:10] <dalek> rakudo: Merge branch 'master' of git@github.com:rakudo/rakudo
+[17:10] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/5b679a9e3a48e8d860784dbf786506540f54eaef
+[17:10] <shorten> dalek's url is at http://xrl.us/beonwu
+[17:18] *** tetragon joined
+[17:34] *** Casan joined
+[18:41] *** tetragon joined
+[18:48] *** joubert_ left
+[18:52] *** contingencyplan joined
+[19:25] *** tetragon_ joined
+[19:43] *** tetragon joined
+[20:32] *** tetragon_ joined
+[20:39] *** contingencyplan joined
+[20:46] *** riffraff joined
+[20:56] *** plathrop joined
+[21:00] <plathrop> Hello!
+[21:02] <cotto> Hi, plathrop.
+[21:02] <cotto> bacek, ping
+[21:05] <plathrop> I'm trying to follow along with the tutorial from parrotblog.org but I'm running into some issues (even before I really get into the tutorial).
+[21:05] <plathrop> I followed the "Getting Started" page to download and build Parrot.
+[21:05] <plathrop> (version 1.0.0)
+[21:05] <plathrop> But I don't seem to have a NQP binary
+[21:06] <plathrop> Platform is OS X 10.5.6
+[21:06] <plathrop> Anyone have ideas where I might be going wrong?
+[21:06] <plathrop> "make test" says everything passes.
+[21:07] <cotto> plathrop, are you working with an installed parrot?
+[21:07] <cotto> i.e. did you run make install?
+[21:08] <plathrop> cotto: Not yet. Is that the missing link?
+[21:08] <cotto> I know that when that tutorial was written, the install process wasn't working.
+[21:08] <cotto> Where are you trying to build your language?
+[21:08] <sjn> seen pmichaud
+[21:08] <purl> pmichaud was last seen on #parrot 2 days, 4 hours, 9 minutes and 37 seconds ago, saying: bbl  [Apr  9 16:57:34 2009]
+[21:09] <plathrop> cotto: Well, I haven't gotten that far. I reached the point on the "Getting Started" page where it says to run   $ ./nqp hello.nqp
+[21:09] <plathrop> And, there's no nqp
+[21:11] <cotto> Which page are you looking at?  I don't see anything like that on http://www.parrotblog.org/2008/03/targeting-parrot-vm.html
+[21:11] <plathrop> http://docs.parrot.org/parrot/latest/html/docs/book/ch02_getting_started.pod.html which I figured was a pre-requisite to starting the tutorial. Sorry I wasn't clear.
+[21:11] <shorten> plathrop's url is at http://xrl.us/beooh7
+[21:12] *** tetragon joined
+[21:14] <cotto> plathrop, that page seems to be out-of-date.
+[21:15] <cotto> You can run a NQP script with ./parrot compilers/nqp/nqp.pbc foo.nqp
+[21:15] <cotto> although the example nqp code should be say("Hello, world") instead of what's there now
+[21:15] <plathrop> cotto: ah, okay. Thanks.
+[21:16] <cotto> Look at compilers/nqp/t for more nqp examples.
+[21:16] <plathrop> cotto: so, is there anywhere that might show me how to get Parrot installed and ready for me to follow the tutorial? Or is the tutorial hopelessly out of date?
+[21:16] <plathrop> I'm mostly playing around with this to learn a bit about writing a very simple Lisp.
+[21:17] <cotto> which tutorial?
+[21:17] <purl> which tutorial are you talking about?
+[21:17] <plathrop> cotto: The one that you linked to.
+[21:19] <cotto> I think that tools/dev/mk_language_shell.pl works outside Parrot's root if you don't need dynops.
+[21:19] <cotto> I think you'll be fine using it.
+[21:19] * cotto checks
+[21:24] <cotto> it looks like dynops and dynpmcs don't work from an installed 1.0 parrot, but the tutorial doesn't require them.
+[21:27] <plathrop> Thanks, cotto!
+[21:27] <cotto> np.  Feel free to stick around here and ask if you run into trouble.
+[21:41] *** kid51 joined
+[22:09] <bacek> good morning
+[22:09] <bacek> cotto: pong. Sorry, I was wrong in my message.
+[22:28] <nopaste> "kid51" at 70.85.31.226 pasted "t/pmc/nci.t: Failures in two tests" (56 lines) at http://nopaste.snit.ch/16249
+[22:31] <bacek> kid51: known issue... mikehh reported it.
+[22:32] <kid51> bacek:  Thx ; is there a TT?
+[22:33] <bacek> kid51: probably no
+[22:43] <cotto> bacek, yup.  My bisection points to 38036, although some later commits changed the resultant error.
+[22:49] <kid51> I had all tests passing at r38036.  I looked there first because 'nci' appeared in the log message.
+[22:49] <kid51> Opening TT.
+[22:49] <cotto> kid51, you're right.  It's '37.  I just misremembered.
+[22:52] <cotto> kid51++
+[22:58] <kid51> https://trac.parrot.org/parrot/ticket/551
+[23:01] *** Tene joined
+[23:03] <Tene> I'm having a problem with Parrot_io_eprintf
+[23:03] <Tene> when I eprintf("%S", message), it prints nothing
+[23:04] <Tene> when I eprintf(" %S", message), it prints a space, then the message.
+[23:13] <cotto> Tene, is that with a STRING*?
+[23:16] <Tene> yes
+[23:17] <cotto> I think you have to use %Ss.
+[23:19] *** tetragon joined
+[23:19] <cotto> confirmed
+[23:19] <Tene> yes
+[23:19] <Tene> :)
+[23:19] <Tene> thanks
+[23:46] *** Whiteknight joined
+[23:47] <Tene> Okay, lemme commit this line number stuff.
+[23:54] *** davidfetter joined
+[23:55] <Whiteknight> anybody here on i386?
+[23:55] <mikehh> moi - I am
+[23:56] <Whiteknight> I'm trying to get more information about TT # 551. I'm not on i386, so I can't duplicate it here
+[23:56] <Tene> Whiteknight: linux i386?  I can give you a shell on my box.
+[23:57] <Whiteknight> Tene: I wouldn't even know what to do with shell access. I'm a total n00b with that kind of stuff
+[23:57] <mikehh> my parrot is still at r38059
+[23:57] <Tene> Whiteknight: what information do you need?
+[23:58] <mikehh> I have a version at r38023
+[23:58] <Whiteknight> The failure started at 38037, which I knew previously. I thought the error was fixed in r38052
