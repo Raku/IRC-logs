@@ -1,0 +1,135 @@
+[07:46] *** rakkable left
+[07:47] *** rakkable joined
+[13:30] *** librasteve_ joined
+[14:16] *** vrurg_ joined
+[14:16] *** vrurg left
+[18:55] *** rakkable left
+[18:55] *** rakkable joined
+[19:02] <librasteve_> https://rakudoweekly.blog/2026/03/02/2026-09-release-190-2026-02/
+
+[19:03] <lizmat> librasteve_++
+
+[20:12] <patrickb> I'm puzzled by this bit of code in the debug server: https://github.com/MoarVM/MoarVM/blob/main/src/debug/debugserver.c#L2171-L2184
+
+[20:13] <patrickb> The comment says, the total number of symbols is lexicals + locals that don't have a matching lexical. The condition in line 2180 seems to do the opposite though, it only counts locals that do have a matching lexical.
+
+[20:15] <patrickb> When actually writing out the locals (in https://github.com/MoarVM/MoarVM/blob/main/src/debug/debugserver.c#L2231-L2245), the code again only considers locals that do have a matching lexical.
+
+[20:16] <patrickb> But looking at the lexical code path, there is code to also check matching lexicals (here https://github.com/MoarVM/MoarVM/blob/main/src/debug/debugserver.c#L2215-L2218)
+
+[20:16] <patrickb> So at least from arm-chair reading the code it seems that the count would be too high and the locals would be output twice.
+
+[20:17] <patrickb> I suspect I'm missing a crucial detail here. Any hints?
+
+[20:20] <timo> my first thought is, when there's a debug local there shouldn't actually be a corresponding entry in the lexical names hash
+
+[20:20] <timo> and all entries in the frame's actual lexical names hash are true real lexicals
+
+[20:21] <timo> ah, i see what you mean
+
+[20:22] <timo> the stuff in 2231 to 2245 should have the check flipped right?
+
+[20:22] <timo> wait, isn't that what was_from_local is meant to convey?
+
+[20:23] <timo> hm, was_from_local doesn't prevent the lexical from being written
+
+[20:25] <timo> yeah it looks like your analysis is right. do you think flipping the != MVM_INDEX_HASH_NOT_FOUND into == instead is the right fix?
+
+[20:28] <patrickb> I don't know what would have to happen to the code at https://github.com/MoarVM/MoarVM/blob/main/src/debug/debugserver.c#L2238-L2241
+
+[20:28] <patrickb> It uses the idx returned from the debug_locals mapping.
+
+[20:29] <timo> i think debug_entry->hash_handle.key is the right value to use there
+
+[20:29] <patrickb> I guess that code would have to somehow retrieve metadata (name and stuff) for a true local. 
+
+[20:30] <timo> well, locals don't have those, that information lives in the debug locals structure instead
+
+[20:30] <patrickb> ah
+
+[20:30] <timo> i'm glad you're giving this code a real work-out
+
+[20:30] <timo> sorry about the state you've found it in :|
+
+[20:32] <patrickb> All good. I was fully expecting to find a few bugs (I actually hoped so, otherwise I my hopes would be pretty low to see the debugger in a usable state ever given my past (several years back) experience with the comma debugger.
+
+[20:33] <patrickb> I'm multitasking a little here. How can this line `result = &frame->work[debug_entry->local_idx];` possibly cause `result` to become a null pointer?
+
+[20:33] <patrickb> (It's this line: https://github.com/MoarVM/MoarVM/blob/main/src/debug/debugserver.c#L2216)
+
+[20:34] <patrickb> I've put a print after that line and it prints `(nil)` as the pointer value. That puzzles me loads as well...
+
+[20:35] <timo> do you have a live process at that spot at the moment?
+
+[20:35] <patrickb> No. It's not reproducible in the debugger.
+
+[20:35] <timo> it might help to have the bytecode outputted. it could very well be the register hasn't been written to since the frame was created at the specific point in time the frame is stopped
+
+[20:35] <patrickb> So printf all the way...
+
+[20:35] <timo> well, i would definitely point you at rr in that case
+
+[20:35] <patrickb> I've already looked at the bytecode.
+
+[20:36] <timo> does it look like it should have a value in it? does the frame_vivify call happen in that case?
+
+[20:36] <patrickb> From what I am able to puzzle together the value is probably not set.
+
+[20:36] <patrickb> It doesn't.
+
+[20:36] <timo> oh, that is afterwards isn't it
+
+[20:37] <timo> oh, is it actually literally the MVMRegister* that's a null pointer, not that it has a .o that is a null pointer?
+
+[20:37] <patrickb> But I'm fundamentally not understanding that line of code. It indexes into an arguably non-null array and takes the address of an offset. How can this possibly be null?
+
+[20:37] <patrickb> Yes, it's result itself that is null.
+
+[20:38] <timo> can you show me the exact printf you're printfing?
+
+[20:38] <patrickb> fprintf(stderr, "8351: %p\n", result);
+
+[20:38] <timo> that doesn't look wrong, yeah... wat :)
+
+[20:39] <timo> and the frame still has a work?
+
+[20:39] * patrickb goes off sprinkling a few more printfs...
+
+[20:39] <timo> if you're going through outer-> pointers to reach this frame, it might already have been exited
+
+[20:39] <patrickb> yes
+
+[20:40] <timo> are we doing something there that's undefined behaviour in C and that's why we're getting nonsense?
+
+[20:40] <patrickb> it's the first outer of the current frame trying to access $_ there.
+
+[20:40] <patrickb> I'll validate the work pointer
+
+[20:41] <timo> do you happen to know the local_idx? 0 is often the first argument, so that could reasonably be $_, then you would have 0 + 0 as the address
+
+[20:41] <ShimmerFairy> I was gonna say that my first guess would be undefined behavior, which could happen if `debug_entry->local_idx` blows past the end of the array `frame->work` is pointing to.
+
+[20:42] <timo> but could that cause a null pointer to be the result of the &array[index] operation?
+
+[20:43] <ShimmerFairy> I don't know if it would in practice, but *in theory* anything can happen once you stumble into UB.
+
+[20:44] <patrickb> jup, frame->work is also null
+
+[20:44] <timo> right, the compiler could launch nethack if it wants
+
+[20:44] <patrickb> debug_entry->local_idx is 0
+
+[20:44] <timo> ah then we have a way forward at least. we'd need to decide on a way to signal in the protocol that the lexical is no longer available and send that information over, or we leave it out which isn't as optimal
+
+[21:59] <patrickb> Adding a quick bandaid workaround lets me proceed. \o/
+
+[22:00] <patrickb> There are a lot more outers than I would have expected...
+
+[22:01] <patrickb> I'd tend to make it explicit in the protocol instead of silently leaving it out.
+
+[22:01] <patrickb> But now I'm off to bed...
+
+[22:01] <patrickb> Thanks for your help!
+
+[22:02] <patrickb> 'night everyone!
+

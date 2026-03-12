@@ -1,0 +1,312 @@
+[00:20] <lizmat> timo: #masakism logs now also online
+
+[00:20] <lizmat> sleep&
+
+[04:55] <disbot1> <jubilatious1_98524> Hi @shimmerfairy  , I nudged an ICU conversation on the old perl6-users mailing list, and got 13 replies (latest 2024). Here take a look: https://www.nntp.perl.org/group/perl.perl6.users/2020/09/msg9241.html
+
+[11:41] <lizmat> m: .say with try 56792.chr   # sorta expected to have that say Nil
+
+[11:41] <camelia> rakudo-moar af30c7bed: OUTPUT: «Error encoding UTF-8 string: could not encode Unicode Surrogate codepoint 56792 (0xDDD8)␤  in block <unit> at <tmp> line 1␤␤»
+
+[11:41] <lizmat> actually, not say anything at all  :-)
+
+[12:57] <lizmat> timo: for reading large (2GB+) files, would it make sense to presize the Buf, (and then resize to what's used) and then have nqp::readfh start adding bytes *after* what is already in there?
+
+[13:33] <timo> it makes sense that the 56792.chr works but the say doesn't; after all, our strings are capable of more than just™ utf8, so it can represent a lone surrogate codepoint ... or maybe we don't want that to be possible at all is what you're suggesting?
+
+[13:36] <patrickb> I'm puzzled again. Looking at https://github.com/MoarVM/MoarVM/blob/main/src/core/bytecode.c#L764 The frame deserializer only reads the debug_locals data if the debug server is active, but it does not advance `pos` when the debug server isn't active.
+
+[13:37] <patrickb> Won't this mess up all following deserialization? (Or is it fine simply because it's the last part of the frame data?)
+
+[13:38] <timo> it's the last part, the next frame's position will be read from the table of all frame's positions again
+
+[13:39] <patrickb> Ah. Understood. Then it's fine. Thanks for confirming!
+
+[13:39] <timo> no problem!
+
+[13:40] <timo> actually, a few months ago I hacked together an imhex pattern definition file for moarvm files, which you may find interesting to look at. also there's lizmat's module that can read these files and give statistics and such
+
+[13:40] <lizmat> MoarVM::Profile you mean ?
+
+[13:42] <timo> no i think it's MoarVM::Bytecode?
+
+[13:42] <lizmat> ah, ok, yes
+
+[13:48] <lizmat> Q: given enough RAM, should we be able to slurp a 2G+ file ?
+
+[13:53] <timo> slurp to string, right?
+
+[13:54] <lizmat> nope...  binary
+
+[13:54] <lizmat> sorry
+
+[13:54] <timo> yeah that should surely work. do we still grow buffers only linearly after a specific size?
+
+[13:55] <lizmat> well, I'm working on optimizing that
+
+[13:55] <timo> ISTR a pull request or maybe just a branch with experiments for that
+
+[13:56] <lizmat> yeah, that got merged, but it also needs some rework
+
+[13:56] <timo> what would be really nice is if we could mmap a file into a Buf, but that's actually a different operation from slurping, since then changes to the file will cause changes in memory as well
+
+[13:56] <lizmat> well, I'll leave that for a later exercise
+
+[13:58] <timo> you can already get that with NativeCall and a CArray or CPointer
+
+[13:58] <lizmat> % rl '"m5.sql".IO.slurp'
+
+[13:58] <lizmat> initial read of 1048576: 1048576
+
+[13:58] <lizmat> taking slow path for 2417660750
+
+[13:58] <lizmat> sub slurp-PIO-uncertain(Mu \PIO, int $size)
+
+[13:58] <lizmat> trying to read 1879048192 bytes
+
+[13:58] <lizmat> appending 538612558 to 1879048192
+
+[13:58] <lizmat> trying to read 1879048192 bytes
+
+[13:58] <lizmat> MoarVM panic: Memory allocation failed; could not allocate 18446744066204519736 bytes
+
+[13:59] <timo> well, that's not great! :)
+
+[14:00] <lizmat> feels like that allocation number is...   way too big ?
+
+[14:00] <timo> yes, negative number
+
+[14:00] <timo> I recall looking at some code paths where we made sure to use the biggest number type for file size information the OS / C library can give us
+
+[14:00] <timo> m: say 18446744066204519736.base(16)
+
+[14:00] <camelia> rakudo-moar af30c7bed: OUTPUT: «FFFFFFFE40AA4D38␤»
+
+[14:01] <lizmat> m: my int $ = 18446744066204519736
+
+[14:01] <camelia> rakudo-moar af30c7bed: OUTPUT: «Cannot unbox 64 bit wide bigint into native integer. Did you mix int and Int or literals?␤  in block <unit> at <tmp> line 1␤␤»
+
+[14:03] <lizmat> anyways, will contemplate while doing some gardening&
+
+[14:05] <timo> maybe check with strace if you can spot where the number may come from
+
+[15:39] <patrickb> When a raku process (my debugger UI) stops and doesn't perform any cleanup on shutdown, a Proc::Async child (the moar under debug) might first receive a SIGHUP (causing moar to try to shutdown) and then a SIGINT (causing it to die immediately)? I'm asking because when shutting the UI down I receive a last sole 83 byte from moar. I'd guess it's the start of a ThreadEnded notification. Does that sound plausible?
+
+[15:40] <patrickb> Byte 83 is the introducer of a fixed with map with 3 elements.
+
+[15:58] <timo> I can only recommend rr to record the whole process tree so you can figure things like that out reliably :)
+
+[15:58] <timo> sigint shouldn't kill moar immediately, but we also don't catch it by ourselves so we really don't do very much between receiving sigint and exiting
+
+[16:16] <lizmat> an update on the MoarVM panic: Memory allocation failed; could not allocate 18446744066204519736 bytes error
+
+[16:17] <lizmat> if I *don't* do the $blob.append($part)    I don't get an error
+
+[16:17] <lizmat> so it feels like the nqp::splice of large buffers is doing something wonky
+
+[16:46] <lizmat> aha: looks like it fails when such a large blob is being returned from a sub
+
+[16:48] *** [Coke]_ joined
+[16:48] <lizmat> frobnicating&
+
+[16:51] *** [Coke] left
+[17:34] <timo> if we are adding newly read blobs to an existing blob one by one, if we don't otherwise have GC pressure (did not verify) we might keep a lot of smaller blobs around before gc can toss them out?
+
+[17:34] <timo> we don't really have a Blob.join or something right? but ... we probably could ...
+
+[17:34] <timo> actually, i don't think appending a native array with the splice op is bad?
+
+[17:36] <timo> rakudo -e '"bla/bla/bigfile.bin".IO.slurp(:bin).elems.say' → 2188252818
+
+[17:36] <timo> 2.1G big
+
+[18:02] <lizmat> hmmmm   that's a good point
+
+[18:03] <lizmat> right... I forgot the :bin in my slurp test
+
+[18:03] <lizmat> so it does trying to decode the 2.4G blob
+
+[18:04] <lizmat> *dies
+
+[18:11] <timo> > MoarVM panic: Memory allocation failed; could not allocate 18446744065282693704 bytes
+
+[18:11] <timo> ah yes
+
+[18:11] <lizmat> https://gist.github.com/lizmat/905751e5c763a21670fdb3c22a8c9d9c   some decoding memory usage
+
+[18:13] <timo> #3  MVM_string_utf8_decode (tc=0x5ec4c020080, result_type=<optimized out>, utf8=0x7ffe6a010000 "Rar!\032\a", 
+
+[18:13] <lizmat> note that in the end, even the ticker gets interrupted (for about 24 ticks)
+
+[18:13] <timo>     bytes=2188252818) at src/strings/utf8.c:241
+
+[18:13] <timo> 241         MVMGrapheme32 *buffer = MVM_malloc(sizeof(MVMGrapheme32) * bufsize);
+
+[18:14] <timo> "ticker gets interrupted" could be a surprisingly long GC pause?
+
+[18:14] <timo> MVMint32 bufsize = bytes ... yeah that can too easily overflow haha
+
+[18:14] <lizmat> yeah, about 2.4 seconds worth ?
+
+[18:15] <lizmat> ao appending bufs for more than 32bit ints is wonky
+
+[18:17] <lizmat> ?
+
+[18:18] <timo> we should note that a MVMString has a num_graphs attribute that is a 32bit integer too
+
+[18:19] <lizmat> aaahhh   I guess that's where the decoding of larger blobs dies on
+
+[18:19] <lizmat> would it work if it would make separate strands ?
+
+[18:19] <timo> there is however no upper limit to how many bytes you can decode to still fit into that because we might be creating some enormous composed graphemes
+
+[18:19] <timo> no the string that has the strands in it still has to have the total length in that attribute
+
+[18:20] <lizmat> ok, so slurping my sample file will just not work
+
+[18:20] <lizmat> so I guess we will need Blob.decode to check for max length and give a less LTA error message
+
+[18:21] <timo> the first thing we do is generate a buffer that's big enough to have 4 bytes for every 1 byte of the input
+
+[18:21] <timo> that's the line where the panic happens for us now
+
+[18:22] <lizmat> yeah, but the buf is not 4611686016551129934 bytes
+
+[18:22] <timo> correct
+
+[18:22] <lizmat> so the value it shows is  bogus
+
+[18:22] <timo> but we go through a 32bit integer on the way to the malloc call
+
+[18:24] <timo> that makes it go negative and then back up to unsigned 64bit which makes it huge
+
+[18:24] <lizmat> ok, I guess that makes sense...  but still LTA  :-)
+
+[18:24] <timo> yes, for sure
+
+[18:25] <timo> rakudo -e 'say "x" x (2**32 + 1)'
+
+[18:25] <timo> Repeat count (4294967297) cannot be greater than max allowed number of graphemes 4294967295
+
+[18:38] *** [Coke]_ is now known as [Coke]
+
+[18:48] <lizmat> m: say "x" x (2**32)
+
+[18:48] <camelia> rakudo-moar af30c7bed: OUTPUT: «Repeat count (4294967296) cannot be greater than max allowed number of graphemes 4294967295␤  in block <unit> at <tmp> line 1␤␤»
+
+[18:49] <lizmat> that's uint32
+
+[18:49] <lizmat> some handling appears to conk out at half of that because of signed int32 ?
+
+[18:49] <timo> could be
+
+[18:50] <lizmat> hehe, looks like .slurp(:bin) on a 2G file currently doesn't even work
+
+[18:50] <timo> i think it might just be really slow because the buffer grows linearly
+
+[18:51] <lizmat> Reading from filehandle failed: Invalid argument
+
+[18:51] <timo> you have local changes?
+
+[18:51] <lizmat> this is on 2026.01
+
+[18:52] <timo> could be a bug on macos only?
+
+[18:53] <lizmat> it's because nqp::readfh gets a too large value, exceeding max positive value on an int32
+
+[18:53] <timo> as i showed above I can slurp(:bin) a file that's 2188252818 bytes big just fine
+
+[18:54] <timo> you do "path".IO.slurp(:bin)?
+
+[18:54] <lizmat> ah, maybe af30c7bed30b725a124876addeb1303da97ce7cf is to blame
+
+[18:54] <timo> right, i'm on 2025.12-8-ga42e10a59 still i think
+
+[18:55] <timo> oh, i see
+
+[18:58] <timo> i see 64bits all over the place in the implementation of read_fhb that implements nqp::readfh
+
+[18:58] <lizmat> 0.47 to slurp a 2.4G file
+
+[18:59] <lizmat> try an nqp::readfh with 0x080000000 as size
+
+[18:59] <timo> the read function we use for the actual reading on the other hand returns signed int64 for the number of bytes read, but takes an unsigned int for the number of bytes to read
+
+[19:00] <timo>        According  to  POSIX.1, if count is greater than SSIZE_MAX, the result is implementation-defined; see NOTES
+
+[19:00] <timo>        for the upper limit on Linux.
+
+[19:00] <lizmat> % r 'use nqp; nqp::readfh(nqp::open("m5.sql","r"),Buf.new,0x080000000)'
+
+[19:00] <lizmat> Reading from filehandle failed: Invalid argument
+
+[19:01] <lizmat> m: say my int32 $ = 0x080000000
+
+[19:01] <camelia> rakudo-moar af30c7bed: OUTPUT: «-2147483648␤»
+
+[19:01] <lizmat> m: say my int32 $ = 0x070000000
+
+[19:01] <camelia> rakudo-moar af30c7bed: OUTPUT: «1879048192␤»
+
+[19:01] <timo> that file has to actually be big enough?
+
+[19:02] <lizmat> nope
+
+[19:02] <timo> no error on my machine
+
+[19:03] <lizmat> hmmm...  ok lemme try on a linux box
+
+[19:03] <timo> [pid 138197] <... read resumed>, "QFI\373\0\0\0\3\0\0\0\0\0\0\0\0\0\0\0\0\0\0\0\20\0\0\0\24\200\0\0\0"..., 2147483648) = 2147479552
+
+[19:03] <timo> m: say 2147483648.base(16)
+
+[19:03] <camelia> rakudo-moar af30c7bed: OUTPUT: «80000000␤»
+
+[19:04] <timo>        On Linux, read() (and similar system calls) will transfer at most 0x7ffff000 (2,147,479,552) bytes, return‐
+
+[19:04] <timo>        ing the number of bytes actually transferred.  (This is true on both 32-bit and 64-bit systems.)
+
+[19:04] <timo> can you check the man page on your system `man 2 read` what it says?
+
+[19:07] <lizmat> The read() and pread() call may also return the following error:
+
+[19:07] <lizmat>      [EINVAL]           The value provided for nbyte exceeds INT_MAX.
+
+[19:07] <lizmat> confirmed it's not an issue on Linux
+
+[19:07] <timo> ok, so on mac the maximum is INT_MAX, which i think is 32bit integers? and on linux the maximum is SSIZE_MAX which is 64bit on 64bit systems?
+
+[19:07] <lizmat> I guess
+
+[19:08] <lizmat> no idea what INT_MAX is on MacOS
+
+[19:08] <timo> i wonder if limits.h has something
+
+[19:08] <timo> in lldb you should be able to print(INT_MAX)
+
+[19:08] <lizmat> google says:
+
+[19:08] <lizmat> INT_MAX is a macro that represents the maximum value of the upper limit of the integer data type in C/C++. The value of INT_MAX is: INT_MAX = 2147483647 (for 32-bit Integers)
+
+[19:09] <timo> though of course a sufficiently wild platform could have different definitions :P
+
+[19:09] <timo> (we do not target platforms like that)
+
+[19:09] <lizmat> yeah... so the underlying issue is read on MacOS being 32bit bound
+
+[19:12] <timo> if there's no standardised #define available we can either probe for that in the Configure.pl or we just always cap to INT_MAX for all systems, or we try once with the value passed and if we get EINVAL we reduce the size we attempt to read
+
+[19:13] <lizmat> I think capping for INT_MAX for now is ok  :-)
+
+[19:14] <timo> we don't do anything inside the read_bytes function of syncfile to handle having read less than was requested, do all users of nqp::readfh deal with smaller actual results?
+
+[19:14] <timo> i guess they already have to
+
+[19:15] <lizmat> I guess I'll check them after I commit this
+
+[19:16] <lizmat> anyways, one probably shouldn't be slurping files with that size anyway
+
+[19:17] <timo> it's quite possibly not what you actually want to do, yeah
+
+[20:27] *** patrickb left
+[20:41] *** patrickb joined
