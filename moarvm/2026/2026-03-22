@@ -1,0 +1,94 @@
+[00:02] <patrickb> I think I have an idea how to still make it work. I'll postpone the validation of whether the checksum is ok till the first breakpoint hit.
+
+[00:03] <patrickb> Down side: This won't work for files that I don't have the source locally. How should a user be expected to be able to usefully set a breakpoint without the source on the display?
+
+[00:08] <timo> we'll want to offer display of bytecode or something at some point
+
+[00:09] <timo> if someone is interested enough to build not just a disassembler (which is easy enough) but an actual decompiler, that could be helpful too
+
+[05:54] <patrickb> Can we possibly return a context handle (of the unit context) in the file loaded notification?
+
+[06:06] <patrickb> Ah, no, we obviously can't. If there is no frame with that context yet, then the context doesn't exist yet either...
+
+[06:06] <patrickb> Phew. I'm out of ideas...
+
+[06:18] <patrickb> Can we somehow make the debugserver break on all lines in a given file? Then we could do the business in the first breakpoint hit. 
+
+[06:19] <patrickb> In the new file notification, is there a line number set? If not we'd be able to differentiate.
+
+[12:22] <patrickb> I've had a quick look. It seems, the line number is 1 for that notify_new_file suspend. :-(
+
+[16:07] <lizmat> looking at the number of levensthein implementations that we have in core, I wonder why we don't have that as an MoarVM op
+
+[21:08] *** librasteve_ joined
+[21:36] <[Coke]> B+1
+
+[21:36] <[Coke]> er, +1
+
+[21:47] <Voldenet> Does it have to be levensthein distance? I'm feeling that something like `top_n_suggestions` could be more generalized
+
+[21:49] <Voldenet> and wouldn't put any specific constraints on numeric ranges used for string distance (e.g. sift4 could be used)
+
+[21:50] <timo> could really be anything
+
+[21:51] <timo> i think we have some additional scoring stuff in there already compared to traditional levenshtein based on like case difference for example
+
+[21:52] <timo> like, foo_bar vs fooBar vs foo-bar vs FOOBAR vs FOO_BAR could all be considered a low distance from each other compared to changing a letter to a different letter
+
+[21:52] <timo> if we want to go fancy with it, we could also consider foo_bar vs bar_foo a smaller difference than it normally would be with just the regular algorithm
+
+[21:55] <Voldenet> that makes sense – it's not a typo that normal edit distance would get, but tokenized distance would
+
+[21:57] <Voldenet> so every identifier would need to get converted into singular tokens, then per-token matching would have to be done, then combinations of these top matches could result in scores
+
+[22:05] <Voldenet> > identifiers = 'foo_bar' -> <foo bar>; scoring = create_scoring(); for identifiers.tokens -> token { score_add(scoring, 'bar', token) }; score_finalize(scoring)
+
+[22:05] <Voldenet> pseudocode of what I mean
+
+[22:06] <Voldenet> heh, I feel like I've skipped a step where 'bar' gets extracted from initial identifier
+
+[22:07] <Voldenet> > identifiers = tokenize('foo_bar') -> <foo bar>; scoring = create_scoring(); for tokenize('bar-foo') -> input_token { for identifiers.tokens -> token { score_add(scoring, input_token, token) }}; score_finalize(scoring)
+
+[22:09] <Voldenet> I feel like tokenizing should be rakudo-implemented and scoring should be a bunch of ops
+
+[22:12] <Voldenet> so that scoring object really is useless in any other context outside of ops, but scorings of various tokens in the same instances can be compared
+
+[22:17] <timo> why wouldn't we just have a single syscall that takes a target string, a list of candidates, and something to put results into
+
+[22:19] <Voldenet> well, the tokenization would require pre-building a table larger than the string (since it'd need N \0-terminated strings), but it depends on the use case
+
+[22:20] <Voldenet> the initial idea I've had would just take string, list of candidates and number of results requested
+
+[22:20] <Voldenet> but then it can't be anyhow pre-optimized for distance-matching
+
+[22:22] <Voldenet> so, input and targets would need to get tokenized on every attempt
+
+[22:27] <Voldenet> maybe `my $ctx := matching_table_new('foo_bar'); matching_table_add($ctx, 'another_identifier'); my $iterator := matching_table_top($ctx); while $iter { my $item = matching_table_pop($iter); say $item }`
+
+[22:29] <Voldenet> low-level, doesn't do any implications about any datatypes, iterator can hold any data it needs to get N top results
+
+[22:31] <timo> how often do we expect to re-do distance scoring in a given process's lifetime?
+
+[22:36] <Voldenet> typically typo-suggestion emits the best guess and everything exists, but practically, every scope would need its matching table
+
+[22:37] <Voldenet> perhaps linked to another one
+
+[22:39] <Voldenet> in case user catches the error, maybe I'm overthinking this design
+
+[22:40] <Voldenet> I'm looking at the https://github.com/rakudo/rakudo/blob/74da84b05fbc6834ffbd8ca4e642610316c78789/src/Raku/ast/resolver.rakumod#L1405
+
+[22:40] <Voldenet> and perhaps suggestions should also have priority
+
+[22:44] <timo> ideally if the user catches the error we don't generate any suggestions at all unless they are explicitly accessed, for example by printing the exception out
+
+[22:49] <Voldenet> `my $ctx := matching_table_new(3); matching_table_add($ctx, 'foo_bar', 0); matching_table_add($ctx, 'another_identifier', 0); my $iterator := matching_table_top('some_typo', $ctx); while $iter { my $item = matching_table_pop($iter); say $item }`
+
+[22:49] <Voldenet> in current case $ctx could be equivalent to `my @candidates := [[], [], []];`
+
+[22:50] <Voldenet> I like the idea of having similarity matching inside the core, because it can be used outside of the core code
+
+[23:12] <timo> we do have StrDistance for use in the tr operator i think
+
+[23:12] <timo> which is something else, but at least tangentially related
+
+[23:18] *** librasteve_ left
