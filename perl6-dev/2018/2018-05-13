@@ -1,0 +1,231 @@
+[01:06] <MasterDuke> timotimo: any ideas for how to make this https://github.com/rakudo/rakudo/blob/master/src/core/Match.pm6#L799-L823 smaller in bytecode? i've removed sigils and pulled the role outside the sub, but it's only down to 440 bytes
+[01:07] <timotimo> perhaps try to have just one EVAL and combine the string in there
+[01:08] <timotimo> maybe have the ifs construct just one string that'? either :i :m, :i, :m or the empty string
+[01:09] <MasterDuke> hm, i'll give that a try
+[01:58] *** ilbot3 joined
+[01:58] *** moderator changes topic to: Perl 6 language and compiler development 2.0 | Logs at http://irclog.perlgeek.de/perl6-dev/today | For toolchain/installation stuff see #perl6-toolchain | For MoarVM see #moarvm
+[02:05] <timotimo> can you tell from spesh if the inner blocks are already counted for the 440?
+[02:06] <MasterDuke> how would i know?
+[02:08] <MasterDuke> if i turn on MVM_LOG_INLINES, the only debug output with MAKE_REGEX in it is `Can NOT inline MAKE_REGEX (9904) with bytecode size (440) into INTERPOLATE_ASSERTION (9892): bytecode is too large to inline`
+[02:09] <MasterDuke> adding the `with bytecode size (440)` to what's printed is a local modification
+[02:21] <timotimo> the spesh log prints out the bytecode for the whole frame normally
+[02:25] <MasterDuke> i don't see bytecode size in the spesh log?
+[02:25] <MasterDuke> i'm trying turning it into multis now
+[02:25] <timotimo> no, but you can see what kinds of things take up space in it
+[02:28] <timotimo> oh, you can just take the very last BB and see what its pc is
+[02:29] <timotimo> that's the original pc, i.e. it refers to the "before" state
+[02:29] <timotimo> but it gives you a rough idea of how big the frame is
+[02:30] <MasterDuke> line: 807 (pc 440)
+[02:31] <MasterDuke> both before and after specialization
+[02:31] <timotimo> right, that doesn't change between before and after
+[02:33] <timotimo> i'll make spesh print out the size
+[02:33] <timotimo> oh, it's not trivial, i'll have to go through the code and count
+[02:34] <MasterDuke> how would it be different than what i did?
+[02:35] <timotimo> well, spesh can make the bytecode shrink or grow, but you can't see that from what's in the speshlog unless you count it by hand
+[02:35] <timotimo> computers are better at that sort of thing
+[02:37] <MasterDuke> hm. and is the inlining being attempted before or after the specialization?
+[02:38] <timotimo> i think it takes spesh-optimized code for inlining
+[02:38] <timotimo> yeah, you can see it in the spesh log
+[02:39] <timotimo> "Inlining graph" gives you graphs that contain sp_ ops
+[02:39] <timotimo> which only spesh is allowed to emit
+[02:39] <MasterDuke> hm, with multis i now get `Can inline <anon> (835) into MAKE_REGEX (9903)`
+[02:39] <MasterDuke> but that's the only reference to MAKE_REGEX, there's nothing about trying to inline it
+[02:41] <timotimo> inlining something into MAKE_REGEX can be a big contributor to its size
+[02:41] <timotimo> can you find the corresponding frame in the spesh log that's being inlined into MAKE_REGEX?
+[02:42] <MasterDuke> Latest statistics for '<anon>' (cuid: 835, file: SETTING::src/core/Attribute.pm6:63)
+[02:43] <MasterDuke> that's deep into `method compose` in Attribute.pm6
+[02:49] <timotimo> grab my latest moarvm commit
+[02:53] <MasterDuke> k. btw, making it multis was a decent help
+[02:54] <timotimo> hm, i wonder if they should be made named arguments
+[02:54] <MasterDuke> `perl6 -e 'my @l = "sm.sql".IO.lines; my $s = "Perl6"; my $t = now; my @m = @l.grep(/ <$s> /); say @m.elems; say now - $t'` for a 10k line file went from 3.4s to 2.6s
+[02:54] <timotimo> but their presence or nonpresence is probably not going to be static in the code
+[02:54] <timotimo> so that might not actually help
+[02:54] <timotimo> wow
+[02:56] <MasterDuke> fyi, couple new warnings. e.g., `src/spesh/dump.c:552:37: warning: format ‘%ld’ expects argument of type ‘long int’, but argument 3 has type ‘MVMuint32 {aka unsigned int}’ [-Wformat=]`
+[02:58] <timotimo> why don't i get those :|
+[02:58] <timotimo> gcc is lying to me?
+[02:58] <MasterDuke> i have gcc (Ubuntu 7.2.0-8ubuntu3.2) 7.2.0
+[02:59] <timotimo> if you change the ld in there to lu instead, does that fix it?
+[02:59] <timotimo> gcc (GCC) 7.3.1 20180303 (Red Hat 7.3.1-5)
+[02:59] <MasterDuke> but i didn't see them with gcc (GCC) 8.1.0
+[02:59] <MasterDuke> i.e., got warnings in kubuntu 17.10, not in arch linux
+[03:00] <MasterDuke> Frame size: 226 bytes
+[03:00] <MasterDuke> for the <anon> that got inlined into MAKE_REGEX
+[03:00] <MasterDuke> oh, that was before. Frame size: 128 bytes after
+[03:02] <MasterDuke> MAKE_REGEX is Frame size: 546 bytes before, and Frame size: 344 bytes (140 from inlined frames) after
+[03:03] <MasterDuke> hm. there was an 'inlining graph' before, of that <anon>. it had Frame size: 128 bytes
+[03:05] <MasterDuke> btw, making them '%u' silenced the warnings
+[03:05] <timotimo> without an l?
+[03:05] <MasterDuke> yeah
+[03:06] <timotimo> so with %lu it's still warning?
+[03:06] <MasterDuke> yeah, `warning: format ‘%lu’ expects argument of type ‘long unsigned int’, but argument 3 has type ‘MVMuint32 {aka unsigned int}’ [-Wformat=]`
+[03:07] <timotimo> ok, thank you!
+[03:16] <timotimo> going to bed, seeya!
+[03:17] <MasterDuke> same here, later...
+[04:01] *** Ben_Goldberg joined
+[05:47] *** ufobat___ joined
+[05:55] *** entonian joined
+[08:24] *** ufobat___ joined
+[08:25] <[Tux]> Rakudo version 2018.04.1-71-g776ff354c - MoarVM version 2018.04.1-100-g99971b537
+[08:25] <[Tux]> csv-test-xs-20      0.421 -  0.480
+[08:25] <[Tux]> csv-ip5xs           0.861 -  0.873
+[08:25] <[Tux]> test-t --race       0.998 -  1.000
+[08:25] <[Tux]> test-t              2.347 -  2.428
+[08:25] <[Tux]> csv-ip5xs-20        8.698 -  8.760
+[08:25] <[Tux]> test                8.974 -  9.008
+[08:25] <[Tux]> test-t-20 --race   14.766 - 15.508
+[08:25] <[Tux]> csv-parser         37.111 - 37.651
+[08:26] <[Tux]> test-t-20          41.685 - 42.041
+[09:17] <samcv> good *
+[10:12] *** robertle joined
+[10:24] <samcv> releasable6: status
+[10:24] <releasable6> samcv, Next release in ≈6 days and ≈8 hours. 2 blockers. 0 out of 71 commits logged
+[10:24] <releasable6> samcv, Details: https://gist.github.com/f63ca0be6ce1470deeb867b606ee850e
+[10:55] *** ExtraCrispy joined
+[11:36] <Geth> ¦ rakudo: MasterDuke17++ created pull request #1823: Turn MAKE_REGEX into multis
+[11:36] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/1823
+[11:46] <MasterDuke> still not sure why MAKE_REGEX doesn't show up in the debug output for inlining other than something being inlined into it. why isn't spesh attempting to inline it into INTERPOLATE_ASSERTION?
+[12:25] <timotimo> MasterDuke: what does INTERPOLATE_ASSERTION's spesh log look like?
+[12:26] <timotimo> both the stats and the before/after
+[12:30] <Geth> ¦ roast/car-grant-midrat: e0c9483ff0 | (Zoffix Znet)++ | S32-num/midrat.t
+[12:30] <Geth> ¦ roast/car-grant-midrat: [CaR Grant] Spec MidRat->Rat degradation
+[12:30] <Geth> ¦ roast/car-grant-midrat: review: https://github.com/perl6/roast/commit/e0c9483ff0
+[12:32] <Geth> ¦ roast/car-grant-midrat: f98396df31 | (Zoffix Znet)++ | S32-num/midrat.t
+[12:32] <Geth> ¦ roast/car-grant-midrat: Don't store dens in vars
+[12:32] <Geth> ¦ roast/car-grant-midrat:
+[12:32] <Geth> ¦ roast/car-grant-midrat: We never use them in this subtest
+[12:32] <Geth> ¦ roast/car-grant-midrat: review: https://github.com/perl6/roast/commit/f98396df31
+[12:33] <MasterDuke> timotimo: before has Frame size: 1748 bytes + (166 + 170 from inlining graph), after has Frame size: 1836 bytes (346 from inlined frames)
+[12:34] <timotimo> what code are you using?
+[12:34] <MasterDuke> `perl6 -e 'my @l = "sm.sql".IO.lines; my $s = "Perl6"; my $t = now; my @m = @l.grep(/ <$s> /); say @m.elems; say now - $t'`
+[12:36] <timotimo> sm.sql is like a profile sql file or something?
+[12:36] <MasterDuke> yeah, shortened to exactly 10k lines
+[12:40] <MasterDuke> this is all done on the branch from my PR of course
+[13:06] <dogbert11> ZOFFLOP: t/06-telemetry/01-basic.t test #42
+[13:07] <dogbert11> ZOFFLIP: t/spec/S10-packages/precompilation.rakudo.moar test #47
+[13:08] <MasterDuke> i think there was a segfault in t/09-moar/General_Category__UnicodeData__2.t in the failed travis run for https://github.com/rakudo/rakudo/pull/1823
+[13:27] <Geth> ¦ roast/car-grant-midrat: cd834c824c | (Zoffix Znet)++ | S32-num/midrat.t
+[13:27] <Geth> ¦ roast/car-grant-midrat: [CaR Grant] Add more MidRat->Rat degradation specs
+[13:27] <Geth> ¦ roast/car-grant-midrat:
+[13:27] <Geth> ¦ roast/car-grant-midrat: - Test with two low-denominator MidRats
+[13:27] <Geth> ¦ roast/car-grant-midrat: review: https://github.com/perl6/roast/commit/cd834c824c
+[13:40] <dogbert11> MasterDuke: yes, there's something fishy going on with that one
+[13:41] <dogbert11> it shouldn't look like this: Illegal instruction (core dumped)
+[13:42] <timotimo> MasterDuke: got a clue what's ailing the jvm in your pull request? or does it also not run any of rakudo's tests in the master branch?
+[13:44] <MasterDuke> timotimo: not sure. but https://github.com/rakudo/rakudo/pull/1822 also has all failing jvm jobs
+[13:46] <MasterDuke> and that touches completely different code, so i don't think it's a problem with either of the PRs
+[13:46] <timotimo> OK
+[13:46] <timotimo> that's fair
+[13:46] <timotimo> i restarted the job with the flapper btw
+[13:46] <MasterDuke> thanks
+[13:47] *** bartolin joined
+[13:56] *** lucasb joined
+[13:56] <MasterDuke> oh, t/02-rakudo/08-inline-native-arith.t just flopped for me, that's a new one
+[14:11] <Geth> ¦ roast/car-grant-midrat: 7891f3d6e9 | (Zoffix Znet)++ | S32-num/midrat.t
+[14:11] <Geth> ¦ roast/car-grant-midrat: [CaR Grant] MidRat no longer inherits from FatRat
+[14:11] <Geth> ¦ roast/car-grant-midrat:
+[14:11] <Geth> ¦ roast/car-grant-midrat: Reasoning: https://irclog.perlgeek.de/perl6/2018-05-13#i_16160055
+[14:11] <Geth> ¦ roast/car-grant-midrat: review: https://github.com/perl6/roast/commit/7891f3d6e9
+[14:27] <MasterDuke> timotimo: travis is now clean. would you mind merging 1822 and 1823?
+[14:30] <timotimo> i wonder if the single space for "not m and not i" is necessary
+[14:30] <timotimo> or if it also comes out correct with an empty string there
+[14:30] <timotimo> we perhaps optimize concatenating empty strings
+[14:30] <timotimo> of course that'll be a drop in the ocean
+[14:32] <timotimo> if we pull the "anon regex { " together with the different flags, we'll spend a tiny more space in the string constant table, but we can get rid of a single concatenation in the bytecode
+[14:33] <MasterDuke> k. i'm gonna be afk for a bit, but can try that later
+[14:34] <timotimo> until then i can probably merge the pull request, it does look good
+[14:34] <timotimo> and the pay-off looks juicy
+[14:35] <MasterDuke> yeah, i was surprised but happy it was that much of a difference
+[14:35] <Geth> ¦ rakudo: 32a78996e6 | (Daniel Green)++ | src/core/Match.pm6
+[14:35] <Geth> ¦ rakudo: Turn MAKE_REGEX into multis
+[14:35] <Geth> ¦ rakudo:
+[14:35] <Geth> ¦ rakudo: Also pull the role outside of the subs and re-write a nested ternary
+[14:35] <Geth> ¦ rakudo: into nested nqp ops.
+[14:35] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/32a78996e6
+[14:35] <Geth> ¦ rakudo: 79af50f698 | timo++ (committed using GitHub Web editor) | src/core/Match.pm6
+[14:35] <Geth> ¦ rakudo: Merge pull request #1823 from MasterDuke17/speed_up_MAKE_REGEX
+[14:35] <Geth> ¦ rakudo:
+[14:35] <Geth> ¦ rakudo: Turn MAKE_REGEX into multis
+[14:35] <Geth> ¦ rakudo:
+[14:35] <Geth> ¦ rakudo: searching 10k lines for a constant string interpolated into
+[14:35] <Geth> ¦ rakudo: a regex with `<$s>` syntax is about 30% faster.
+[14:35] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/79af50f698
+[14:36] <Geth> ¦ rakudo: e0dca0ccbd | thundergnat++ | src/core/Rational.pm6
+[14:36] <Geth> ¦ rakudo: Rewrote Rat / FatRat stringification to be much faster.
+[14:36] <Geth> ¦ rakudo:
+[14:36] <Geth> ¦ rakudo: Rats stringify on average twice as fast, FatRats, depending on the
+[14:36] <Geth> ¦ rakudo: size of the denominator, range from about the same to 200+ times as
+[14:36] <Geth> ¦ rakudo: fast. Also fixes a few bugs: FatRat strings very close to 1 no
+[14:36] <Geth> ¦ rakudo: longer round off to 1. Rats and FatRats no longer ever stringify
+[14:36] <Geth> ¦ rakudo: with trailing zeros in the fractional part. FatRats are now capable
+[14:36] <Geth> ¦ rakudo: of stringifying to sixteen minimum significant digits or more if
+[14:36] <Geth> ¦ rakudo: necessary to accurately express the value, but holding off for v6.c
+[14:36] <Geth> ¦ rakudo: because it isn't spec.
+[14:36] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/e0dca0ccbd
+[14:36] <Geth> ¦ rakudo: f72a6a4995 | timo++ (committed using GitHub Web editor) | src/core/Rational.pm6
+[14:36] <timotimo> thundergnat++ # very cool
+[14:37] <Geth> ¦ rakudo: Merge pull request #1822 from thundergnat/fast-fatrats
+[14:37] <Geth> ¦ rakudo:
+[14:37] <Geth> ¦ rakudo: Rewrote Rat / FatRat stringification to be much faster.
+[14:37] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/f72a6a4995
+[14:43] *** AlexDaniel joined
+[15:05] *** ufobat joined
+[15:45] *** skids joined
+[16:21] * skids wonders if there is an nqp op to create a shallow clone of a mixin's base type
+[16:23] <timotimo> clone of a type? you mean an instance of that type with the attributes copied over shallowly?
+[16:23] <skids> Yes, of an instance.  Basically strip the mixin.
+[16:24] <timotimo> i don't think there is an op for that
+[16:24] <skids> I've found a spot where it is necessary to shed SpecialArg off a node.
+[16:24] <timotimo> ah, interesting
+[16:25] <timotimo> i suppose storing a value in there that means "nope" is not helpful, right?
+[16:25] <timotimo> if places do istype everywhere
+[16:26] <skids> Well usually they check whether .named is true, but there are a few spots that check for SPecialArg specifically.
+[16:27] <skids> (this is the spot.  It was assuming it would get a Want and stripping it, but it could actually be a WVal or an Op, too) https://github.com/skids/rakudo/commit/8c1f26ff3eb1163b5295d188540e74ca7103556e
+[16:28] <skids> (Oh i guess that's two commits in)
+[16:47] <Geth> ¦ rakudo: zoffixznet self-assigned TWEAK cannot set array dimension dynamically when it uses variable declared with has keyword https://github.com/rakudo/rakudo/issues/1793
+[16:54] *** cog_ joined
+[18:32] <Geth> ¦ rakudo: 9b915f09de | (Zoffix Znet)++ | src/Perl6/Grammar.nqp
+[18:32] <Geth> ¦ rakudo: Fix overzealous X::Syntax::NoSelf throwage
+[18:32] <Geth> ¦ rakudo:
+[18:32] <Geth> ¦ rakudo: Fixes R#1793 https://github.com/rakudo/rakudo/issues/1793
+[18:32] <Geth> ¦ rakudo:
+[18:32] <Geth> ¦ rakudo: When we set up a fresh $*HAS_SELF for throwage of X::Syntax::NoSelf in
+[18:32] <Geth> ¦ rakudo: post contraints, it's not actually scoped to for just the post
+[18:32] <synopsebot> R#1793 [open]: https://github.com/rakudo/rakudo/issues/1793 TWEAK cannot set array dimension dynamically when it uses variable declared with has keyword
+[18:32] <Geth> ¦ rakudo: constraint. It's technically declared at the start of
+[18:32] <Geth> ¦ rakudo: <…commit message has 6 more lines…>
+[18:32] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/commit/9b915f09de
+[18:33] <Geth> ¦ roast: 3993892a3f | (Zoffix Znet)++ | S12-construction/construction.t
+[18:33] <Geth> ¦ roast: Remove trailing whitespace
+[18:33] <Geth> ¦ roast: review: https://github.com/perl6/roast/commit/3993892a3f
+[18:33] <Geth> ¦ roast: 65f0dd0cff | (Zoffix Znet)++ | S12-construction/construction.t
+[18:33] <Geth> ¦ roast: Test attributes can be used in variable shape declarations
+[18:33] <Geth> ¦ roast:
+[18:33] <Geth> ¦ roast: Closes https://github.com/rakudo/rakudo/issues/1793 R#1793
+[18:33] <Geth> ¦ roast: Rakudo fix: https://github.com/rakudo/rakudo/commit/9b915f09de
+[18:33] <Geth> ¦ roast: review: https://github.com/perl6/roast/commit/65f0dd0cff
+[19:00] <releasable6> Next release in ≈5 days and ≈23 hours. 2 blockers. Please log your changes in the ChangeLog
+[19:01] <MasterDuke> hasn't nine++ already fixed the .precomp blocker?
+[19:11] *** commavir joined
+[20:15] <MasterDuke> timotimo: thanks for merging. btw, did you try my code? if so, did you see anything useful in the spesh log?
+[20:29] <timotimo> i only looked a tiny bit, but i also didn't see why it didn't come up
+[20:33] *** cog_ joined
+[20:39] <timotimo> like, in the stats it records more and more hits for that, i.e. it's running code that is actually still logging the executions
+[20:40] <timotimo> which speshed code wouldn't do
+[20:40] <timotimo> hey, maybe i'm onto something here
+[20:40] <MasterDuke> oh?
+[20:41] <timotimo> hm, no, there's no deopts
+[20:41] <timotimo> and interpolate_assertion and make_regex are both jitted fully
+[20:43] <AlexDaniel> MasterDuke: I think he did some improvements
+[20:43] <AlexDaniel> they're not referenced in the issue unfortunately
+[20:44] <AlexDaniel> IIRC there was still something left, although maybe that's not blocker-worthy
+[20:45] <AlexDaniel> .tell nine Please update the status of R#1783 (is it fully resolved? If not, what is left?)
+[20:45] <yoleaux> AlexDaniel: I'll pass your message to nine.
+[20:45] <synopsebot> R#1783 [open]: https://github.com/rakudo/rakudo/issues/1783 [⚠ blocker ⚠] New sporadic explosions likely related to precomp
+[21:17] <dogbert11> stupid question of the day: if MoarVM is built with the --no-optimize flag everything should still work albeit at a slower pace right?
+[21:21] *** cog_ joined
+[21:36] <timotimo> yeah
+[22:03] <dogbert11> timotimo: thx, one spectest file behaves badly with --no-optimize, i.e. t/spec/integration/eval-and-threads.t
+[22:03] <dogbert11> it tends to fail with 'moar: src/gc/collect.c:218: process_worklist: Assertion `*item_ptr != item->sc_forward_u.forwarder' failed.'
+[22:31] *** lizmat joined
+[23:32] *** MasterDuke joined
