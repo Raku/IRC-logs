@@ -1,8 +1,1254 @@
 [01:16] *** orafu left
 [01:49] *** simcop2387 is now known as cubert
-
 [01:49] *** cubert is now known as simcop2387
-
+[06:26] *** ilbot2 joined
+[06:26] *** moderator changes topic to: »ö« | http://perl6.org/ | nopaste: http://paste.lisp.org/new/perl6 | evalbot usage: 'perl6: say 3;' or rakudo: / pugs: / std: | irclog: http://irc.pugscode.org/ | UTF-8 is our friend!
+[06:28] *** zloyrusskiy joined
+[06:28] *** szabgab joined
+[06:37] *** viklund joined
+[06:40] *** viklund joined
+[06:41] *** viklund joined
+[06:42] *** viklund joined
+[06:44] <moritz_> \\o/
+[06:48] <sjohnson> hi
+[06:54] *** mberends joined
+[07:06] *** mariuz joined
+[07:08] <moritz_> jnthn: make spectest reports:
+[07:09] <moritz_> t/spec/S06-signature/slurpy-params.rakudo
+[07:09] <moritz_> Failed tests:  49, 59
+[07:09] <moritz_> TODO passed:   48, 56
+[07:15] *** rfordinal joined
+[07:35] *** hanekomu joined
+[07:40] *** riffraff joined
 [07:40] *** xenoterracide left
+[07:41] *** xenoterracide joined
+[07:46] <jnthn> oh morning
+[07:46] <jnthn> moritz_: heh, lose two, win two...
+[07:47] <Matt-W> morning
+[07:48] *** msmatsko joined
+[07:50] *** msmatsko joined
+[07:51] *** msmatsko_ joined
+[07:54] *** msmatsko_ joined
+[07:57] <sjohnson> hi
+[08:08] *** mtve joined
+[08:18] *** payload joined
+[08:24] <jnthn> std: sub foo(Int ::T $x) { }
+[08:24] <p6eval> std 28649: OUTPUT«[31m===[0mSORRY![31m===[0m␤Multiple prefix constraints not yet supported at /tmp/X2Aq0iVTDC line 1:␤------> [32msub foo(Int ::T [33m⏏[31m$x) { }[0m␤    expecting type_constraint␤FAILED 00:01 98m␤»
+[08:24] <jnthn> Hmm. Since ::T is a type capture, not a constraint, here, I think this is probably bogus. OTOH, Rakudo matches STD too at the moment...
+[08:28] <moritz_> I think the error message makes sense, somehow
+[08:28] <moritz_> but not quite sure
+[08:31] *** nbrown joined
+[08:35] <jnthn> I'm leaving Rakudo as is for now, but I think that may want to change.
+[08:38] *** alexn_org joined
+[08:55] *** rfordinal left
+[09:36] <jnthn> rakudo: for &infix:<...>.candidates { say .signature.perl }
+[09:36] <p6eval> rakudo 8d6337: OUTPUT«:(@lhs, @rhs)␤:(Any $lhs, @rhs)␤:(Any $lhs, Code $generator)␤:(@lhs, Code $generator, Any :$limit?)␤:(Any $lhs, Any $rhs where all({ ... }))␤»
+[09:37] <Matt-W> wooo
+[09:37] *** Whiteknight joined
+[09:38] <jnthn> Matt-W: Yeah, the difference between that and my local output I think pinpoints the bug...
+[09:38] <Matt-W> :)
+[09:39] * jnthn has just managed to change a bunch of code he hated to be something he can follow more easily, as well as avoiding loads of creating silly unrequired junctions.
+[09:39] *** Ryan52 joined
+[09:39] <jnthn> Now I just need to fix the bugs...
+[09:39] <jnthn> Between this and yesterday's change, even though they're just initial refactors, I'm seeing roughly 10% shaved off startup time.
+[09:42] <Matt-W> ooooh
+[09:42] <Matt-W> jnthn++
+[09:43] <Matt-W> More understandable AND faster
+[09:43] <jnthn> Well
+[09:43] <Matt-W> Wish that could happen more often
+[09:43] <jnthn> Basically in a sig like :(Int $x), we really, really don't need to build a junction containing Int, only to pull it out again later on and decide we didn't need to the junction anyway.
+[09:44] <jnthn> (it made the signature binder a tad simpler, but not enough to justify the waste)
+[09:44] *** |Ryan52 joined
+[09:48] <Matt-W> No you probably don't
+[09:48] <Matt-W> Was that to handle the possibility of it being a junctive type in the signature
+[09:48] <Matt-W> I suppose an all() or any() with one element in it matches the same as the lone element, so it kind of makes sense
+[09:48] <jnthn> Well, in something like :(Int $x where { $x < 42 })
+[09:49] <jnthn> Then we would make an all(Int, {$x < 42})
+[09:49] <Matt-W> oh
+[09:49] <Matt-W> okay I hadn't considered that
+[09:49] <jnthn> This is useful for the single dispatcher, since it has one thing to call ACCEPTS on.
+[09:49] <Matt-W> but not so much for the multi dispatcher?
+[09:49] <jnthn> But the multi-dispatcher needs the nominal type and the constraint type separate.
+[09:50] <Matt-W> because it needs to sort by narrowness
+[09:50] <jnthn> Right.
+[09:50] <jnthn> So it was taking the junction apart to find the nominal type.
+[09:50] <jnthn> But in reality it meant we were building loads of all(Int) style junctions.
+[09:50] <jnthn> Only to throw them away alter
+[09:50] <jnthn> Well, not even that actually
+[09:51] <jnthn> Because we kept hold of the extracted type (which is fine, it's just a pointer to a proto) and also the junction.
+[09:51] <Matt-W> You still don't want to be building all these objects you don't need
+[09:51] <jnthn> Now we never create that junction in the first place - the compiler keeps the two separated out.
+[09:51] <jnthn> And only creates a junction _if_ there are any constraint types.
+[09:51] <Matt-W> So how does it handle a junctive type?
+[09:51] *** eMaX joined
+[09:51] <Matt-W> Just out of curiosity
+[09:52] <jnthn> Junctive types?
+[09:52] <jnthn> Note those don't appear on the LHS anyway.
+[09:52] <jnthn> So they only apply to constraint types.
+[09:52] <jnthn> Basically though, now when we add the paramter to the sig, we pass along the Int and an all({ $x < 42 })
+[09:53] <jnthn> If we know there's one constraint, we can likely drop the junction too.
+[09:53] <jnthn> And if it's just :(Int $x) we pass along Int and a null PMC.
+[09:53] <Matt-W> nice
+[09:53] <jnthn> Yeah
+[09:53] <Matt-W> so what if it was :(Int|Str $x)
+[09:53] <jnthn> No point throwing away stuff we already know.
+[09:54] <jnthn> :(Int|Str $x) is invalid in Perl 6.0.0.
+[09:54] <Matt-W> Really?
+[09:54] <Matt-W> Oh
+[09:54] <jnthn> Yes.
+[09:54] <jnthn> std: sub foo (Int|Str $x) { }
+[09:54] <p6eval> std 28649: OUTPUT«[31m===[0mSORRY![31m===[0m␤Unable to parse signature; couldn't find final ')' at /tmp/X9N8mWFcJ8 line 1:␤------> [32msub foo (Int[33m⏏[31m|Str $x) { }[0m␤    expecting any of:␤       constraint␤       param_sep␤       parameter␤       trait␤    type_constraint␤
+[09:54] <p6eval> ..whitespace␤FAILED 00:02 99m␤»
+[09:54] <jnthn> std: sub foo ($x where Int|Str) { }
+[09:55] <p6eval> std 28649: OUTPUT«ok 00:01 98m␤»
+[09:55] <Matt-W> Oh so you can get the same effect using where
+[09:55] <jnthn> Yes, but note that (other than "I have a constraint") these types don't play into candidate sorting in a multi.
+[09:56] <jnthn> (that is, it's tighter than sub foo($x) { } but only because of the constraint)
+[09:56] <Matt-W> so the interaction with other constrained candidates might be a little different than expected?
+[09:57] <jnthn> Depends what you expect. ;-)
+[09:57] <Matt-W> To be honest I'm not sure I'll actually end wanting to do it very much, but I've always had it in my head as one of the things we can do
+[09:57] <Matt-W> Along with things like has Int|Str @.things
+[09:57] <jnthn> Well, at one time it was proposed in the spec.
+[09:57] <Matt-W> But I guess I'm out of date
+[09:58] <jnthn> But nailing down the semantics of such things gets a bit fun.
+[09:58] <jnthn> Especially with relation to candidate sorting.
+[09:58] <jnthn> We may do so in the future, and the syntax is reserved (e.g. and error now).
+[09:59] <Matt-W> But right now there are other things to worry about
+[09:59] <jnthn> Aye.
+[09:59] <jnthn> Much more important things.
+[10:26] *** NorwayGeek joined
+[10:46] *** xenoterracide joined
 [10:46] *** allbery_b left
+[11:16] *** patspam1 joined
+[11:31] <nothingmuch> @tell ruoso SMOP's IR can be fast because it has a direct correspondence to typed lisp and that can be made fast, that doesn't mean it won't require a real compiler ;-)
+[11:31] <lambdabot> Consider it noted.
+[11:33] *** mikehh joined
+[11:35] * jnthn is very confused
+[11:35] <jnthn> Why does git log show a commit I made just fine, but "git push origin master" doesn't commit it?
+[11:36] <nothingmuch> git log --decorate origin/master..HEAD
+[11:36] <jnthn> (says everything up to date)
+[11:36] <jnthn> oh hmm
+[11:36] <jnthn> git branch -a shows "* (no branch)"
+[11:36] <nothingmuch> so your head is floating
+[11:36] <jnthn> nothingmuch: that command shows the commit I made
+[11:37] <jnthn> nothingmuch: Ah. :-/
+[11:37] <jnthn> nothingmuch: What is one meant to do about that?
+[11:37] <nothingmuch> git rev-parse HEAD
+[11:37] <nothingmuch> get the sha1 of it
+[11:37] <nothingmuch> git checkout master
+[11:37] <nothingmuch> git merge that sha1
+[11:37] <nothingmuch> (or git merge HEAD@{1} -- the value of HEAD before last... see git help reflog if you want to learn more)
+[11:38] <jnthn> nothingmuch++ # thanks, that helped
+[11:38] <nothingmuch> i find gitx/gitk to be very helpful
+[11:39] <nothingmuch> git log --decorate --graph is the same but harder to view
+[11:39] <nothingmuch> but the key option to pass to any of these is --all
+[11:39] <nothingmuch> also git log --pretty=oneline --graph --decorate --all
+[11:40] <jnthn> Nice to know. Thanks :-)
+[11:43] <dalek> rakudo: cf8884d | jonathan++ | src/ (3 files):
+[11:43] <dalek> rakudo: Keep the main nominal type and constraint type(s) separated out at parse time. This simplifies signature construction and also avoids creating a bunch of one-elements junctions that we don't really need. Between this and yesterday's refactor, we shave about 10% or so off Rakudo's startup time.
+[11:43] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/cf8884dbf8d6a83d59ea466f24b6f090910ef682
+[11:44] <nothingmuch> btw the reason you were on a floating head is that either you did git checkout origin/foo or git checkout 1234 or you are in the middle of a rebase
+[11:44] <jnthn> nothingmuch: Yes, I had done the second of those...I probably after looking back at a previous revision should have done git checkout master rather than git checkout <latest sha1 here>.
+[11:45] <nothingmuch> yep, otherwise it creates a linked list of commits but updates no pointers but HEAD
+[11:46] <moritz_> git is a beast if you don't grok the graph + pointers structure
+[11:46] <nothingmuch> when you do a checkout of a named local branch then HEAD is a symbolic reference to that branch, so any commit you make updates that branch, instead of HEAD
+[11:51] <jnthn> Aha.
+[11:52] * jnthn is still working on grokking git.
+[11:52] <jnthn> Time to do some non-Rakudo tasks...more Rakudo hacking later. :-)
+[11:53] <nothingmuch> jnthn: i like the 'git for computer scientists' doc
+[11:53] <nothingmuch> it explains how the graph model works
+[11:54] <nothingmuch> everything else in git makes sense once that does
+[11:54] <nothingmuch> so assumptions generally lead to the right place
+[11:54] <nothingmuch> (e.g. "blah should be possible" or "git probably does it by ..."
+[11:54] <moritz_> there's also "git from the bottom up"
+[11:54] <nothingmuch> yeah, same material but in much higher detail
+[11:55] <nothingmuch> http://blog.woobling.org/2009/05/become-git-junkie.html
+[12:01] *** masak joined
+[12:02] <jnthn> lolitsmasak
+[12:02] * moritz_ spetests rakudo on 4 cores
+[12:02] <masak> I'm out of sync with the day/night cycle. :/
+[12:02] <phenny> masak: 00:43Z <carlin> tell masak (re the 'use' bug) that's alright, the original ticket doesn't mention 'is export' as the cause so it's good to get to the bottom of that
+[12:03] <masak> carlin: oh, good point.
+[12:03] <jnthn> masak: Oh, it's itneded to be sync'd with?
+[12:03] <jnthn> *intended
+[12:04] <masak> that's a good question.
+[12:04] <masak> I don't really have any hard reason to make it sync right now.
+[12:11] *** takadonet joined
+[12:11] <takadonet> morning all
+[12:12] <moritz_> morning' takadonet
+[12:12] <masak> o/
+[12:12] <takadonet> how are you moritz_?
+[12:12] <masak> jnthn: in transforming :(Int $x where { $x < 42 }) to all(Int, {$x < 42}), don't you throw away important ordering information?
+[12:12] <moritz_> takadonet: a bit tired, but all in all just fine
+[12:13] <masak> jnthn: say I have an object with a custom-made '<' operator which blows up the universe.
+[12:13] <moritz_> the all() junction should really be an also() junction
+[12:13] <moritz_> which is an all()-junction but with guarantued ordering
+[12:13] <moritz_> s/ordering/order of execution/
+[12:14] <jnthn> Ah, probably, yes, though for now (1) our all's are ordered and (2) we don't have also yet.
+[12:14] <masak> or we just use an array like everyone else.
+[12:14] <jnthn> masak: Anyway, we don't transform it to that now.
+[12:14] <masak> ok.
+[12:14] <jnthn> The all only has one element now.
+[12:14] <jnthn> The Int out front is handled separately.
+[12:14] <jnthn> That was the point of the changes. :-)
+[12:15] <moritz_> rakudo: say 1
+[12:15] <p6eval> rakudo cf8884: OUTPUT«1␤»
+[12:15] <moritz_> that's the newest version
+[12:16] <masak> jnthn++
+[12:17] <moritz_> rakudo: class A { method foo { 3 } }; multi sub f(A $x where { .foo }) { }; f(3)
+[12:17] <p6eval> rakudo cf8884: OUTPUT«No applicable candidates found to dispatch to for 'f'␤in Main (/tmp/mjSbc83YnM:0)␤»
+[12:17] <moritz_> that used to complain that it can't call method .foo on an Int, iirc
+[12:17] <moritz_> rakudo: class A { method foo { 3 } }; multi sub f(A $x where { .foo }) { }; f(A.new)
+[12:17] <p6eval> rakudo cf8884:  ( no output )
+[12:17] <moritz_> rakudo++
+[12:17] <moritz_> jnthn++
+[12:18] <jnthn> oh
+[12:18] <jnthn> I didn't mena to fix any bugs...
+[12:18] <jnthn> :-)
+[12:18] <moritz_> spectest run on quadcore finished in 14m25.688s. \\o/
+[12:20] *** vigith joined
+[12:20] *** vigith left
+[12:20] <masak> wow. that parallelism thing really does pay off.
+[12:20] <takadonet> !!!
+[12:21] <takadonet> should try it on my machine....
+[12:21] <colomon> now if there were just a quadcore MBP...
+[12:21] <Matt-W> I need to remember that
+[12:22] <Matt-W> I have a quadcore box...
+[12:22] <Matt-W> although I usually do rakudo stuff on my dualcore
+[12:22] <colomon> Matt-W: same here.
+[12:22] <takadonet> going to try it on a dual quadcore right now!
+[12:24] <Matt-W> because the quadcore's usually in windows
+[12:24] <Matt-W> but the dualcore laptop only has linux
+[12:25] <pmichaud> good morning, #perl6
+[12:25] <moritz_> I think the parallel testing thing doesn't work on windows
+[12:25] <moritz_> at least jnthn reported that it's not faster than than a serial one
+[12:25] <moritz_> good morning pmichaud
+[12:25] <masak> morning, pmichaud
+[12:26] <pmichaud> parallel testing gives me about a 40% (wall clock) improvement
+[12:26] <pmichaud> (dual core)
+[12:26] <pmichaud> spectesting is much less painful lately; I can get a spectest done in about 15 mins on my notebook
+[12:27] <moritz_> rakudo: say (50*60 + 8) / (14 * 60 + 26)
+[12:27] <slavik2> <?{$0 < 100}> ?
+[12:27] <p6eval> rakudo cf8884: OUTPUT«3.47344110854503␤»
+[12:27] <slavik2> rakudo: say 2^64
+[12:27] <p6eval> rakudo cf8884: TIMED_OUT
+[12:27] <slavik2> slow :(
+[12:28] <slavik2> perl6: say 2^64
+[12:28] <Matt-W> The very thought of doing Rakudo dev work on Windows fills me with horror. It's bad enough doing it at work...
+[12:28] <moritz_> pmichaud: then you notebook is about twice as fast as mine (also a dual core)
+[12:28] <p6eval> sprixel 28649: OUTPUT«Sprixel Error: /_Junctive_or_/ not yet implemented; apologies from the crew!␤»
+[12:28] <p6eval> ..elf 28649: OUTPUT«66␤»
+[12:28] <p6eval> ..pugs: OUTPUT«one(VInt 2,VInt 64)␤»
+[12:28] <p6eval> ..rakudo cf8884: TIMED_OUT
+[12:28] <pmichaud> I have a very speedy notebook, yes.
+[12:28] <jnthn> Matt-W: Indeed, it's be impossible for anyone to work productively on Rakudo on Windows.
+[12:29] <pmichaud> ...and jnthn likes doing the impossible.  :)
+[12:29] <Matt-W> jnthn does the impossible on a regular basis
+[12:29] <Matt-W> It's just me
+[12:29] <jnthn> ;-)
+[12:29] <takadonet> heh
+[12:29] <Matt-W> I learned to code on a Linux box (well, a BBC Micro, then a Linux box) and I just don't feel that Windows offers me any good options
+[12:29] <slavik2> aww ... still no bignum in parrot?
+[12:29] <pmichaud> I'm soooo happy about the nqp-rx progress last night... I might be able to have a self-hosting p6 regex parser before the day is out
+[12:29] <moritz_> woot
+[12:30] <slavik2> pmichaud: sweet, with assertions? ^^
+[12:30] <pmichaud> slavik2: probably not today for assertions
+[12:30] <slavik2> tomorrow, I can wait till tomorrow
+[12:30] <moritz_> :-)
+[12:30] <pmichaud> at least, not p6-like assertions
+[12:30] <Matt-W> pmichaud: Wow! Well done
+[12:30] <pmichaud> pir assertions become much more possible
+[12:30] <jnthn> pmichaud: Ooh, nice work. :-)
+[12:31] <slavik2> pmichaud: how can I embed those into perl6 code?
+[12:31] <pmichaud> slavik2: ...regexes?
+[12:31] <jnthn> pmichaud: Think we'll switch to that by the next Rakudo release?
+[12:31] <slavik2> yes
+[12:31] <pmichaud> slavik2: um, the normal way to put a regex into perl6 code is to use / ... /   :)
+[12:32] <pmichaud> jnthn: I don't know if we'll be able to switch by next release.  The switch will have a huge impact.
+[12:32] <slavik2> token byte { [\\d+] ... } # <?{0 <= $0 <=255}>
+[12:32] <masak> pmichaud: src/Regex/P6Regex/Grammar.pm line 19: \\w [ \\w+! <?before \\w> ]? -- could you give an example of when the thing within the brackets would match?
+[12:32] <pmichaud> slavik2: oh.  when we're done (many days hence)  it'd just be like you wrote
+[12:33] <slavik2> pmichaud: when you say many ... is that more than 365?
+[12:33] <pmichaud> masak:  sure...  for "abcdef"  the brackets would match "bcde"
+[12:33] <masak> oh, ah, because of backtracking. gotcha.
+[12:33] *** NorwayGeek joined
+[12:33] <moritz_> what does the ! mean in a regex?
+[12:33] *** synth joined
+[12:33] * moritz_ confused
+[12:34] <masak> moritz_: it's the default mode.
+[12:34] <pmichaud> that expression matches a sequence of word characters except for the last one
+[12:34] <masak> greedy.
+[12:34] <pmichaud> moritz_: ! forces greedy backtracking
+[12:34] *** rblasch joined
+[12:34] <masak> moritz_: I didn't know about it either until I started reading S05 with a fine comb. :)
+[12:34] <slavik2> so wordchar, followed by as many wordchars but leaving out the last one
+[12:34] <pmichaud> slavik2: exactly
+[12:34] <masak> moritz_: it's needed here because we're in a token, which turns off greed and turns on ratcheting.
+[12:34] <moritz_> ah, if it's the default, it might explain why I never needed it explicitly :-)
+[12:35] <Matt-W> I still get confused about tokens and rules and regexps
+[12:35] <pmichaud> the purpose of that expression is to optimize a regex like      / foobar* /   a bit
+[12:35] <slavik2> also, regex { a } # matches " a " not "a" ... is this the intended behavior?
+[12:35] <pmichaud> instead of converting that to   / 'f' 'o' 'o' 'b' 'a' 'r'* /
+[12:35] <slavik2> don't regexes do :x mode by default?
+[12:35] <pmichaud> it converts it to   / 'fooba' 'r'* /
+[12:35] <moritz_> they do
+[12:35] <slavik2> or /x in perl5
+[12:36] <moritz_> rakudo: say 'a' ~~ / ^ a $ /
+[12:36] <p6eval> rakudo cf8884: OUTPUT«a␤»
+[12:36] <moritz_> works, no?
+[12:36] <slavik2> hmm
+[12:36] <masak> pmichaud: ah. you answered my next question ("why?") without my having to ask it. :)
+[12:36] *** payload joined
+[12:36] <moritz_> note that ' a ' ~~ /a/ because it's not anchored
+[12:36] <slavik2> rakudo: regex blah { a }; say 'a' ~~ /<blah>/;
+[12:36] <p6eval> rakudo cf8884: OUTPUT«a␤»
+[12:37] <slavik2> rakudo: rule blah { a }; say 'a' ~~ /<blah>/;
+[12:37] <p6eval> rakudo cf8884: OUTPUT«a␤»
+[12:37] <moritz_> pmichaud: I noticed there are no tests in nqp-rx - not yet written? or forgotten to commit?
+[12:37] <pmichaud> moritz_: nyi
+[12:37] <moritz_> ok
+[12:37] <slavik2> hmm, I think one of them did not do /x
+[12:37] <pmichaud> I've thought about testing individual components, but it's a bit tricky at the moment
+[12:38] <pmichaud> also, I'd like the tests to all be written in nqp
+[12:38] <pmichaud> anyway, lack of tests is not to be taken as an indication that tests aren't important :)
+[12:39] <pmichaud> very soon I'll be importing the entire pge test suite :)
+[12:39] <Juerd> If anything, lack of tests will usually quickly show that they are in fact important
+[12:40] <Matt-W> Juerd: well said
+[12:40] * Matt-W is hugely impressed with pmichaud's progress
+[12:48] *** rblasch joined
+[12:49] *** rblasch_ joined
+[13:03] <jnthn> pmichaud: (switch) OK. I'm thinking that at a minimum we'll have switched to the new signature representation by the next release, and very possibly the new binder.
+[13:03] <pmichaud> ..."new binder" == "new signature binder"?
+[13:03] <jnthn> pmichaud: Indeed.
+[13:03] <pmichaud> OK.
+[13:04] <pmichaud> next release is +15 days, fwiw
+[13:04] <jnthn> How many days before the release would you want to see something like that land in master?
+[13:04] <pmichaud> I suspect the grammar changes will have to take place in a branch.  That's going to be one ugly branch.
+[13:05] <jnthn> I'm thinking if I can have it landed a week before release, it'll be fine?
+[13:05] <pmichaud> I'm fine with it at any point before the release
+[13:05] <jnthn> (and yes, I know, that's ambitious...)
+[13:05] <pmichaud> rakudo doesn't (yet) have parrot's weird timeframes
+[13:05] <jnthn> OK, I'd like some buffer to fix any horrors the test suite somehow fails to identify.
+[13:06] <pmichaud> sure.  check with the release manager (PerlJam) to see how much lead time he'd like to see
+[13:06] <moritz_> jnthn: so you don't depend on the pcc-refactoring to land before this step?
+[13:06] <jnthn> moritz_: Ssshhh.
+[13:06] <jnthn> :-)
+[13:06] *** PerlJam joined
+[13:06] * moritz_ shuts up :-)
+[13:06] <PerlJam> greetings!
+[13:06] * pmichaud wonders if PerlJam has some special indicator for when his nick gets mentioned
+[13:07] <pmichaud> (while he's "off-chan")
+[13:07] <moritz_> maybe he has a client that parses the HTML irc logs :-)
+[13:07] <PerlJam> Why?  What were y'all saying about me?
+[13:07] <pmichaud> 13:06 <pmichaud> sure.  check with the release manager (PerlJam) to see how much lead time he'd like to see
+[13:08] <pmichaud> in response to jnthn++ talking about putting a major refactor in place :)
+[13:08] <pmichaud> 13:05 <pmichaud> I'm fine with it at any point before the release
+[13:08] <jnthn> PerlJam: See irclog, but since you're release manager this month: if I'm going to land a major refactor, how long before the release would you like to see it land?
+[13:08] <pmichaud> as long as spectests pass, I'm happy.
+[13:08] <PerlJam> jnthn: sooner is better, but like pm said, as long as it's before the release.
+[13:08] <PerlJam> :)
+[13:08] <jnthn> OK.
+[13:09] *** rblasch joined
+[13:09] <jnthn> I'll see how things go.
+[13:09] <pmichaud> wfm
+[13:09] <jnthn> I don't know how painful it's going to be yet.
+[13:09] <PerlJam> jnthn: I've noticed the last few releases that you seem to do a flurry of activity between the parrot release and the rakudo release. Are the odds good that you'll do that again?  :)
+[13:10] <moritz_> "just like any other task deep down in the parrot's guts"?
+[13:10] <jnthn> PerlJam: I'd want to land this branch before the Parrot release
+[13:10] <jnthn> The flurry is usually mostly bug fixes to try and get a higher quality release.
+[13:10] <PerlJam> jnthn: good deal.  this is the signature refactor stuff you were talking about the other day?
+[13:11] <jnthn> PerlJam: Yes.
+[13:11] <PerlJam> excellent
+[13:11] <jnthn> The initial pre-refactors have already shaved about 10% off startup time. :-)
+[13:11] <pmichaud> yay
+[13:12] <jnthn> pmichaud: We construct a lot less pointless junctions now. :-)
+[13:12] <pmichaud> yes, I noticed that.
+[13:12] <pmichaud> solves a couple of other problems as well.
+[13:12] *** ruoso joined
+[13:14] <Matt-W> jnthn: fewer
+[13:14] <Matt-W> :P
+[13:14] <moritz_> grammar nazi :-)
+[13:14] <pmichaud> Matt-W: ...and the ones that we do construct are "less pointless" than they were before :)
+[13:15] <moritz_> uhm, the ones we construct now have never been pointless
+[13:15] <Matt-W> no, the ones that are still there are just as pointless as they ever weren't
+[13:15] <Matt-W> moritz_: and yes, although unfortunately I fail to use grammar correctly 100% of the time myself
 [13:15] *** felipe left
+[13:16] <jnthn> Sorry, I'll try and make less grammar errors.
+[13:16] <jnthn> ;-)
+[13:17] * Matt-W throws up his hands in despair
+[13:17] <moritz_> jnthn: don't, then we wouldn't have nice things to fret about
+[13:17] *** PerlJam joined
+[13:18] <PerlJam> hrm
+[13:19] *** [bjoern] joined
+[13:19] <[bjoern]> Shouldn't this work?
+[13:19] <[bjoern]> rakudo: say map &infix:<+>.assuming(3), (1,2,3)
+[13:19] <p6eval> rakudo cf8884: OUTPUT«No applicable candidates found to dispatch to for 'map'␤in sub map (src/gen_setting.pm:328)␤called from Main (/tmp/D63TBV1Qi2:0)␤»
+[13:19] <jnthn> rakudo: say &infix:<+>.assuming(3).WHAT
+[13:19] <p6eval> rakudo cf8884: OUTPUT«Code()␤»
+[13:19] <jnthn> rakudo: say &infix:<+>.assuming(3).PARROT
+[13:19] <p6eval> rakudo cf8884: OUTPUT«Sub␤»
+[13:20] <jnthn> aww
+[13:20] <jnthn> [bjoern]: yes
+[13:20] <Matt-W> Perl6MultiSub is what we wanted to see there, I take it?
+[13:20] <jnthn> Matt-W: No, just that the sub was re-blessed into a Perl 6 type.
+[13:20] <moritz_> no
+[13:20] <moritz_> you can't reduce with an unary function
+[13:20] <Matt-W> ah, so Perl6<something>
+[13:21] <moritz_> oh, wait
+[13:21] <jnthn> [bjoern]: anyway, that's a Rakudo bug, it appears
+[13:21] <moritz_> you can map, yes
+[13:21] * moritz_ confused
+[13:21] <Matt-W> rakudo: (1,2,3).map: &infix:<+>.assuming(3)
+[13:21] <p6eval> rakudo cf8884: OUTPUT«No applicable candidates found to dispatch to for 'map'␤in Main (/tmp/V2nKsZCyTx:0)␤»
+[13:21] <Matt-W> thought so
+[13:22] <pmichaud> rakudo:  say &infix:<+>.assuming(3).signature
+[13:22] <p6eval> rakudo cf8884: OUTPUT«No signature found␤␤»
+[13:22] <jnthn> rakudo:  say &infix:<+>.signature
+[13:23] <p6eval> rakudo cf8884: OUTPUT«No signature found␤␤»
+[13:23] <jnthn> ah, .signature on a multi.
+[13:23] <pmichaud> we don't yet do .signature on multis
+[13:23] <jnthn> I think it's meant to be a junction of 'em all.
+[13:23] <jnthn> forget which type of junction...will have to chekc spec.
+[13:23] * Matt-W guesses 'any'
+[13:24] <jnthn> That'd be my guess too
+[13:24] <Matt-W> 'all' would be a bit odd
+[13:24] <pmichaud> I was rooting for 'none'  :-P
+[13:25] <Matt-W> 'none' would be an interesting concept
+[13:25] <Matt-W> here's a function with none of the following signatures
+[13:25] <Matt-W> so how do you call it
+[13:25] * PerlJam mentions the "one" junction so that the list is complete.
+[13:26] <[bjoern]> hehe
+[13:26] <Matt-W> 'one' would make sense in the case of you only call one of them at once... except when you don't
+[13:29] <PerlJam> oh crap ... I have to come up with a name for the Rakudo release.  Any suggestions?
+[13:29] <pmichaud> there's a list in the release guide
+[13:30] <PerlJam> or, let me rephrase, any suggestions along with reason(s) why that PM group?
+[13:31] <pmichaud> the p6 folks here in the north dallas area are about ready to suggest "Dallas".  But we probably need/want to create a "Dallas.pm" first.  And we should be careful not to offend the "DFW.pm" organizers
+[13:31] <moritz_> PerlJam: you could surely use the organizers of YAPC::Asia or YAPC::EU
+[13:31] <moritz_> I also added a link to one of the groups in release_guide.pod
+[13:32] <pmichaud> although, given the fact that none of us here actually live in "Dallas" itself, nor do we meet there, perhaps we should create an "Allen.pm" or "Plano.pm" instead :)
+[13:32] <moritz_> and I'd like to encourage others to do that too if the add pm groups there
+[13:32] <PerlJam> moritz_: ThousandOaks?
+[13:33] <moritz_> PerlJam: rright, that one
+[13:33] <PerlJam> (any PM group doing perl6 hackathons certianly gets my favor  :)
+[13:33] <jnthn> I planned to add Seoul.pm to the release name ideas list.
+[13:33] <jnthn> (Seoul.pm)++
+[13:33] <PerlJam> It's there now.
+[13:34] <jnthn> \\o/
+[13:34] <moritz_> jnthn: any good reason wich fits in one paragraph?
+[13:36] <pmichaud> I think that Seoul.pm was suggested to me earlier in the year
+[13:36] <pmichaud> I don't think I have anything written about it
+[13:37] <pmichaud> we could also invite suggestions from the Padre folks, since they're doing a fair bit of rakudo and p6 integration
+[13:37] <moritz_> aye
+[13:38] <pmichaud> that might get us a middle-east and/or australian locatoin
+[13:38] <pmichaud> *location
+[13:39] <pmichaud> we should probably get szabgab and/or Alias to suggest names for our list :)
+[13:39] <moritz_> I can ask in #padre
+[13:40] * pmichaud lurks to see what gets said :)
+[13:41] <PerlJam> #padre is quiet this morning.
+[13:41] <pmichaud> PerlJam: anyway, you have two weeks to decide.  If we get to the release date and still don't have an obvious candidate, I suggest either Seoul or ThousandOaks
+[13:41] <pmichaud> both of those are excellent candidates
+[13:42] <jnthn> moritz_: I gave a Perl 6 talk there recently. :-)
+[13:42] <PerlJam> barring other suggestions, I'm going with ThousandOaks  because of the perl 6 hackathon and I just like the name  :)
+[13:42] <pmichaud> I know they'll be excited to see it
+[13:42] <moritz_> jnthn: that's what the IRC logs find when I search for Seoul.pm :-)
+[13:43] <moritz_> #padre is also publicly logged, FYI
+[13:43] <pmichaud> the Seoul.pm suggestion came to me in-person at a hackathon or workshop
+[13:43] <jnthn> I was rather surprised to discover that one of them had a printed copy of the Perl 6 spec too!
+[13:43] <jnthn> Made into a book.
+[13:43] <pmichaud> I'll double-check my logs
+[13:44] <pmichaud> PerlJam: feel free to update the release guide with your current candidate
+[13:44] <pmichaud> (same goes for any release candidates)
+[13:44] <pmichaud> er, release managers
+[13:49] *** iblechbot joined
+[13:50] <masak> meeting tonight to brainstorm about a Perl 6 book. 18 UTC. any interested parties are welcome to attend.
+[13:50] <moritz_> let's say #perl6book?
+[13:51] <masak> what moritz_ said. #perl6book.
+[13:51] <pmichaud> masak/moritz:  have either of you been in touch with chromatic and/or allison about a book?
+[13:51] <moritz_> not me
+[13:51] * masak neither
+[13:51] <pmichaud> okay
+[13:51] <masak> but I imagine our plans are less ambitious than theirs.
+[13:51] <pmichaud> I need to include the two of you on some discussions
+[13:52] <dalek> rakudo: a0d1e55 | moritz++ | docs/release_guide.pod:
+[13:52] <dalek> rakudo: [docs/release_guide.pod] suggest Lisbon.pm
+[13:52] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/a0d1e550b0a98597311c6c84c6828ebff715c002
+[13:59] *** breinbaas joined
+[14:08] *** szabgab joined
+[14:08] *** KyleHa joined
+[14:11] *** alester joined
+[14:13] <KyleHa> Smolder ought to hide test results that are exactly the same as some other test results.
+[14:17] *** SmokeMachine joined
+[14:19] *** Psyche^ joined
+[14:23] *** ilbot2 joined
+[14:23] *** moderator changes topic to: »ö« | http://perl6.org/ | nopaste: http://paste.lisp.org/new/perl6 | evalbot usage: 'perl6: say 3;' or rakudo: / pugs: / std: | irclog: http://irc.pugscode.org/ | UTF-8 is our friend!
+[14:23] *** Gothmog_ joined
+[14:24] *** mariuz joined
+[14:25] *** hugme joined
+[14:26] <moritz_> or at least identify them as such
+[14:26] <KyleHa> Good morning Moritz!
+[14:26] <moritz_> good localtime() KyleHa :-)
+[14:27] <KyleHa> I got that Test::Util thing done-ish.
+[14:27] <moritz_> that's great
+[14:27] <KyleHa> It probably needs better names (is_run and get_out).
+[14:27] <masak> who is Jeremiah Foster? he's to hold a talk on Perl 6 at FSCONS '09. http://fscons.org/node/64
+[14:27] <masak> which is great, but I don't think I've heard the name before.
+[14:27] <KyleHa> It's also painfully slow.
+[14:28] <moritz_> masak: I've heard that name before, but I can't manage to get an association with it
+[14:28] <KyleHa> Otherwise, barring some feedback, I'm going to leave it as-is.
+[14:29] <mberends> masak: I'm very interested in contributing to a Perl 6 book. If I miss tonight's meeting because of network-- please know that you can count on my enthusiastic support, and tuits :)
+[14:29] <moritz_> KyleHa: I think the next step is to write some simple tests to use it, and get feedback from windows users (like jnthn++)
+[14:30] <masak> mberends: excellent. as with all efforts of this kind, your contributions will be warmly accepted.
+[14:30] <moritz_> mberends: there will be public logs
+[14:30] <moritz_> mberends: and yes, it will be great to have you on board
+[14:30] * PerlJam is itching to write something for perl 6 too, but needs to find the time to sit down and do it.
+[14:30] <mberends> :-)
+[14:31] <KyleHa> I wrote some simple tests in pugs/t/03-test-util/is_run.t  Some of them could reasonably move to the spectest suite.
+[14:32] <moritz_> please do
+[14:33] *** justatheory joined
+[14:33] *** abra joined
+[14:36] *** xenoterracide joined
+[14:39] <pugs_svn> r28650 | kyle++ | [t/spec] turn some todo lives_ok tests to skipped tests and fudge regressions
+[14:50] *** synth^2 joined
+[14:58] *** r0bby_ joined
+[14:58] <pugs_svn> r28651 | kyle++ | [t/spec] Test "die" with is_run()
+[14:59] <pugs_svn> r28652 | rblasch++ | [t/spec] Fixed typo.
+[15:02] <colomon> moritz_, masak: is the book meeting in two hours?
+[15:02] <masak> no, three.
+[15:02] <moritz_> colomon: three, actually
+[15:02] <moritz_> date --utc helps :-)
+[15:02] <masak> not on OS X :/
+[15:03] <jnthn> not on windows :/
+[15:03] <colomon> what masak said.
+[15:03] <moritz_> inferior operating systems.. :-)
+[15:03] <masak> ah, date -u
+[15:03] * KyleHa can never remember how to spell UTC.
+[15:03] <colomon> but it works great on my Linux box.
+[15:03] <masak> KyleHa: Z-u-l-u :P
+[15:04] <KyleHa> Yeah, it's always 'date -u' for me.  8-)
+[15:05] <colomon> the good news here (at least from my perspective) is that I'm a lot more likely to be available in three hours than in two.   :)
+[15:05] <moritz_> wow, I didn't know we'd attract so many people with our small brainsstorming meeting
+[15:07] <pmichaud> my irssi client tells me the current utc :)
+[15:07] <[particle]> foxclocks++
+[15:09] <jnthn> pmichaud: Heh, how'd you get it to do that?
+[15:12] <TimToady> well, for my irssid, I have env TZ=America/Los_Angeles
+[15:13] <TimToady> *irssi
+[15:13] <TimToady> an irssid would be cool though
+[15:13] <moritz_> isn't that spelled 'screen'? :-)
+[15:14] <pugs_svn> r28653 | kyle++ | [t/spec] more specific fudge message after some "git bisect" goodness
+[15:15] <KyleHa> (slurpy-params.t regressions were introduced by 41bc84f00d, if that helps anyone.)
+[15:15] <moritz_> if you fudge out rakudo regressions, please open a ticket for that
+[15:16] <KyleHa> OK.
+[15:16] *** felipe joined
+[15:16] <moritz_> (our unstated motto is "we only move forward unless stated otherwise" :-)
+[15:17] <KyleHa> I think my brain just tried a summersault.
+[15:17] <jnthn> I'm was pondering the failures may be bogus.
+[15:17] <jnthn> The message iirc suggests it's a call time failure.
+[15:17] <jnthn> Wehreas it probably wants to be a compile time one.
+[15:17] *** lanny joined
+[15:19] <moritz_> care to explain?
+[15:20] *** envi^office joined
+[15:20] *** nbrown joined
+[15:21] <jnthn> Later
+[15:21] <jnthn> (busy)
+[15:21] <moritz_> sure
+[15:24] *** nihiliad joined
+[15:29] <pugs_svn> r28654 | kyle++ | [t/spec] Add reference to RT 69622
+[15:36] *** ejs joined
+[15:45] *** zloyrusskiy joined
+[15:49] *** pmurias joined
+[15:53] <TimToady> jnthn: I agree that ::T shouldn't count as a constraint; working on a STD patch
+[15:54] <jnthn> TimToady: OK, cool...I'll patch Rakudo too at some point for it.
+[15:54] <jnthn> TimToady: Plus no dobut I'll need to work on converging with the parameters with of STD a bit more too.
+[15:55] <TimToady> we'll have to do something similar in any case if we add coercive types, since Int(Any) is really more like Any where *.coerce_to(Int)
+[16:02] <pugs_svn> r28655 | lwall++ | [STD] don't count ::T as type constraint as suggested by jnthn++
+[16:02] <pugs_svn> r28655 | [gimme5] naively remove comma from map and grep
+[16:02] <pugs_svn> r28655 | [STD_P5] start hacking in a P5 grammar by cutting down P6 grammar
+[16:02] <pugs_svn> r28655 |     (compiles, but nothing invokes the non-regex part yet)
+[16:04] <jnthn> TimToady: Yes, true.
+[16:04] <jnthn> TimToady: Not entirely sure what the chances of those appearing in Rakudo * are yet.
+[16:05] <jnthn> I'd rather like 'em to, but we'll see.
+[16:05] <TimToady> if it's a simple desugar to a nominal plus a constraint, it's probably pretty easy
+[16:06] <KyleHa> Is there any functional difference between ?1 and Bool::True ?
+[16:06] <jnthn> yhmm, true
+[16:06] *** zaphar_ps joined
+[16:06] <jnthn> Well, actually that's what I do with :(42) today
+[16:06] <TimToady> I guess it's more like *.=Int
+[16:07] <jnthn> (de-sugar it to two things)
+[16:07] <jnthn> Hmm. That does make it all rather simple. :-)
+[16:07] <jnthn> Means it can all be done in the actions and no changes to signatures.
+[16:07] <jnthn> OK, in that case it can certainly be in Rakudo *.
+[16:07] <jnthn> TimToady++
+[16:07] *** mberends joined
+[16:08] <jnthn> TimToady: I am curious though, if .Foo is The Way to coerse.
+[16:08] <quietfanatic> KyleHa: ?1 is Bool::True.
+[16:08] <KyleHa> Cool, thanks!
+[16:08] <jnthn> TimToady: Mostly because if I have a class Foo::Bar { } and I want to write a coercion to it, what is the method that I write called?
+[16:08] <TimToady> hmm, perhaps I'm oversimplifying
+[16:08] *** cahek joined
+[16:09] <jnthn> TimToady: I'm wondering if we want more like a COERCE multi.
+[16:09] <TimToady> .'Foo::Bar' maybe
+[16:09] <jnthn> How do you define a method of this name?
+[16:09] <quietfanatic> KyleHa: But anything that requires a Bool will take 1 to mean true.
+[16:09] <TimToady> well Foo::Bar() should always work
+[16:09] <jnthn> Yeah, true.
+[16:09] <TimToady> but it occurs to me that a simple desugar of Int(Any) isn't quite what it wants to mean
+[16:09] <jnthn> But I think we had Foo($x) as just calling $x.Foo anyway.
+[16:10] <KyleHa> quietfanatic: Yeah, that's what I figured.  I'm just thinking about an unambiguously boolean value without the verbosity of 'Bool::'.
+[16:10] <TimToady> suppose you have foo(Int(Any) $x, Int(Any) $y) {...}
+[16:10] <quietfanatic> KyleHa: Aye.
+[16:11] *** zloyrusskiy joined
+[16:11] <TimToady> suppose there's also a (Num,Num) variant
+[16:11] <quietfanatic> KyleHa: just plain True ought to do it too.
+[16:11] <quietfanatic> rakudo: say True
+[16:11] <p6eval> rakudo a0d1e5: OUTPUT«1␤»
+[16:11] <KyleHa> Oh, that's good too.
+[16:11] <TimToady> if you say foo(1,1) you want it to pick the coerced to Int variant, not pick the Num variant
+[16:11] <jnthn> The Num,Num variant is tighter.
+[16:12] <TimToady> than Any Any
+[16:12] <jnthn> Oh
+[16:12] <jnthn> Hmm
+[16:12] <TimToady> but I think we'd have to insert narrow versions in the candidate list as well
+[16:12] <jnthn> Do you really want it to pick that?
+[16:12] <TimToady> so maybe it's not so simple
+[16:12] <jnthn> Well, the problem is that this may blow up exponentially, no?
+[16:12] <TimToady> I think so
+[16:12] <TimToady> depends
+[16:13] <TimToady> might get away with just two variants, most general and most specific
+[16:13] <jnthn> Hmm
+[16:13] <jnthn> Maybe.
+[16:13] <jnthn> I'm a bit wary about extra candidates magically appearing.
+[16:13] <TimToady> I think that works for most of Perl builtins, but I could be misdesigning
+[16:14] <TimToady> it's a kind of way of specifying which specific case should be used as the default
+[16:14] <TimToady> without having to write the Any,Any variant and delegate back to Int,Int
+[16:14] <jnthn> Hmm, I see the point.
+[16:15] <jnthn> We just don't generate extra candidates anywhere else.
+[16:15] <jnthn> I'm not worried from an impl point of view.
+[16:15] <jnthn> More a user one.
+[16:16] <jnthn> I mean, what if the user writes their own :(Int,Int) variant too?
+[16:16] <jnthn> Our generated one will then cause an ambiguous dispatch.
+[16:16] <TimToady> that would be ambiguous, yes
+[16:16] <quietfanatic> Isn't it almost as easy to have one candidate added, and then have the MMD treats it like two?
+[16:16] <TimToady> I'm currently thinking that the Int,Int is the actual one, and the Any,Any is generated
+[16:16] <TimToady> since it just delegates
+[16:17] <jnthn> quietfanatic: That's more an implementation detail.
+[16:17] <TimToady> quietfanatic: not if it has to be sorted to two different places in the candidate list
+[16:17] *** iblechbot joined
+[16:18] <jnthn> quietfanatic: Yes, they can share the same chunk of code, but still, it'll still be two entries in the ordering.
+[16:18] <quietfanatic> jnth: Didn't you say you weren't worried from an implementation point of view, but a user point of view?
+[16:18] <jnthn> TimToady: Generating the Any,Any could work.
+[16:18] <quietfanatic> If I type &sub.candidates it'd matter.
+[16:19] <jnthn> quietfanatic: Hmm, true. It was the dispatch semantics that bothered me more than the introspection ones. :-)
+[16:19] <TimToady> Any,Any :> Num,Num :> Int,Int, but the outer two might be the same function, albeit with the Any version coercing
+[16:19] <TimToady> so it's not really the same function at that point
+[16:19] <jnthn> Well, they have different signatures, but the same .do I guess.
+[16:19] <TimToady> not if we want to eliminate useless coerion on (1,1)
+[16:19] <TimToady> *coercion
+[16:20] <jnthn> (if we say that binding the signature is what drives the coercion, anyway)
+[16:20] <TimToady> hmm
+[16:20] <jnthn> I think that'd mean two Routine objects (well, some subclass of that) though.
+[16:20] *** cahek joined
+[16:20] <TimToady> (Int,Int)|(Any where *.=Int, Any where *.=Int)
+[16:21] <TimToady> does a multisig insert multiple candidates?
+[16:21] <jnthn> I'm still hadn't really figured out how the whole multi-sig thingy plays into it.
+[16:21] <jnthn> Well, it needs to insert more than one thing into the candidate list.
+[16:21] <TimToady> I suspect it has to
+[16:21] <jnthn> They likely would share something.
+[16:21] *** Zloy_russkiy joined
+[16:21] <jnthn> But it'd be two entries.
+[16:22] <TimToady> if the sig matcher does the coercion before the .do, then it might work
+[16:22] <jnthn> Since the two sigs could sort very differently.
+[16:22] <jnthn> Yeah.
+[16:22] <jnthn> Though this actually brings up a copule more questions...
+[16:22] <TimToady> so maybe we can desugar Int(Any) to a multisig
+[16:22] <TimToady> assuming we can get that to work
+[16:22] <jnthn> Like, if the binding executes before the .do, whose lexpad holds the parameters?
+[16:23] <TimToady> always the .do's lexpad
+[16:23] <quietfanatic> Would Int(Any), Int(Any) generate two sigs or four?
+[16:23] <jnthn> quietfanatic: TimToady suggested I think two.
+[16:23] <jnthn> TimToady: OK.
+[16:24] <jnthn> TimToady: On a related note, if I have a default value, is it OK to take that and promote it to a closure that returns that value?
+[16:24] <TimToady> sigs are the only place where lexicals leak outside their block :)
+[16:24] <jnthn> At least, in any non-literal case?
+[16:24] <jnthn> (we can optimize literals...)
+[16:24] <TimToady> isn't that required in any case?
+[16:25] <jnthn> TimToady: I think it is to get the right semantics.
+[16:25] <jnthn> TimToady: We may well get the wrong ones in Rakudo today. ;-)
+[16:25] <TimToady> it has to be at least a thunk of some sort that is lazy
+[16:25] <jnthn> OK, good.
+[16:25] <TimToady> it's not evaluated unless needed
+[16:25] <jnthn> I'll thunk everything initially.
+[16:25] <jnthn> And them if it's like :($foo = 1) then we can optimize it later.
+[16:25] <TimToady> just like with has $.foo = bar()
+[16:26] <jnthn> Right.
+[16:26] <TimToady> bar isn't called unless un-inited
+[16:26] <jnthn> *nod*
+[16:26] <jnthn> OK, seems like I'm on the right track.
+[16:26] <TimToady> in fact, I think the has case specs autoclosure
+[16:27] <jnthn> Yes, that one is spec'd, I'm quite sure of it.
+[16:27] <jnthn> I'm not so sure the default parameter value case is, which is why I wanted to check I was doing something sane. :-)
+[16:28] <TimToady> the proper way to fire off code 'en passant' would be with a where, not with a default
+[16:29] <jnthn> TimToady: Sorry if I caused confusion - this was a separate question to the coercions stuff.
+[16:29] <TimToady> and it's inefficient to calculate unneeded defaults, so there's really no use case for being eager
+[16:29] <jnthn> Yes, agree.
+[16:29] <TimToady> oddly, not confused, for once :)
+[16:29] <jnthn> Ah, I see.
+[16:29] <TimToady> either that, or more confused than I think I am :)
+[16:29] <jnthn> Yes, I thought I had confused you. But no, you were way ahead of me. :-)
+[16:31] <jnthn> I guess this leaves my tricket issue being "make the parameter lexicals go in the right place during the binding"
+[16:31] <jnthn> (Almost certainly not a problem, just needs some thought.)
+[16:31] <TimToady> hmm, I wonder...
+[16:32] <TimToady> std: multi foo ($a,$b)|($b,$a) {...}
+[16:32] <p6eval> std 28655: OUTPUT«ok 00:01 97m␤»
+[16:32] <jnthn> heh heh. What if the multi sigs introduce different varialbes.
+[16:32] <TimToady> now why didn't I get a useless redeclaration...
+[16:32] <jnthn> TimToady: Actually, that's one other thing that confused me on multi sigs.
+[16:32] <TimToady> then they get declared
+[16:33] <jnthn> std: multi foo ($a,$b)|($a) { say $b }
+[16:33] <p6eval> std 28655: OUTPUT«ok 00:01 99m␤»
+[16:33] <TimToady> just dups are colesced under the 'my $x; my $x' rule
+[16:33] <jnthn> std: my $x; my $x;
+[16:33] <p6eval> std 28655: OUTPUT«Potential difficulties:␤  Useless redeclaration of variable $x (from line 1) at /tmp/pgRIa3o3eK line 1:␤------> [32mmy $x; my $x[33m⏏[31m;[0m␤ok 00:01 97m␤»
+[16:33] <TimToady> it would, of course, be undefined if the second sig matched
+[16:33] <jnthn> But without the warning?
+[16:33] <TimToady> I was expecting the warning, but STD is smarter than I am, it would seem :)
+[16:33] <jnthn> OK, so we're taking the union of the possible variables.
+[16:33] <TimToady> yes
+[16:34] <jnthn> OK.
+[16:34] <jnthn> I think however I implement multi sigs, is how coercions should probably happen.
+[16:34] <masak> I'm on #perl on irc.perl.org today -- interesting experience.
+[16:34] <TimToady> seem likely
+[16:34] *** abra joined
+[16:34] <jnthn> masak: Do they talk about Perl there?
+[16:34] <masak> jnthn: sometimes.
+[16:34] <jnthn> Wow.
+[16:35] *** stephenlb joined
+[16:35] <TimToady> spread the butterflies
+[16:35] <masak> mst asked a nice question: which features do I think Perl 6 would have that Perl 5 does not have already, and might never have?
+[16:35] <masak> I thought I'd bring that question over here for general mulling.
+[16:35] <masak> I've already said macros, the op overloading syntax, parametric roles ("we've had that for ages!" said mst)...
+[16:36] *** zloy_russkiy joined
+[16:36] <TimToady> optimizable semantics :P
+[16:37] *** abra joined
+[16:37] <masak> TimToady: so far, I've avoided conflict with people who express a distaste of the butterfly, and sort of mingled with those who don't. :)
+[16:37] <TimToady> the union of Perl 5 extensions rather than the intersection :)
+[16:37] <masak> yes, that's something that I wanted to express as well.
+[16:37] <TimToady> I'm sure I could come up with a more concrete list given time
+[16:37] *** cognominal joined
+[16:38] <masak> that union/intersection thing could be seen as the "Final Argument" for Perl 6.
+[16:38] <masak> meaning that, sure, you can get most of the cool things in Perl 5 too. but not as nicely packaged and not as consistent and coherent.
+[16:38] <TimToady> yeah, you can shoehorn most any single Perl 6 feature in, but to shoehorn all of them in is impossible
+[16:39] <TimToady> also, anything depending on a sane type system, and deep multi-dispatch semantics
+[16:39] <masak> aye.
+[16:40] <TimToady> native types, maybe
+[16:40] *** meppl joined
+[16:40] <masak> why is that good?
+[16:40] <masak> and what can't Moose emulate?
+[16:41] <TimToady> if Moose turns into an optimizer, it'll be too slow
+[16:42] <TimToady> I think P5 could easily get contextual variables
+[16:43] <TimToady> but I doubt it'll ever manage to acquire twigils
+[16:43] <obra_> TimToady: please tell chromatic or lathos it's impossible for perl5 to grow twigils.  ;)
+[16:43] <TimToady> not without some severe refactoring of syntax, which is never gonna happen
+[16:44] * obra_ grins
+[16:44] <masak> I'll mention twigils to mst. :)
+[16:44] <TimToady> there are many, many ramifications...
+[16:45] * jnthn manges to explode the Parrot dynop compiler
+[16:46] <TimToady> including switching to . for methods, switching to ~ for concat, etc, etc.
+[16:46] <dukeleto> jnthn: what are you doing to the poor dynops?
+[16:46] <quietfanatic> What about perl 6 regexes?
+[16:47] <moritz_> they are great ;-)
+[16:47] <TimToady> more doable, on some level, since p5 considers regexen to be strings
+[16:47] <quietfanatic> They (once implemented, will) completely outstrip perl 5 regexes.
+[16:47] <quietfanatic> Hmm.
+[16:47] <TimToady> but again, depends on twigilness for $<foo>
+[16:47] <jnthn> dukeleto: Creating combinatoric pain. :-)
+[16:48] <moritz_> quietfanatic: perl 5 supports pluggable regex engines
+[16:48] <moritz_> by pragma
+[16:48] <TimToady> which implies use of .<> for subscripting
+[16:48] <quietfanatic> Is multiple dispatch doable in 5?
+[16:48] <TimToady> which implies required whitespace before infix:«<»
+[16:48] *** payload joined
+[16:49] <moritz_> which breaks a hell lot of code out there
+[16:49] <TimToady> at some point, you can break these consistencies of P6 and substitute different twigils or different subscripting constructs, but then the whole design goes insane(r)
+[16:50] <TimToady> Perl5: "Look, I can juggle one ball at once, and sometimes two!"
+[16:51] *** Chillance joined
+[16:52] <quietfanatic> Oh, and named arguments!
+[16:52] *** lmc joined
+[16:52] <moritz_> TimToady: can I assume that Int ~~ Num doesn't hold true anymore?
+[16:52] <moritz_> but rather Int ~~ Real and Num ~~ Real instead
+[16:53] <[particle]> depends if you've overloaded ~~ :)
+[16:54] * moritz_ slaps [particle] with +2 stick of obviousness
+[16:54] <[particle]> you probably know this, but that hurts a little.
+[16:55] <TimToady> actually, S02 currently has Int ~~ Integral but not Real
+[16:56] <moritz_> so what's the type that encompasses Int and Num, but not Complex?
+[16:56] <moritz_> I'd thought that'd be Real
+[16:56] <TimToady> define "encompass" in terms of capabilities
+[16:57] <moritz_> I'm caring about type constraints right now, not capabilities (though I know that the two are related)
+[16:57] <TimToady> depend on how you define it, there are things Integral can do that Real can't, and vice versa
+[16:58] <TimToady> roles are primarily about capabilites, I suspect
+[16:58] <TimToady> so we might actually have to split up the capabilities differently than standard type theory would suggest
+[16:58] <moritz_> what can a Num do that an Int can't?
+[16:59] <TimToady> remember a fractional part
+[16:59] * justatheory types
+[16:59] <moritz_> well, that can be implied to be 0 on an Int - but you've got a point
+[16:59] <moritz_> I thought more in terms of standard functions
+[16:59] <moritz_> sqrt, floor, sign, abs etc.
+[17:00] *** cdarroch joined
+[17:00] <TimToady> an Int value can almost always be *used* as a Num, sure
+[17:01] <TimToady> but tagmemics says we can make that work without necessarily saying that one is the subset of the other
+[17:02] <TimToady> we know how to verb nouns without making all nouns into verbs or all verbs into nouns
+[17:03] <TimToady> and, in fact, we give a consistent meaning to verbing nouns in P6.  Int($x) is a verbed Int
+[17:07] <moritz_> that doesn't quite solve the problem on how to write a signature that excepts every number that can act as a real value (in the mathematical sense)
+[17:07] <TimToady> std: sub foo (Int ::T $x) {...}
+[17:07] <p6eval> std 28655: OUTPUT«ok 00:03 99m␤»
+[17:07] <jnthn> \\o/
+[17:07] <quietfanatic> I notice rakudo's qx captures stderr as well as stdin.  Is this specced?
+[17:08] <TimToady> moritz_: well, it's all still negotiable :)
+[17:08] <moritz_> TimToady: that's good ;-)
+[17:09] <TimToady> but perhaps the type you're looking for is Real() rather than Real, meaning anything that coerces to Real
+[17:09] <TimToady> which is what jnthn and I have been, er, negotiating
+[17:10] <moritz_> no, I don't
+[17:10] <moritz_> because I want to write functions that reject Complex numbers on multi dispatch
+[17:10] <TimToady> so there's something in there about not losing info
+[17:11] <TimToady> which is probably heading into some kind covariant/contravariant swamp :)
+[17:11] <quietfanatic> I don't know if Complex should coerce to Real.
+[17:11] <moritz_> OH NOEZ
+[17:11] <TimToady> Complex.re already does that
+[17:12] <quietfanatic> I mean implicitly.
+[17:12] <moritz_> that's more cutting, less coercing
+[17:12] <TimToady> well, define what the coercion should do
+[17:12] <quietfanatic> Fai.
+[17:12] <moritz_> I can't think of any sane, universal way to coerce 1+2i to Real
+[17:12] <quietfanatic> *fail.
+[17:12] <quietfanatic> That's what I think it should do.
+[17:12] <moritz_> that's what Rakudo currently does
+[17:12] <moritz_> rakudo: say (3+4i).Num
+[17:12] <TimToady> then Complex !~~ Real()
+[17:12] <p6eval> rakudo a0d1e5: OUTPUT«You can only coerce a Complex to Num if the imaginary part is zero␤␤»
+[17:12] <quietfanatic> Thus Real() does not match Comlexes.
+[17:13] <moritz_> rakudo: say (3+9i).Num
+[17:13] <p6eval> rakudo a0d1e5: OUTPUT«You can only coerce a Complex to Num if the imaginary part is zero␤␤»
+[17:13] <moritz_> rakudo: say (3+0i).Num
+[17:13] <p6eval> rakudo a0d1e5: OUTPUT«3␤»
+[17:13] <PerlJam> rakudo++
+[17:13] <TimToady> rakudo: say (1.5).Int
+[17:13] <moritz_> that was the most sane I could think of, which doesn't mean much
+[17:13] <PerlJam> (whoever added that)++
+[17:13] <p6eval> rakudo a0d1e5: OUTPUT«1␤»
+[17:14] <TimToady> inconsistent
+[17:14] <PerlJam> TimToady: yes, but is it a foolish inconsistency?
+[17:14] <moritz_> well, for Num -> Int it's a wee bit more obvious
+[17:14] <PerlJam> :)
+[17:14] <moritz_> how to do it
+[17:14] <TimToady> beg to differ
+[17:14] <pmichaud> same here
+[17:14] <PerlJam> truncating the Complex part seems "reasonable" too
+[17:14] <pmichaud> looks equally obvious :)
+[17:15] <TimToady> to many people, rounding is obvious
+[17:15] <pmichaud> or equally non-obvious
+[17:15] <quietfanatic> I certainly don't want +sqrt(-1) to be silently 0!
+[17:15] *** brunov joined
+[17:15] <quietfanatic> I mean Num(sqrt(-1))
+[17:15] <PerlJam> quietfanatic: you want it to be loudly 0 or something else?
+[17:16] <moritz_> for a physicist there's a huge difference between discretizing and throwing away one dimension completely
+[17:16] <pmichaud> quietfanatic: but you're willing to allow   Int(1/2) to be silently 0?
+[17:16] <moritz_> quietfanatic: sqrt(-1) is NaN
+[17:16] <moritz_> rakudo: say sqrt(-1)
+[17:16] <p6eval> rakudo a0d1e5: OUTPUT«NaN␤»
+[17:16] <quietfanatic> pmichaud: yes.
+[17:16] <TimToady> to a mathematician the reals are closer to infinity than they are to integers
+[17:17] <moritz_> and you can reduce two dimensions to one by using a cantor fractal, I know ;-)
+[17:18] <moritz_> still it felt wrong to just use .re or .abs for coercion to me
+[17:18] <TimToady> I'm inclined to think that information-losing transformations ought to generally be explicit
+[17:19] <dalek> rakudo: 30e2cfd | jonathan++ |  (4 files):
+[17:19] <dalek> rakudo: Add in ops that allow for fast construction of low level signatures.
+[17:19] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/30e2cfdf881ad43bbd0f0ddaa7afe9bcfdbe9d9b
+[17:19] <TimToady> integer trunction might be an exception for practical reasons
+[17:19] *** mberends left
+[17:19] <PerlJam> TimToady: what do you mean by "explicit"?
+[17:19] *** mberends joined
+[17:19] <moritz_> sounds sane
+[17:20] <colomon> I'm with PerlJam on this one.
+[17:20] <pmichaud> jnthn: ...ops?
+[17:20] <pmichaud> jnthn: why use dynops here?
+[17:20] <pmichaud> jnthn: simply to avoid method call overhead?
+[17:20] <jnthn> pmichaud: Indeed.
+[17:20] <pmichaud> hmmmm
+[17:20] <jnthn> pmichaud: We're not talking a couple of method calls here.
+[17:20] *** icwiener joined
+[17:21] <TimToady> I mean that .re is explicit, and Real() isn't
+[17:21] <jnthn> pmichaud: We're talking a *lot*.
+[17:22] <jnthn> pmichaud: And I rather suspect that's a big part of my startup on my box is running to 0.95-ish seconds currently (down from 1.05-ish with a couple of the recent refactors I've done.)
+[17:22] <moritz_> I see that sigguts.h was added, and my first thought was "did jnthn work on signals?"
+[17:22] <jnthn> pmichaud: Yes, I know it's a big...eww. But that's why I factored the code generation for signatures out, so it's only one method emitting this stuff. :-)
+[17:22] <colomon> TimToady: Would Real() be okay if the Complex's imaginary part was 0?
+[17:22] <jnthn> s/big/bit/
+[17:23] <jnthn> pmichaud: Overall, though, signatures - unless we really need a high level object - are becoming more low level.
+[17:23] <pmichaud> what do you mean by "low level"?
+[17:23] <jnthn> pmichaud: We can't just go on doing tens of hash lookups every time we call a sub with a couple of parameters.
+[17:24] <jnthn> I mean, we're stashing the data in a c-struct.
+[17:24] <PerlJam> TimToady: so ... what are coercions then?  To me, when down-coercing, it always seems like you're asking to take this big thing and put it in a smaller box.  whatever fits, fits.  Ergo,  Real($complex)  tries to fit a complex number into a Real-sized box and all that fits is the real portion.
+[17:24] <TimToady> maybe, depending on how we define ~~ Real()
+[17:24] <pmichaud> I don't have a problem with it being in a c-struct
+[17:24] <pmichaud> it's the ops specifically that are weirdish
+[17:24] <TimToady> to be consistent Int(1.0) would work, and Int(1.5) wouldn't
+[17:24] <pmichaud> why dynops instead of methods?
+[17:24] <jnthn> pmichaud: Mostly overhead.
+[17:25] <PerlJam> TimToady: now *that's* a foolish consitency if ever I saw one
+[17:25] <pmichaud> I think I'd prefer to deal with overhead issues after pcc branch has landed, though
+[17:25] <jnthn> pmichaud: The difference between going through a bunch of PCC, or just doing a bunch of pointer assignments.
+[17:25] <jnthn> pmichaud: I'd rather write this once.
+[17:25] <pmichaud> why "a bunch of PCC"?
+[17:25] <colomon> TimToady: taking that to the next level -- if a Rat cannot be exactly expressed as a Num, it can't be converted to one using .Num?
+[17:26] <TimToady> Multiple foolish consistencies are the hobgoblins of large minds. :)
+[17:26] <jnthn> pmichaud: Because we have hundreds of methods in the setting. Add up their parameters, and you're getting into a lot of calls.
+[17:26] <jnthn> pmichaud: Plus there's a C boundary issue here.
+[17:26] <pmichaud> I was hoping that we'd come up with a way to have the signatures frozen into the pbc anyway
+[17:27] <pmichaud> so it doesn't matter if there are hundreds of methods in the setting, because that cost is compile-time and not startup-time
+[17:27] <PerlJam> coercing downwards as truncation works for me if no one else.
+[17:27] <jnthn> pmichaud: We may be able to have *some* aspects of them frozen.
+[17:27] <jnthn> pmichaud: However, I see that more as a long-term goal.
+[17:27] <quietfanatic> If Complex downgrades implicitly to Real, then we'll need a Realal role to go along Integral. :)
+[17:28] <quietfanatic> s/along/along with/
+[17:28] <jnthn> pmichaud: The thing is that we can't freeze things like references to type objects so easily.
+[17:28] <colomon> TimToady: I'm inclined to think not allowing Complex.Num (er Complex.Real?) is the right choice.
+[17:28] <TimToady> Really
+[17:28] <PerlJam> And as a general principle, coercions should not work only at the points of intersection between the types and fail everywhere else.
+[17:28] <jnthn> pmichaud: And I don't see that changing too soon.
+[17:28] <PerlJam> IMHO
+[17:29] <colomon> PerlJam: yes, it seems like that would encourage a lot of ugly code, if nothing else.
+[17:29] <jnthn> pmichaud: Anyway, the refactor I did means the code gen for this is in one method.
+[17:30] <PerlJam> Or, another foolish consistency is to not provide coercion at all  ;)
+[17:30] <jnthn> pmichaud: If this approach somehow turns out horrible, it's not going to be hard to switch to a method call based approach.
+[17:30] <jnthn> pmichaud: I'm just making a pragmatic decision based upon our need to win some performance and my expectations of what Parrot will provide us.
+[17:31] <pmichaud> jnthn: and PCCMETHODS are that slow?
+[17:31] <jnthn> pmichaud: You have all the PCC overhead as usual, plus the fact that you're crossing the PIR/C boundary.
+[17:32] <pmichaud> it just really feels like a very premature optimization.
+[17:32] <pmichaud> also it feels like we just went a bit too far down a slippery slope
+[17:32] <jnthn> I fail to see how.
+[17:32] <pmichaud> architecturally I think we just start writing all of our primitives as dynops
+[17:33] <jnthn> Parrot provides more than one way to deal with C data structures from within PIR. One is dynops, another is vtable methods, another is PCC methods.
+[17:33] <pmichaud> okay, some comments/questions then
+[17:33] <pmichaud> what does get_signature_elem do exactly?  It appears to have the same documentation as set_signature_elem
+[17:34] <quietfanatic> jnthn: there's more than one way?  I have to learn these ways.
+[17:34] <pmichaud> oh, I see
+[17:34] <jnthn> pmichaud: The first paragraph marks the difference.
+[17:34] <pmichaud> set is a set, get is a fetch
+[17:34] <jnthn> pmichaud: It's for introspection.
+[17:35] <pmichaud> so it's a fast lookup of lots of attributes
+[17:35] <jnthn> Right.
+[17:35] <pmichaud> instead of "get_signature_size" op, why not just VTABLE_get_integer ?
+[17:36] <jnthn> pmichaud: That one would be ammenable to being a vtable method.
+[17:36] <jnthn> pmichaud: But it'd be the "odd one out".
+[17:36] <pmichaud> instead of "allocate_signature",   why not   $P0 = new ['P6LowLevelSig']   and   assign $P0, int    ?
+[17:36] <jnthn> But yes, that'd not be an issue.
+[17:37] <jnthn> Could do it that way also.
+[17:37] *** abra joined
+[17:37] <pmichaud> that would at least be consistent with other PMCs like FixedPMCArray and the like
+[17:37] *** abra joined
+[17:37] <pmichaud> unless we want to say that the existing FPA mechanism is a poor one (which is possible)
+[17:38] * PerlJam keeps mentally inserting a G into FPA for some reason
+[17:39] *** abra joined
+[17:39] <jnthn> Well, after I figured the set_signature_elem and get_signature_elem would be dynops, the other two kinda just followed along in a "just build a small op-based interface to low level signatures" kinda way.
+[17:40] <pmichaud> well, I'm not going to veto it now.  (more)
+[17:41] <jnthn> FPA relation - well, thing is we aren't really supporting the array interface.
+[17:41] <jnthn> At least, not for now.
+[17:41] <pmichaud> But this seems to me as though we have extremely little faith in Parrot's ability to perform, especially in the realm of attribute and hash lookups
+[17:41] <jnthn> Note that we'll never expose this PMC directly to Perl 6 code.
+[17:42] *** abra joined
+[17:42] <pmichaud> and if attribute/hash lookups aren't performant enough, then the hope of ever having a reasonable speed regex engine is fairly moot.
+[17:43] <pmichaud> afk, gotta grab lunch before 18h00
+[17:44] <jnthn> I think the difference here is that there's an expectation that the regex engine is being written in something running on top of Parrot, whereas the things that primarily care about signatures (the multi-dispatcher and the signature binder) are in C.
+[17:45] <jnthn> It's kinda silly, to me, to build up a bunch of objects and hashes, when the things that need the data much more naturally use structs.
+[17:45] <pmichaud> objects are structs
+[17:45] <jnthn> Parrot high level objects?
+[17:46] <jnthn> No, every time you look up an attribute in one of those ATM it's a hash lookup.
+[17:46] <pmichaud> right
+[17:46] *** abra joined
+[17:46] <pmichaud> thus my point about performance
+[17:46] <jnthn> We can have a really efficient hash implementation, I'm sure.
+[17:46] <pmichaud> perhaps we really need a more efficient object implementation
+[17:46] <jnthn> Probably.
+[17:47] <pmichaud> I know that attribute lookups in object PMCs are currently hash lookups.  I think that's a problem with the design.
+[17:47] <PerlJam> sic chromatic on it :)
+[17:47] <jnthn> But the thing that we do an awful lot of at the moment is calling things.
+[17:47] <pmichaud> because I guarantee that Cursor and Match objects all have attributes
+[17:47] <TimToady> "if it's good enough for P5, it's good enough for Parrot" :P
+[17:47] <jnthn> Every operator dispatch and method dispatch is influenced by binding performance.
+[17:48] <jnthn> So yes, we probably do want to target objects for improvements too.
+[17:48] <pmichaud> jnthn: I understand that.  But I think it's also the case that we expect an ability to write (some portions of) dispatch in P6, same as how we do the regex engine
+[17:48] <pmichaud> i.e., at one time it wasn't expected that the regex engine would be written "on top of Parrot"
+[17:48] <pmichaud> it was expected that the regex engine would be integral to Parrot
+[17:49] <TimToady> you mean embedded in Parrot, as in P5
+[17:49] <pmichaud> yes
+[17:49] <TimToady> I remember tromping on that one pretty hard at one design meeting
+[17:49] <pmichaud> "tromping on" == "don't do that" ?
+[17:50] <pmichaud> or "tromping on" == "that's the only way to do it"?
+[17:50] <TimToady> stomping into the ground such that the idea won't be resurrected :)
+[17:50] *** abra joined
+[17:50] <pmichaud> would you say similar things about dispatch?  or are dispatchers different from regex engine in that sense?
+[17:50] <jnthn> I think for now we have to pick our primitives.
+[17:51] <jnthn> e.g. the things we'll make fast - at the cost of not writing them in Perl 6 - to enable other things to be written in Perl 6.
+[17:51] <jnthn> And still be performant.
+[17:51] <TimToady> I think dispatchers also have to give the appearance of being in the same runloop, even if they aren't
+[17:52] *** abra joined
+[17:52] <TimToady> but only if someone is looking
+[17:52] <pmichaud> jnthn: okay, here's my conclusion for now
+[17:52] *** parduncia joined
+[17:52] <pmichaud> jnthn: first, it's OK to continue on this path
+[17:53] <TimToady> in a sense, the dispatcher wants to be inlined and optimized away on every call
+[17:53] *** stephenlb joined
+[17:53] <pmichaud> alarm bells are going off in my head that "this is the wrong approach" and that it's really trying to work around something that absolutely will have to be fixed in parrot anyway
+[17:53] *** abra joined
+[17:54] <pmichaud> but I don't want it to become a template for how we solve other problems in parrot
+[17:54] <pmichaud> I agree that it'll be easy to switch it to something else later
+[17:54] <pmichaud> i.e., the encapsulation is fine
+[17:54] <TimToady> we can assume that a special declaration will be required if you wish to open up the dispatcher to monkeypatching
+[17:55] <TimToady> under the prepessimal principle
+[17:55] <moritz_> book brainstorming meeting in 5 in #perl6book
+[17:56] <jnthn> I agree it's not desirable to have a dynop explosion.
+[17:57] <jnthn> And yes, I hope that we'll hit a point where we can perhaps switch to a method interface instead.
+[17:57] <pmichaud> it's not just the dynop, it's this struct/hash duality that keeps being entrenched (more)
+[17:57] <pmichaud> we already have a lot of PMCs that act as structs
+[17:57] *** abra joined
+[17:57] <pmichaud> and then we write a bunch of "inspect" vtable methods to be able to fetch information out of those structs
+[17:58] <pmichaud> and we do this because we don't have an efficient mechanism for storing attributes
+[17:59] <pmichaud> so every time a speed issue pops up we move things away from the standard interface and into special-purpose PMCs
+[17:59] <PerlJam> pmichaud: a foolish inconsistency?  :)
+[17:59] <pmichaud> which seems to tell me that we ought to be addressing the source of the speed issue
+[17:59] <pmichaud> instead of constantly adding workarounds to avoid it
+[18:01] <jnthn> pmichaud: There's probably a lot of truth in that.
+[18:01] <moritz_> jnthn: #perl6book?
+[18:01] <jnthn> moritz_: p6book or perl6book?
+[18:01] <moritz_> perl6book
+[18:02] *** NorwayGeek joined
+[18:02] <jnthn> heh, I was still in the other one, waiting for the meeting to start. ;-)
+[18:03] *** abra joined
+[18:06] *** Dyuran joined
+[18:06] *** Dyuran left
+[18:07] *** abra joined
+[18:11] *** abra joined
+[18:15] *** rfordinal joined
+[18:16] *** quietfanatic joined
+[18:24] *** rfordinal left
+[18:32] *** abra joined
+[18:41] <cj> pmichaud: I heard your name the other day.  are you related to UW in any way?
+[18:41] <pmichaud> cj:  no, that's probably the other "Patrick Michaud"
+[18:42] <cj> didn't you register with ARIN or IANA or something?
+[18:44] <masak> IANA what?
+[18:44] <masak> :)
+[18:45] *** viklund joined
+[18:46] <jnthn> IANA pmichaud you're looking for, I guess... :-)
+[18:46] <pmichaud> I don't think I registered with anything.  I tend to grab "pmichaud" wherever I can, yes, but there are a lot of places where others beat me to it :)
+[18:52] <[particle]> cj: that's patrick a michaud, who works on 'Solstice' (cpan name), aka 'Catalyst' (internal UW name)
+[18:58] *** abra joined
+[19:06] <moritz_> hugme: reload
+[19:06] <hugme> moritz_: reloaded successfully
+[19:06] <moritz_> hugme: show book
+[19:06] <hugme> moritz_: sorry, I don't know anything about 'book'
+[19:06] <moritz_> hugme: reload
+[19:06] <hugme> moritz_: reloaded successfully
+[19:06] <moritz_> hugme: show book
+[19:06] <hugme> moritz_: the following people have power over 'book': PerlJam, TimToady, [particle], jnthn, masak, mberends, moritz_, pmichaud. URL: http://github.com/perl6/book/
+[19:06] <masak> mmm, power over 'book'. :)
+[19:08] <[particle]> i can make him write really screwed up code anytime now. muhahahahahahah!!!!
+[19:09] *** nihiliad joined
+[19:12] <pmichaud> (IronMan from #perl6book)  -- I've been thinking of bundling my commit messages into blog posts :)
+[19:17] *** abra joined
+[19:19] <moritz_> README commit pushed
+[19:25] <moritz_> we need dalek to report to #perl6book
+[19:28] <colomon> Getting away from the book for a moment -- I asked in the middle of the night, and missed any response that might have happened.
+[19:29] <colomon> As far as I know, we don't have tests for operator overloading?  I mean all the things we are enabling moving operators to the setting.
+[19:29] <colomon> (I guess not just operators, for that matter.)
+[19:29] <colomon> It seems like it might be worthwhile to add to the spectest?  (Or is it there and I just don't know where?)
+[19:30] <moritz_> colomon: we have tests for overloading some operators
+[19:31] <moritz_> colomon: and we also have tests for calling positional parameters by names for many builtins (frew++, iirc)
+[19:31] <colomon> yes, frew.
+[19:31] <moritz_> which also requires them to be in the setting, though they don't work yet
+[19:32] <colomon> where are the current overloading tests?
+[19:32] <moritz_> S06-operator-overloading/*.t
+[19:32] <pmichaud> S13-overloading, perhaps?
+[19:33] <moritz_> and S13-overloading/*.t
+[19:33] <colomon> sigh; I've been looking in S03-operators
+[19:33] <pmichaud> S13 is the synopsis that describes operator overloading, iirc
+[19:33] <moritz_> that's not where the spec puts it ;-)
+[19:34] <colomon> S06-operator-overloading/imported-subs.t appears to be defining new operators.
+[19:34] <pmichaud> colomon: feel free to put things where they make more sense :)
+[19:35] <colomon> pmichaud: I'm just trying to figure out the lay of the land right now.
+[19:35] <pmichaud> yes, but if the lay of the land isn't conducive to "figuring it out", then it needs changing
+[19:35] <pmichaud> we not only create maps of the land, but we sometimes terraform and bulldoze to get the land to fit what we want the maps to look like.
+[19:36] <colomon> I always assume that I'm just being dense until proven otherwise.  :)
+[19:36] <colomon> It looks like a couple of the basic operators are overloaded in S06-operator-overloading/subs.t
+[19:37] <colomon> Ditto for S13-overloading (though weirdly, in multiple-signatures.t rather than operators.t)
+[19:38] <moritz_> you know, they say that 90% of everything is crud. Since I made 22% of the commits of the test suite, at least half of what I did there was crud
+[19:39] <moritz_> probably much more
+[19:39] <moritz_> "arguing with flawed arguments for dummies, part 1"
+[19:40] <colomon> I would like to emphasize that I am not criticizing the current tests, I'm looking for more tests that need to be written.
+[19:40] <colomon> d:)
+[19:40] <moritz_> colomon: I know. But I wanted to put your "assume that I'm just being dense until proven otherwise" into perspective
+[19:41] * PerlJam cleans up some spam on rakudo.org
+[19:41] <moritz_> I think currently we'd be better of with disabling comments on rakudo.org altogether
+[19:42] <PerlJam> Probably
+[19:42] <PerlJam> Certainly on some pages.
+[19:44] <PerlJam> Is there an easy-ish way to delete many comments?
+[19:44] <moritz_> I haven't found one
+[19:44] <moritz_> except opening the confirmation-for-delete page in a new tab for every comment
+[19:45] <moritz_> so you don't have to wait for two pages loading to proceed to the next one
+[19:58] <pugs_svn> r28656 | diakopter++ | [sprixel] made a bunch more tests pass, er smth.
+[20:00] <pmichaud> phone
+[20:01] <diakopter> mberends: 304 tests passing
+[20:02] <pugs_svn> r28657 | diakopter++ | [sprixel] updated spectest.data
+[20:03] <mberends> \\o/
+[20:17] *** r0bby joined
+[20:22] *** xenoterracide joined
+[20:34] <cognominal> svn perl6 does not build anymore.  complains of  a missing sigguts.h
+[20:35] <cognominal> I meant git perl6
+[20:35] <cognominal> make: *** No rule to make target `src/pmc/sigguts.h', needed by `src/pmc/perl6_group.bundle'.  Stop.
+[20:35] <jnthn> cognominal: huh. It's in the repo... http://github.com/rakudo/rakudo/tree/master/src/pmc/
+[20:36] * jnthn thought he'd forgot to check it in, but it's there... :-S
+[20:36] <moritz_> cognominal: did you reconfigure before running make?
+[20:36] <PerlJam> cognominal: did you git pull ?  :)
+[20:37] <cognominal> perl Configure.pl --gen-parrot  # what I do
+[20:37] <jnthn> cognominal: The file is really not there on disk?
+[20:38] <cognominal> maybe that's a make realclean that erased it.
+[20:38] <jnthn> oh!!
+[20:38] <jnthn> Yes :-/
+[20:38] <moritz_> try 'git checkout src/pmc/sigguts.h' to bring it back
+[20:38] <jnthn> A make clean with the old make file removed any *.h, not just pmc_*.h
+[20:38] <jnthn> Or a reset if yo've no other local diffs.
+[20:39] <cognominal> my script does a realclean  after the pull
+[20:39] <jnthn> ah.
+[20:39] <cognominal> usually it helps, but not this time apparently
+[20:40] <jnthn> Yeah...sorry.
+[20:40] <cognominal> no problem :)
+[20:45] <cognominal> thx. bed time&
+[20:45] <quietfanatic> In Perl 5, you can change the use semantics by defining an import sub.
+[20:45] <quietfanatic> How does one do this in Perl 6?
+[20:52] *** anniyan joined
+[20:52] *** SmokeMachine joined
+[20:54] <TimToady> quietfanatic: not yet specced, though likely to be similar
+[20:54] <quietfanatic> Alright.
+[20:55] <quietfanatic> It's not something that can't easily be worked around.
+[21:03] *** xenoterracide joined
+[21:06] *** meppl joined
+[21:07] *** Whiteknight joined
+[21:10] *** xenoterracide joined
+[21:30] *** tak11 joined
+[21:40] <jnthn> OK, I now have a branch with us switched over to building the new signature objects, plus enough tweaks to get the stage 1 compiler to run again. Multi dispatch takes its info from the new style sig objects too, as does !SIGNATURE_BIND (eventually going away, but one step at a time). Tomorrow I'll try and get us properly compiling the setting again, and then get the branch passing the test suite. Hopefully by the end of this week, I'll have this first sta
+[21:41] <diakopter> I'll have this first sta...
+[21:41] <moritz_> truncated after... what diakopter wrote ;-)
+[21:41] <jnthn> ...I'll
+[21:41] <jnthn> have this first stage merged, and after that it'll be on to
+[21:41] <jnthn> writing our own custom binder, which will probably take much of
+[21:41] <jnthn> next week. :-)
+[21:41] <jnthn> gah, fail
+[21:41] <jnthn> well, it's readable. :-)
+[21:41] <moritz_> but readable fail
+[21:41] * moritz_ too slow tonight
+[21:42] <jnthn> I expect the custom binder will handle binding nameds to positionals right from the start.
+[21:42] <moritz_> now *that* would be good new
+[21:42] <jnthn> So if I can get that done before the next release (decent chance) then we can win a bunch of tests from that too. :-)
+[21:43] <moritz_> cool
+[21:43] <quietfanatic> Can I introspect signatures soon?
+[21:43] <jnthn> quietfanatic: Are you wanting to?
+[21:43] <quietfanatic> Yeah, for Gamebase.
+[21:43] <moritz_> we already won a few thousand tests since last release thanks to colomon++'s tireless testing and implementing the trigonometric functions
+[21:43] <jnthn> quietfanatic: It needs a spec. I'll try and get one proposed.
+[21:44] <quietfanatic> Alright! :)
+[21:44] <moritz_> but pmichaud hasn't updated the spectest graph to show it :)
+[21:44] <jnthn> quietfanatic: And a prototype implementation. Then you can play with it and see how it feels. :-)
+[21:44] *** EvanCarroll joined
+[21:44] <moritz_> jnthn: care to push that branch to github?
+[21:44] <quietfanatic> I want to say "event multi method collision ($target) { ... }"
+[21:44] <moritz_> git push origin $yourbranchname
+[21:44] <quietfanatic> and have it look at the signature to see when to call the event.
+[21:45] <EvanCarroll> I'm banned from irc.perl.org, thanks to mst. I wanted to submit a bug about parrot.org site though
+[21:45] <EvanCarroll> You can't see the comments unless you're logged in. If you click on a post, you always get the same prompt, "login or register to post comments." Upon, logging in you'll be prompted with a box to enter your comment, if it is your first time you're OK. However, if you've already posted and you're looking for your old comment you'll be inclined to retype and resubmit. When you resubmit you'll be brought back to the post, this time logged in, and you'll se
+[21:45] <quietfanatic> Hmm.
+[21:45] <jnthn> moritz_: done.
+[21:45] <quietfanatic> I don't know if this is the right place for a parrot.org bug report.
+[21:46] <moritz_> EvanCarroll: please get a track account account, and submit the ticket at https://trac.parrot.org/parrot/newticket
+[21:46] <EvanCarroll> Well, again I'm klined from irc.perl.org, so someone will have to cross post if they care
+[21:47] <moritz_> EvanCarroll: your message was truncated due to IRC limitations
+[21:47] *** lumi joined
+[21:47] <jnthn> moritz_: I plan some clean-up in the PIR files, this was more a "get the stage 1 compiler to run again" jobby. :-)
+[21:48] <EvanCarroll> moritz_: is there an email address for the trac bugs?
+[21:48] <moritz_> EvanCarroll: no, you have to use the web interface
+[21:48] <moritz_> at least for submission
+[21:48] <EvanCarroll> trac--
+[21:50] *** EvanCarroll left
+[21:54] <moritz_> rakudo: sub a($a, $a) { }
+[21:54] <p6eval> rakudo 30e2cf:  ( no output )
+[21:54] <moritz_> rakudo: sub a($a, $a) { $a + $a }; say a(2, 3)
+[21:54] <p6eval> rakudo 30e2cf: OUTPUT«6␤»
+[22:00] <jnthn> std: sub a($a, $a) { }
+[22:00] <p6eval> std 28657: OUTPUT«Potential difficulties:␤  Useless redeclaration of variable $a (from line 1) at /tmp/kO9C5VJP5r line 1:␤------> [32msub a($a, [33m⏏[31m$a) { }[0m␤ok 00:01 97m␤»
+[22:01] <jnthn> only a warning, huh.
+[22:03] <diakopter> rakudo: my $a + $a
+[22:03] <p6eval> rakudo 30e2cf: OUTPUT«Use of uninitialized value␤Use of uninitialized value␤»
+[22:03] <diakopter> std: my $a + $a
+[22:03] <p6eval> std 28657: OUTPUT«ok 00:01 97m␤»
+[22:03] <diakopter> hrm
+[22:03] <diakopter> sprixel: my $a + $a
+[22:03] <p6eval> sprixel 28657: OUTPUT«Sprixel Error: TypeError: Cannot call method 'add' of undefined␤»
+[22:03] <moritz_> unlike in perl 5, a declaration make the variable visible immediately
+[22:06] *** takadonet left
+[22:07] <diakopter> rakudo: sub a ($b, $c = $b, $b = $c) { $b + $c }; say a 5
+[22:07] <p6eval> rakudo 30e2cf: OUTPUT«Null PMC access in isa()␤in sub a (/tmp/eHTYynJY4L:1)␤called from Main (/tmp/eHTYynJY4L:0)␤»
+[22:10] <diakopter> rakudo: sub a ($b = $b) { }; say a
+[22:10] *** FOAD_ joined
+[22:10] <p6eval> rakudo 30e2cf: OUTPUT«Null PMC access in isa()␤in sub a (/tmp/DalKSx8DVO:1)␤called from Main (/tmp/DalKSx8DVO:0)␤»
+[22:11] <jnthn> heh
+[22:11] <jnthn> diakopter: Feel free to file rakudo bug, though I suspect those may be known.
+[22:11] <jnthn> Expect they're fixable in the new binder.
+[22:13] <moritz_> this one is
+[22:14] <moritz_> masak++ reported it about a week ago
+[22:18] *** am0c joined
+[22:26] *** nihiliad joined
+[22:48] *** lmc joined
+[23:05] *** payload joined
+[23:12] *** ShaneC joined
+[23:12] <ShaneC> does rakudo have a way to check for errors or exceptions from an eval?
+[23:13] <Juerd> ShaneC: It's in $!
+[23:13] <ShaneC> thanks
+[23:14] <jnthn> rakudo: eval('lol'); say $!
+[23:14] <p6eval> rakudo 30e2cf: OUTPUT«Could not find non-existent sub lol␤»
+[23:15] <jnthn> rakudo: eval('die "omfg lol"'); say $!
+[23:15] <p6eval> rakudo 30e2cf: OUTPUT«omfg lol␤»
+[23:15] <jnthn> :-)
+[23:19] <ShaneC> awesome job on rakudo btw ;-) giving p6 a serious shot for the first time and really enjoying it!
+[23:20] <Juerd> \\o/
+[23:20] <ShaneC> hopefully once i catch up on my p6 i'll get some time to actually help with rakudo
+[23:20] * Juerd agrees that rakudo is awesome
+[23:20] <jnthn> ShaneC: Glad you're finding Perl 6 fun. :-)
+[23:21] <jnthn> It's a fun language to use, and to implement.
+[23:21] <jnthn> Though maybe different kinds of fun. ;-)
+[23:23] *** FOAD_ joined
+[23:42] <quietfanatic> The fact that neither caller() nor $?FILE seem to work in Rakudo is making it hard to cache generated code.
+[23:43] <Tene> eh?  how are those related?
+[23:43] <ShaneC> why do you need those two cache generated code?
+[23:43] <ShaneC> to*
+[23:43] <quietfanatic> To save it in a file related to either the module or the calling program.
+[23:43] <ShaneC> ah, thought you meant caching in memory
+[23:44] <Tene> quietfanatic: what information do you need, exactly?
+[23:44] <quietfanatic> Ah, yeah, I meant disk. :)
+[23:44] <quietfanatic> Preferably, the name of the program that use'd this module.
+[23:44] <quietfanatic> If not, at least the directory the module is in.
+[23:49] <Tene> quietfanatic: will some embedded PIR be acceptable?
+[23:49] <quietfanatic> For now, yeah.
+[23:49] <Tene> kk
+[23:50] <quietfanatic> (incidentally, most of my generated code is embedded PIR)
+[23:54] <lisppaste3> tene pasted "fetch the filename of the caller" at http://paste.lisp.org/display/88361
+[23:54] <Tene> quietfanatic: will that do?
+[23:55] <Tene> erm, drop the .local pmc and loop:
+[23:55] <Tene> of course
+[23:55] <quietfanatic> I fugyred :)
+[23:55] <quietfanatic> er...
+[23:55] <Tene> I was going to take a different approach, but simple is better.
+[23:55] <quietfanatic> *figured
+[23:55] <quietfanatic> %r is the return value or something?
+[23:56] <Tene> yes
+[23:56] <Tene> so you use: $filename = Q:PIR { ... };
+[23:56] <quietfanatic> I see.  Thanks!
+[23:56] <Tene> np
+[23:57] <Tene> doesn't look like that gives you a path, just whatever filename you called the program with
+[23:57] <Tene> "./foo.pl" in my case

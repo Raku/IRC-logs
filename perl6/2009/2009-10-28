@@ -1,0 +1,2290 @@
+[00:00] <jnthn> What could possibly go wrong? ;-)
+[00:00] <TimToady> I would not expect 1
+[00:00] <jnthn> tbh I don't expect we're going to get this right first time anyway - I'm just trying to get an insight into your vague expectations, so I can get something prototyped.
+[00:00] <TimToady> it's not a list assignment
+[00:00] <jnthn> Ah, OK.
+[00:01] <jnthn> So what would you expect $foo to get?
+[00:01] <jnthn> $capt? $capt.Scalar?
+[00:01] <TimToady> well, if it were $foo := bar I'd expect $foo.WHAT to be Parcel, probably
+[00:01] <TimToady> but copying a Parcel might do something to it
+[00:02] <jnthn> Hmm
+[00:02] <TimToady> (I think return is Parcel, not Capture, actually)
+[00:02] <jnthn> Wait, when did our capture from earlier become...oh, OK. :-)
+[00:02] <TimToady> return 1,2,:a<b> is just three return values
+[00:03] <jnthn> It only becomes a capture in the case of my ($x, $y, :$a) := foo, and it's because the signature binding coerces it into a capture?
+[00:03] <TimToady> I guess that means that sub return (|$parcel) doesn't capturify
+[00:03] <jnthn> It parcelifies? :-)
+[00:03] <TimToady> it's born parcelified
+[00:04] <jnthn> OK, but in general we'd like to be able to optimize somesub(1,2,:a<3>) to build a capture right off.
+[00:04] <TimToady> comma syntax creates parcels at compile time
+[00:04] <TimToady> yes
+[00:04] <jnthn> I'm OK if it means that return is just special and doesn't do that.
+[00:04] <TimToady> but we can recognize that at compile time
+[00:05] <TimToady> well, if |$foo captures the rest of the capture, then we can't undo the capturization of sub foo ($first, |$rest) easily
+[00:05] <jnthn> Are you thinking we might want a general mechanism for saying "this sub wants a parcel not a capture"? Or can we just handle it in the compiler as "ah, it's a return statement control"?
+[00:06] <TimToady> well, I was just thinking that |$parcel works as the first argument, but as soon as you start binding one real argument, it capturifies and then you can only say |$capture
+[00:07] <TimToady> but maybe we can do sigil tricks instead
+[00:07] <jnthn> Yes, I'd been under the impression that :(|$capture) is fine, but anything else in a signature with one of those in is kinda bogus/invalid.
+[00:07] <jnthn> Unless it's unpacking that capture, of course.
+[00:08] <TimToady> I saw it as shifting @$capture or %$capture<key>:delete as you use up bits of the capture during binding
+[00:08] <TimToady> and |$cap just returns the remnant
+[00:08] <jnthn> Oh, interesting.
+[00:08] <jnthn> I'd seen us not damaging the original capture, just taking things from it.
+[00:09] <TimToady> well, something to be said for that view too
+[00:09] <jnthn> Well, I have two use cases for that way.
+[00:09] <TimToady> especially given callsame
+[00:09] <jnthn> 1) yes, that.
+[00:09] <jnthn> 2) in multi-dispatch, when we have to do a bindability check
+[00:09] <jnthn> That is, we need to give the capture a run through a couple of signatures to ask "can you bind it"
+[00:10] <TimToady> in that case |$cap would copy in the rest of the capture, since you do have track your position in the positionals at least
+[00:10] <jnthn> Hmm.
+[00:10] *** literal joined
+[00:10] <jnthn> I'd kinda seen captures themselves as immutble.
+[00:10] <TimToady> which is why you'd make a copy
+[00:11] <jnthn> Ah, OK.
+[00:11] *** nihiliad joined
+[00:11] <jnthn> We could do it that way too.
+[00:11] <TimToady> but maybe we leave the copying to the user
+[00:11] <TimToady> and just let them bind |$cap in addition to any other args
+[00:11] <jnthn> to be honest though, I don't see how implementing it by modifying the capture helps that much.
+[00:11] <jnthn> Certainly, I can't see it being all that efficient.
+[00:11] <TimToady> it was just my mental picture, but I agree captures are immutable
+[00:12] <TimToady> much like strings are really immutable on some level, but the container can hide that or cheat
+[00:12] <jnthn> Aye, true.
+[00:13] <jnthn> Implementation experience on my part so far suggests keeping them immutable for real is the way to go, especially since it will make callsame trivial.
+[00:13] <TimToady> however, that perhaps implies that partial binding for "for" not only has to be able to stop in the middle, but restart there.
+[00:14] <TimToady> or that "for" transmutes the positionals into an iterable (mutalbe) list
+[00:14] <jnthn> I was leaning more towards the second on that.
+[00:14] <jnthn> Haven't quite figured out how it will look yet though.
+[00:15] *** Schwern joined
+[00:15] <jnthn> Going back to where we were before though...
+[00:16] <jnthn> sub foo() { return 1 }; my $a = foo(); # here we'd expect $foo to be 1?
+[00:16] <TimToady> maybe we just have a lazy bind-repeatedly primitive
+[00:16] <jnthn> sub foo() { return 1,2,3 }; my $a = foo(); # here we'd expect $foo to not be 1
+[00:17] <jnthn> If the payload of the return exception is a parcel in both cases, what's the operation on the parcel that gives us these semantics?
+[00:17] <TimToady> parcels are like captures in that a single value in item context drops the wrapper
+[00:17] <jnthn> I think for my ($a, $b, $c) = foo() then it's just ".list"
+[00:17] <jnthn> OK, so the answer is "just put it in item context".
+[00:18] <jnthn> That works for me.
+[00:18] <TimToady> whereas the latter is a list assignment, hence list context
+[00:18] <jnthn> OK.
+[00:18] <jnthn> So right now I'm thinking of a first cut whereby...
+[00:19] <jnthn> 1) return is special-cased to not make a capture, but instead just give return the parcel
+[00:19] <jnthn> 2) return uses that as the payload
+[00:19] *** payload joined
+[00:19] <jnthn> 3) something handling a return value contextualizes it as .item or .list depending on what type of assignment we're doing
+[00:20] <TimToady> missing a step there
+[00:21] <TimToady> the return value gets incorporated into the super-parcel of the argument list foo was called in as a sub-parcel
+[00:21] <TimToady> how that superparcel is bound eventually determines the context of the subparcel
+[00:21] <TimToady> foo(1,2,bar())   foo gets superparcel, of which bar's subparcel is the 3rd item
+[00:22] <jnthn> Hmm
+[00:22] <jnthn> OK.
+[00:22] <TimToady> if foo is ($$$) then bar is in item context, otherwise not
+[00:23] <jnthn> OK, but (just to make sure I follow):
+[00:23] <TimToady> context is always lazy till binding/assignment
+[00:23] <jnthn> sub bar { return 1,2 }
+[00:23] <jnthn> sub foo($a, $b, $c) { ... }
+[00:23] <TimToady> returns Parcel(1,2)
+[00:23] <jnthn> foo(1, bar()) # error?
+[00:23] <TimToady> correct
+[00:24] <TimToady> must say |bar()
+[00:24] <jnthn> That is, it can only bind to one parameter, which then enforces a context?
+[00:24] <jnthn> This sounds saner than I first feared. :-)
+[00:25] <TimToady> however, if foo(*@a) then it finds itself in list context and flattens
+[00:25] <jnthn> Right.
+[00:25] <jnthn> Sounds like I very literally *can* just return a Parcel.
+[00:25] <TimToady> indeed
+[00:25] <jnthn> And whatever "consumes" it next does the Right Thing.
+[00:25] <TimToady> the real trickiness will be in how to create the superparcel such that \\@foo and @foo work right
+[00:26] <jnthn> \\@foo and @foo where? In the signature?
+[00:26] <TimToady> no, in the call args
+[00:26] <jnthn> Ah.
+[00:27] <TimToady> @foo is like bar() in that it will flatten if it finds itself in list context
+[00:27] <lambdabot> Maybe you meant: do faq ft todo yow
+[00:27] <TimToady> whereas \\@foo is like [...]
+[00:27] <TimToady> which never flattens
+[00:27] <TimToady> even in list context
+[00:28] <jnthn> Ah, OK.
+[00:28] <TimToady> so either we have the bare object autoflatten and we suppress that, or we have the bare object never autoflatten, and insert code that flattens in list context
+[00:28] <jnthn> So far as I understand, we do the latter in Rakudo now.
+[00:29] <TimToady> I think that's the right approach
+[00:29] <jnthn> pmichaud++ would be able to confirm that, he understands that bit better than me. :-)
+[00:29] <TimToady> so $foo that happens to contain an Array doesn't flatten
+[00:29] <jnthn> Yeah
+[00:29] <jnthn> We currently have that now by wrapping it in a kinda Perl6Scalar proxy object.
+[00:29] <jnthn> So it's "flagged" as "don't flatten me"
+[00:30] <TimToady> likewise foo(1,2,\\@bar) really means pass the bare object and do nothing extra
+[00:30] <jnthn> So when the flattener is doing its list context flattening, it knows to pass over it.
+[00:30] <TimToady> I think the flag should be "flatten me", not "don't flatten me"
+[00:30] <TimToady> by default an object sitting there in the list shouldn't flatten
+[00:31] * jnthn tries to remember if @a = (@b, @c) flattens @b and @c or not
+[00:31] <TimToady> so [...] can just insert an Array into the list and not worry about it
+[00:32] <TimToady> yes, those flatten because @ turns on the flattening
+[00:32] <jnthn> nod. We handle those I think by that constructor just making sure they're flagged as "don't flatten me"
+[00:32] <jnthn> Hmm.
+[00:32] <jnthn> I wonder if we get that right.
+[00:32] <jnthn> rakudo: my @b = 1,2,3; my @c = 4,5,6; my @a = (@b, @c); say @a.elems
+[00:32] <p6eval> rakudo e8cac1: OUTPUT«6␤»
+[00:32] <jnthn> Ah, yes
+[00:32] *** orafu joined
+[00:32] <jnthn> I'm probably missing something.
+[00:33] <jnthn> rakudo: my @b = 1,2,3; my @c = 4,5,6; my @a = (\\@b, \\@c); say @a.elems
+[00:33] <TimToady> I think the default should be not to flatten unless explicitly marked as flattenable
+[00:33] <p6eval> rakudo e8cac1: OUTPUT«2␤»
+[00:33] <jnthn> That may well be a better default.
+[00:33] <TimToady> and the tricky thing about \\@x is that it's taking that marker off, not putting one on
+[00:33] <TimToady> it just denatures the @
+[00:34] <TimToady> and turns it into a [...] equivalent
+[00:34] <TimToady> (without the recomposition, of course)
+[00:35] <jnthn> Hmm, yes.
+[00:35] <TimToady> well, thank for eliciting some of the random thoughts in my decoherent brane
+[00:35] <jnthn> Trickiness.
+[00:35] <TimToady> *thanks
+[00:35] *** literal joined
+[00:35] <jnthn> Thanks for your time. You've cleared a lot of stuff up for me.
+[00:35] <TimToady> that's why I said tricky at the beginning, because it's counterintuitive on some level
+[00:35] <jnthn> Yes, I just took a while to see the trickiness.
+[00:36] <TimToady> the first notion is that \\@x must wrap @x somehow, not dewrap it
+[00:36] <jnthn> Yes
+[00:36] <TimToady> but \\ is more of an anti-function than a function
+[00:36] <jnthn> I fear that's what we are doing in Rakudo.
+[00:38] <Juerd> Is \\ a good symbol for that? It may be diagonal, but it's still very flat.
+[00:38] <TimToady> interestingly, a Parcel itself is like @ in that it is marked as flattenable, and \\(1,2,3) takes that marker off
+[00:39] <jnthn> \\(1,2,3) doesn't create a Capture these days?
+[00:39] <jnthn> Or you just mean, a Capture doesn't carry that marker?
+[00:39] <TimToady> I think the historical usages of \\ play well here in suppressing the normal expectation of the following construct
+[00:39] <TimToady> it's sort of a "don't" operator :)
+[00:40] * jnthn chuckles
+[00:40] <TimToady> \\(1,2,3) is a non-intepolating parcel now, I think
+[00:40] <jnthn> OK.
+[00:40] <TimToady> er, non flattening
+[00:41] *** quuxx joined
+[00:41] <TimToady> foo(*@) would flatten foo($a, $b, (1,2,3)) to 5 args but foo($a, $b, \\(1,2,3)) would be three args
+[00:41] <carlin> quux segfaulted and someone tooks its nick :-(
+[00:41] <TimToady> the third of which would be a Parcel
+[00:41] <Juerd> Okay, then I won't make a fool out of me by suggesting & :P
+[00:42] <TimToady> would conflict with the verb nounifier in any case
+[00:42] <Juerd> I thought you liked a challenge!
+[00:42] <TimToady> I liked such challenges when I designed Perl 1
+[00:42] <TimToady> now I am a coward.  :)
+[00:43] <Juerd> When did Perl 6 stop being about shifting symbols all across the operator space ;)
+[00:43] <TimToady> about the time the universe stopped being opaque to light
+[00:44] <Juerd> I remember that I was once scared that every new idea would affect the spelling of just about every existing operator.
+[00:44] <Juerd> But ASCII is flexible enough \\o/
+[00:45] <TimToady> one must certainly take that into account, but major upheavals are less likely these days
+[00:45] <Juerd> And for that I'm very grateful :)
+[00:46] * jnthn also
+[00:46] <jnthn> Feels like we're almost converging.
+[00:46] <TimToady> however, asteroids are still more likely in the morning than in the evening, and slightly more likely in autumn than in spring...
+[00:46] <Juerd> Perl 5 is diverging though.
+[00:46] <TimToady> in a sense, it must
+[00:46] <TimToady> it cannot converge without becoming Perl 6
+[00:47] <TimToady> and borrowing ideas piecemeal will force divergence
+[00:47] <Juerd> Are \\w, \\s and \\d supposed to match codepoints outside the ascii range in Perl 6?
+[00:47] <TimToady> yes
+[00:47] <Juerd> Perl 5 is going back to ascii-only for those, I read in perl5110delta :(
+[00:48] <Juerd> I think that's an insanely bad idea.
+[00:48] <TimToady> I do too.
+[00:48] <jnthn> I was kinda like "huh what" when I read that.
+[00:48] <Juerd> It does mean that Perl 6's behaviour is now different, and should be specced instead of implied.
+[00:48] <jnthn> And hoped I'd misunderstood 'cus I'd not had enough coffee, but apparently not. :-(
+[00:49] <jnthn> I liked that I could write regexes with \\w and \\d and have them match other types of word and digit characters beyond "those in ASCII".
+[00:49] <Juerd> Oh, and the workaround is a compile time option. Site wide configuration's worked for PHP, so why not try it with Perl, they might have thought ;)
+[00:50] <TimToady> it's terribly bad Huffman coding to restrict \\w to ascii
+[00:50] <TimToady> obra__: see ^^
+[00:50] <jnthn> Juerd: Oh ouch. :-(
+[00:50] <TimToady> please kill that idea
+[00:51] <TimToady> Perl 5 must not revert to ASCII semantics where we've been gaining ground on Unicode for many years
+[00:52] <Juerd> Current Perl 5 behaviour is quasi-random ascii or unicode. There's a way to force it to do unicode (upgrade the string before matching). There's no clean way to force it to NOT do unicode.
+[00:52] <TimToady> contrariwese, if Perl 5 does go that route, I will just think of it as another nail
+[00:53] <Juerd> So in order to upgrade your perl5.10 program to perl5.11 without anything breaking, you'll have to get rid of each and every \\d, \\w or \\s that could ever match non-ascii data.
+[00:54] <Juerd> Or abuse the old bug, and decode, match, encode.
+[00:54] <Juerd> Er, the other way around: encode, match, decode
+[00:54] <Juerd> But then you can't use *any* unicode property.
+[00:54] *** snarkyboojum joined
+[00:55] <Juerd> TimToady: What do you mean by a nail?
+[00:55] <TimToady> another nail in the coffin
+[00:55] <TimToady> another fjord for which it pines
+[00:55] <Juerd> Oh, thanks
+[00:55] <Juerd> Dutch has the same idiom but I didn't recognise it.
+[00:56] <Juerd> (nagel aan de doodskist)
+[00:56] <TimToady> we probably stole it from you :)
+[00:56] <Juerd> Ideas and information cannot be stolen, fortunately :)
+[00:57] <Juerd> Well, unless there's just one carrier. Then effectively you could steal it by stealing that.
+[00:58] <Juerd> 2am; off to bed
+[00:58] <Juerd> Good localtime
+[00:59] <TimToady> night
+[00:59] <Juerd> .oO( Hm, what context would Good provide? )
+[00:59] <Juerd> afk
+[00:59] <TimToady> Good grief!
+[01:00] <diakopter> hugme: grief Good
+[01:00] <diakopter> hrm
+[01:00] <diakopter> hugme can't be a griefer I guess
+[01:02] <jnthn> :-)
+[01:03] <diakopter> hugme: Good
+[01:04] <TimToady> lambdabot: Good
+[01:04] <diakopter> @Good
+[01:04] <lambdabot> Unknown command, try @list
+[01:04] <diakopter> @$$
+[01:04] <lambdabot> Maybe you meant: . ? @ bf do ft id pl rc v wn
+[01:04] <TimToady> @list Good
+[01:04] <lambdabot> No module "Good" loaded
+[01:04] <diakopter> . ? @ bf do ft id pl rc v wn
+[01:04] <diakopter> nope, I guess that's not what I meant
+[01:05] * diakopter tries to find TimToady's reply in the backlog
+[01:06] <jnthn> Do we actually *use* lambdabot for anything these days?
+[01:06] <jnthn> Oh, karma.
+[01:06] <diakopter> --karma
+[01:07] <carlin> Someone should write a karma-bot in Perl6 and then we can get rid of lambdabot
+[01:08] <diakopter> quuxx: learn karma
+[01:12] <diakopter> sjohnson: javascript doesn't need semicolon in a great many places, esp at ends of lines
+[01:12] <diakopter> function a(){ print(1) }a() // DWIM
+[01:15] <jnthn> OK, sleep time
+[01:15] <jnthn> o/
+[01:15] *** Caelum joined
+[01:16] *** tak11 joined
+[01:17] <diakopter> TimToady: are you saying that the object file needs to be the syml+ast?  in that case, all the caching should be in sprixel.  all the additional caching/persisting I add, I mean.
+[01:17] <diakopter> however, that doesn't solve the problem for .pm file not loaded by the .setting
+[01:18] <diakopter> where "the problem" is "restrictively slow parse durations"
+[01:19] <obra__> TimToady: noted. I will do what I can. the current problem is that tthe implementation as first submitted badly broke lots of stuff
+[01:19] <obra__> TimToady: as of 5.11.1 the changes in 5.11.0 were reverted.
+[01:21] <cls_bsd> a/win 30
+[01:23] <diakopter> /win 46838729
+[01:33] <obra_> TimToady: if you see p5p doing anything else that feels wrong, I'm happy to go wave the carrot and stick around
+[01:34] <sjohnson> diakopter: there are times when it is needed... prototyping is one instance
+[01:37] <sjohnson> in other words, if you try to join them all on one line, the semicolons must be present in some cases
+[01:37] *** snarkyboojum_ joined
+[01:39] *** payload joined
+[01:40] *** dduncan joined
+[01:40] *** dduncan left
+[01:57] *** jaldhar_ joined
+[01:59] *** Exodist joined
+[02:05] <obra_> TimToady: ping? Abigail asks if the same ruling applies to \\d (and presumably also \\s)
+[02:06] <TimToady> yes, it does
+[02:06] <obra_> My assumption would be "yes" ..
+[02:06] <obra_> oh good.
+[02:06] <obra_> Thanks :)
+[02:06] <TimToady> the best future direction would be more toward nailing down the actual type of the currently untyped 8-bit buffers
+[02:07] <fax> Abigail !!!
+[02:07] * obra_ nods.
+[02:08] <TimToady> thanks
+[02:08] <obra_> Thanks for making a definitive statement. (Leaving aside that it's the answer that makes me happiest, I'm just happy that the debate is finished)
+[02:08] <fax> I never really recovered from that backref prime test
+[02:08] <obra_> Now p5p just need to address the deprecation mess
+[02:10] <obra_> The consensus among folks hacking on the core seems to be "deprecated features should not be removed unless they're significantly hindering performance or new functionality. And then only after they've been warning as deprecated for at least one major version cycle.
+[02:11] <obra_> But there's a historical mess of things marked deprecated because the implementations were awful and things marked deprecated because the language feature was awful and needed to go.
+[02:11] <obra_> There is disagreement over what's in column A and what's in column B.
+[02:12] <obra_> The most interesting change for 5.12 in this sphere is that nicholas has written code to enable deprecation warnings by default.
+[02:12] <TimToady> +1
+[02:13] <obra_> Woot.
+[02:13] <obra_> My inclination is to not kill anything more for 5.12. ($[ went already) and see how the world likes those warnings
+[02:14] <obra_> and if there are things in 5.13 that are really getting in the way, we can discuss them.
+[02:14] <obra_> I got particularly cranky when someone tried to deprecate ' as a package seperator a few weeks back.
+[02:14] <obra_> But I learned with 5.001m and the pink camel, so I may be a special case
+[02:15] <TimToady> in p6 ' is legal *within* an identifier
+[02:15] <TimToady> as is -
+[02:15] * obra_ can't wait for production grade p6.
+[02:16] <TimToady> EMETOO
+[02:17] <obra_> The justification for wanting ' to warn is that newbies try to do $name = 'Bob'; print "This is $name's computer"
+[02:17] <TimToady> not a problem with strict in p6?
+[02:17] <TimToady> s/?//
+[02:17] * obra_ nods
+[02:17] <dalek> nqp-rx: f645528 | pmichaud++ |  (4 files):
+[02:17] <dalek> nqp-rx: [nqp]:  Add contextual vars, tests for optional args.
+[02:17] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/f645528723ca9ef9c7c42e00c753bdcc885fe9a3
+[02:18] *** tak11 joined
+[02:18] <obra_> in p5, it is certainly potentially confusing, but I'm the fix feels worse than the problem
+[02:28] *** hercynium joined
+[02:29] *** ShaneC joined
+[02:30] *** tak11 joined
+[02:48] *** tak__ joined
+[02:48] *** agentzh joined
+[02:57] *** snarkyboojum joined
+[03:37] *** charsbar joined
+[03:46] *** eternaleye joined
+[03:54] <jsut> how do you do $self->SUPER:: in p6?
+[04:01] *** JJack joined
+[04:01] *** JJack left
+[04:02] <TimToady> generally you just call nextsame;
+[04:02] <TimToady> or callsame; if you want to capture control back
+[04:08] <dalek> nqp-rx: ed8726a | pmichaud++ |  (4 files):
+[04:08] <dalek> nqp-rx: [nqp]  Add named argument handling.
+[04:08] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/ed8726a6fb0e644a9b69e9fc25cfee8324056508
+[04:08] <dalek> nqp-rx: 742167e | pmichaud++ |  (3 files):
+[04:08] <dalek> nqp-rx: [nqp]:  Add modules, package-based names.
+[04:08] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/742167ef98a75022d62364ae57ba455379e15ff0
+[04:20] *** justatheory joined
+[04:48] *** quuxx joined
+[04:51] <dalek> nqp-rx: e1d65a0 | pmichaud++ |  (3 files):
+[04:51] <dalek> nqp-rx: [nqp]:  Add class declarations and method calls.
+[04:51] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/e1d65a020c388d8154e2bfa03f39ca00a20aca3e
+[04:57] <dalek> nqp-rx: 8199cf6 | pmichaud++ |  (4 files):
+[04:57] <dalek> nqp-rx: [nqp]:  Add 'self', methodop tests.
+[04:57] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/8199cf6d6ee75ae6972a050e6c5d55f96a30ebba
+[04:57] <dalek> nqp-rx: 9bfe3c4 | pmichaud++ | t/nqp/28-subclass.t:
+[04:57] <dalek> nqp-rx: [nqp]:  Add tests for subclassing.
+[04:57] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/9bfe3c468afdf0f96d08deddebf6b789fed0eea4
+[05:06] *** Bzek joined
+[05:10] *** quietfanatic joined
+[05:12] <quietfanatic> Is there any chance I can declare context variables in a signature in the near future?
+[05:12] <quietfanatic> rakudo: sub x ($*thing) { y() }; sub y { say $*thing }; x(45);
+[05:12] <p6eval> rakudo e8cac1: OUTPUT«Invalid twigil used in signature parameter. at line 2, near ") { y() };"␤in Main (file src/gen_setting.pm, line 1250)␤»
+[05:13] *** Bzek_ joined
+[05:20] *** mberends joined
+[05:22] <quietfanatic> Or another thing;
+[05:22] <quietfanatic> rakudo: say (&sin, &cos)>>.(pi)
+[05:22] <p6eval> rakudo e8cac1: OUTPUT«sincos␤»
+[05:22] <quietfanatic> rakudo: say ((&sin, &cos)>>.(pi)).perl
+[05:22] <p6eval> rakudo e8cac1: OUTPUT«[{ ... }, { ... }]␤»
+[05:23] <quietfanatic> I'd expect this to output [-1, 0] (or close)
+[05:23] <quietfanatic> I mean [0, -1] or close
+[05:24] <quietfanatic> Or how about this
+[05:24] <quietfanatic> rakudo: say ((3, 4) <<,>> (5, 6)).perl
+[05:24] <p6eval> rakudo e8cac1: OUTPUT«Bool::False␤»
+[05:25] <quietfanatic> I'd expect this to be equivalent to the zip operator.
+[05:26] <dalek> nqp-rx: dd2ec36 | pmichaud++ |  (3 files):
+[05:26] <dalek> nqp-rx: [nqp]:  Add statement_prefix:sym<make>, $/ $_ $! variables.
+[05:26] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/dd2ec36cd1f4a6b3423501e4a33401a970a27578
+[05:26] <dalek> nqp-rx: 1316068 | pmichaud++ | src/NQP/ (2 files):
+[05:26] <dalek> nqp-rx: [nqp]:  Add $<foo> and $[0] variables.
+[05:26] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/13160682dc710caea490e196082d25410717e5dc
+[05:32] <TimToady> STD already siggy context vars
+[05:32] <TimToady> *defines siggy
+[05:33] <pmichaud> NQP supports context vars in signatures as well
+[05:33] <pmichaud> so it won't be long before rakudo has them.
+[05:33] <quietfanatic> Oh goody
+[05:34] <pmichaud> I'm a little surprised that Rakudo doesn't have them already.  I think we're probably enforcing a check on the '*' twigil that shouldn't be enforced.
+[05:41] *** eternaleye_ joined
+[05:53] <pugs_svn> r28926 | pmichaud++ | [pm.txt]:  Another spec question for TimToady++ and others.
+[06:01] *** WXYZ joined
+[06:02] <WXYZ> JavaScript is an object-oriented[2] scripting language used to enable programmatic access to objects within both the client application and other applications. It is primarily used in the form of client-side JavaScript, implemented as an integrated component of the web browser, allowing the development of enhanced user interfaces and dynamic websites. JavaScript is a dialect of the ECMAScript stan
+[06:02] <WXYZ> dard and is characterized as a dynamic, weakly typed, prototype-based language with first-class functions. JavaScript was influenced by many languages and was designed to look like Java, but to be easier for non-programmers to work with.[3][4]
+[06:09] *** JimmyZ joined
+[06:11] *** astrojp_ joined
+[06:17] <pmichaud> http://nopaste.snit.ch/18488  # accessing PIR opcodes directly from NQP
+[06:19] <dalek> nqp-rx: 463e6af | pmichaud++ | src/NQP/ (2 files):
+[06:19] <dalek> nqp-rx: [nqp]:  Allow subroutine and method names of form "category:sym<...>".
+[06:19] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/463e6af80257a0c7f715aafbbd61448d6553b5b7
+[06:19] <dalek> nqp-rx: 2a89139 | pmichaud++ |  (3 files):
+[06:19] <dalek> nqp-rx: [nqp]:  Add ability to access PIR opcodes directly via PIR:: pseudonamespace.
+[06:19] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/2a8913968bd00e86a46744faecdffe8b7be614c9
+[06:19] <pmichaud> time for sleep -- more tomorrow.
+[06:20] *** drbean_ joined
+[06:26] *** japhb joined
+[06:37] *** pnate joined
+[07:01] *** astrojp joined
+[07:04] *** drbean joined
+[07:12] *** nothingmuch joined
+[07:13] *** nothingmuch joined
+[07:16] *** drbean_ joined
+[07:16] *** iblechbot joined
+[07:24] *** [particle] joined
+[07:27] *** snarkyboojum joined
+[07:33] *** Su-Shee joined
+[07:33] <Su-Shee> good morning.
+[07:34] <moritz_> oh hai
+[08:13] *** rfordinal joined
+[08:18] *** ejs joined
+[08:23] *** payload joined
+[08:27] <dalek> nqp-rx: 819be4d | pmichaud++ | t/nqp/30-pirop.t:
+[08:27] <dalek> nqp-rx: [nqp]:  Failure to plan(3); is like planning to fail.
+[08:27] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/819be4daf3589aca2be39e38fa21427f4552438c
+[08:27] <dalek> nqp-rx: b1c6254 | pmichaud++ | src/ (4 files):
+[08:27] <dalek> nqp-rx: [nqp]:  Add regex_declarator.
+[08:27] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/b1c625400d9c620c0ab9e4c8bed625a919fd43dd
+[08:27] <dalek> nqp-rx: c571f83 | pmichaud++ |  (3 files):
+[08:27] <dalek> nqp-rx: [nqp]:  Add grammars, tokens, regexes, rules, and protoregexes.
+[08:27] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/c571f839bc5c0c24378a1930f1e716c50f023898
+[08:27] <dalek> nqp-rx: eb5ffe7 | pmichaud++ | t/nqp/32-protoregex.t:
+[08:27] <dalek> nqp-rx: [nqp]:  Add some simple protoregex tests.
+[08:27] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/eb5ffe73155ab76284545fe459d37c1d44002bd4
+[08:31] *** ejs1 joined
+[08:46] *** PZt joined
+[08:58] *** mariuz joined
+[09:19] *** snarkyboojum joined
+[09:33] *** rblasch joined
+[09:34] *** xenoterracide joined
+[09:37] *** xenoterracide joined
+[09:41] *** xenoterracide joined
+[09:46] *** xenoterracide joined
+[09:47] *** pranjal5215 joined
+[09:49] *** pranjal5215 left
+[09:59] *** astrojp left
+[10:46] *** iblechbot joined
+[10:47] *** dakkar joined
+[10:56] *** payload joined
+[11:07] *** lisppaste3 joined
+[11:10] *** IllvilJa joined
+[11:11] *** ejs2 joined
+[11:12] <IllvilJa> Folks, that perl 6 book you (Michaud, Masak, Worthington and Lenz) started to write was very nice reading, made me understand some key aspects of this new language.
+[11:13] <IllvilJa> Keep up the good work, this is the "missing piece" in the perl 6 documentation we have been waiting for and desperately needs.
+[11:14] <moritz_> IllvilJa: good to hear it, thanks for teh feedback
+[11:15] <Juerd> New language \\o/
+[11:15] *** hanekomu joined
+[11:17] *** pnu joined
+[11:21] <mathw> IllvilJa: I think you just made the authors very happy
+[11:21] <IllvilJa> mathw: That was intentional
+[11:22] <mathw> :)
+[11:22] <mathw> Personally I just like to see people learning about Perl 6
+[11:22] *** NorwayGeek joined
+[11:23] *** colomon joined
+[11:24] * moritz_ wonders if the release announcement made it sufficiently clear that we don't really have a book yet, just fragments
+[11:25] *** xenoterracide joined
+[11:25] <IllvilJa> moritz_: that were clear, but even if it is fragments being offered so far, they manage to make the covered topics clearer.
+[11:26] <mathw> \\o/
+[11:26] <mathw> moritz_: I intend to contribute to it at some point, but work's burning all my tuits at the moment.
+[11:29] <moritz_> mathw: quite understandable
+[11:29] *** xenoterracide joined
+[11:30] *** envi^home joined
+[11:30] *** KyleHa joined
+[11:31] <KyleHa> moritz_: Ping!
+[11:31] <moritz_> KyleHa: you pang :-)
+[11:32] <KyleHa> Hello!
+[11:32] <moritz_> or something :-)
+[11:32] <KyleHa> I'm looking at the recent t/spec/TODO changes.
+[11:32] <KyleHa> ...and stuff.
+[11:33] <KyleHa> A couple of them look like things I thought I tested.
+[11:33] <KyleHa> So now I'm trying to find the revisions to show you to see if you concur.
+[11:33] <moritz_> KyleHa: if you think you tested them, feel free to remove them
+[11:34] <jnthn> oh hai folks
+[11:34] <moritz_> KyleHa: it's not a definitive list, and not a tracking system either, just a list to get some ideas what needs to be done
+[11:34] <moritz_> lolitsjnthn!
+[11:34] *** masak joined
+[11:34] <masak> oh hai, #perl6
+[11:34] <KyleHa> OK.
+[11:35] <moritz_> lolthereisamasaktoo
+[11:36] <jnthn> lol
+[11:36] <jnthn> I only *just* beat masak here. :-)
+[11:36] * masak backlogs to find out what the others are talking about
+[11:36] * jnthn only just got here and has no clue
+[11:38] <mathw> jnthn, masak: IllvilJa had compliments about the book.
+[11:38] <masak> now, that's an interesting nick.
+[11:39] <masak> it means 'malice' in Swedish.
+[11:39] <IllvilJa> masak: I know, I'm a Swede :-).
+[11:39] <masak> IllvilJa: tja. :P
+[11:39] <moritz_> IllvilJa: you're not alone :-)
+[11:39] <IllvilJa> Hejsan!
+[11:40] <masak> IllvilJa: where from are you?
+[11:40] <moritz_> (not me, though)
+[11:40] <IllvilJa> masak: I'm living in Stockholm (raised and born in good old Gothenburg though)
+[11:40] <masak> a bit like me, then.
+[11:40] <IllvilJa> Where are you from?
+[11:40] <masak> living in Uppsala, but born and raised in the archipelago of the west coast.
+[11:41] <IllvilJa> Where in that archipelago?
+[11:41] <masak> I bet you've heard about Orust, if you're from Gbg.
+[11:41] <IllvilJa> Absolutely.
+[11:41] <masak> well, a small island outside of Orust, situated just at the end of the world.
+[11:42] <IllvilJa> Ok.  So, what's Uppsala like?
+[11:42] <KyleHa> All this time I've been thinking Carl was a German.
+[11:42] <moritz_> KyleHa: maybe you confused him with me? :-)
+[11:43] <masak> IllvilJa: Uppsala is wonderful. it'll be hard to move on, when that time comes.
+[11:43] <jnthn> masak: Just backlogged and read those. :-)
+[11:43] <jnthn> Gothenburg++ :-)
+[11:43] <KyleHa> moritz_: I knew you were, but with Masak, I was just going by the name (Carl), which I think of as German.
+[11:43] <IllvilJa> masak: sounds nice.  I've been there a couple of times, and Uppsala seem to have a very nice down town at least.
+[11:43] <masak> KyleHa: oh, but most of our kings are also called Carl in Sweden.
+[11:44] <masak> IllvilJa: nod.
+[11:44] <moritz_> (maybe I should add a voluntary registry of nickname => country mappings, and display small flags in the IRC logs :-)
+[11:44] * jnthn wonders where KyleHa thinks he's from :-)
+[11:44] <KyleHa> masak: Good to know!
+[11:45] <IllvilJa> Ironically, Sweden had to 'import' our king from France once upon a time (a French guy named Bernadotte became the Swedish king and our current one is a descendant of him)
+[11:45] <masak> moritz_: nice idea. displaying a flag for each utterance feels like overkill, though.
+[11:45] <moritz_> masak: right
+[11:46] <masak> IllvilJa: I'm not done backlogging yet, so maybe you've answered this question already: what brings you to our humble channel?
+[11:46] <moritz_> masak: I've been thinking about various ways to show some of our community to the outside world
+[11:46] <KyleHa> jnthn: I'm pretty sure you're way out of my time zone, but I don't think I ever thought about it.
+[11:46] <masak> moritz_: woot.
+[11:46] <moritz_> maybe just a page where people can put up a picture of them, two lines of text, nationality... something like that
+[11:47] <KyleHa> The sun never sets on the Perl 6 contributors?
+[11:47] <mathw> IllvilJa: It's hardly unusual, we've imported kings from Germany before
+[11:47] <moritz_> and maybe the offer to mentor newbies in the Perl 6 community
+[11:47] <mathw> Also Scotland
+[11:47] <moritz_> sometimes you ejected them, too
+[11:47] <moritz_> :-)
+[11:47] <mathw> Yes
+[11:47] <moritz_> at least the scottisch queen(s) :-)
+[11:48] <IllvilJa> masak: I'm a perl 5 developer and I'm very interested in the next generation of perl 6, if for nothing else because it seem to be a very powerful language.
+[11:48] <mathw> Queen Mary of Scots wasn't our queen though...
+[11:48] <mathw> Just a close relative
+[11:48] <masak> IllvilJa: do you frequent Stockholm.pm meetings?
+[11:48] <IllvilJa> Hm... no.  When/where/how do they occur?  Got any good URL?
+[11:49] <masak> there's this mailing list that I could dig up for you.
+[11:49] <masak> I'm not implying that the meetings themselves are frequent, by the way. :)
+[11:49] <masak> there was one this spring, and there was talk of one this fall.
+[11:50] <IllvilJa> Ok, sounds intresting.
+[11:50] *** snarkyboojum joined
+[11:50] <moritz_> http://github.com/moritz/json/blob/master/lib/JSON/Tiny/Grammar.pm#L16 # anybody spots the error?
+[11:51] * mathw doesn't
+[11:51] <masak> hold on.
+[11:52] <masak> it shouldn't be '|'?
+[11:52] <masak> but '||'?
+[11:52] <moritz_> right
+[11:52] <moritz_> masak won!
+[11:52] * masak wins
+[11:52] <IllvilJa> While I'm here, how complete/working/reliable is the implementation of inter process communication in Perl 6?  Things develop quite quickly here, so what did not really work yesterday in perl 6 might be useful today.
+[11:52] <masak> lunch &
+[11:52] <moritz_> IllvilJa: quasi non-existant
+[11:53] <pugs_svn> r28927 | kyle++ | [t/spec/TODO] See r28888 for tests for r28881 and note similar tests
+[11:53] <IllvilJa> moritz_: ok!
+[11:55] * mathw was thinking about threading a bit
+[11:55] <mathw> I'd like some way to say at the language level 'you must have this lock before calling this subroutine or you will be responsible for the destruction of the universe'
+[11:55] *** bpetering joined
+[11:55] <mathw> but that's largely because I'm working on some hideous multithreaded C++ which of course has no such capability
+[11:56] <mathw> and the comments appear to be wrong
+[11:56] <moritz_> that looks like desperation, not language design :-)
+[11:59] *** rfordinal left
+[11:59] *** takadonet joined
+[11:59] <takadonet> morning all
+[12:00] <moritz_> m\\o/rning
+[12:00] <takadonet> how are you this morning moritz_?
+[12:00] <moritz_> slightly flu-y, I fear
+[12:01] <moritz_> (and it's not really morning here anymore :)
+[12:02] <jnthn> moritz_: shh...it's still not much over an hour since I got up. :-P
+[12:02] <moritz_> jnthn: well, your "here" differs from my "here" anyway :-)
+[12:03] <bpetering> yay for getting up past midday! :)
+[12:03] <bpetering> hi all
+[12:03] <moritz_> hi bpetering
+[12:03] *** ejs2 joined
+[12:03] <jnthn> moritz_: That'd be a wonderful argument...apart from we're in the same timezone. :-)
+[12:03] *** IllvilJa1 joined
+[12:04] <moritz_> jnthn: still there are... cultural differences.
+[12:05] <jnthn> ;-)
+[12:06] <lisppaste3> moritz_ pasted "JSON::Tiny test failure" at http://paste.lisp.org/display/89428
+[12:06] <IllvilJa1> Just a PS for any space geeks here: Nasa is trying to launch their new Ares 1 rocket (actually named Ares 1-X) and it can be followed via Nasa TV at www.nasa.gov.
+[12:06] <moritz_> if anybody got some spare tuits, I'd like some insight on that test failure
+[12:06] <takadonet> already watching IllvilJa1 :)
+[12:06] <moritz_> which looks pretty confusing to me
+[12:07] <moritz_> because got and expected are the same
+[12:07] * moritz_ suspects a bug in is_deeply
+[12:07] <moritz_> (that's t/04-roundtrip.t)
+[12:08] <bpetering> moritz_: yeah, my first thought is "how are they being compared"?
+[12:08] <moritz_> with Test.pm:is_deeply
+[12:09] *** clkao joined
+[12:09] *** buu joined
+[12:09] *** Infinoid joined
+[12:09] *** dmpk2k joined
+[12:10] <bpetering> i've got several thoughts to discuss re: the book, when anyone has a chance.
+[12:11] <bpetering> also, several nitpick-class changes if someone has a spare hug...
+[12:11] *** JimmyZ joined
+[12:12] <KyleHa> When is_deeply compares hash values, it first does a string compare and then a deep compare.  Is that right?
+[12:13] <moritz_> bpetering: what's your github ID?
+[12:13] <moritz_> KyleHa: probably not
+[12:14] <KyleHa> Seems to me it ought to JUST compare them deeply.  Otherwise two different hashes with the same contents stringify differently but are deeply the same.  I think.
+[12:14] <moritz_> that's probably an optimization from the times before hash randomization
+[12:14] <moritz_> KyleHa: care to rip it out?
+[12:15] <moritz_> bpetering: and yes, I'm available for discussion
+[12:15] <KyleHa> moritz_: I'd like nothing better, but I won't have time to do it for another two or three hours.
+[12:15] <bpetering> moritz_: 'bpetering'
+[12:16] <moritz_> hugme: add bpetering to book
+[12:16] * hugme hugs bpetering. Welcome to book!
+[12:17] <bpetering> I can do it now...
+[12:17] <bpetering> where is the canonical Test.pm?
+[12:18] <moritz_> bpetering: there is no canonical one
+[12:18] <moritz_> return if $a ne $b;
+[12:18] <moritz_> just compares the keys
+[12:18] <moritz_> so I don't think that's wrong
+[12:18] <bpetering> great :|
+[12:18] <moritz_> and I don't know what KyleHa meant
+[12:18] *** alexn_org joined
+[12:19] <KyleHa> That's the line I was looking at, but I was reading it wrong.
+[12:19] <bpetering> why is Test.pm not under the umbrella of proto?
+[12:19] <KyleHa> So I think what I saw isn't actually there.
+[12:20] <bpetering> oh, and thanks moritz_++ :)
+[12:20] <moritz_> bpetering: Test.pm is part of the compiler (and soon of the language)...
+[12:21] <moritz_> bpetering: traditionally each compiler has a Test.pm according to its own level of sophistication
+[12:21] <moritz_> and at the start it steals from a simple Test.pm from another impl :-)
+[12:21] <moritz_> for example pugs' Test.pm reports the caller's line number
+[12:21] <moritz_> something which rakudo still can't do
+[12:22] <bpetering> moritz_: well, making that spec sounds good, since the language is defined in terms of passing the test suite
+[12:22] <moritz_> it's been my plan for about a year, and @Larry agrees. But last time I tried it was a bit too ambitious :/
+[12:24] <bpetering> well, moritz_++ again for the idea - i agree completely (for what that's worth)
+[12:25] <bpetering> but why is that failing? <o ...
+[12:26] <bpetering> where's the Test.pm that is behind the  fail?
+[12:26] *** ejs2 joined
+[12:27] <moritz_> in the rakudo repo
+[12:29] <moritz_> I don't know yet if it's a is_deeply fail or a .perl fail
+[12:30] <moritz_> though I suspect the former
+[12:33] <bpetering> how can it be a .perl fail?
+[12:34] <moritz_> well, maybe the structures are indeed different, but .perl displays them as identical
+[12:34] <bpetering> but there should be no message printed in that case, no?
+[12:34] <bpetering> err, sorry! just adding confusion.
+[12:35] <moritz_> speaking of confusion, may rakudo fails to build
+[12:35] <moritz_> /scratch/mlenz/rakudo/parrot_install/bin/parrot: symbol lookup error: /scratch/mlenz/rakudo/parrot/runtime/parrot/dynext/math_ops.so: undefined symbol: Parrot_pcc_get_context_struct
+[12:35] <bpetering> you're right, given that output you can't tell.
+[12:43] <moritz_> rakudo: say True === True
+[12:43] <p6eval> rakudo e8cac1: OUTPUT«1␤»
+[12:48] <moritz_> rakudo: say undef eqv undef
+[12:48] <p6eval> rakudo e8cac1: OUTPUT«1␤»
+[12:48] <bpetering> sorry moritz, my brain's in a terrible place for debugging, and i suspect it's beyond my ken anyway :(
+[12:48] <moritz_> rakudo: say [1, undef] eqv [1, undef]
+[12:48] <p6eval> rakudo e8cac1: OUTPUT«1␤»
+[12:49] <moritz_> bpetering: that's fine, just thought anybody might have a spark of inspiration tha I lacked
+[12:50] <bpetering> can we get at Rakudo's Test.pm using p6eval?
+[12:50] <jnthn> moritz_: Your Rakudo fails to build, or your Parrot?
+[12:52] <moritz_> jnthn: rakudo fails to build
+[12:52] <jnthn> Using the PARROT_REVISION Parrot?
+[12:52] <jnthn> Or just latest?
+[12:53] <bpetering> rakudo: say is('bpetering','sufficientlycaffeinated',':(')
+[12:53] <p6eval> rakudo e8cac1: OUTPUT«Could not find non-existent sub is␤in Main (file src/gen_setting.pm, line 295)␤»
+[12:53] <bpetering> well, that's kinda telling
+[12:53] <jnthn> rakudo: use Test; say is('bpetering','sufficientlycaffeinated',':(') # clearly, not ;-)
+[12:53] <bpetering> rakudo: use Test; say is('bpetering','sufficientlycaffeinated',':(')
+[12:54] <p6eval> rakudo e8cac1: TIMED_OUT
+[12:54] <bpetering> aw. *slinks away sadly*
+[12:55] * bpetering doesn't understand why 'use Test' would cause a TIMED_OUT
+[12:55] <moritz_> we've had a lot of those timeouts lately, and I don't understand at all where they are coming from
+[12:58] <bpetering> rakudo: use Test; say is('foo','bar','doesnotcompute');
+[12:59] <p6eval> rakudo e8cac1: TIMED_OUT
+[12:59] <jnthn> rakudo: print "TIMED_OUT"
+[12:59] <p6eval> rakudo e8cac1: TIMED_OUT
+[13:00] <bpetering> well, it *looks* like 'use Test' is giving TIMED_OUT consistently, so maybe that's a hint?
+[13:00] <jnthn> Or did it? ;-)
+[13:00] <bpetering> jnthn: now figure out how to do it without us seeing the trigger :P
+[13:00] <moritz_> it seems that rakudo doesn't install Test.pm as part of its 'make install'
+[13:00] <moritz_> and p6eval uses an installed rakudo
+[13:01] <moritz_> (it would be even better if it installed a Test.pir too)
+[13:01] <dalek> rakudo: 3ec4d40 | moritz++ | src/setting/Operators.pm:
+[13:01] <dalek> rakudo: implement Bool eqv Bool, be more verbose in error message in cases where eqv is not yet implemented
+[13:01] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/3ec4d4037fa69f58881dbd089eeabb9526b46767
+[13:01] <dalek> rakudo: c0ba847 | moritz++ | README:
+[13:01] <dalek> rakudo: [README] "make install" in parrot is now sufficient
+[13:01] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/c0ba8477f77c9f8f8b9866c2c6f6f089da4425cb
+[13:01] <moritz_> but we see a lot of timeouts for other things too
+[13:01] <moritz_> rakudo: class A { method b { say "hi" } }. A.new.b
+[13:01] <p6eval> rakudo e8cac1: OUTPUT«Confused at line 2, near ". A.new.b"␤in Main (file <unknown>, line <unknown>)␤»
+[13:01] <moritz_> rakudo: class A { method b { say "hi" } }; A.new.b
+[13:02] <p6eval> rakudo e8cac1: TIMED_OUT
+[13:02] <moritz_> anything that involves a class declaration, it seems
+[13:03] <moritz_> and interestingly enough, that line appeared twice in p6eval's log
+[13:03] *** SmokeMachine joined
+[13:03] <bpetering> moritz_: could the TIMED_OUT error include additional info?
+[13:03] <carlin> rakudo: class A {}
+[13:04] <p6eval> rakudo e8cac1: TIMED_OUT
+[13:04] <bpetering> or has that been tried (i.e. dumping some state)?
+[13:04] <moritz_> bpetering: it says CPU time limit exceeded on the tty where I started p6eval
+[13:04] <moritz_> don't know if that's any more helpful
+[13:05] <moritz_> rakudo: class A { method b { say "hi" } }. A.new.b
+[13:05] <p6eval> rakudo e8cac1: OUTPUT«Confused at line 2, near ". A.new.b"␤in Main (file <unknown>, line <unknown>)␤»
+[13:05] <moritz_> rakudo: class A { method b { say "hi" } }; A.new.b
+[13:05] <bpetering> have you tried removing resource limits and then trying to duplicate TIMED_OUTs (in privmsg :) ?
+[13:05] <p6eval> rakudo e8cac1: TIMED_OUT
+[13:06] <moritz_> the thought is kinda scary :/
+[13:07] <moritz_> looking at the process monitor I see that it is indeed using up all cycles from one CPU as long as it's running
+[13:08] <bpetering> weird with a beard.
+[13:08] <moritz_> when I run it from the console it takes real    0m2.669s
+[13:08] <moritz_> and the limit is 8s
+[13:08] <bpetering> CPU?
+[13:10] <moritz_> it's a xen guest
+[13:10] *** [particle] joined
+[13:10] <moritz_> don't know what the physical CPU is
+[13:10] <bpetering> jnthn: that's not a disparaging remark about beards. i guess it's a pun or something. concepts don't usually have facial hair. sometimes i do but not as impressive as yours.
+[13:11] <moritz_> 4 cores, 700M free memory
+[13:11] <moritz_> rakudo: class A { method b { say "hi" } }; A.new.b
+[13:11] <p6eval> rakudo e8cac1: TIMED_OUT
+[13:11] <jnthn> bpetering: huh?
+[13:11] <jnthn> oh
+[13:11] <jnthn> I see. :-)
+[13:12] <jnthn> Your rhyme full of slime.
+[13:12] <jnthn> :-)
+[13:12] <bpetering> hmm, that woulda been a major WTF if you missed the first bit :)
+[13:12] <jnthn> Yes...yes, it was...
+[13:12] <jnthn> :-)
+[13:19] <bpetering> moritz_: 1) attach EvalbotExecuter to a rakudo instance on someone else's machine, maybe mine
+[13:20] <bpetering> 2) maybe strace the rakudo process if possible
+[13:21] <moritz_> bpetering: I've copied the full chroot to a different server, will try it on that one soon
+[13:21] <bpetering> 3) try different things and see if they all have the same bizzarely high CPU usage behind the TIMED_OUT
+[13:22] <bpetering> ... or whether there's a different mode of failure in any case.
+[13:22] <bpetering> jnthn: my brain is full of slime :-)
+[13:22] *** rfordinal joined
+[13:24] <bpetering> moritz_: those aren't demands, they're ideas, the quality of which is implicitly qualified by my nonsense of late.
+[13:27] <moritz_> bpetering: (ideas) that's how I understood it, yes
+[13:27] <bpetering> moritz_: cool :)
+[13:28] <bpetering> wanna discuss the book now or should we maybe wait til masak's around?
+[13:29] <moritz_> bpetering: both options work for me
+[13:32] <bpetering> well, there's a bunch of nitpicky grammar (linguistic) stuff i'll just commit, but my main thing so far is:
+[13:33] <bpetering> in regexes.pod, line 85 - maybe link to the spec?
+[13:33] <bpetering> and also, is there a more approachable central point of reference for stuff like that? like the regex cheat sheet, but for the whole langugae?
+[13:34] <moritz_> not that I know of
+[13:35] <moritz_> link to spec - that might be useful for an online version, but only limited so for a printed one
+[13:35] <moritz_> also the spec doesn't have a table of all assertions or backslash rules
+[13:35] <moritz_> it rather lists it as a difference to Perl 5
+[13:36] <bpetering> first thought: LTA :)
+[13:36] <moritz_> aye
+[13:37] <bpetering> ... because not *everyone's* coming from P5
+[13:37] <bpetering> and it would probably just be better
+[13:38] * jnthn sets about re-working our various binder internals to really believe in capture-ish thingies.
+[13:38] <moritz_> and even those that are frequently don't know all the details about /s, /m, . ^ $ \\a \\z \\Z etc
+[13:38] <bpetering> moritz_: i certainly don't :)
+[13:39] <moritz_> there you go :-)
+[13:40] <bpetering> but Perl 6 should prove a cure to my chronic dilettantism. Highly awesome, lots to learn.
+[13:40] <moritz_> less to learn, actually
+[13:40] <moritz_> at least about regex anchors :-)
+[13:40] <bpetering> aye :-)
+[13:42] * bpetering believes in you, binder internals! now believe in capture-ish thingies!
+[13:43] <bpetering> jnthn: may the wind be at your back.
+[13:43] <jnthn> bpetering: Aye, this is going to be slightly tricky.
+[13:44] <bpetering> and yet you made it sound so easy :-)
+[13:44] <jnthn> But should get us a slight performance win and push the door to nested signatures a little wider open :-)
+[13:44] <jnthn> Well, in theory it's easier than a lot of the previous binding related work up until now.
+[13:46] <bpetering> moritz_: thinking on how to make the basics non-boring...
+[13:47] <bpetering> one option is to do something "the hard way" which you then do with ease the proper way... like, oh say, parsing JSON?
+[13:47] <bpetering> at least you don't have to type CreateObject("Scripting.Dictionary") over and over and over
+[13:47] <moritz_> bpetering: but then you'd have to introduce a recursive-descending parser along with the basics...
+[13:48] <moritz_> that's fine if you wrote such a thing before, but pretty nasty if you haven't
+[13:48] <obra_> TimToady: It sounds like there's a fairly serious concern about \\d and unicode matching in perl5.
+[13:48] <moritz_> because it's yet more stuff to wrap your head around
+[13:48] <jnthn> Aye, conceptually hard example in opening chapter is probably not good.
+[13:49] <bpetering> true enough... so do you reckon it's possible to (in general terms) do something the hard way which is then done the easy way using cool Perl 6 features?
+[13:49] <jnthn> I know for us compiler folks small hand-coded rec-desc parsers are what we do during a relaxing afternoons hacking by the pool over a beer, but it's not like that for most of the world. :-)
+[13:49] <bpetering> jnthn: lol :-)
+[13:50] <moritz_> bpetering: if you do that, the example is contrieved, by definition
+[13:50] <bpetering> ... without introducing too much conceptual hardness?
+[13:50] <moritz_> because you write it harder than it needs to be
+[13:50] <bpetering> moritz_: disagree, but not sure i can back up my disagreement :)
+[13:51] <moritz_> somebody mentioned yesterday that it might be a good idea to do some classical text processing
+[13:51] <moritz_> like having two CSV files, and do joins on them
+[13:51] <moritz_> or so
+[13:51] <moritz_> that way you can demonstrate loops, hashes, arrays, if, etc.
+[13:52] <jnthn> That's not a bad idea.
+[13:52] <jnthn> Some text-munging, but where you don't really need to parse.
+[13:52] <bpetering> I can haz merit?
+[13:52] <bpetering> to be clear, sounds good.
+[13:52] <moritz_> jnthn: yes, I thought about something so simple that you can use split() with a string
+[13:53] <jnthn> moritz_: nod
+[13:53] <bpetering> how would that fit with the rest of the book... as it exists in actuality and in people's heads?
+[13:53] <moritz_> http://www.perlmonks.org/?node_id=803661 for example
+[13:54] *** payload joined
+[13:55] <bpetering> so we have some sort of higher-level coherence, i mean.
+[13:56] <moritz_> the coherence is achieved on the perl 6-level, not on the example level (in my mind)
+[13:56] *** payload joined
+[13:58] <pmichaud> good morning, #perl6
+[13:58] <moritz_> good morning pmichaud
+[13:58] <bpetering> moritz_: so you want to decouple the purpose of the examples from the books structure?
+[13:58] <bpetering> morning pmichaud :)
+[13:58] *** Bzek joined
+[13:59] <moritz_> bpetering: yes
+[13:59] <moritz_> bpetering: that's pretty much how it is right now anyway
+[13:59] <moritz_> with the single exception that MMD and grammars use the same topic
+[14:01] <pmichaud> jnthn: I figured out a (I think) good way to get started on the rakudo grammar refactor
+[14:01] <jnthn> pmichaud: Ah, good.
+[14:01] <jnthn> pmichaud: I was going to ask you about that.
+[14:01] <pmichaud> basically, we start with nqp's grammar.  It's based heavily on STD.pm
+[14:01] *** perlsyntax joined
+[14:02] <jnthn> Since I was pondering a Rakudo day tomorrow/Friday.
+[14:02] <bpetering> moritz_: think i agree with that - multi-purpose examples are more likely to achieve the goal of getting people up to speed IMO
+[14:02] <jnthn> pmichaud: OK, sounds sane.
+[14:02] <perlsyntax> if i download perl6 would that  break my perl 5.10.0?
+[14:02] <moritz_> perlsyntax: no
+[14:02] <perlsyntax> cool
+[14:03] * pmichaud prepares for self-hosting nqp
+[14:03] <moritz_> (in fact you need Perl 5 to configure and build rakudo for now)
+[14:03] <perlsyntax> i been hear good things about perl 6 moritz.
+[14:03] <moritz_> perlsyntax: that's good :-)
+[14:04] <bpetering> perlsyntax: where from?
+[14:04] <jnthn> pmichaud: When do you think we might be ready to start on the Rakudo grammar refactor?
+[14:04] <perlsyntax> wisconsin
+[14:04] *** gravity joined
+[14:04] <pmichaud> jnthn: maybe tomorrow or friday?
+[14:04] <[particle]> just like last time around
+[14:04] <[particle]> oops, stuck in scrollbackland
+[14:04] <perlsyntax> why you ask bpetering?
+[14:05] <pmichaud> jnthn: I expect that I'll have nqp self-hosting this morning, and then there are just a few other minor bits to put in place before I can declare it ready.
+[14:05] <bpetering> perlsyntax: sorry, i meant "where have you been hearing good things about perl 6 from?"
+[14:05] <jnthn> perlsyntax: I think he was curious where you heard good things about Perl 6 from. :-)
+[14:05] <pmichaud> it's already able to compile its own Actins.pm
+[14:05] <jnthn> pmichaud: OK, let's aim for Friday then!
+[14:05] <pmichaud> *Actions.pm
+[14:05] <pmichaud> yes, Friday sounds good.
+[14:05] <[particle]> are you releasing nqp-rx?
+[14:05] <perlsyntax> II hear from my programmers freinds
+[14:05] <pmichaud> [particle]: nqp-rx releases 2nd tuesday of each month
+[14:05] <perlsyntax> How do i get start with perl 6?
+[14:05] <jnthn> pmichaud: Also, I had a long and very helpful discusion with TimToady++ last night on multiple return value handling.
+[14:06] <pmichaud> jnthn: yes, I read it in scrollback
+[14:06] <[particle]> excellent.
+[14:06] <jnthn> pmichaud: OK, cool, just wanted to point you to it as a "probably worth reading" if you didn't already.
+[14:06] <pmichaud> I skimmed it and it mostly made sense
+[14:06] <jnthn> pmichaud: Mostly I'm happy because it gives me a path forward.
+[14:06] <bpetering> perlsyntax: you can play with it right here in the channel, or private message if you'd like to be polite and not cause noise pollution :)
+[14:06] <pmichaud> I bookmarked it for later reading :)
+[14:06] <moritz_> perlsyntax: if you know Perl 5 already, http://perlgeek.de/en/article/5-to-6 might be a good start
+[14:06] <jnthn> I've no doubt we'll have to iterate on it a bit, but at least I can get something in place.
+[14:07] <pmichaud> I need to re-review it and make sure it's sufficient to handle array interpolations in the various cases they occur (which is what has always tripped us up in the past)
+[14:07] <perlsyntax> thanks
+[14:07] <bpetering> perlsyntax: you can also download Rakudo, a Perl 6 compiler - see http://rakudo.org/how-to-get-rakudo
+[14:07] <jnthn> pmichaud: Yes, TimToady seemed to be advocating a change from how I understand we do things now.
+[14:07] <pmichaud> I did see mention of a "interpolate me" flag, which is pretty close to what Rakudo had been doing originally
+[14:07] <perlsyntax> i useing  fedora
+[14:07] <jnthn> pmichaud: Right now, we wrap stuff up in Perl6Scalar, as I understand it, to prevent flattening.
+[14:08] <pmichaud> "what we do now"  is really "my best guess based on insufficient spec"  :)
+[14:08] <jnthn> Sure. :-)
+[14:08] <bpetering> perlsyntax: if you want to experiment with the stuff in moritz's articles, try privmsging 'p6eval' this: "rakudo: say 4+5" etc
+[14:08] <moritz_> rakudo: say 4+5
+[14:09] <p6eval> rakudo c0ba84: OUTPUT«9␤»
+[14:09] <perlsyntax> i see
+[14:09] <pmichaud> I've known (and complained) for months that rakudo's current implementation is wrong -- just needed clarification about what "right" is.  Which you managed to elicit from TimToady++ last night, it appears.
+[14:09] <pmichaud> so, +1
+[14:09] *** KyleHa joined
+[14:10] <jnthn> pmichaud: Yes, I was surprised and happy that I managed to get those answers.
+[14:10] <jnthn> Suddenly a lot of stuff cleared up for me.
+[14:10] <bpetering> perlsyntax: and feel free to ask in this channel about pretty much anything - we're very friendly :)
+[14:10] <pmichaud> actually, let me read it real quick and see what thoughts I have
+[14:10] <perlsyntax> cool
+[14:10] <jnthn> pmichaud: Today I'm switching us from the pos_args / named_args to just using :call_sig.
+[14:11] <perlsyntax> I think i going to install perl 6.
+[14:11] <jnthn> pmichaud: I'm thinking I can hopefully land that today rather than it being drawn out.
+[14:11] <pmichaud> jnthn: okay
+[14:11] <jnthn> I'd kinda done other things with this switch in mind anyway.
+[14:11] <pmichaud> but keep in mind we might be undoing it (temporarily) with the grammar switch
+[14:12] <pmichaud> although it'll be good to have it done so that we know how to do it
+[14:12] *** ejs joined
+[14:12] <KyleHa> moritz_: Did you get that test failure thing figured out?
+[14:12] <jnthn> pmichaud: I guess one of my earlier tasks in the new grammar will be switching out signature/parameter handling to use the real binder.
+[14:12] <perlsyntax> Do you do this in perl 6 /usr/bin/perl
+[14:13] <pmichaud> jnthn: sure, but the timing of that depends on how quickly we can parse signatures
+[14:13] <bpetering> perlsyntax: generally no
+[14:13] <moritz_> KyleHa: no
+[14:13] <pmichaud> (to a sufficient degree to use the new binder)
+[14:13] <perlsyntax> oh really
+[14:13] <jnthn> True.
+[14:13] <jnthn> I'll ahve to look at how you do it in NQP compared to how STD looks.
+[14:13] <pmichaud> don't look yet
+[14:13] <pmichaud> or, "don't accept what you see yet"
+[14:13] <pmichaud> NQP is still not using contextuals for its markers
+[14:13] <pmichaud> I expect that sometime later today or tomorrow
+[14:14] <perlsyntax> i did this and that all to it?
+[14:14] <perlsyntax> git clone git://github.com/rakudo/rakudo.git
+[14:14] <perlsyntax> that all i do.
+[14:14] <moritz_> then cd rakudo
+[14:14] <moritz_> perl Configure.pl --gen-parrot
+[14:14] <moritz_> make install
+[14:14] <pmichaud> "less README"  :-)
+[14:15] <perlsyntax> thanks
+[14:15] <moritz_> that will install the binary to parrot_install/bin/perl6
+[14:15] <jnthn> pmichaud: OK, will look later then :-)
+[14:16] *** digitalise joined
+[14:16] <jnthn> pmichaud: btw, I've not done any Rakudo days for a while. I can easily do 2 or maybe even 3 of them next week so we can really push on with this new grammar.
+[14:16] <pmichaud> jnthn: I expect the grammar to go very quickly, actually.
+[14:16] <perlsyntax> would the tar be better i had a hard time compile it
+[14:17] <pmichaud> if I look at the speed of nqp development over the past 48 hours, it's pretty straightforward
+[14:17] <jnthn> Sure, but we've got a lot of things to get working again. :-)
+[14:17] <pmichaud> also, nqp has some nifty new features
+[14:17] <moritz_> perlsyntax: I don't think the tar is easier to compile in any way
+[14:17] <bpetering> perlsyntax: what exact error message did you get?
+[14:17] <jnthn> pmichaud: Plus you'll probably spend a while reprimanding me for not using the shiny new features properly. ;-)
+[14:17] <pmichaud> oh, I doubt that.
+[14:18] *** meppl joined
+[14:18] <bpetering> perlsyntax: (you can use the channel paste thingo if you like: http://paste.lisp.org/new/perl6 )
+[14:18] <pmichaud> I will say that I'm wanting to avoid   $past<flag>   as much as we can this time :)
+[14:18] <pmichaud> with contextuals we shouldn't need it nearly as often.
+[14:18] <perlsyntax> i try that then
+[14:18] <moritz_> bpetering++ # guiding newbies
+[14:18] <pmichaud> but one of the niftiest features in NQP is that we can get direct access to PIR opcodes
+[14:19] <lisppaste3> perlsyntax pasted "untitled" at http://paste.lisp.org/display/89433
+[14:19] <bpetering> bpetering is just barely not a newbie :-)
+[14:19] <pmichaud> for example, to get the codepoint of a character in NQP
+[14:19] <jnthn> pmichaud: Yes, I saw that go in and was like "oh wow"
+[14:19] *** slavik joined
+[14:19] <bpetering> perlsyntax: thank you!
+[14:19] <perlsyntax> welcome
+[14:20] <moritz_> perlsyntax: you need to install the 'svn' binary from subversion
+[14:20] <pmichaud> before:  my $char = 'x';  my $code := Q:PIR { $P0 = find_lex '$char'; $S0 = $P0; $I0 = ord $S0; %r = box $I0 };
+[14:20] <perlsyntax> i see
+[14:20] <jnthn> pmichaud: The other thing I wondered is: does that mean we have a nice way to handle pseudo-packages generally now? So we can do CALLER:: and friends...
+[14:20] <perlsyntax> where i get that?
+[14:20] <pmichaud> now:  my $char = 'x';  my $code := PIR::ord($char);
+[14:20] <jnthn> pmichaud: oh, nice!!
+[14:20] <moritz_> perlsyntax: most linux distributions bundle that already
+[14:20] <moritz_> perlsyntax: for example on debian you can use 'apt-get install subversion'
+[14:21] <jnthn> pmichaud: We can haz that in Rakudo too, to beautify the setting? ;-)
+[14:21] <perlsyntax> ok
+[14:21] <pmichaud> jnthn: if we're willing to allow a PIR:: pseudo-namespace in Rakudo, yes.
+[14:21] <bpetering> perlsyntax: try "yum install subversion"
+[14:21] <pmichaud> (I think yes)
+[14:21] <perlsyntax> ok
+[14:21] <pmichaud> the PIR:: feature itself doesn't do a lot for pseudo-packages on its own
+[14:21] <bpetering> perlsyntax: then retry "perl Configure.pl --gen-parrot"
+[14:21] <moritz_> pmichaud: all-caps words are resevered in Perl 6 anyway, iirc
+[14:22] <jnthn> pmichaud: I think so. Later on we can always so "only with a pragma"
+[14:22] <jnthn> Just as for Q:PIR and the like.
+[14:22] <perlsyntax> i will
+[14:22] <pmichaud> Another nice thing is that if PIR::xxx(...) is used in an expression, it won't box/unbox to PMCs unless it has to
+[14:26] <perlsyntax> i try to do a make install and get this
+[14:26] <perlsyntax> make install make: *** No rule to make target `install'.  Stop.
+[14:26] <perlsyntax> odd
+[14:26] <moritz_> perlsyntax: did parrot compile OK?
+[14:26] <bpetering> perlsyntax: are you in the 'rakudo' directory?
+[14:27] <perlsyntax> i cd the dir
+[14:27] <moritz_> and was there a Makefile generated?
+[14:27] <perlsyntax> i not sure.
+[14:27] <moritz_> ls
+[14:27] <moritz_> will tell you
+[14:27] <perlsyntax> ok
+[14:27] <jnthn> pmichaud: That's pretty nice to have too. :-)
+[14:27] <perlsyntax> build  Configure.pl  CREDITS  docs  dynext  lib  LICENSE  parrot  perl6.pir  README  src  t  Test.pm  tools
+[14:27] <perlsyntax> that all i see.
+[14:28] <moritz_> perlsyntax: that means that the Configure step wasn't successful
+[14:28] <perlsyntax> i see
+[14:28] <moritz_> perlsyntax: please try perl Configure.pl --gen-parrot again
+[14:28] <perlsyntax> ok
+[14:28] <moritz_> and nopaste us the output
+[14:29] <[particle]> nopaste is here: http://paste.lisp.org/new/perl6
+[14:29] *** icwiener joined
+[14:30] <lisppaste3> perlsyntax pasted "perl 6" at http://paste.lisp.org/display/89434
+[14:31] <moritz_> perlsyntax: read the README again
+[14:31] <perlsyntax> i did that moritz
+[14:31] <perlsyntax> ok
+[14:31] <moritz_> perlsyntax: especially the part about the required software
+[14:31] <pmichaud> 00:28
+[14:31] <pmichaud> TimToady
+[14:31] <pmichaud> so either we have the bare object autoflatten and we suppress that, or we have the bare object never autoflatten, and insert code that flattens in list context
+[14:31] <pmichaud> 
+[14:31] <pmichaud> 00:28
+[14:31] <perlsyntax> i see
+[14:31] <pmichaud> jnthn
+[14:31] <pmichaud> So far as I understand, we do the latter in Rakudo now.
+[14:31] <pmichaud> ...actually, Rakudo does the former.
+[14:31] <pmichaud> bare objects autoflatten
+[14:32] <pmichaud> references suppress the autoflattening.
+[14:32] <perlsyntax> i try make still have the prob.
+[14:32] <KyleHa> moritz_: I think I got your test fail fixed.  Give it a try with the Test.pm I just pushed?
+[14:32] <moritz_> KyleHa: will do
+[14:32] <bpetering> perlsyntax: "yum install gcc"
+[14:32] <perlsyntax> ok
+[14:33] <moritz_> perlsyntax: did you install all the required software?
+[14:33] <moritz_> a C compiler, make, subversion, icu etc.?
+[14:33] <perlsyntax> oh my god i thought i had gcc.
+[14:34] <perlsyntax> thanks
+[14:34] <bpetering> perlsyntax: then "yum install libicu", then try perl Configure.pl --gen-parrot again
+[14:34] <perlsyntax> ok
+[14:35] <pmichaud> jnthn: so, if I'm reading yesterday's conversation correctly,  something like   @foo  will have a "flatten me" flag on it somehow, and it's syntactic
+[14:36] <KyleHa> moritz_: I think maybe is_deeply ought to have this on the end of its elsif ladder:  elsif $got.WHAT eq $expected.WHAT { die "Don't know how to compare " ~ $got.WHAT; }
+[14:36] <moritz_> KyleHa++
+[14:36] <dalek> rakudo: f8fb41b | (Kyle Hasselbacher)++ | Test.pm:
+[14:36] <dalek> rakudo: [Test.pm] Teach is_deeply how to compare Bool
+[14:36] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/f8fb41b213c6703a9b080a1b5d05ac67b66dddbf
+[14:36] <moritz_> KyleHa: not quite :-)
+[14:36] <moritz_> KyleHa: it should start with return False if $got.WHAT !=== $expected.WHAT
+[14:36] *** nihiliad joined
+[14:36] <perlsyntax> this perl 6 look cool
+[14:37] <moritz_> KyleHa: I wanted to spectest that and see if it caused any failures, but got distracted
+[14:37] <moritz_> KyleHa: or maybe it should just defer its work to infix:<eqv>
+[14:37] <KyleHa> moritz_: Yes, I could see trusting in the mighty eqv.
+[14:38] <bpetering> perlsyntax: it is cool - once you get it installed, play around a little and tell us what you think.
+[14:38] <perlsyntax> i will
+[14:38] <perlsyntax> are there doc for perl 6?
+[14:38] <moritz_> KyleHa: funnily I tried it with infix:<eqv> in JSON::Tiny and found that it lacked support for... *drumroll* Bool :-)
+[14:38] <moritz_> perlsyntax: http://perl6.org/documentation/
+[14:38] <perlsyntax> thanks
+[14:39] <KyleHa> moritz_: Yeah, I noticed your commit earlier, so I was surprised that wasn't a fix.
+[14:40] <bpetering> perlsyntax: there's also http://szabgab.com/perl6.html
+[14:40] <KyleHa> The Bool thing popped out at me when I did this:  for $got.kv -> $k,$v { is_deeply $v, $v, $k; }   That was after I noticed that this failed:  is_deeply $got, $got, 'self compare';
+[14:40] <moritz_> ooh, that's the URL I was looking for the other day
+[14:41] <moritz_> we should add that that to perl6.org too
+[14:41] <bpetering> moritz_: i would but you generally beat me to it :)
+[14:42] <moritz_> bpetering: I'll let you do it this time :-)
+[14:42] <bpetering> moritz_++ # socially constructive laziness
+[14:43] *** kent\\n joined
+[14:44] <dalek> nqp-rx: ff564c6 | pmichaud++ | build/PARROT_REVISION:
+[14:44] <dalek> nqp-rx: Bump PARROT_REVISION.
+[14:44] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/ff564c6c9a74355584ffa6e67e29e61493254e77
+[14:44] <bpetering> perlsyntax: how are you doing? :)
+[14:52] <pugs_svn> r28928 | bpetering++ | [perl6.org] doc - add link(s) to szabgab's Perl 6 stuff
+[14:58] <jnthn> pmichaud: Sorry, was afk for a bit...
+[14:59] *** eternaleye joined
+[14:59] <jnthn> pmichaud: I thought that !flatten was the code that handled the flattening?
+[14:59] <pmichaud> jnthn: yes, but that says "I'm in list context", not "can I be flattened"
+[15:00] <pmichaud> i.e., !flatten is more of a caller-side thing than the object being operated on
+[15:00] <jnthn> Ah, OK.
+[15:00] <pmichaud> oh, wait
+[15:00] <pmichaud> maybe not
+[15:00] <pmichaud> anyway, the way Rakudo currently keeps track of flattening vs non-flattening is that Lists/Arrays flatten and ObjectRefs don't.
+[15:00] <pmichaud> or something like that
+[15:00] *** ejs joined
+[15:01] <pmichaud> I suspect we'll come up with a flattening ObjectRef
+[15:01] <pmichaud> so that given
+[15:01] <jnthn> Yes, it seems that TimToady was suggesting it should be the other way around.
+[15:01] <pmichaud> my @array = 1,2,3;
+[15:01] <jnthn> Well, or just a prop in the metadata, like rw is.
+[15:01] <pmichaud> my $array := @array
+[15:01] <pmichaud> it can't be in the object itself
+[15:01] <pmichaud> it has to be added to the object
+[15:01] <jnthn> ah, yes :-|
+[15:02] <pmichaud> anyway,   the only way to tell the difference between     (1, 2, 3, $array)    and (1, 2, 3, @array)   is by syntax
+[15:02] <jnthn> *nod*
+[15:02] <pmichaud> which means that the second case has to have something special to say "I can be flattened"
+[15:03] <jnthn> So yes, marking the second as "flatten me" like we mark things today inside an ObjectRef would seem to be a way.
+[15:03] *** mtve joined
+[15:03] <jnthn> The \\@foo just takes that flatten me thingy away.
+[15:03] <pmichaud> right
+[15:03] <pmichaud> of course, it gets a little tricky with
+[15:03] <pmichaud> my $array := @array;
+[15:03] <pmichaud> because $array needs to not have the 'flatten me' thingy that got generated by @array
+[15:04] <jnthn> Yeah, we need to whip it off there too.
+[15:04] <[particle]> does flattening happen on binding?
+[15:04] <moritz_> maybe it should be part of the generated AST, not of the object?
+[15:05] <moritz_> that's where syntactic differences usually end up
+[15:05] <pmichaud> moritz_: we can't always know at compile-time if the thing will be flattened or no
+[15:05] <pmichaud> so it has to be a flag that says "I can be flattened"
+[15:05] <moritz_> example?
+[15:05] <[particle]> and the op does the flattening
+[15:06] <pmichaud> sub foo($a, $b, $c) { ... }
+[15:06] <pmichaud> sub foo($a, *@slurpy) { ... }
+[15:06] <pmichaud> consider:
+[15:06] <pmichaud> foo(1, @array)
+[15:06] <pmichaud> foo(1, $array)
+[15:06] <pmichaud> in the first case @array is flattened when placed in the slurpy
+[15:06] <pmichaud> in the second case $array is never flattened
+[15:07] <pmichaud> but with
+[15:07] <pmichaud> sub bar($a, $b) { ... }
+[15:07] <pmichaud> bar(1, @array)
+[15:07] <pmichaud> the @array isn't flattened
+[15:07] <pmichaud> i.e., we can't tell at compile time if the @array argument will be flattened
+[15:07] <pmichaud> (unless we know something about the subroutine we're calling, which we don't always know)
+[15:08] <moritz_> pmichaud: but you can know at compile time if it might be flattened, in the appropriate context
+[15:08] <pmichaud> if you know context, yes.
+[15:08] <pmichaud> I'm just saying that generated AST isn't sufficient.
+[15:08] <pmichaud> this idea that "we know the context" is often non-existent in Perl 6
+[15:08] <moritz_> well, the binder knows the context
+[15:09] <moritz_> because it knows the signature
+[15:09] <pmichaud> sure, but that's runtime, by definition
+[15:09] <moritz_> ah, now I see where you're getting it
+[15:09] <moritz_> s/it/at/
+[15:10] <moritz_> if it is marked in the AST, it has to propagate to the runtime too
+[15:10] *** Psyche^ joined
+[15:10] <moritz_> which boils down to... an attribute in an object.
+[15:11] <pmichaud> essentially it has to be an attribute in a reference, or a special type of reference, though
+[15:11] <pmichaud> it can't be the object itself
+[15:11] <pmichaud> it could be the container, I suppose
+[15:12] <jnthn> *nod*
+[15:12] <moritz_> makes sense
+[15:12] <pmichaud> that would presume that we create
+[15:12] <pmichaud> my @bar;
+[15:12] <pmichaud> such that @bar is an objectref to an Array
+[15:12] * moritz_ just feels he's at least half an hour behind pmichaud and jnthn, or more likely half a month
+[15:12] <pmichaud> and the objectref has the "flatten me" marker on it
+[15:13] <jnthn> pmichaud: Yes, sounds sane.
+[15:13] <jnthn> pmichaud: We can even make it cheap and just store it in the PMC flags.
+[15:13] <jnthn> pmichaud: Heck, we could do that for rw too...
+[15:13] <pmichaud> how many PMC flags are there?
+[15:14] <pmichaud> ultimately most of our containers are going to have 'type' properties anyway, so I'm not too concerned about having the prophash
+[15:14] <diakopter> moritz_: if you're behind half a month, I'm behind half a decade.
+[15:14] <jnthn> pmichaud: We can have up to 7. ;-)
+[15:14] <pmichaud> can we easily get to the pmc flags from PIR?
+[15:15] <jnthn> I don't think there is a generic get_flags op. I was thinking of "is_rw" and "is_flattening" dynops perhaps.
+[15:15] <jnthn> Since we have the metadata hash for types anyway though...
+[15:15] <pmichaud> sounds like an optimization to be done later to me
+[15:15] <jnthn> Yeah
+[15:16] <jnthn> Just use the metadata hash for now then.
+[15:17] <pmichaud> omg
+[15:17] <pmichaud> ...I just used the new version of nqp to compile its own grammar and actions file and after fixing one bug..... it worked.
+[15:18] <moritz_> oh noez, pmichaud rans out of work! :-)
+[15:18] <[particle]> next!
+[15:18] <pmichaud> oh, I still have to restructure the build process to do it by default
+[15:18] <pmichaud> but I was somewhat expecting a fair bit of bug resolving before it worked.
+[15:19] <pmichaud> I wonder if I built something wrong and I still have the old version.
+[15:19] * pmichaud realcleans and starts over to check.
+[15:20] <jnthn> wow :-)
+[15:20] <jnthn> You don't even wanna know where I am...
+[15:20] *** Lorn joined
+[15:20] * jnthn shudders and hacks on
+[15:22] <pmichaud> looks like it was built correctly
+[15:22] <pmichaud> coooooooool!
+[15:22] <jnthn> Woohoo!
+[15:22] <jnthn> pmichaud++
+[15:25] <dalek> nqp-rx: 9f4cd36 | pmichaud++ | build/Makefile.in:
+[15:25] <dalek> nqp-rx: Add 'nqp-self' target, to test-build a self-hosted copy of NQP.
+[15:25] <dalek> nqp-rx: Works for building its own parser.
+[15:25] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/9f4cd36ded50548c97b79bb98ba17695b72d197d
+[15:25] <dalek> nqp-rx: 42e99a3 | pmichaud++ | src/NQP/ (2 files):
+[15:25] <dalek> nqp-rx: [nqp]:  Don't rely on module BEGIN semantics anymore.
+[15:25] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/42e99a3f79077389fe59c37e6eed201bfb2236e3
+[15:25] <dalek> nqp-rx: 42ff618 | pmichaud++ | src/NQP/Actions.pm:
+[15:25] <dalek> nqp-rx: [nqp]:  Bootstrap intermediate step
+[15:25] <dalek> nqp-rx: Because sub definitions change from package to lexical in the
+[15:25] <dalek> nqp-rx: new version of nqp, move the private subs to the top so they
+[15:25] <dalek> nqp-rx: work in both old and new versions of nqp.  nqp-self target
+[15:25] <dalek> nqp-rx: passes all nqp tests.
+[15:25] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/42ff618797c3ce0769c65e4c1cae6c4621339fb0
+[15:25] <dalek> nqp-rx: 72b2520 | pmichaud++ | build/Makefile.in:
+[15:25] <dalek> nqp-rx: [nqp]:  Self-generate actions for nqp-self target.
+[15:25] <pmichaud> okay, time for a short break, then time to rebuild the build system.  When this is done, nqp-rx will be independent of both pge and nqp in Parrot.
+[15:25] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/72b2520e1ca27c2653fcc2acc14667fd7d44df8c
+[15:27] <KyleHa> rakudo: sub foo { say 'foo' }; undefine foo; foo();
+[15:27] <p6eval> rakudo f8fb41: OUTPUT«foo␤foo␤»
+[15:27] <KyleHa> rakudo: sub foo { say 'foo' }; undefine &foo; foo();
+[15:28] <p6eval> rakudo f8fb41: OUTPUT«invoke() not implemented in class 'Undef'␤in Main (file <unknown>, line <unknown>)␤»
+[15:30] <KyleHa> rakudo: sub foo { say 'foo'; }; undefine foo; foo;
+[15:31] <p6eval> rakudo f8fb41: OUTPUT«foo␤foo␤»
+[15:32] * jnthn emerges from IMCC
+[15:32] <bpetering> huh?
+[15:33] <bpetering> KyleHa: do you understand that, or bug?
+[15:33] <KyleHa> bpetering: I'm looking at this:  http://rt.perl.org/rt3/Ticket/Display.html?id=69236
+[15:33] <bpetering> (getting 2xfoo)
+[15:33] <KyleHa> I think I understand it, but I'm not sure what I want to test.
+[15:34] <moritz_> well
+[15:34] <moritz_> undefine foo; calls foo()
+[15:34] <moritz_> which returns True
+[15:34] <moritz_> (the return value from say())
+[15:35] <moritz_> that is undefined
+[15:35] <moritz_> (which should fail, because you can't undefine an object of a value type)
+[15:35] <KyleHa> rakudo: undefine Bool::True
+[15:35] <p6eval> rakudo f8fb41:  ( no output )
+[15:36] <moritz_> it should probably fail() though
+[15:36] <moritz_> and not die
+[15:36] <moritz_> (not sure)
+[15:36] <moritz_> so I'd suggest to write a test as:
+[15:37] <moritz_> sub foo { my $x = [] } # return something you can safely undefine
+[15:37] <moritz_> undefine foo;
+[15:37] <moritz_> ok foo() ~~ Array
+[15:38] *** brunov joined
+[15:39] <moritz_> std: sub foo { }; foo ~~ Array;
+[15:39] <p6eval> std 28928: OUTPUT«[31m===[0mSORRY![31m===[0m␤Preceding context expects a term, but found infix ~~ instead at /tmp/rGCBAFuAtO line 1:␤------> [32msub foo { }; foo ~~[33m⏏[31m Array;[0m␤FAILED 00:01 113m␤»
+[15:39] <moritz_> std++
+[15:39] <moritz_> TimToady++
+[15:40] <bpetering> moritz++, good explanation.
+[15:40] <bpetering> and testing advice
+[15:41] <IllvilJa1> (Ares 1-X made it at last!)
+[15:45] *** KyleHa joined
+[15:45] *** am0c joined
+[15:45] * KyleHa rattles his head.
+[15:45] <am0c> OH HAI
+[15:46] <jnthn> am0c: oh hai!
+[15:46] <am0c> jnthn: \\o
+[15:47] *** pmurias joined
+[15:48] <dalek> nqp-rx: d9b4687 | pmichaud++ | Configure.pl:
+[15:48] <dalek> nqp-rx: Remove bogus note about Perl 6 spectests (Coke++).
+[15:48] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/d9b4687025dda137dd34265a163161693103bb9b
+[15:48] <am0c> dinner&
+[15:49] *** alexn_org joined
+[15:52] <pmichaud> lunchtime.
+[15:52] <KyleHa> I'm kind of shocked by this:  http://gist.github.com/220555
+[15:52] <KyleHa> I never thought I'd see 'ok 1' fail.
+[15:54] <moritz_> KyleHa: undefine &foo; should fail already
+[15:54] <KyleHa> I can't undefine &a_sub ?  Should that die, then, or just not do anything?
+[15:55] <moritz_> probably die
+[15:55] <moritz_> I suspect that undefining Bool::True makes Test.pm barf
+[15:57] <jnthn> lol
+[15:57] <KyleHa> Yeah, 'if 1' still works, so it probably is in Test.pm somewheres.
+[15:57] <moritz_> rakudo: undefine Bool::True; say ?1;
+[15:57] <p6eval> rakudo f8fb41: OUTPUT«Use of uninitialized value␤␤»
+[15:58] <moritz_> KyleHa: yes, it coerces to Bool somewhere :-)
+[15:58] <KyleHa> rakudo: undefine Bool::True; say 'truth' if 1;
+[15:58] <quietfanatic> Well, you undefined Bool::True.
+[15:58] <p6eval> rakudo f8fb41: OUTPUT«truth␤»
+[15:58] <moritz_> rakudo: undefine Bool::True; say 'truth' if ?1;
+[15:58] <p6eval> rakudo f8fb41:  ( no output )
+[15:58] <KyleHa> Ha!
+[15:59] <pugs_svn> r28929 | pmichaud++ | [pm.txt]:  Add another question for TimToady++ and others.
+[15:59] <dalek> nqp-rx: 36a6064 | pmichaud++ |  (5 files):
+[15:59] <dalek> nqp-rx: [bootstrap]:  Add stage0 versions of HLLCompiler, NQP.
+[15:59] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/36a60644400b9d66d1fc8372f17719f0813b9da0
+[16:01] *** astrojp joined
+[16:02] *** justatheory joined
+[16:02] *** IllvilJa joined
+[16:04] <KyleHa> S29 says "undefine -- see S32-setting-library/Scalar.pod", which does not exist.
+[16:05] <Tene> So, I remember hearing stuff about how POE will be superfluous in Perl 6, because the builtin threading/event model will be sufficient, or something...
+[16:05] <moritz_> that would be great, but somewho I only believe it when I see it :-)
+[16:06] <moritz_> Tene: also note that POE is cooperative multitasking, not threading
+[16:06] <moritz_> Tene: which means I believe it even less :-)
+[16:07] <Tene> :)
+[16:07] <TimToady> only people who believe it before they see it are qualified to implement it :)
+[16:08] <moritz_> one of the huge differences is that in POE you don't need to lock anything
+[16:08] <moritz_> because nobody will ever interrupt what you're doing
+[16:10] <TimToady> at a low level, I'd like to think we can do something Erlangish
+[16:10] <TimToady> where everything is event queues rather than locks
+[16:10] * moritz_ comes from Erlangen, but can't speak Erlangish
+[16:11] <TimToady> this probably entails enforcing some isolation between the two ends of a feed operator
+[16:13] <TimToady> however, the notion of handling only one event at a time says you can't pull more than one item off your incoming lazy list, which is peculiar from a P6 point of view
+[16:14] <PerlJam> Tene: if Perl 6 does threading right, POE will be less needed IMHO.  But superflous is probably a bit of an overstatement :)
+[16:17] <TimToady> passing objects from one event handler to another doesn't need locking if the objects are immutable
+[16:17] <TimToady> and there are ways of making mutable objects effectively immutable
+[16:17] <TimToady> COW, or hand-off of ownership
+[16:18] <TimToady> within those constraints, locking between event handlers is handled entirely by incoming event queues
+[16:19] <TimToady> it's only when two different threads want the same mutable object that we run into locking issues
+[16:19] <TimToady> (which is a large part of why we're moving awy from temp variables toward context variables)
+[16:20] <TimToady> it's a nice situation to be in when your lexical scoping tells you whether locking is necessary or not
+[16:21] <TimToady> or STM, or whatever
+[16:22] *** zaphar_ps joined
+[16:25] *** alester_ joined
+[16:29] <pugs_svn> r28930 | kyle++ | [t/spec] Tests inspired by IRC: http://irclog.perlgeek.de/perl6/2009-10-28#i_1654146
+[16:29] <KyleHa> moritz_: Whenever you could have a look at that, I'd be grateful.
+[16:29] <KyleHa> nom &
+[16:29] *** meppl joined
+[16:31] <moritz_> KyleHa: looks good. For bonus points you can also try to call def after its usage attempt
+[16:37] <masak> jnthn: so, are you done using the branch 'pccupdate'?
+[16:38] <jnthn> masak: Yes.
+[16:38] <masak> can I delete it from github?
+[16:38] <jnthn> masak: Yes, I actually don't know how to.
+[16:38] <jnthn> So please do it and then show me how you did it. :-)
+[16:38] <masak> 'git push origin :pccupdate'
+[16:39] <jnthn> A colon deletes it?
+[16:39] <masak> aye.
+[16:39] <jnthn> That's...
+[16:39] <jnthn> ...so git.
+[16:39] <masak> the syntax is actually a special case of a more general syntax.
+[16:39] <masak> I also thought it was zany until I found this out.
+[16:39] <jnthn> Ah, ok
+[16:42] <masak> ah. the general syntax is <src>:<dst>, meaning update <dst> with the current state of <src>.
+[16:42] <masak> remove <src>, and it means 'delete'.
+[16:42] *** cdarroch joined
+[16:43] <jnthn> Ah, that's not so odd after all.
+[16:43] <PerlJam> jnthn: git is very much like perl in spirit  :)
+[16:44] <masak> that's probably why the Python people went with mercurial. :P
+[16:44] <jnthn> I think I'm getting quite close to having got us switched over to using :call_sig.
+[16:44] <jnthn> About to run a spectest, but I've fixed up the places I expected would be pain points.
+[16:45] <jnthn> This means a few things, not least that we're actually now passing around and dealing with capture-ish thingies.
+[16:45] <Tene> more features?  delicious features?  faster?
+[16:46] *** fax joined
+[16:46] <TimToady> pmichaud: I wonder if we should reserve a different namespace for impl-dependencies than just CAPS
+[16:47] <TimToady> given that implementations are pragmatic in nature, perhaps pir::ord would be more the thing
+[16:47] <jnthn> Tene: Bit faster, cleaner code, was a pre-req for nested signatures.
+[16:47] <Tene> TimToady: last I asked, he listed correspondence to Q:PIR as part of his motivation for CAPS
+[16:48] <TimToady> which seems a weak argument compared to namespace purity
+[16:49] <PerlJam> "purity"?
+[16:49] <TimToady> collision avoidance
+[16:50] <PerlJam> Are you saying that Perl might have need of the PIR namespace for something else?
+[16:51] <pmichaud> TimToady: I'm definitely open to alternatives to PIR::
+[16:51] <jnthn> Well, when somebody writes the Perl 6 In Ruby compiler, for example. ;-)
+[16:51] <masak> someone wants Perl 6 grammars for Ruby: http://stackoverflow.com/questions/1638347/perl6-grammars-or-something-similar-for-ruby
+[16:51] <pmichaud> I figured that since CALLER:: and OUTER:: and the like are somewhat specialized namespaces, PIR:: could fall nicely into that group
+[16:52] <masak> my guess is that if there were such a thing, we'd have heard about it.
+[16:52] <Tene> PerlJam: he's saying that it might be nice to reserve a namespace for impl-dependant things, to avoid code that clashes in one impl, but not on another, for example.
+[16:52] <TimToady> yes, but OUTER:: and CALLER:: are defined by Perl 6, not by the impl
+[16:52] <pmichaud> originally we were also looking at possibly a specialized sigil
+[16:52] <Tene> masak: We can do that in Cardinal, once Cardinal is less bad.
+[16:52] <TimToady> so was just suggesting using the pragma namespace instead
+[16:52] <PerlJam> oh, I see.
+[16:52] * PerlJam is little slow today
+[16:53] <pmichaud> I'm afraid I don't quite follow "pragma namespace"
+[16:53] <masak> Tene: maybe consider writing that as a reply on the SO page?
+[16:53] <TimToady> all lowercase
+[16:53] <pmichaud> ahhh
+[16:53] <pmichaud> I'm fine with it being all lowercase, if you think that's better.
+[16:53] <pmichaud> should I do the same with  Q:pir  instead of Q:PIR ?
+[16:54] <TimToady> the original definition of pragmas in Ada was for impl-dependencies, mostly
+[16:54] <Tene> pmichaud: ETA for you being comfortable with me migrating Cardinal to nqp-rx?
+[16:54] <TimToady> though Perl 5 ended up with some "standard pragmas"
+[16:54] <pmichaud> Tene: I'm working on bootstrap now; then we probably need a 'make install' target
+[16:54] <pmichaud> then I think it's ready for people to start migrating
+[16:54] <Tene> Great, okay.
+[16:55] <Tene> I'm not quite available until next week anyway. :)
+[16:55] <pmichaud> at the moment it's passing all of the code-based tests from the old nqp suite
+[16:55] <TimToady> don't care one way or the other about Q:PIR
+[16:55] <pmichaud> okay
+[16:55] <pmichaud> I'll switch to pir:: instead
+[16:55] <Tene> masak: do I need to register an account on SO?
+[16:55] <masak> Tene: beats me. I wouldn't be surprised, though.
+[16:55] <pmichaud> if you have other such suggestions I'm eager to hear them :)
+[16:56] <masak> their system kinda hinges on people having accounts.
+[16:57] * jnthn does a spectest on the switch to :call_sig
+[16:58] <pmichaud> Tene: also, note that I'm planning to rewrite HLLCompiler in NQP
+[16:58] <moritz_> Tene: any Open-ID provider will do for SO
+[16:58] <pmichaud> I'm also planning to change the standard compiler framework to be all-NQP instead of a PIR/NQP mix
+[16:59] <pmichaud> (i.e., when someone writes their MyLang::Compiler object, they do it in NQP instead of PIR)
+[17:03] <pugs_svn> r28931 | pmichaud++ | [pm.txt]:  Another Perl 6 syntax question.
+[17:03] <pugs_svn> r28931 | Pm-6:  Is there a syntax that allows a (trusted) routine to access
+[17:03] <pugs_svn> r28931 |     the private attributes of another object without going through
+[17:03] <pugs_svn> r28931 |     an accessor?  For example, if object $b has a private attribute
+[17:03] <pugs_svn> r28931 |     of "$!xyz", is there a syntax for me to get to that attribute?
+[17:04] <dalek> nqp-rx: dc737ba | pmichaud++ |  (3 files):
+[17:04] <dalek> nqp-rx: [nqp]:  Per suggestion from TimToady++, switch PIR::pirop to pir::pirop .
+[17:04] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/dc737ba1259aca9b2578eb910a2dc748c615dbbd
+[17:04] <Tene> masak: I posted an answer.
+[17:04] <masak> Tene++
+[17:04] <jnthn> pmichaud: I was about to say "trusts", but yu already figured that end of it. :-)
+[17:05] <pmichaud> jnthn: sure, but I want to know the syntax for the attribute in that case.
+[17:05] *** ShaneC joined
+[17:06] <jnthn> pmichaud: Right, I'm not sure what that looks like.
+[17:06] <jnthn> I'd like to know too. :-)
+[17:07] <pmichaud> the question came up a few months before, but iirc wasn't ever resolved
+[17:07] <pmichaud> and, more to the point, NQP would like to use it
+[17:07] <jnthn> Ah.
+[17:07] <pmichaud> since I'm about to add "has $!foo" to NQP class declarations.
+[17:08] <jnthn> Oooh.
+[17:08] <jnthn> Perl6::Compiler::Signature will like you for that. :-)
+[17:08] *** cotto_work joined
+[17:08] <pmichaud> afk for a bit
+[17:15] <pugs_svn> r28932 | lwall++ | [S12] clarify that private accessors are already the most primitive form (Pm-6)
+[17:20] *** ejs joined
+[17:22] <pugs_svn> r28933 | lwall++ | [pm.txt] preliminary answers to six questions
+[17:23] <pugs_svn> r28934 | lwall++ | [STD] unify noun into term
+[17:25] <pugs_svn> r28935 | lwall++ | [S12] typo
+[17:26] *** stephenlb joined
+[17:27] *** payload joined
+[17:29] *** icwiener_ joined
+[17:29] <pmichaud> yay, answers!
+[17:29] <KyleHa> moritz_: Thanks for having a look!
+[17:29] <pugs_svn> r28936 | kyle++ | [t/spec] Test suggested by moritz++
+[17:30] <KyleHa> moritz_++  # Checking over the crud I commit.
+[17:30] <pmichaud> TimToady: (Pm-4, .ast)    Currently S05 says that .ast returns the matched text.  Fossil?
+[17:30] <pmichaud> S05:2434
+[17:34] <pmichaud> TimToady: (Pm-6, private attributes of other objects) --  r28932 doesn't directly answer my question (at least I don't see the answer).  "No simpler notation is needed for accessing another object's private attributes"  -- does this mean there is no such notation, or ... ?
+[17:34] <pmichaud> ...because I have places where I could use such a notation, and I don't know what it is.  :-)
+[17:34] <TimToady> that is the simple notation
+[17:34] <pmichaud> I'm confused
+[17:34] <pmichaud> if I have an object $b
+[17:35] <pmichaud> and I want to access the '$!foo' attribute of $b
+[17:35] <pmichaud> how do I do it?
+[17:35] <TimToady> $b!TrustsMe::foo
+[17:35] <pmichaud> ...thinking
+[17:35] <pmichaud> oh, I see
+[17:36] <pmichaud> so if $b is an instance of class XYZ
+[17:36] <pmichaud> it would be
+[17:36] <pmichaud> $b!XYZ::foo
+[17:36] <TimToady> yes, that's the idea
+[17:36] <pmichaud> got it
+[17:36] <pmichaud> perfect, and thanks.
+[17:36] <jnthn> how do we distinguish those and private methods?
+[17:37] <TimToady> well, clunky, so maybe not perfect, but it'll do :)
+[17:37] <moritz_> and it doesn't include the sigil
+[17:37] <pmichaud> private attributes / accessors often don't include the sigil
+[17:37] <moritz_> what about using $b::XYZ::@foo for the attribute, and $b::XYZ::foo for the method?
+[17:38] <pmichaud> not ::, though
+[17:38] <pmichaud> should be . or !
+[17:38] <moritz_> erm, yes
+[17:38] <moritz_> $b!XYZ::@foo for the attrib
+[17:38] <TimToady> $b's @!foo   # :)
+[17:38] <KyleHa> Gesundheit.
+[17:38] <pmichaud> lol
+[17:41] <PerlJam> moritz_: why not require () for the method if they need distinguishing?
+[17:41] <moritz_> PerlJam: because that's not how we normally do it
+[17:43] <pugs_svn> r28937 | pmichaud++ | [pm.txt]:  Mark questions as being answered, along with some additional
+[17:43] <pugs_svn> r28937 | commentary and clarification from Pm.
+[17:43] *** pyrimidine joined
+[17:43] * PerlJam never has had a good sense of "normal" for Perl 6
+[17:44] <pmichaud> "normal" is whatever TimToady++ says it is, but only at the moment it's asked
+[17:45] <pmichaud> I call it the Perl 6 Heisenberg Uncertainty Principle.  You can know the answer very precisely but only for an instant, or you can know the answer vaguely for a longer period of time, but you can't know the answer precisely for a longer period of time.
+[17:45] <pmichaud> :-)
+[17:46] <PerlJam> pmichaud: so ... what are the specs?
+[17:46] <PerlJam> they strike the balance between vague and precise?
+[17:46] <KyleHa> If I get the $!foo from $b of type X with $b!X::foo, how then do I get the @!foo from $b ?
+[17:46] <moritz_> sometimes ;-)
+[17:46] <moritz_> KyleHa: there can't be $!foo and @!foo in the same class
+[17:47] <pugs_svn> r28938 | lwall++ | [S05] decouple $() from .ast so we can use .ast as boolean
+[17:47] <KyleHa> moritz_: Oh.  But I can have $foo and @foo in the same scope.  Trippy.
+[17:47] <pmichaud> PerlJam: the specs are just snapshots of the wave function in various states of being collapsed
+[17:48] <KyleHa> pmichaud: I was already confused before the comparison to quantum physics, which is also confusing.
+[17:48] * PerlJam needs to get some  TimToady-colored glasses for the next time he looks at the specs.
+[17:48] <pmichaud> PerlJam: those would be "TimToady-colored specs", I guess.
+[17:49] <PerlJam> sure, go for the *obvious* puns  ;)
+[17:49] <obra_> seen TimToady
+[17:49] <TimToady> I dunno, I'm kind of a light tan color...
+[17:49] * obra_ grins
+[17:50] <TimToady> obra_: is the concern that there are numeric Unicode points that don't work as digits?
+[17:50] <obra_> heya. Yves Orton, who's been doing most of the regex engine internals hackng has a fairly well-reasoned writeup to p5p.
+[17:50] <TimToady> \\d excludes things like roman numerals
+[17:50] <KyleHa> I think I should go do some Perl 5 work.  After a swim in the Perl 6 fluid, I need some concrete.
+[17:50] <obra_> \\d matching non-ascii may break a whole slew of applications
+[17:50] <obra_> let me get a url for the post
+[17:50] <TimToady> Um, it's been matching non-ascii for quite a while now, I though.
+[17:51] <obra_> since I _know_ I am a lossy filter for this stuff.
+[17:51] <TimToady> *thought
+[17:51] <PerlJam> yeah, I thought so too
+[17:51] <TimToady> in fact, STD is kinda depending on that
+[17:51] <obra_> nntp.perl.org isn't up to date
+[17:51] <obra_> -> nopaste
+[17:53] <obra_> http://fsck.com/~jesse/tmp/matching.txt
+[17:54] <TimToady> std: say ໔໒
+[17:54] <p6eval> std 28938: OUTPUT«ok 00:01 105m␤»
+[17:54] <TimToady> it's fine to say 42 in Laotian
+[17:55] *** am0c joined
+[17:55] * obra_ is attempting to lure yves here.
+[17:55] *** dmq joined
+[17:55] <obra_> hello, dmq!
+[17:55] <dmq> hiya
+[17:56] <PerlJam> greets dmq
+[17:56] <obra_> I was just showing TimToady your message of this morning about \\d matching
+[17:56] <obra_> I know that I don't do your concerns justice.
+[17:56] <dmq> just before we start, wanted to make it clear im sorry for any controversy this caused, the intention was to fix bugs and restore sanity in a tricky situation, not cause community upheaval.
+[17:57] <PerlJam> dmq: that's okay, we'll just blame obra  ;)
+[17:57] <moritz_> lol
+[17:57] <obra_> <- blame magnet
+[17:58] <obra_> I'm good at that. and happy to do it.
+[17:58] <dmq> the basic problem is the inconsistancies between semantics of "latin-1" (which in the conversation is just  alabel for "not unicode") and unicode strings.
+[17:58] <dmq> this has many consequences although actually works surprisingly well as we all know.
+[17:58] <dmq> however there are actually a lot of bugs related to this.
+[18:00] <TimToady> sure, I understand the history, but to my mind, the correct way forward it get better typing on the ambiguous 8-bit strings, not to make Unicode optional in a 1990s sense
+[18:00] <moritz_> I can see the impedance mis-match between what \\d+ and numification
+[18:00] <moritz_> but the question is which to fix
+[18:00] <dmq> and the only way to sort it out are 1: serious rewrite to the regex engine - and make a lot of things really dog slow 2: introduce a new modifiers (yeah ugly, but what can you do) to allow people to get whichever set of semantics they want, including the current somtimes borken ones.
+[18:01] <TimToady> all valid Unicode \\d have a digit value associated with that is easily tranlatable to 0-9 digits for numification
+[18:01] <dmq> IMO 2 isnt too controversal. At least I didnt think.
+[18:01] <dmq> there are even precendents elsewhere.
+[18:01] <PerlJam> dmq: does #1 allow for pragmata to modulate the behavior?
+[18:01] <dmq> and it actually allows us to handle a case that wasnt handled properly.
+[18:01] <dmq> #2 does.
+[18:02] <dalek> nqp-rx: 92cc0bf | pmichaud++ | src/ (4 files):
+[18:02] <dalek> nqp-rx: [nqp]:  Unify <noun> with <term>, per latest STD.pm changes.  TimToady++
+[18:02] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/92cc0bfcfa75895ed66f61376a8ef2b4ce1b4ff3
+[18:02] <dmq> that is not true
+[18:02] <dmq> btw
+[18:02] <dmq> TimToady
+[18:02] <TimToady> I don't mind pragmas, but I'd really like to see the default bias towards Unicode semantics consistently
+[18:02] <dmq> the unicode 1/4 and 1/2 and stuff are "digits"
+[18:02] <TimToady> they are not supposed to be matched by \\d
+[18:03] <dmq> \\d matches IsDigit
+[18:03] <dmq> unicode decides what goes in there.
+[18:03] <TimToady> they are only supposed to match things that have a 0-9 mapping
+[18:03] <TimToady> that has always been the intent
+[18:03] <dmq> well, thats not what happens.
+[18:03] <dmq> i cant speak to supposed.
+[18:04] <dmq> that is part of the problem.
+[18:04] <dmq> unicode can release a new version and new digits show up.
+[18:04] <pmichaud> according to my unicode tables, 1/2 isn't IsDigit
+[18:04] <pmichaud> http://www.fileformat.info/info/unicode/char/00bd/index.htm
+[18:05] <dmq> well, im pretty sure last i checked some of them are.
+[18:05] <dmq> maybe i misremember.
+[18:05] <TimToady> 1/2 is No, not Nd, and \\d matches Nd
+[18:05] <TimToady> iirc
+[18:06] * obra_ needs to vanish back to the client. Good luck getting this sorted out, everybody. (Also, thanks!)
+[18:06] <dmq> nevertheless we dont support converting such codepoints to numbers during numification, and people use \\d+ to match ids IMO a gazzilion times more than they use it to match any other type of digit together.
+[18:06] <TimToady> yes, but that's kind of a looking-under-the-lamppost argument
+[18:06] <dmq> anyway, to be honest i dont really care THAT much about \\d matching only [0-9]
+[18:06] <TimToady> we're trying to enable people of other cultures to work in Perl too
+[18:06] <dmq> so long as i can enabled it with /a
+[18:07] <dmq> which i dont think is controversial.
+[18:07] <jnthn> Why /a? a for...?
+[18:07] <dmq> im unconvinced that having multiple ways to represent numerals for computing processing is wise.
+[18:07] <dmq> because /p is taken
+[18:07] * jnthn just thought "a for ascii"...
+[18:07] <TimToady> a for ASCII presumably
+[18:07] <dmq> so "a" for ascii.
+[18:07] <dmq> i would have preferred /p for "perl"
+[18:08] <dmq> because id like \\s to have the perl definition under /a
+[18:08] <dmq> not the unicode one.
+[18:08] <jnthn> Oh, so /a = \\d is only [0-9]
+[18:08] <dmq> yes
+[18:08] <jnthn> I'd got it backwards, sorry.
+[18:08] <dmq> really actually as far as i understand, unless timtoady doesnt like /a and (?a: ...)
+[18:09] <TimToady> as long as the default stays Unicode, I'm happy
+[18:09] <dmq> the only controversial thing at this point is a) what the default /[tlau] modifier would be in 5.12, b) whether \\d should ALWAYS match [0-9] (which I and many other thing it should)
+[18:10] <dmq> the defautl is likely to stay "t" for traditional.
+[18:10] <TimToady> huh?
+[18:10] <dmq> which is "decide based on the utf8 flag"
+[18:10] <TimToady> in what sense is Unicode traditional?
+[18:10] <PerlJam> dmq: steal /o back  (for "old")  :)
+[18:10] <Tene> [0-9] isn't that much worse to type than \\d, if that's what you really want, btw.
+[18:10] <dmq> since that breaks the least.
+[18:10] <moritz_> call it /b for brainded # SCNR
+[18:10] * PerlJam hates the perl5 /o for some reason
+[18:10] <pmichaud> /u for "US-Centric"
+[18:10] <TimToady> how about /7 for ASCII and /8 for Latin-1  :)
+[18:11] <dmq> id argue that about 98% of the time people have used \\d they mean [0-9], i dont think its well huffman coded to force them.
+[18:11] <dmq> and the decide based on the utf8ness of the string is dangerous.
+[18:11] *** astrojp left
+[18:11] <Tene> Eh, sure.
+[18:11] <dmq> people expect to be able to detaint page args with /^\\d+$/
+[18:11] <PerlJam> dmq: how much of that 98% of the time are they mucking with unicode documents?
+[18:11] <TimToady> and how often to people accidentally get Bengali in their input?
+[18:12] <dmq> you could probably have fun breaking lots and lots of pages by slipping in other digits in their ids.
+[18:12] <TimToady> the huffman argument cuts both ways
+[18:12] *** astrojp joined
+[18:12] <dmq> i dont think it being a unicode document matters at all.
+[18:12] <dmq> personally.
+[18:13] <dmq> i think people would be really surprised to find that id=<thai-digits>
+[18:13] <dmq> passes a /^\\d+$/ check
+[18:13] <TimToady> it may take ten or twenty years, but the world will settle down on consistent Unicode semantics eventually
+[18:13] <dmq> and with perl switching behaviour on a dime....
+[18:13] <TimToady> we'll do much better to be there first rather than last
+[18:13] <dmq> well
+[18:13] <TimToady> Perl 6 will no switch behavior on a dime
+[18:13] <TimToady> *not
+[18:14] <TimToady> Unicode is mandatory from the getgo
+[18:14] <Tene> Could the pragma for matching unicode with \\d also enable numification of unicode digits?
+[18:14] <dmq> so /u will give consistant unicode behaviour. /a will give consistant asciss behaviour, /t will given "choose based on the string" and /l will give "use locale;" behaviour.
+[18:14] <TimToady> but that also implies good typing, which Perl 5 will have trouble keeping up with
+[18:14] <dmq> imo if Perl6 includes non computer ordinals in \\d it is a mistake.
+[18:15] <dmq> anyway, i guess your position is clear, you want /t with unicode \\d.
+[18:15] <masak> non computer ordinals? is that another name for other people's digits?
+[18:15] <PerlJam> dmq: careful, TimToady can see around corners (according to another semi-famous guy named Tim)   :-)
+[18:16] <TimToady> you make it sound like I want /t  :)
+[18:16] <dalek> rakudo: 6a43a35 | jonathan++ |  (9 files):
+[18:16] <dalek> rakudo: Switch to using :call_sig for argument handling. Wins back a little performance and gets us positioned almost ready to implement nested sigs. whiteknight++ for :call_sig Parrot work. Please note: PARROT_REVISION bumped.
+[18:16] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/6a43a35b11b6e949052980daf48ec7080ef4ac23
+[18:16] <dmq> well /u will instantly break a lot of code.
+[18:16] <TimToady> I think a plethora of flags is more confusing than just settling on Unicode
+[18:16] <moritz_> PerlJam: is that a guy who's last name is a valid identifier in Perl 6, but not in Perl 5? ;-)
+[18:16] <dmq> although id be happy with /u and an ascii \\d
+[18:16] <PerlJam> moritz_: heh
+[18:16] <dmq> masak: perlsonally i dont buy the "other peoples digits" bit.
+[18:17] <masak> dmq: you don't believe in Bengali digits?
+[18:17] <moritz_> dmq: I've seen Big5 encoded emails with phone numbers in full-width digits
+[18:17] <dmq> i do believe in bengali digits. and if you show me an aton written to handle them then fine.
+[18:17] <TimToady> let me repeat, the proper place to fix Perl 5's string problems are by getting better buf vs str distinctions on currently ambiguous strings
+[18:17] <TimToady> not by adding more flags to tell it to guess one way or another
+[18:18] <TimToady> can I use tr///?
+[18:18] <dmq> for every possible mapping?
+[18:18] <dmq> go ahead
+[18:18] <dmq> and then explain then semantics for  mixes
+[18:19] <dmq> what do you do with 123<thaidigt><1 subscript>
+[18:19] <dmq> do you convert that into 12341?
+[18:19] <pmichaud> 1 subscript doesn't match \\d
+[18:19] <TimToady> the translations are sitting right there in one of the columns of UnicodeData.txt; how hard can it be?
+[18:19] <dmq> for mixed types?
+[18:20] <PerlJam> dmq: matching the digits doesn't mean they have to be converted into one form or another.
+[18:20] <PerlJam> (except for the purposed of the match)
+[18:20] <TimToady> if by mixed you mean your thai/subscript example, then you just tr/// them all to 0-9 and then aton it
+[18:20] <dmq> most of the time in perl people are matching digits to parse out numbers, ids, etc.
+[18:21] <dmq> when they arent they have an out \\p{IsDigit}
+[18:21] <dmq> or friends.
+[18:21] <TimToady> yes, and I'd like the Bengalis to be able to program nicely in Perl too
+[18:21] <pmichaud> when people want to match 0-9, use [0-9]
+[18:21] <pmichaud> that seems fairly simple
+[18:22] <pmichaud> if \\w matches more than [A-Za-z], then it makes sense that \\d matches more than [0-9]
+[18:22] <dmq> but badly huffman coded
+[18:22] <TimToady> wrong wrong wrong wrong wrong
+[18:22] <dmq> and frankly backwards incompatible.
+[18:22] * diakopter counts an odd number of 'wrongs'
+[18:22] <TimToady> cultural imperialism should be dehuffmanized
+[18:23] <dmq> i dont agree that standards are cultural imperialism.
+[18:23] <pmichaud> depends on the origin of the standard, hmm?
+[18:23] <TimToady> they never seem culturally imperialistic to the cultural imperialists :)
+[18:23] <dmq> yes, it apparently only seems to matter if it comes from english/american culture actually pmichaud.
+[18:24] <moritz_> dmq: you might think differently if your name couldn't be written in that standard (if by standard you mean ASCII)
+[18:24] <TimToady> Oh, other cultures are generally more culturally imperialistic even than western culture, but we have the chance to do something about it, and they don't
+[18:24] *** clsn joined
+[18:24] <dmq> considering i have a french name, and grew up in a culture that uses text that cant be expressed in ascii-7 bit actually moritz you would be wrong.
+[18:25] <dmq> is it cultural imperialism that 0 meridian is in grenwhich?
+[18:25] <moritz_> dmq: most french names can still be written in ASCII with very little loss of information
+[18:25] <dmq> is it cultural imperialism to ask that there be a common set of digits for numeric information exchange?
+[18:25] <dmq> i dont think so.
+[18:25] <TimToady> well, it does make the Australians type more when they want to put in their longitude into their GPS
+[18:26] <TimToady> so vaguely, yes
+[18:26] <TimToady> these aren't black and white issues
+[18:26] <dmq> my point is if you pick a standard you either pick something nobody uses so everybody is equally disadvantaged, or you just the most common form and move on.
+[18:27] <TimToady> Unicode is a standard.  Let's move on.
+[18:27] <dmq> sure its a standard
+[18:27] <dmq> by unicode doesnt dictate the mapping of \\d does it?
+[18:27] <TimToady> how many times to I have to point to that column in UnicodeData.txt that does just that?
+[18:28] <TimToady> those are the digits in the new world
+[18:28] *** IllvilJa joined
+[18:28] <clsn> The question is, should the "digit" feature of Unicode coincide with Perl's \\d ?  It would seem to me that to do otherwise would require some explaining.
+[18:28] <diakopter> purl, \\d is UnicodeData.txt
+[18:29] <PerlJam> dmq: What's your plan for \\s and \\w in relation to \\d?  \\s will match unicode whitespace but \\d will only match ascii digits?  Is that correct?
+[18:29] <Tene> ENOPURL
+[18:29] <masak> diakopter: no purl, thankfully.
+[18:30] <dmq> under /t nothing changes from 5.8/5.10
+[18:30] <dmq> under /u all unicode semantics.
+[18:30] <dmq> under /l same semantics as we currently have under use locale.
+[18:30] <dmq> under /a all ascii semantics.
+[18:31] <dmq> this is actually an improvement as use locale didnt work properly before.
+[18:31] <PerlJam> dmq: and /t is the default?
+[18:31] <dmq> yes
+[18:31] *** abra joined
+[18:31] <clsn> Mm.  That would cover the "explaining" I was mentioning.
+[18:31] <obra_> dmq: What's your opinion on 'use 5.12' turning on /u
+[18:31] <TimToady> those still look like flags to tell it how to guess, rather than fixing the problem of not knowing what the numbers in buffer mean
+[18:31] <dmq> no unless \\d match [0-9].
+[18:32] <dmq> making binary data match unicode string points given the way utf8 upgrading works is IMO not a good plan.
+[18:33] <dmq> how to guess?
+[18:33] <dmq> it basically just "what should \\d mean"
+[18:33] <dmq> what should "\\w mean"
+[18:33] <diakopter> what's the flag for ASN.1 mode
+[18:33] <dmq> and should \\x{DF} match /ss/i
+[18:33] <dmq> or not
+[18:33] <dmq> instead of the current schizophrenic "it depends on the string being utf8_on" behaviour.
+[18:34] <dmq> not mention a whole host of other problems with case folding rules differing from the "classic perl" rules that apply to non utf8 strings.
+[18:35] <dmq> for instance what should happen to codepoints in the 128..255 range?
+[18:35] <TimToady> that's my point, you need a way to disambiguate that upgrade in the language, not a bunch of bandaids applied after the fact
+[18:36] <dmq> currently if the string is not utf8 and the pattern is not utf8, and does not explicitly use unicode style constructs then no codepoints in that range match "A" case insenitively.
+[18:36] <dmq> in either are utf8 they do.
+[18:36] *** abra_ joined
+[18:36] <dmq> TimToady: are you talking about how Perl6 will do it?
+[18:36] <dmq> or proposing how perl5 should do it.
+[18:37] <diakopter> yes?
+[18:37] <dmq> or both?
+[18:37] <dmq> if we do not default to /t we break code for sure.
+[18:37] <dmq> somewhere.
+[18:38] <moritz_> that's why it's a new major release of perl
+[18:39] <dmq> Look, i tried changing the behaviour both ways.
+[18:39] <TimToady> the problem cannot actually be fixed without breaking something; sane deprecation cycles would help, a little
+[18:39] <dmq> too much breaks.
+[18:39] <dmq> yes
+[18:39] <PerlJam> has perl5 started doing regular releases?
+[18:39] <dmq> i agree. the only way to be able to consistent behaviour imo is to introduce flags
+[18:40] <dmq> sorry, the only way i see to be able to have a way to have consistent behaviour without causing carnage is to make it "opt in" and that basically means flags.
+[18:40] <pmichaud> "opt in" could be called "upgrade to major version", vwiw
+[18:40] <pmichaud> *fwiw
+[18:40] <dmq> no
+[18:41] <dmq> opt in means: you have to explicitly change your code to see the change.
+[18:41] <TimToady> the Problem of Perl 5 in a nutshell
+[18:41] <TimToady> and Why We Have Perl 6
+[18:41] <Tene> that is, could be called "upgrade to major version and indicate in your lexical scope that you're using it."
+[18:42] <dmq> thats a better description.
+[18:42] <Tene> that is, "use 5.12"
+[18:42] <TimToady> the problem with 'use 5.12" is that it's not exact
+[18:42] <dmq> no, in this case its /X
+[18:42] <TimToady> you need something more like "use exactly 5.10.2"
+[18:42] <dmq> the only question is whether use 5.12 implies a differnt X than without.
+[18:43] <dmq> and i personally dont think it should but dont really care.
+[18:43] <TimToady> (which is why version requests are exact in Perl 6, btw)
+[18:43] * pmichaud disappears for a while to focus on bootstrap issues.
+[18:43] <dmq> so long as i can write /a and tell all my colleagues to write /a im happy.
+[18:43] <dmq> or /u
+[18:43] <dmq> depending.
+[18:44] <TimToady> .o(features add, but cruft multiplies)
+[18:45] <dmq> there is of course precedence for this in other languages.
+[18:45] <dmq> and packages, as far as i recall.
+[18:45] <dmq> but unless you have a better option to restoring sanity to perl5 on this level i think we have to make to do.
+[18:46] *** abra joined
+[18:48] *** abra joined
+[18:53] <avar> TimToady: I think what you're sidestepping here a bit is that \\d as it's defined today essentially means that it's useless to everyone as a validation tool unless you happen to be implementing an application to print out every digit character in Unicode.
+[18:53] <avar> Even if I'm working with Thai characters I usually don't want to accept Bengali, or dozens of other languages that use [^0-9] for their numbers.
+[18:54] <avar> And I've never seen a use of \\d where the author didn't really mean [0-9]. Because it's so brief people use it instead of [0-9] when that's what they really mean, sometimes inserting invalid data into databases as a result.
+[18:54] <avar> Honestly I think the proper huffmanization for \\d as it is in Perl 6 is <YES_AGAINST_ALL_ODDS_I_ACTUALLY_WOULD_LIKE_TO_ACCEPT_EVERY_DIGIT_CHARACTER_IN_UNICODE_REALLY>
+[18:55] <PerlJam> avar: If you're working with Thai characters and you don't want to match Bengali, you aren't using \\d anyway.
+[18:56] <avar> PerlJam: Why wouldn't I? If the string is UTF-8 \\d will match my Thai digits.
+[18:56] <PerlJam> avar: and your Bengali digits too.
+[18:56] <dmq> so then what purpose is there in using \\d for this?
+[18:57] <dmq> why is it so bad to force people to use \\pNd
+[18:57] <dmq> or \\p{IsDigit}
+[18:57] <PerlJam> dmq: or [0-9]
+[18:57] <PerlJam> :)
+[18:57] <dmq> so in the name of avoiding cultural imperialism we make it useless to everybody?
+[18:58] <TimToady> now you're arguing
+[18:58] <PerlJam> people keep saying "useless" and that's just not true.
+[18:59] <dmq> the story about solomon and the baby comes to mind, and ill just say im happy to make \\d matching ONLY thai digits.
+[19:00] <dmq> i notice that the nepalese dont have any digits.
+[19:00] <clsn> Perhaps not "useless", but apparently "useful for things nobody ever used it for before."  which I guess is neither here nor there.
+[19:01] <dmq> i mean to be honest id be fine with implementing something that makes it easy to make \\d mean whichever set of 10 unicode codepoints you want.
+[19:01] <dmq> :-)
+[19:01] <dmq> so long as the default is 0-9
+[19:01] <dmq> :-)
+[19:02] <dmq> ah cool lets use \\d => U+0F20 to U+0f29
+[19:02] <TimToady> well, one of your Perl 5 legacy applications is STD.pm, which needs \\d to match Unicode, so please don't break that :P
+[19:03] <PerlJam> dmq: personally, I don't think I care much as long as all of the character class shortcuts behave similarly.  i.e. if \\w follows unicode, so does \\d.  if \\w is ascii, so it \\d  etc.
+[19:03] <PerlJam> dmq: (and that there's a way to switch)
+[19:04] <TimToady> dmq: sorry, you can't use both F and f in hex numbers anymore
+[19:04] <dmq> i personally thinks thats not as good as making \\d mean 0-9 always.
+[19:04] <dmq> but what the heck.
+[19:04] <dmq> im ok with that.
+[19:04] <dmq> :-)
+[19:05] <dmq> which do you want me to make [:XDIGIT:] match tho?
+[19:06] <TimToady> I want both, but you're using F/f inconsistently, so I just thought by your argument you'd want to limit it to one or the other, in a culturally imperialistic sort of way...
+[19:07] <PerlJam> TimToady: I don't think parody has ever been a useful form of instruction  :)
+[19:07] <dmq> id have done it all uppers like the standard uses except that on my keyboard its a pain to num/upper-letter/number in a row
+[19:08] *** alester joined
+[19:08] <TimToady> PerlJam: yeah, there's a pair of adjacent Proverbs that argue that on both sides :)
+[19:08] <TimToady> btw, the translations are already extracted into lib/unicore/To/Digit.pl
+[19:09] <dmq> nod
+[19:09] <dmq> so you want us to hack the numification too?
+[19:09] <dmq> karl will probably do a routine for that.
+[19:09] <dmq> imo its a good idea.
+[19:09] <TimToady> I'm willing to live with the inconsistency if no one has time to hack it :)
+[19:09] <dmq> maybe lc($num) should result in digits being transformed. :-)
+[19:10] <TimToady> I don't even have enough time to hack on p6 these days  :)
+[19:10] <dmq> with which inconsistancy?
+[19:10] *** kidd joined
+[19:10] <dmq> you would prefer we do nothing and not fix the bugs or provide people ways to fix the bugs?
+[19:10] <TimToady> \\d matching Unicode but numification remaining ignorant
+[19:10] <PerlJam> dmq: just introduce an ascii() op for those that don't care for unicode :)
+[19:10] <dmq> ah ok
+[19:10] <dmq> sorry
+[19:10] <dmq> i thought you meant something else.
+[19:10] <TimToady> but I'd prefer that numification get fixed rather than \\d get broken
+[19:11] <moritz_> PerlJam: isn't that the plan? with /a?
+[19:11] <TimToady> ascii() would be a valid way of approaching the untyped buffer problem
+[19:11] <TimToady> that's what I mean about fixing the types rather than adding bandaids
+[19:12] <PerlJam> moritz_: that doesn't help with numification
+[19:12] <TimToady> and then you push back asciiness one step further and label the incoming filehandle as :ascii
+[19:12] <TimToady> then its strings are just born that way
+[19:12] <TimToady> likewise for any other encoding
+[19:13] <TimToady> and then you don't have guess what the high bits mean
+[19:13] <TimToady> this is one of the areas where Perl 5 could usefully borrow ideas from Perl 6
+[19:14] <dmq> and now strings carry around their encoding information?
+[19:14] <TimToady> their *type* information
+[19:14] <TimToady> which might imply an encoding
+[19:14] <dmq> and so what type is the result of joing two strings
+[19:14] <dmq> ?
+[19:14] <dmq> which are different types?
+[19:15] <TimToady> can always join to a Unicode string
+[19:15] <dmq> so then the result is magically converted in format?
+[19:15] <TimToady> no magic, just hard work to do it right
+[19:15] <TimToady> but it beats guessing what the numbers mean later
+[19:15] *** SmokeMachine joined
+[19:15] <dmq> doesnt that mean you turn binary+unicode into "a gazzilion encodings"+unicode.
+[19:16] <TimToady> it means you don't allow unicode ops on strings you don't know the type of, as Perl 6 does
+[19:16] <dmq> i dotn see how it solves the problems people encounter with this stuff all the time actually.
+[19:16] <TimToady> it means breaking something after a deprecation cycle
+[19:16] <dmq> we discussed this at length on p5p actually.
+[19:16] <TimToady> I'm sure you did :)
+[19:17] <dmq> the problem basically it just makes the current situation worse.
+[19:17] <TimToady> the current situation is a false minimum
+[19:17] <dmq> not better.
+[19:17] <TimToady> the only way to make it better is to make it temporarily worse
+[19:17] <dmq> now every piece of code has to agonize over string type.
+[19:17] <dmq> the general intention was to go the other way, and go to all unicode and only unicode.
+[19:18] <TimToady> well, now you're starting to get into why Perl 6 has multiple dispatch, sure
+[19:18] <dmq> with certain specific mappings.
+[19:18] <TimToady> I didn't say it would be trivial to fix it right
+[19:19] <TimToady> I really don't think the p5 community has what it takes to make significant progress here, to be honest, because the ramifications go on and on, and every step is painful to someone.
+[19:20] <dmq> the modifiers seem to me to be the only sane solution for perl5.
+[19:21] <TimToady> .oO(There is no problem is computer language design that cannot be solved by adding another layer of cruft.)
+[19:21] *** brunov joined
+[19:21] <dmq> and frankly even elsewhere. both sets of semantics are reasonable and will be common.
+[19:21] <TimToady> but you're likely correct
+[19:21] <TimToady> in the cultural sense, at least
+[19:21] <dmq> i dont see how tagging strings with type actually solves the problems we see in perl5 with utf8/non
+[19:22] <TimToady> I'd just like to not see a retreat toward C's head-in-the-sand attitude toward text
+[19:22] <dmq> which primarily focus around strings changing types unexpectedly, and semantics changing unexpectedly.
+[19:22] <TimToady> you would always know how to upgrade any typed "non" to utf8
+[19:23] <TimToady> because a well typed string knows the mapping to unicode
+[19:23] <dmq> so then before you do anything useful with any string the only way to get consistent results is to guard that usage with unicode upgrade?
+[19:23] <TimToady> if you want consistent unicode semantics, you have to know the codepoints
+[19:24] <TimToady> it's possible, but difficult, to do an abstract mapping without upgrade
+[19:24] <dmq> so you are saying that Perl6 will apply Unicode rules always, regardless of the encodings of the strings?
+[19:24] <dmq> if so then that is different from what i understood.
+[19:24] <dmq> and that makes sense.
+[19:24] <TimToady> well, that's what Perl 6 does, but that's because binary buffers aren't considered strings
+[19:24] <dmq> and is what we would like to do in perl.
+[19:24] <dmq> perl5
+[19:24] <Juerd> My message to p5p isn't getting through
+[19:25] <moritz_> Juerd: it sometimes takes a way
+[19:25] <TimToady> neither is mine, oh wait.... :P
+[19:25] <Juerd> TimToady: Is yours rfc2822 formatted? ;)
+[19:25] <dmq> well if the /semantics/ dont vary with encoding then its not what we have in perl.
+[19:25] <dmq> perl5.
+[19:25] <Juerd> 5.10 :D
+[19:25] <dmq> sorry.
+[19:26] <dmq> and its the semantics changing that is the problem, not which semantics are chosen.
+[19:26] <Juerd> That depends. I don't see it as "the" problem, but one of the problems.
+[19:26] <dmq> and if in your proposal the semantics do change depending on the type then it seems to me you are back at square 1 with the problems that perl5 has.
+[19:26] *** IllvilJa joined
+[19:27] <TimToady> S02:52
+[19:27] <Juerd> I see two distinct major problems with going back to ascii land. Unnecessary incompatibility, and straying from the unicode path.
+[19:27] <Juerd> And then some small ones, but they're minor.
+[19:27] <dmq> nobody is talking about that juerd.
+[19:27] <Juerd> Okay.
+[19:28] <dmq> it is how 5.11.1 works and it was bad idea.
+[19:28] <dmq> and broken
+[19:28] <dmq> severly.
+[19:28] <Juerd> Oh, that's great to hear
+[19:28] <Juerd> I'm just going to paste my mail to p5p on a paste site
+[19:28] <TimToady> biab &
+[19:28] <Juerd> It explains that all this started with me reading perl5110delta and not realising there was a 5.11.1 already.
+[19:29] <avar> Juerd: you can also use the nntp interface
+[19:29] <Juerd> avar: I'm sure it's technically possible
+[19:29] <Juerd> But it's been a decade since I used nntp
+[19:29] <dmq> is there an easy link to an expanded version of S02-bits.pod?
+[19:29] *** desertm4x joined
+[19:29] <Juerd> What do you mean by expanded?
+[19:29] <dmq> http://svn.pugscode.org/pugs/docs/Perl6/Spec/S02-bits.pod
+[19:30] <moritz_> http://perlcabal.org/syn/S02.html#line_52
+[19:30] *** cognominal joined
+[19:30] <Juerd> Easy links to synopses in general, are http://p3rl.org/S02
+[19:31] <dmq> ok so unicode semantics
+[19:31] <dmq> fine
+[19:31] <dmq> so \\s match \\v?
+[19:31] <Juerd> http://p3rl.org/8602QWAD is what I posted to p5p
+[19:31] <dmq> and things like that?
+[19:34] <TimToady> \\v means something else in p6
+[19:34] <TimToady> it's any vertical whitespace
+[19:34] <TimToady> (including the old \\v, interestingly)
+[19:34] <TimToady> along with \\h for horizontal whitespace
+[19:35] <dmq> well that is what \\v means in a perl5 regex too.
+[19:35] <dmq> same with \\h
+[19:36] <dmq> and i meant the "old \\v"
+[19:37] *** mberends joined
+[19:39] <TimToady> okay, then maybe the only difference is that in p6 you can't print "\\v" and get a vertical tab
+[19:39] <TimToady> whatever that is... :)
+[19:40] <PerlJam> ^L  (it's a really big vertical tab :)
+[19:41] <TimToady> then where's our really big horizontal tab?  WE WAZ ROBBED!!!
+[19:41] <dmq> actually \\v is only special in a regex pattern.
+[19:42] <TimToady> ah, so it is
+[19:43] <diakopter> rakudo: say "\\v"
+[19:43] <p6eval> rakudo 6a43a3: OUTPUT«v␤»
+[19:44] <TimToady> std: say "\\v"
+[19:44] <p6eval> std 28938: OUTPUT«[31m===[0mSORRY![31m===[0m␤Unrecognized backslash sequence: '\\v' at /tmp/bOK7p56U0D line 1:␤------> [32msay "\\v[33m⏏[31m"[0m␤FAILED 00:02 104m␤»
+[19:47] <diakopter> rakudo: say '\\v'
+[19:48] <p6eval> rakudo 6a43a3: OUTPUT«\\v␤»
+[19:48] <diakopter> std: say '\\v'
+[19:48] <p6eval> std 28938: OUTPUT«ok 00:02 103m␤»
+[19:51] <TimToady> S02:3347 is the spec for that
+[20:00] <TimToady> phone
+[20:15] *** colorless joined
+[20:16] <colorless> Hrm... anyone know of a good editor with a perl6 syntax highlighting tool, beyond padre?
+[20:17] <TimToady> there's this obscure one called "vim"
+[20:17] <colorless> fair enough
+[20:18] <TimToady> though the p6 highlighting doesn't come bundled with it :)
+[20:18] <moritz_> colorless: http://github.com/petdance/vim-perl
+[20:19] <PerlJam> colorless: you don't like padre
+[20:19] <PerlJam> ?
+[20:20] <dmq> maybe padre is too colorful
+[20:20] <colorless> I installed the perl6 plugin, and I can't seem to get it to work. I enabled it, and made sure that coloring was checked, but nada.
+[20:20] <szabgab> what is colorless higlightig?
+[20:20] <japhb> szabgab, inverse and blink
+[20:20] <szabgab> crap dmq beat me
+[20:20] <colorless> @szabgab: shades of gray?
+[20:20] <lambdabot> Unknown command, try @list
+[20:22] <japhb> Too bad lambdabot doesn't DWIM and only give that error if addressed directly.
+[20:22] <PerlJam> colorless: Are you sure padre recognizes your document as Perl 6?
+[20:22] <moritz_> colorless: start the program with 'use v6;', that should help
+[20:22] <colorless> Well, it was smart enough to turn off coloring when I saved as a .p6
+[20:22] <japhb> moritz_, how early does it have to appear?
+[20:22] <PerlJam> colorless: or, View -> View Document As... -> Perl 6
+[20:23] <colorless> That too. It acknowledges that perl6 is there, and that it has a color set. Just a... monotone colorset
+[20:23] <moritz_> japhb: no idea, but first line should do ;-)
+[20:24] *** PZt joined
+[20:24] <japhb> I guess you'd want it on the first or second line (accounting for #!) anyway ...
+[20:24] <japhb> early declaration, and all that
+[20:25] <szabgab> I am not sure Padre cares
+[20:25] <colorless> One assumes that it would be upset if I changed the language on it. But it selects Perl 6 on the "View Document As:" list.
+[20:25] <szabgab> where use v6; appares
+[20:26] <szabgab> bug ?
+[20:26] <moritz_> not really
+[20:32] <Tene> So, um... I can't run 'make spectest' in rakudo.  'Unknown arguments to TAP::Harness'
+[20:32] <moritz_> Tene: which version of TAP::Harness do you use?
+[20:33] <Tene> looks like 3.16
+[20:33] <moritz_> that should be sufficiently new
+[20:34] <Tene> but there's also a 3.10 installed?  what?
+[20:35] <Tene> nm, thanks moritz.
+[20:35] <moritz_> debian sometimes has problems with dual-lived modules, it seems
+[20:35] <moritz_> not sure about other distris
+[20:35] <Tene> does rakudo have a smoke server or anything?  I heard jonathan mention smokes, but there's no 'make smoke' or 'make smolder' target...
+[20:36] <Tene> yes, removed the broken module, everything works now.
+[20:36] <moritz_> Tene: spectest_smolder
+[20:36] <moritz_> is the make target
+[20:36] <moritz_> tinyurl.com/rakudosmoke
+[20:36] <Tene> ah, thanks.
+[20:36] <moritz_> two failures are to be expected
+[20:37] <moritz_> one in unicode.t
+[20:37] <moritz_> one in IO-Socket-INET.t
+[20:38] <Tene> I'm planning on focusing on sockets and IO stuff coming up soon.  I'll look at the latter sometime.
+[20:38] *** __ash__ joined
+[20:38] <moritz_> Tene: then you can also look at http://rt.perl.org/rt3/Ticket/Display.html?id=70045 (and maybe apply it)
+[20:39] <pugs_svn> r28939 | lwall++ | [subst.t] fix parsefailing s,,, test
+[20:40] <Tene> my first task is a Select PMC
+[20:55] <KyleHa> One down, 525 to go.
+[20:59] *** fax joined
+[21:04] <moritz_> rakudo: sub iPower($a, $b) { exp($b * log($a)) }; say iPower(1i, 3.0);
+[21:04] <p6eval> rakudo 6a43a3: OUTPUT«-1.83697019872103e-16 + -1i␤»
+[21:08] <KyleHa> I'm 305 rows down in my old spreadsheet, and 125 rows are marked as 'tested'.
+[21:09] * moritz_ writes tests for RT #68848
+[21:10] <KyleHa> The old spreadsheet has 393 rows.  There are now 525 tickets.  So it looks like I've basically just kept up with the incoming rate, and that's by skipping over quite a few.
+[21:11] <Tene> oh man, spectests take a LONG TIME to run.
+[21:11] <moritz_> aye :(
+[21:11] * moritz_ blames parrot
+[21:12] * Tene blames moritz.
+[21:13] <pugs_svn> r28940 | moritz++ | [t/spec] tests for RT #68848, complex powers wrapped in a subroutine
+[21:13] * japhb blames schwern.  Oh wait, that was yesterday.
+[21:13] <Tene> See?  You keep adding more tests!
+[21:13] *** Su-Shee left
+[21:13] <jnthn> I know, it's like they want good test coverage metrics or something!
+[21:14] <moritz_> if we only had those.... ;-)
+[21:14] <KyleHa> Is it possible to get coverage metrics with Rakudo?  On my last P5 project, I loved looking at Devel::Cover reports to see where to test next.
+[21:15] <Tene> you could probably make something out of the parrot profiling runcore...
+[21:15] <moritz_> but that is slooooow
+[21:15] <Tene> have you profiled the profiler?
+[21:16] <moritz_> cotto_work has done that, and improved it a lot
+[21:16] <moritz_> still slooow
+[21:17] <PerlJam> A profiler and code coverage tool would be excellent for Rakudo
+[21:18] <jnthn> moritz_: Part of the problem is that Rakudo itself is pretty slow too.
+[21:22] <moritz_> part of the problem is that rakudo under a profiling parrot ist 18 times slower than under a normal one
+[21:22] *** dj_goku joined
+[21:23] *** Whiteknight joined
+[21:25] <jnthn> moritz_: Right, it's a problem of more than one part. ;-)
+[21:25] <KyleHa> So we could run the spectests, like, overnight...to get profiling data.  Wow.
+[21:25] *** rdice joined
+[21:26] <moritz_> KyleHa: don't forget that it takes another year to run pprof2cg.pl over the data
+[21:26] <KyleHa> Room for improvement!
+[21:26] <KyleHa> Opportunity!
+[21:32] <xp_prg> anyone used aspell here?
+[21:32] <moritz_> rakudo: sub foo($positional, :$named) {}; foo(:named)
+[21:32] <p6eval> rakudo 6a43a3: OUTPUT«Not enough positional parameters passed; got 0 but expected 1␤in Main (file src/gen_setting.pm, line 295)␤»
+[21:33] <jnthn> moritz_: Had we used to make a mess of that one?
+[21:33] <pugs_svn> r28941 | kyle++ | [t/spec] A few tests for "quietly"
+[21:35] <moritz_> jnthn: yes
+[21:35] <moritz_> invalid arg type in named portion of
+[21:35] <moritz_> args
+[21:35] <moritz_> http://rt.perl.org/rt3/Ticket/Display.html?id=68568
+[21:35] <moritz_> jnthn++ #for fixing it
+[21:36] <KyleHa> There's a lot of stuff that could be tested better if error messages were standardized.
+[21:37] <moritz_> yes, we have to do that at some point
+[21:37] <KyleHa> I can imagine that being a large pain for whoever is stuck implementing them.
+[21:37] <moritz_> but we really need a champion who pushes that matter
+[21:37] <pmichaud> ...drum-roll...
+[21:37] <moritz_> (and I'm not doing it)
+[21:38] <moritz_> rakudo: for 1,2,3,4,5 -> $a, $? { say $a }
+[21:38] <p6eval> rakudo 6a43a3: OUTPUT«1␤3␤StopIteration␤in Main (file <unknown>, line <unknown>)␤»
+[21:38] *** dj_goku joined
+[21:38] <jnthn> moritz_: That was rather less than awesome...
+[21:38] <KyleHa> The champion's job would be to write the spec and then holler for feedback and make revisions until everyone likes it?
+[21:38] <moritz_> the old error message was "Invalid twigil used in signature parameter"
+[21:38] <moritz_> KyleHa: mostly, yes
+[21:38] *** tak11 joined
+[21:39] <pmichaud> oops, I killed dalek.
+[21:39] <moritz_> KyleHa: though one doesn't have to get agreement from everybody
+[21:39] <pmichaud> here's the punchline:
+[21:39] <pmichaud> 21:39 <dalek> nqp-rx: Complete bootstrapping of nqp-rx.  It now builds itself entirely
+[21:39] *** dalek joined
+[21:39] <pmichaud> 21:39 <dalek> nqp-rx: from its own source files, and does not require NQP or PGE from
+[21:39] <pmichaud> 21:39 <dalek> nqp-rx: the Parrot repository.  It also passes all of the tests
+[21:39] <pmichaud> 21:39 <dalek> nqp-rx: (except for pod comments) from Parrot's nqp test suite.
+[21:39] *** brunov joined
+[21:39] <pmichaud> 21:39 <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/5c96a9fe896d6ff0762f81177c09f8ffe57b5b8d
+[21:39] <moritz_> KyleHa: it's enough to get approval from TimToady and maybe some implementors
+[21:39] <jnthn> pmichaud++ !!!!
+[21:40] <jnthn> pmichaud: That's the whole regex engine bootstrapped on it too?
+[21:40] *** frederico joined
+[21:40] <moritz_> KyleHa: independently of that we should simply start to collect error messges
+[21:40] <pmichaud> jnthn: yes.
+[21:40] <PerlJam> pmichaud++
+[21:40] <KyleHa> moritz_: You mean a catalog of what Rakudo outputs right now?
+[21:40] <pmichaud> there are some things that the regex engine doesn't do yet that PGE does, but they're the sorts of things that weren't important to building NQP :-)
+[21:40] <PerlJam> pmichaud: did you work out make install too?
+[21:41] <pmichaud> PerlJam: not yet, but it's pretty trivial.
+[21:41] <pmichaud> Just installs a few .pbc files
+[21:41] <jnthn> pmichaud: That's fine, I guess for the most part they won't be hard to put back in later, if not easier than the first time around.
+[21:41] <moritz_> KyleHa: yes, rakudo and maybe other implementations
+[21:41] <jnthn> For you, at least. :-)
+[21:41] <pmichaud> they're easier than the first time around
+[21:41] * PerlJam claims the good news about nqp-rx as his virtual birthday present  :)
+[21:41] <pmichaud> because I get to re-use code
+[21:41] *** Whiteknight joined
+[21:41] <moritz_> PerlJam++ # birthday
+[21:41] <pmichaud> for example, regexes don't currently handle \\x[...]  \\c[...] etc.
+[21:41] <pmichaud> however
+[21:42] <pmichaud> the HLLGrammar has it built in as its quote expression
+[21:42] <moritz_> anybody else having birthday?
+[21:42] <KyleHa> moritz_++   # error message path forward clarity
+[21:42] <pmichaud> so the regex engine will just call over to the HLLGrammar engine for that
+[21:43] <pmichaud> (error messages)  Also be sure to look in STD.pm
+[21:43] <jnthn> Oh, nice. :-)
+[21:47] <KyleHa> I was thinking that the standard Exception object should include accessors that tell where the error happened (file, line, package, whatever).
+[21:47] <moritz_> right
+[21:47] <moritz_> we also had a good discussion with TimToady about exception things
+[21:47] <moritz_> let me see if I can find it in the logs
+[21:48] <KyleHa> Thanks.
+[21:49] <KyleHa> I think we'd have to have a standard error catalog and then a standard way to emit non-standard errors (such as Parrot's null PMC or anything else implementation-specific).
+[21:49] <moritz_> http://irclog.perlgeek.de/perl6/2009-07-16#i_1321556
+[21:50] <moritz_> KyleHa: oh, you already participated in that discussion ;-)
+[21:50] <KyleHa> If there's a fixed menu of errors, it would make it easier to do i18n with them.
+[21:50] <moritz_> aye
+[21:50] <KyleHa> It was long enough ago that I forgot it.  8-)
+[21:50] <jnthn> i18n'd errors would be nice.
+[21:50] <moritz_> I mostly remembered that it existed, not the exact contents
+[21:51] *** kent\\n joined
+[21:51] <KyleHa> Thanks for digging that up, moritz_++
+[21:52] <KyleHa> I guess each Exception could have a 'source' that is (1) the compiler, (2) the programmer via "die", (3) the OS, (4) internal (Parrot), or (5) other.
+[21:53] <KyleHa> OK, time to commute.  Take care, #perl6.
+[21:54] <jnthn> o/
+[21:54] <jnthn> save travels
+[21:54] <moritz_> ciao
+[21:54] <jnthn> *safe
+[21:54] <KyleHa> Thanks!  o/
+[21:55] <moritz_> rakudo: say sign(3+4i).perl
+[21:55] <p6eval> rakudo 6a43a3: OUTPUT«You can only coerce a Complex to Num if the imaginary part is zero␤0␤»
+[21:57] <pmichaud> moritz_: what would you need to add nqp to p6eval ?
+[21:57] <pmichaud> or what would you like to have ?
+[21:57] <moritz_> pmichaud: a build target for the fakexecutable
+[21:57] *** Psyche^ joined
+[21:57] <pmichaud> moritz_: that's the current default target
+[21:58] <moritz_> pmichaud: optionally a 'make install'
+[21:58] <pmichaud> aka "make nqp"
+[21:58] <pmichaud> oh, you probably need 'make install'
+[21:58] <pmichaud> since it depends on having some .pbc files available
+[21:58] <moritz_> pmichaud: and an estimation on how often it should be rebuilt
+[21:58] <pmichaud> how often is rakudo rebuilt?
+[21:58] <moritz_> pmichaud: I can chdir to nqp-rx's build dir
+[21:58] <pmichaud> chdir to nqp-rx's build dir works for now, yes.
+[21:58] <moritz_> once or twice per hour
+[21:58] <pmichaud> whatever schedule you think is best.
+[21:59] <pmichaud> anyway, "make nqp" will always work.
+[21:59] <moritz_> pmichaud: how good are our overall chances that nqp-rx works with the same parrot revision as rakudo?
+[22:00] <pmichaud> moritz_: pretty good
+[22:00] <pmichaud> nqp doesn't depend on a lot of parrot changes at the moment.
+[22:01] <moritz_> then I'll use the same installed parrot for both... oh wait
+[22:01] <moritz_> that would imply that I need to rebuild nqp every time I rebuild rakudo
+[22:01] <pmichaud> shouldn't
+[22:01] <moritz_> I'll just use --gen-parrot
+[22:01] <pmichaud> it's only a problem if the .pbc format changes
+[22:01] <pmichaud> but yes, just use --gen-parrot for now
+[22:01] <japhb> moritz_, when rakudo is reworked onto nqp-rx you'll need to gang them together anyway, yes?
+[22:01] <pmichaud> japhb: yes, but rakudo will solve that problem
+[22:02] <moritz_> pmichaud: I have a scheme with two install dirs in which I install parrot in turns
+[22:02] <moritz_> (also goes to japhb)
+[22:02] <pmichaud> japhb: i.e., rakudo will have any nqp dependencies already handled in its configure
+[22:02] <moritz_> so when one is being rebuilt, the other works
+[22:02] <pmichaud> moritz_: anyway, --gen-parrot (should be) cheap if build/PARROT_REVISION isn't being bumped
+[22:02] <pmichaud> because there's no parrot to rebuild
+[22:03] <pmichaud> anyway, if you need something in nqp-rx, let me know (or feel free to make commits)
+[22:03] <pmichaud> afk for a bit, feeding kids
+[22:04] <pmichaud> actually, running errand so bbl
+[22:07] <moritz_> hugme: add moritz to nqp-rx
+[22:07] * hugme hugs moritz. Welcome to nqp-rx!
+[22:11] *** mrsaturns joined
+[22:11] *** payload joined
+[22:11] <mrsaturns> /help
+[22:13] <mrsaturns> hmm... hey everyone!
+[22:13] <moritz_> hi ;-)
+[22:13] <dalek> nqp-rx: fcb7998 | moritz++ | build/gen_parrot.pl:
+[22:13] <dalek> nqp-rx: [build] enable parallel parrot build per environment variable
+[22:13] <dalek> nqp-rx: review: http://github.com/perl6/nqp-rx/commit/fcb7998bbe267b19bc05c0c1082822b39dd1d59b
+[22:14] <moritz_> I wonder if I should cherry-pick that for rakudo too
+[22:17] <mrsaturns> I'm on irc on my android phone. :) sorry bout being off-topic(is there a current topic?)
+[22:17] <Tene> not really.
+[22:17] <Tene> just your phone, apparently.
+[22:17] <Tene> Have you compiled rakudo for your phone yet?
+[22:17] <moritz_> mrsaturns: Perl 6 ;-)
+[22:18] <mrsaturns> Tene: no i havent.
+[22:18] <mrsaturns> but i do have perl 5.10.0
+[22:19] <japhb> Best thing about perl 5.10 ... is that you can use it to configure and build Parrot & Rakudo!  ;-)
+[22:20] <mrsaturns> do you think i could on my phone?
+[22:20] <moritz_> if you have a C compiler
+[22:21] <japhb> I don't happen to know off-hand of anyone doing a compiler on Android, but there's no particular reason you couldn't, as long as you have the dev tools.
+[22:21] <japhb> C compiler, make, etc.
+[22:21] <japhb> s/doing a compiler/doing a Parrot compile/
+[22:22] *** zamolxes joined
+[22:22] <mrsaturns> there is no builtin c compiler or make, maybe theres someway to get one on.
+[22:22] <Tene> cross-compile?
+[22:22] <japhb> Actually, someone who has an Android should try (hint hint), it would be a nice brag item
+[22:23] * Juerd quickly hides his phone
+[22:23] <Tene> My gf has one.
+[22:23] <quietfanatic> rakudo: submethod x { say $_ }; 45.x
+[22:23] <p6eval> rakudo 6a43a3: OUTPUT«Method 'x' not found for invocant of class 'Int'␤in Main (file src/gen_setting.pm, line 295)␤»
+[22:24] <quietfanatic> Am I doing something wrong or is this NYI?
+[22:25] <mrsaturns> std: submethod x { say $_ }; 45.x
+[22:25] <p6eval> std 28941: OUTPUT«ok 00:01 109m␤»
+[22:27] <jnthn> quietfanatic: I think you're doing something wrong.
+[22:27] <jnthn> quietfanatic: submethods don't work like that. :-)
+[22:27] <jnthn> They're just like ordinary methods apart from you can only call them in the most derived class.
+[22:27] <quietfanatic> I guess I should reread the spec then
+[22:28] <quietfanatic> rakudo: submethod Object::x { say self }; 45.x
+[22:28] <p6eval> rakudo 6a43a3: OUTPUT«Method 'x' not found for invocant of class 'Int'␤in Main (file src/gen_setting.pm, line 295)␤»
+[22:28] <quietfanatic> rakudo: smethod Object::x { say self }; 45.x
+[22:29] <p6eval> rakudo 6a43a3: OUTPUT«invoke() not implemented in class 'Undef'␤in Main (file <unknown>, line <unknown>)␤»
+[22:29] <quietfanatic> rakudo: method Object::x { say self }; 45.x
+[22:29] <p6eval> rakudo 6a43a3: OUTPUT«Method 'x' not found for invocant of class 'Int'␤in Main (file src/gen_setting.pm, line 295)␤»
+[22:29] <quietfanatic> rakudo: class Object is also { method x { say self } }; 45.x
+[22:29] <p6eval> rakudo 6a43a3: OUTPUT«45␤»
+[22:29] <mrsaturns> *claps*
+[22:30] <quietfanatic> There. :)
+[22:30] <quietfanatic> There's gotta be an easier way to do that.
+[22:32] <mrsaturns> well,you know what they say, TMTOWTDI, unless of course theres not.
+[22:34] <jnthn> quietfanatic: well, it's meant to look like: augment Object { method x { say self } }
+[22:34] <jnthn> quietfanatic: That's the Easiest Way. :-)
+[22:34] <jnthn> Rakudo will switch from "is also" to this updated syntax soonish.
+[22:35] <quietfanatic> yeah...
+[22:35] <quietfanatic> I'll have to write a macro if I want to do that more often.
+[22:35] <quietfanatic> (iirc macros are also not implemented yet)
+[22:36] <mrsaturns> it really isn't that much typing.
+[22:36] <jnthn> I really hope you don't want to do that often.
+[22:37] <quietfanatic> The example I was trying to do was:  method shq { .subst("'", "'\\\\''", :global) }
+[22:37] <quietfanatic> so that I could say $filename.=shq
+[22:37] <quietfanatic> instead of $filename = shq $filename
+[22:38] *** SmokeMachine joined
+[22:38] <quietfanatic> It just made a lot more sense that way.
+[22:39] *** lichtkind joined
+[22:43] <mrsaturns> rakudo: [1..100000].pick.say
+[22:44] <p6eval> rakudo 6a43a3: TIMED_OUT
+[22:46] <diakopter> rakudo: &self()
+[22:46] <p6eval> rakudo 6a43a3: OUTPUT«invoke() not implemented in class 'Undef'␤in Main (file <unknown>, line <unknown>)␤»
+[22:46] <quietfanatic> rakudo: &term:<self>
+[22:46] <p6eval> rakudo 6a43a3: OUTPUT«Confused at line 2, near ":<self>"␤in Main (file <unknown>, line <unknown>)␤»
+[22:46] <quietfanatic> aw
+[22:47] <diakopter> rakudo: &say()
+[22:47] <p6eval> rakudo 6a43a3: OUTPUT«␤»
+[22:47] <mrsaturns> rakudo's confused
+[22:47] <quietfanatic> std: &term:<self>
+[22:47] <p6eval> std 28941: OUTPUT«ok 00:02 125m␤»
+[22:47] <diakopter> rakudo: &say(&say)
+[22:47] <p6eval> rakudo 6a43a3: OUTPUT«say␤»
+[22:48] <mrsaturns> should that do that?
+[22:48] <moritz_> I think it's a sensible stringification
+[22:48] <mrsaturns> std: &say(&say)
+[22:48] <p6eval> std 28941: OUTPUT«ok 00:03 126m␤»
+[22:48] <quietfanatic> If the sub is declared with a name it stringifies that way.
+[22:49] <quietfanatic> my &s = sub {say 3}; say &s
+[22:49] <quietfanatic> rakudo: my &s = sub {say 3}; say &s
+[22:49] <p6eval> rakudo 6a43a3: OUTPUT«_block58␤»
+[22:49] <quietfanatic> rakudo: my &s = sub s {say 3}; say &s
+[22:49] <p6eval> rakudo 6a43a3: OUTPUT«Redefinition of routine s␤s␤»
+[22:49] <diakopter> rakudo: my $s = sub {say 3}; say $s
+[22:49] <p6eval> rakudo 6a43a3: OUTPUT«_block57␤»
+[22:50] <quietfanatic> rakudo: my $s = sub s {say 3}; say &s
+[22:50] <p6eval> rakudo 6a43a3: OUTPUT«s␤»
+[22:50] <quietfanatic> rakudo: my $s = sub s {say 3}; say $s
+[22:50] <diakopter> rakudo: my %s = sub {say 3}; say %s
+[22:50] <p6eval> rakudo 6a43a3: OUTPUT«s␤»
+[22:50] <p6eval> rakudo 6a43a3: TIMED_OUT
+[22:50] <quietfanatic> Odd number of elements in hash constructor there.
+[22:51] <diakopter> yeah, but /me blinks anyway
+[22:53] <diakopter> rakudo: my @s; say @s[].WHAT.new.push(44)
+[22:53] <p6eval> rakudo 6a43a3: OUTPUT«Null PMC access in type()␤in Main (file <unknown>, line <unknown>)␤»
+[22:53] <moritz_> bug!
+[22:53] <diakopter> rakudo: my @s; say @s[].WHAT.new
+[22:53] <p6eval> rakudo 6a43a3: OUTPUT«␤»
+[22:54] <jnthn> rakudo: Array.new
+[22:54] <jnthn> rakudo: Array.new.push(42)
+[22:54] <p6eval> rakudo 6a43a3:  ( no output )
+[22:54] <quietfanatic> rakudo: List.new.push(42)
+[22:54] <jnthn> rakoudo: my @s; say @s[].WHAT
+[22:54] <p6eval> rakudo 6a43a3:  ( no output )
+[22:55] <quietfanatic> rakudo: say List.new.push(42)
+[22:55] <jnthn> rakudo: my @s; say @s[].WHAT
+[22:55] <p6eval> rakudo 6a43a3: OUTPUT«List()␤»
+[22:55] <p6eval> rakudo 6a43a3: OUTPUT«Null PMC access in type()␤in Main (file <unknown>, line <unknown>)␤»
+[22:55] <jnthn> oh
+[22:55] <jnthn> .push returns NPMC.
+[22:55] <jnthn> :-/
+[22:55] <quietfanatic> no
+[22:55] <lichtkind> jedno pivo pro jnthn
+[22:56] <quietfanatic> Wait yes
+[22:56] <quietfanatic> It performed them in the reverse order.
+[22:57] <jnthn> lichtkind: \\o/
+[22:57] <jnthn> Dakujem velmi pekne!
+[22:58] <moritz_> multi sub sign(Any $x) { ... }
+[22:58] <diakopter> rakudo: List()
+[22:58] <p6eval> rakudo 6a43a3: OUTPUT«invoke() not implemented in class 'ResizablePMCArray'␤in Main (file <unknown>, line <unknown>)␤»
+[22:59] <moritz_> sign(:x(0))
+[22:59] <moritz_> => No applicable candidates found to dispatch to for 'sign'
+[22:59] <moritz_> why?
+[23:01] <jnthn> moritz_: Because it's a multi-dispatch.
+[23:01] <jnthn> moritz_: Which doesn't account for named arguments.
+[23:01] <jnthn> moritz_: You need to write a proto.
+[23:01] <moritz_> ok
+[23:02] <moritz_> speaking of which
+[23:02] <moritz_> why do proto regex declarations don't account for the parametrisation with :sym<thing>?
+[23:02] <jnthn> EPARSEFAIL
+[23:03] <jnthn> moritz_: Don't quite understand what you're asking.
+[23:04] <moritz_> when you declare a proto for a multi, you do it in a way that indicates the signatures of the multis
+[23:04] <moritz_> so if you have only two-arg candidates, you have ($, $) as the signature
+[23:04] <moritz_> right?
+[23:05] <moritz_> otoh the proto declarations in nqp-rx look like this:
+[23:06] <moritz_> proto token quantifier { <...> }
+[23:06] <moritz_> but the individual tokens as parameterized
+[23:06] <moritz_> like token quantifier:sym<*> { <sym> }
+[23:06] <moritz_> why isn't that parametrization also part of the proto declaration?
+[23:06] <moritz_> *not also part of
+[23:08] <TimToady> that's not a parameter really--it's just part of the name that the compiler knows to pick out specially
+[23:08] <moritz_> ok
+[23:09] *** SmokeMachine joined
+[23:09] <jnthn> moritz_: Also, the whole idea of a proto laying down the possibilities for a multi signature is kinda not something we worry about in Rakudo.
+[23:09] <jnthn> Apparently there was some idea of auto-generating missing protos too.
+[23:10] <jnthn> However, it was never spec'd in any way other than "well we just magically get it"
+[23:10] <jnthn> And I never really got the motivation or the idea.
+[23:10] <jnthn> (I've asked about it before, and the responses haven't led me to feel it mattered much.)
+[23:11] <jnthn> For example, if I write a:
+[23:11] <jnthn> proto foo($, $) { ... }
+[23:12] <jnthn> Is it then an error to write a multi foo($) { ... }
+[23:12] <moritz_> no idea
+[23:12] <diakopter> std: proto foo($, $) { ... }; multi foo($) { ... };
+[23:12] <p6eval> std 28941: OUTPUT«ok 00:01 107m␤»
+[23:13] <jnthn> Other than as an "omg no candidates matched" fallback - which is what Rakudo implements - I've not got much of a feel for the other roles protos might play.
+[23:13] <moritz_> it's also the "subs declared with that name are automatically multis"
+[23:14] <diakopter> std: multi foo($) { ... }; multi foo($) { ... };
+[23:14] <p6eval> std 28941: OUTPUT«ok 00:01 107m␤»
+[23:14] <jnthn> Yes, we do that too.
+[23:14] <jnthn> But the spec says things like:
+[23:14] <jnthn> specify the commonalities (such
+[23:14] <jnthn> as parameter names, fixity, and associativity) shared by all multis
+[23:14] <jnthn> of that name in the scope of the C<proto> declaration.
+[23:14] <diakopter> rakudo: multi foo($) { ... }; multi foo($) { ... };
+[23:14] <p6eval> rakudo 6a43a3:  ( no output )
+[23:15] <diakopter> rakudo: multi foo($) { ... }; multi foo($) { ... }; foo(&foo);
+[23:15] <p6eval> rakudo 6a43a3: OUTPUT«Ambiguous dispatch to multi 'foo'. Ambiguous candidates had signatures:␤:(Any $)␤:(Any $)␤in Main (file <unknown>, line <unknown>)␤»
+[23:15] <diakopter> rakudo: proto foo($) { ... }; multi foo($) { ... }; foo(&foo);
+[23:15] <p6eval> rakudo 6a43a3:  ( no output )
+[23:15] <jnthn> Further down it talks about how if there's a proto then we have a "known fixed signature"
+[23:16] <jnthn> However, looking through S06, that's as specific as it gets.
+[23:16] <moritz_> that's kinda non-specific
+[23:16] <dalek> rakudo: fcdf3e8 | moritz++ | src/setting/Complex.pm:
+[23:16] <dalek> rakudo: whitespace fixes in Complex.pm
+[23:16] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/fcdf3e8fee8c94872d37cb5ad6a818ec6d48a6fc
+[23:16] <dalek> rakudo: 8cf27e5 | moritz++ | src/ (3 files):
+[23:16] <dalek> rakudo: move sign() to setting, also implement the method form
+[23:16] <diakopter> rakudo: our proto foo($) { ... }; my sub foo { say $^a }; foo(&foo);
+[23:16] <dalek> rakudo: review: http://github.com/rakudo/rakudo/commit/8cf27e5cbd3d7478c20ab2138df400e4b09739e2
+[23:16] <p6eval> rakudo 6a43a3: OUTPUT«get_pmc_keyed() not implemented in class 'Undef'␤in Main (file <unknown>, line <unknown>)␤»
+[23:17] <diakopter> what's calling get_pmc_keyed?
+[23:17] <jnthn> diakopter: heh, that's what I was wondering
+[23:18] <jnthn> rakudo: my sub foo { say $^a }; foo(&foo);
+[23:18] <p6eval> rakudo 6a43a3: OUTPUT«block_19␤»
+[23:18] <jnthn> std: our proto foo($) { ... }; my sub foo { say $^a };
+[23:18] <p6eval> std 28941: OUTPUT«ok 00:02 110m␤»
+[23:19] <pugs_svn> r28942 | moritz++ | [evalbot] nqp now executes nqp-rx
+[23:19] <jnthn> moritz_: ah, S12 has a bit more.
+[23:19] <jnthn> Within its scope,
+[23:19] <jnthn> the signature of a C<proto> also nails down the presumed order
+[23:19] <jnthn> and naming of positional parameters, so that any multi call with named
+[23:19] <jnthn> arguments in that scope can presume to rearrange those arguments into
+[23:19] <jnthn> positional parameters based on that information.  (Unrecognized names
+[23:19] <jnthn> remain named arguments.)  Any other type information or traits attached
+[23:19] <jnthn> to the C<proto> are also shared by the routines within its scope,
+[23:19] <jnthn> so a C<proto> definition can be used to factor out common traits.
+[23:20] <moritz_> evalbot control restart
+[23:20] *** p6eval joined
+[23:20] <moritz_> nqp: say('new and improved')
+[23:20] <p6eval> nqp: OUTPUT«new and improved␤»
+[23:20] <diakopter> rakudo: proto foo { say 4 }; sub foo { say &^a }; foo(&foo);
+[23:21] <p6eval> rakudo 6a43a3: OUTPUT«Too many positional parameters passed; got 1 but expected 0␤in Main (file src/gen_setting.pm, line 295)␤»
+[23:21] <diakopter> rakudo: proto foo(&a) { say 4 }; sub foo { say &^a }; foo(&foo);
+[23:21] <p6eval> rakudo 6a43a3: OUTPUT«4␤»
+[23:21] <diakopter> and the proto ran
+[23:21] <jnthn> Hmm. That's a tad odd.
+[23:21] <jnthn> oh
+[23:21] <jnthn> I suspect it's a silly bug with & sigils.
+[23:21] <diakopter> --silly_bugs
+[23:21] <moritz_> aye
+[23:21] <jnthn> Wwe ain't been storing stuff with & sigils, so sometimes get tripped up on them.
+[23:22] <jnthn> I expect that to change in the new grammar.
+[23:22] <moritz_> pmichaud: p6eval's nqp: target now uses nqp-rx
+[23:24] <jnthn> nqp: sub foo() { say "oh hai" }; my $x := &foo; $x()
+[23:24] <p6eval> nqp: OUTPUT«Unable to parse blockoid, couldn't find final '}' at line 1␤current instr.: 'parrot;Regex;Cursor;FAILGOAL' pc 6558 (src/Regex/Cursor-builtins.pir:179)␤called from Sub 'parrot;NQP;Grammar;blockoid' pc 4097 (gen/nqp-grammar.pir:1152)␤called from Sub 'parrot;NQP;Grammar;routine_def' p…
+[23:24] <diakopter> nqp: say(234234234234234234234)
+[23:24] <p6eval> nqp: OUTPUT«-5573438723989936774␤»
+[23:25] <jnthn> nqp: sub foo() { }
+[23:25] <p6eval> nqp:  ( no output )
+[23:25] <jnthn> nqp: sub foo() { }; say "ok"
+[23:25] <p6eval> nqp: OUTPUT«Confused at line 1, near "say \\"ok\\""␤current instr.: 'parrot;HLL;Grammar;panic' pc 11756 (gen/hllgrammar-actions.pir:1131)␤called from Sub 'parrot;NQP;Grammar;comp_unit' pc 2155 (gen/nqp-grammar.pir:647)␤called from Sub 'parrot;NQP;Grammar;TOP' pc 605 (gen/nqp-grammar.pir:246)␤cal…
+[23:25] <jnthn> nqp: sub foo() { }; say "ok";
+[23:25] <p6eval> nqp: OUTPUT«Confused at line 1, near "say \\"ok\\";"␤current instr.: 'parrot;HLL;Grammar;panic' pc 11756 (gen/hllgrammar-actions.pir:1131)␤called from Sub 'parrot;NQP;Grammar;comp_unit' pc 2155 (gen/nqp-grammar.pir:647)␤called from Sub 'parrot;NQP;Grammar;TOP' pc 605 (gen/nqp-grammar.pir:246)␤ca…
+[23:25] <diakopter> parens
+[23:26] <jnthn> nqp: sub foo() { }; say("ok");
+[23:26] <p6eval> nqp: OUTPUT«ok␤»
+[23:26] <jnthn> nqp: sub foo() { say "oh hai" }; foo();
+[23:26] <p6eval> nqp: OUTPUT«Unable to parse blockoid, couldn't find final '}' at line 1␤current instr.: 'parrot;Regex;Cursor;FAILGOAL' pc 6558 (src/Regex/Cursor-builtins.pir:179)␤called from Sub 'parrot;NQP;Grammar;blockoid' pc 4097 (gen/nqp-grammar.pir:1152)␤called from Sub 'parrot;NQP;Grammar;routine_def' p…
+[23:26] <jnthn> nqp: sub foo() { say("oh hai") }; foo();
+[23:26] <p6eval> nqp: OUTPUT«oh hai␤»
+[23:26] <diakopter> nqp: sub foo() { }; say(foo());
+[23:26] <p6eval> nqp: OUTPUT«Null PMC access in get_string()␤current instr.: 'print' pc 47485 (gen/nqp-actions.pir:3215)␤called from Sub '_block11' pc 0 (EVAL_1:5)␤called from Sub 'parrot;PCT;HLLCompiler;eval' pc -1 ((unknown file):-1)␤called from Sub 'parrot;PCT;HLLCompiler;evalfiles' pc 1224 (src/PCT/HLLComp…
+[23:27] <jnthn> nqp: sub foo() { say("oh hai") }; my $x := &foo; $x();
+[23:27] <p6eval> nqp: OUTPUT«Confused at line 1, near "$x();"␤current instr.: 'parrot;HLL;Grammar;panic' pc 11756 (gen/hllgrammar-actions.pir:1131)␤called from Sub 'parrot;NQP;Grammar;comp_unit' pc 2155 (gen/nqp-grammar.pir:647)␤called from Sub 'parrot;NQP;Grammar;TOP' pc 605 (gen/nqp-grammar.pir:246)␤called f…
+[23:27] <diakopter> 'tis certainly speedyrific
+[23:27] <jnthn> Yeah
+[23:27] <pugs_svn> r28943 | moritz++ | [evalbot] filter out overlong error messages from nqp
+[23:27] *** p6eval joined
+[23:28] <moritz_> nqp: sub foo() { }; say(foo());
+[23:28] <p6eval> nqp: OUTPUT«Null PMC access in get_string()␤current instr.: 'print' pc 47485 (gen/nqp-actions.pir:3215)␤»
+[23:28] <moritz_> nqp: sub foo() { 3+4 }; say(foo());
+[23:28] <p6eval> nqp: OUTPUT«7␤»
+[23:29] <diakopter> nqp: sub foo() { return(return); }; say(foo());
+[23:29] <p6eval> nqp: OUTPUT«Null PMC access in get_string()␤current instr.: 'print' pc 47485 (gen/nqp-actions.pir:3215)␤»
+[23:29] <moritz_> much better
+[23:30] <jnthn> nqp: class Foo { }
+[23:30] <p6eval> nqp:  ( no output )
+[23:30] <jnthn> nqp: token package_declarator:sym<controller> { <sym> <package_def> }; controller Foo { }
+[23:30] <p6eval> nqp: OUTPUT«Confused at line 1, near "controller"␤current instr.: 'parrot;HLL;Grammar;panic' pc 11756 (gen/hllgrammar-actions.pir:1131)␤»
+[23:31] <moritz_> it's not *that* magic ;-)
+[23:31] <jnthn> nqp: module NQP::Grammar { token package_declarator:sym<controller> { <sym> <package_def> }; }; controller Foo { }
+[23:31] <p6eval> nqp: OUTPUT«Confused at line 1, near "controller"␤current instr.: 'parrot;HLL;Grammar;panic' pc 11756 (gen/hllgrammar-actions.pir:1131)␤»
+[23:31] <diakopter> nqp: sub say(Any $a) { say 4 }; say();
+[23:31] <p6eval> nqp: OUTPUT«Routine declaration requires a signature at line 1, near "(Any $a) {"␤current instr.: 'parrot;HLL;Grammar;panic' pc 11756 (gen/hllgrammar-actions.pir:1131)␤»
+[23:31] <jnthn> aww
+[23:31] <jnthn> ah well, worth a try ;-)
+[23:32] * jnthn woulda been quite scared if that had actually worked.
+[23:32] *** frew joined
+[23:35] <diakopter> nqp: {{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{{say(4)}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}}
+[23:35] <p6eval> nqp: OUTPUT«maximum recursion depth exceeded␤current instr.: 'parrot;P6object;HOW' pc 54 (runtime/parrot/library/P6object.pir:98)␤»
+[23:36] <diakopter> aww
+[23:36] <diakopter> my fav
+[23:37] <sjohnson> diakopter: http://www.halolz.com/wp-content/uploads/2009/07/halolz-dot-com-supermariobros-magicmushroomsjpg.jpg
+[23:38] <diakopter> ok; thanks!
+[23:42] *** wolverian joined
+[23:50] * diakopter decides to (re-)join the parser-generator fun
+[23:54] <pugs_svn> r28944 | lwall++ | [Cursor] more recursion warning suppression
+[23:55] <diakopter> tee hee
+[23:56] *** __ash__ joined
+[23:59] *** cj joined
+[23:59] <cj> diakopter: you called the other day...
