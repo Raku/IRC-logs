@@ -1,0 +1,117 @@
+[04:32] *** rakkable left
+[04:33] *** rakkable joined
+[10:40] *** japhb left
+[10:44] *** japhb joined
+[10:48] *** Geth left
+[10:48] *** Geth joined
+[10:49] *** Geth joined
+[10:52] *** japhb joined
+[10:52] *** rakkable joined
+[10:52] *** [Coke] joined
+[10:52] *** leont joined
+[10:52] *** benchable6__ joined
+[10:52] *** coverable6__ joined
+[10:52] *** sourceable6__ joined
+[10:52] *** linkable6__ joined
+[10:52] *** tellable6__ joined
+[10:52] *** vrurg joined
+[10:52] *** Techcable joined
+[10:52] *** ShimmerFairy joined
+[10:52] *** disbot2 joined
+[10:52] *** kjp joined
+[10:52] *** sugarbeet joined
+[10:52] *** Sario joined
+[10:52] *** xiaomiao joined
+[10:52] *** nine joined
+[10:52] *** bisectable6 joined
+[10:52] *** notable6 joined
+[10:52] *** committable6 joined
+[10:52] *** quotable6 joined
+[10:52] *** greppable6 joined
+[10:52] *** releasable6 joined
+[10:52] *** shareable6 joined
+[10:52] *** unicodable6 joined
+[10:52] *** bloatable6 joined
+[10:52] *** nativecallable6 joined
+[10:52] *** evalable6 joined
+[10:52] *** patrickb joined
+[10:52] *** Voldenet joined
+[10:52] *** rba joined
+[10:52] *** JRaspass joined
+[10:52] *** Guest693 joined
+[10:52] *** jjatria joined
+[10:52] *** jnthn joined
+[10:52] *** ab5tract joined
+[10:52] *** SmokeMachine joined
+[10:52] *** gfldex joined
+[10:52] *** timo joined
+[10:52] *** tbrowder joined
+[10:52] *** ingy joined
+[10:52] *** harrow joined
+[10:52] *** camelia joined
+[10:52] *** ilogger2 joined
+[10:52] *** jdv joined
+[10:58] <patrickb> I just realized: `notify_new_file` is called from `MVM_debugserver_register_line` which in turn is called from spesh during bytecode instrumentation. I'm a bit unsure where the next GC safepoint is during bytecode instrumentation, but I would guess that it's not in the file that is currently instrumented.
+
+[10:59] <timo> oh, inside spesh? that could be related to speculatively inlining code that hasn't been speshed yet
+
+[10:59] <timo> that's not very good, but I assume it will happen outside of the spesh thread in many more cases
+
+[11:00] <patrickb> Which makes me think: Maybe a better place to start looking for $?CHECKSUM and $?SOURCE would be in `MVM_debugserver_breakpoint_check`, i.e. the instrumentation function.
+
+[11:02] <patrickb> The above realization is not based on looking at stracktraces. I just looked at the code. The only caller chain of `notify_new_file` is the one coming from instrument/line_coverage.c, i.e. the part where the breakpoint instruction is injected into the bytecode.
+
+[11:08] <patrickb> Idea: Add a `first_call` flag to MVMDebugServerBreakpointFileTable, check for that flag in `MVM_debugserver_breakpoint_check`, instantly set it to false and suspend there. This is equivalent to just breaking on the first possible breakposition in the new file.
+
+[11:12] <patrickb> I think for the purposes of the file notification request, having the suspend how it currently is might be fine. So I tend to add the ability of such a initial break funtionality separately.
+
+[11:14] <timo> ah, ok, instrument/line_coverage.c should be called from the instrumentation barrier which gets checked when a code is invoked and its internal instrumentation level differs from the mvminstance's instrumentation level, which is normally increased if you turn profiling on for example
+
+[11:16] <timo> i wouldn't call MVM_debugserver_breakpoint_check "the instrumentation function" but that's a minor nitpick
+
+[11:17] <patrickb> Idea: add a boolean flag: `initial` to MT_SetBreakpointRequest, require that `suspend` is also set and no line number is given. When that is set, break on every possible break position in that file. Only when that thread is resumed will the `first_call` flag be reset. This will also solve the issue of concurrent other threads also running code in that file.
+
+[11:17] <timo> the "first_call" idea is not bad. maybe it will also enable us to make any thread stop when hitting it until the thread that first hit it was unsuspended, too
+
+[11:18] <timo> to prevent the issue where if many threads run "towards" the new file, only one gets stopped and all others can just run past
+
+[11:18] <patrickb> Exactly
+
+[11:25] <patrickb> Do you think I have a chance to make this change?
+
+[11:26] <timo> IMO, making this enhanced functionality "replace" how it is currently implemented is a good idea, there's no need for an additional feature or flag in messages or things like that
+
+[11:26] <timo> though a "file-wide breakpoint" could be interesting separately from this too
+
+[11:27] <timo> did i just contradict myself over the course of five seconds?
+
+[11:28] <lizmat> did you?
+
+[11:42] <patrickb> Hm. What's the difference of a file wide breakpoint and the hypothetical new notify_new_file behavior?
+
+[11:43] <patrickb> If it's only that the new notify_new_file auto-removes the breakpoint on resume, then I'd say let's not have the notify_new_file thing at all.
+
+[11:44] <patrickb> Hm... When new file notification is active it'll have to add that file file wide breakpoint automatically on every new file.
+
+[11:47] <patrickb> So the only thing the file notification thing does is auto adding a file wide breakpoint on every file load. The client would then always receive two responses, 1. a breakpoint_set response directly followed by a 2. breakpoint_hit response.
+
+[11:49] <patrickb> I'd want to add a `file` attribute to MT_SetBreakpointConfirmation. Otherwise users will have no idea which new file the response belongs to.
+
+[11:50] <patrickb> The `id` would be the one of the file notification request. A new `breakpoint_id` field would hold the ID of that new breakpoint.
+
+[11:50] <patrickb> Does the above sound sound
+
+[11:50] <patrickb> ?
+
+[12:02] <timo> sounds reasonable, yeah. the "automatically create a breakpoint whenever any new file is seen" behaviour is definitely useful aside from setting a file-wide breakpoint for a file you already know about
+
+[12:13] <timo> the "clear the breakpoint after the thread that initially saw it resumes" behaviour doesn't have to go into moarvm. in fact, it may be annoying if the VM behaves like that when you don't want it, so it should probably be something the debugserver client does explicitly
+
+[12:14] <timo> I recently thought that we may want a command for the debugserver that uses the heapsnapshot "describe" function in the REPRs to get a list of all outgoing references from any object, so that you can also get at WHO and friends without a bunch of extra special commands
+
+[15:00] *** librasteve_ joined
+[19:21] <librasteve_> https://rakudoweekly.blog/2026/03/23/2026-12-ich-bin-ein-berliner/
+
+[19:50] <lizmat> librasteve_++
+
+[23:15] *** kjp left

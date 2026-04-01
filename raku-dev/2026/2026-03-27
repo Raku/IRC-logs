@@ -1,0 +1,512 @@
+[00:47] *** Geth joined
+[00:47] *** rakkable joined
+[00:47] *** lizmat joined
+[03:00] <releasable6__> Next release in ≈1 day and ≈15 hours. There are no known blockers. Please log your changes in the ChangeLog: https://github.com/rakudo/rakudo/wiki/ChangeLog-Draft
+
+[06:05] *** [Coke] left
+[06:57] *** [Coke] joined
+[09:15] *** librasteve_ joined
+[09:27] <timo> so, theoretically there's not that much stopping us from allowing NFAs to run against arrays of integers representing codepoints instead of strings. for one, it'd have to do some work on its own to advance per-grapheme instead of per-codepoint, but not respecting grapheme clusters could be a feature for some common use cases ...
+
+[09:30] <timo> and i'm wondering if we can maybe do something about having to use nqp::indexingoptimized on strings before running a regex on them; actually, i don't know what performance cost it has to leave that out in practice
+
+[09:31] <lizmat> not having to do that, would make regexes on stream a possibility, would it not?
+
+[09:35] <timo> strings are meant to be immutable, so there would really want to be some mechanism in the regex engine that asks for a new target to match against whenever the existing string is exhausted
+
+[09:35] <lizmat> wouldn't you need such a mechanism if you need the next strand ?
+
+[09:35] <timo> no, that is transparent for all string ops
+
+[09:36] <lizmat> hmmmm
+
+[09:36] <timo> and of course you have to make sure your regex doesn't ever look too far ahead too soon if you want streaming matches
+
+[09:37] <timo> unless we want to have some mechanism that can go backwards and re-try places that aborted earlier because it hit the end-of-string-at-the-time?
+
+[09:37] <timo> that sounds kind of doable
+
+[09:38] <timo> will be a bit strange if the matches you get aren't sorted by the start position any more
+
+[09:38] <lizmat> fwiw, I sometimes feel like the regex engine could do with a re-implementation in Raku
+
+[09:38] <timo> what part(s) would you replace?
+
+[09:39] <lizmat> everything apart from the NFA parts ?
+
+[09:39] <timo> even QASTRegexCompilerMAST?
+
+[09:40] <lizmat> not sure, still not very into the MASTing part, so quite a bit of a noob there
+
+[09:40] <lizmat> and I could be talking out of the side of my neck, you know
+
+[09:41] <timo> oh, that's fine
+
+[09:41] <timo> one thing the qast regex compiler mast does for us is all the handling for backtracking and what-not
+
+[09:41] <lizmat> and is that a good thing?
+
+[09:41] <lizmat> or was it a hack ?
+
+[09:42] <timo> if you want to reproduce that with just all the non-QRegex QAST nodes or even RakuAST nodes there'll be ... a bit of work :)
+
+[09:42] <timo> well, i would call it a good thing probably?
+
+[09:42] <lizmat> yeah, I think  I understand the scope and size  :-)
+
+[09:43] <timo> the regex code does a boatload with gotos, but to be honest i don't have a good concept of whether that can be translated easily to loops and if/else branches with blocks and such
+
+[09:44] <timo> FWIW, i would love it if we could have something general-purpose that behaves much like regexes in terms of going through alternatives and having a backtracking stack and stuff
+
+[09:45] <timo> i think you could probably build that kind of thing just with continuations, but i have far too little experience with that to have a chance :D
+
+[09:45] <lizmat> heh..  know the feeling  :-)
+
+[09:47] <timo> are you familiar with "angelic nondeterminism"?
+
+[09:50] <ShimmerFairy> The way I understand it, the whole grammar system is really just like any other bit of Raku code, generating a sequence of MAST instructions to do things; in the case of regexes, it happens to be a syntax focused on writing string-testing code in a convenient and compact way.
+
+[09:50] <lizmat> that's my understanding as well
+
+[09:52] <timo> yeah, i'd say that's correct
+
+[09:52] <ShimmerFairy> From what I can see, regex systems in other langs/libs are more along the lines of "generate a finite automaton and then run it", as opposed to just generating code for a turing machine (which is what Raku does).
+
+[09:54] <timo> there has to be a bit more than just "a finite automaton" to support some regex features, right? the strict mathematical definition of DFA and NFA just give a "match? yes/no", so if you have capturing you'll need something a bit "more" already
+
+[09:54] <timo> and i think at least some lookaround assertions can't be translated to NFA and DFA?
+
+[09:55] <timo> the definition of NFA and DFA only consider consuming a single input character at a time, and there's no "only go to this state if states X and Y are active" in NFA, so I'm not sure how you would make lookbehind work without at least difficulty?
+
+[09:56] <ShimmerFairy> Right, in reality Useful Regex Engines end up mutating finite automations into something that technically isn't one (to match the fact that your regular languages technically aren't either), but you still got some kind of like 'class NFA' to model the machine and run it by calling a 'regex.execute(...)' function.
+
+[09:56] <timo> that makes sense
+
+[09:58] <timo> anyway, in theory you actually can translate any kind of control flow no matter how weird into a construction of just loops and if/else, but worst case you end up with what looks very much like an interpreter loop :D
+
+[09:58] <ShimmerFairy> I've got a very rough C++ library modeling Raku-like grammars where I have it do the work by just stepping through execute()-style methods on the grammar's AST, but this is a rough system that doesn't support too much. When thinking about how to make this library more proper, I think I'd have to invent a bytecode (to substitute for MAST) to get the job done.
+
+[09:58] <timo> so that statement is not worth much
+
+[10:00] <timo> that does sound interesting
+
+[10:12] *** kjp joined
+[10:15] <ShimmerFairy> The main issue is with backtracking and alternates, and in general any scenario where a grammar has to step back to some arbitrary earlier point to try something else. With the MAST approach, each grammar rule compiles down to a flat assembler function, so that stepping back is easily handled with gotos. Trying to do that in an AST structure in C++ directly would I think require you to invent your own version of longjmp.
+
+[10:16] <timo> ah yeah, that seems tricky. you'd probably have to not just recurse into children and return back into parents but navigate a bit more freely huh?
+
+[10:18] <ShimmerFairy> Yeah, you'd need to record points to jump back to in a way that carries forward through child *and* sibling nodes, and then when wanting to jump back you'd need to go backwards through this nonlinear tree structure and call an execute() method that can be told to start midway through the actual function, with all the original context.
+
+[10:18] <timo> if you can get all your state into something that doesn't depend on the C++ stack itself (which you might need anyway/already?) you should be able to do navigation back up and then sideways with not too much trouble, but maybe up then sideways then a specific path downwards might be difficult? not sure if that's actually needed
+
+[10:18] <timo> yeah i think we just said essentially the same thing there
+
+[10:18] <ShimmerFairy> I think it would be possible, but I also think I'd probably be 9/10ths of the way towards inventing a mini-VM with a grammar-focused bytecode anyway.
+
+[10:19] <timo> yeah i think that sounds about right
+
+[10:20] <timo> doing a pass first through the AST to flatten it into a linear thing with gotos seems like the natural result of taking the "i need to be able to navigate arbitrarily through this AST" towards the conclusion :D
+
+[10:21] <timo> do you have a moment to think through adding a "string extension retry stack" to the existing implementation?
+
+[10:21] <ShimmerFairy> The interesting bit is that, while I don't think C++26 is quite there, the magic of Reflection would someday allow for compile-time grammars to be turned into that C++ functions at compile time with no extra preprocessing. Wouldn't help runtime stuff like text editor find/replace dialogs, but it would still be very cool.
+
+[10:23] <timo> i'm not sure if it's possible without something new and extra special ...
+
+[10:24] <ShimmerFairy> I'm not too much of an expert, it took me years just to realize Raku grammars aren't at all like FA-based regex engines (that late realization is what finally led me to be able to write that rough C++ code)
+
+[10:24] <timo> d'oh, i wish i could have told you that when you needed to know :|
+
+[10:24] <ShimmerFairy> (My point was that C++26 reflections let you generate some amount of C++ code, but IIUC it's not quite at the point where you can generate function bodies? It's something I need to study up on though, it's quite an esoteric new feature.)
+
+[10:25] <timo> right
+
+[10:26] <ShimmerFairy> timo: It's fine, the "years" were just years spent occasionally wanting Raku-like grammars in the abstract. It's only recently that I actually needed it, and that gave me the motivation to figure out the misunderstanding before too long.
+
+[10:26] <timo> ah, that's not as bad, ok
+
+[10:27] <timo> my thought for the resumption thing was that normally when we hit EOF we just do a normal backtrack to work on other things we still have on the stack to try
+
+[10:27] <timo> if instead of immediately backtracking we also stored some information about the current state in another place, so that we could go back there at will, then we could resume work there in case the string gets extended
+
+[10:28] <timo> but i think that doesn't work for much the same reason you mentioned with the AST traversal
+
+[10:28] <ShimmerFairy> My first thought is that this might be related to an idea in my head for years about "parsing" binary files. I've done a *lot* of that over the years, and I've come to realize it's not so different from parsing text, and it'd be nice to have something like grammars but for binary data. The main issue here is that binary formats tend to let you jump around to arbitrary positions, which breaks the usual text assumption of parsing linearly 
+
+[10:28] <ShimmerFairy> in one pass.
+
+[10:28] <timo> though I have to mention I'm also at the same time keeping in mind that we can call from one rule into another rule
+
+[10:29] <timo> ah, i recently looked at imhex and built a definition/script for moarvm bytecode files, maybe that'll be of interest to you?
+
+[10:29] <timo> https://gist.github.com/timo/d6297a6c50a27d45cde39dea0221ebd9
+
+[10:30] <ShimmerFairy> For example, in many binary formats you'd need something like, I dunno, /<start-addr=.uint32be> <.goto($<start-addr>.ast)> <null-str> <etc>/
+
+[10:30] <timo> though uhhhh it doesn't really have backtracking i guess?
+
+[10:31] <timo> hm. come to think of it ... i believe there's nothing keeping us from calling a rule with a cursor that isn't the same position or further down a string than where-ever the calling rule may be
+
+[10:33] <timo> going forwards is trivial, you can just `. ** {$amount}`
+
+[10:33] <ShimmerFairy> As long as the grammar engine can cope with the idea that earlier "characters" have not necessarily been matched yet, it should be fine. (One potential problem area is with Grammar.parse(), which expects to end at the end of the text, and for that to mean the whole text's been parsed.)
+
+[10:33] <timo> ... actually, going backwards is just <?^ . ** {$from-start} ...>
+
+[10:34] <timo> for that you just use Grammar.subparse instead :D
+
+[10:35] <ShimmerFairy> Also, there's the fact that cursors have a .from and .to/.pos that implicitly assume it's matched a contiguous sequence of text, which in a binary parser can't neccessarily be true. Trying to add a <.goto($str-pos)> would probably reveal a lot of subtle issues like that.
+
+[10:37] <ShimmerFairy> In any case, I've always thought it'd be nice if Grammar could someday be extended to parse not only other string types (like Uni and NFKD), but all Stringy types as well.
+
+[10:37] <timo> yeah
+
+[10:39] <timo> the way we prevent your code from accidentally splitting grapheme clusters in half is a hindrance when you're trying to be compatible with formats that don't give a crepe
+
+[10:39] <timo> for example, how would \ñ work in most languages vs raku?
+
+[10:39] <ShimmerFairy> So as to the string extension thing, my thinking was just that "we don't have the full string yet" might disturb the same sorts of assumptions that "I need to relocate the cursor to a different offset for this binary parser" would.
+
+[10:39] <timo> assuming ñ there is not a single codepoint but an n and a combiner
+
+[10:40] <timo> yeah, that's a safe bet :D
+
+[10:41] <ShimmerFairy> While I wasn't there at the beginning of Perl 6's creation, I do get the sense that a fair number of assumptions about Unicode usage were proven wrong (Unicode was only ≈ 10 years old at the time, tbf). One of those being that you'd always want to work with text on the grapheme level, and that the only reason you don't is because your language won't let you yet.
+
+[10:41] <timo> oh, the specification of the regex engine explicitly makes space for not just working at the grapheme level at the very least
+
+[10:42] <ShimmerFairy> Yeah, theoretically Perl 6 was designed to support working at other levels, but in practice nobody cared to make it happen back in the day (because, again, who wouldn't want graphemes?)
+
+[10:43] <timo> being able to do stringy things with Uni and friends, and getting a Uni completely without normalization from an utf8 or utf16 or utf32 or ucs-whatever feels like something in line with how perl 6 was designed
+
+[10:43] <timo> yeah
+
+[10:43] <timo> better late than never, right?
+
+[10:44] <ShimmerFairy> of course
+
+[10:44] <timo> so the main problem i think with resumption vs backtracking is that resumption would have to go "back into" subrules and such
+
+[10:44] <timo> and that's where you need continuations (or something equivalent)
+
+[10:45] <ShimmerFairy> I think what you'd want is basically like a suspended child process, like a `cat` waiting for more input. (Not that rakudo should actually spawn a gazillion child processes for regex parsing, ofc.)
+
+[10:46] <timo> do you know about the kind of continuations we have in moarvm? "single-shot bounded continuations" i think they are called? because i think i need someone to explain some things to me :|
+
+[10:46] <ShimmerFairy> Not a clue, unfortunately.
+
+[10:46] <timo> OK
+
+[10:46] <timo> but yeah, it would essentially be like a fork()
+
+[10:47] <ShimmerFairy> For the record, if I were to get into the business of modifying NQP/MoarVM grammar code, the thing I'd first want to do is implement some of those poor forgotten backtracking controls, like ::: and <commit>. At least a couple of them seem like they'd be nice to raise from the dead.
+
+[10:47] <timo> i think what you have to do to use our continuations is you define a stack frame that serves as the "base" which is where the stack gets cut off and stashed into the continuation object when you take the continuation, and that stuff gets pushed onto the stack when you resume the continuation
+
+[10:48] <timo> I mean, I'd totally welcome you to try, and give you as much support as you need to succeed, if you're up for it?
+
+[10:51] <timo> so my conceptual problem with using the continuation to "fork" in place is that after chopping off the stack, I want to have the same stuff on the stack still? because i don't want to return all the way back to the start of regex parsing for example
+
+[10:51] <ShimmerFairy> I'll think about it, it's not an urgent matter (as evidenced by the lack of implementation for decades). Peeking at S05, some of them seem to suggest having an effect on backtracking in a subrule's caller, which if I'm reading that right would be tricky. But otherwise I think it'd just require a minor bit of extra bookkeeping on the bstack.
+
+[10:53] <timo> I was just searching through QASTRegexCompilerMAST for "back" and saw there's backtracking modes that can be r or f or g, but I think that's just about what a single node has set as its backtracking mode, like if you do a [ :r blabla ] to get ratchet semantics for a single group?
+
+[10:53] <timo> and i think at least some part of <commit> is "just" a matter of throwing away entries of the backtrack stack
+
+[10:53] <timo> but the devil is going to be in the details
+
+[10:54] <timo> a rich suite of tests will probably be crucial
+
+[10:54] <ShimmerFairy> IIRC they stand for ratchet/frugal/greedy, since all three kinds of backtracking affect how you'd handle things.
+
+[10:55] <timo> ah, right. for example switching between find and rfind
+
+[10:55] <timo> / .* "foo" / would rfind but / .*? "foo" / would find
+
+[10:55] <timo> same for cclasses
+
+[10:56] <timo> I don't remember off hand what ::: is meant to do. do :: and : do the right thing already?
+
+[10:57] <ShimmerFairy> As per S05, "Evaluating a triple colon throws away all saved choice points since the current regex was entered. Backtracking to (or past) this point will fail the rule outright (no matter where in the regex it occurs):"
+
+[10:57] <timo> oh, huh, that doesn't sound so difficult?
+
+[10:58] <ShimmerFairy> In contrast, "Evaluating a <commit> assertion throws away all saved choice points since the start of the entire match. Backtracking to (or past) this point will fail the entire match, no matter how many subrules down it happens:"
+
+[10:59] <ShimmerFairy> There are some S05 tests for these, but I'm not sure they're comprehensive enough to properly define the semantics of all of them.
+
+[11:02] <ShimmerFairy> As for ::, it affects LTM alternations but *not* temporal ones (requiring bookkeeping on what kind of alternation an entry on the bstack represents). For example, IIUC in the example / [ [ a :: c || a :: d ] e | afoo] /, a failure to match "ace" wouldn't stop you from trying "ade", but matching "a" in either temporal alternate would prevent "afoo" from matching.
+
+[11:04] <ShimmerFairy> (note: the complementary ::> construct exists to let you affect temporal alts but not LTM ones instead)
+
+[11:04] <timo> wow, `::>`
+
+[11:06] <ShimmerFairy> (also, note that :: is spec'd to end the declarative part of the regex, so the LTM mechanism would only see [a | afoo] when trying to sort its options)
+
+[11:06] <timo> do i get this right, the `[ a :: c || a :: d ] e` part would require also matching the `e` in order to prevent `afoo` from being attempted?
+
+[11:07] <ShimmerFairy> not to my understanding, once you hit the '::' the "saved choice points in the current LTM alternation" are thrown away, and on top of that "current" is "defined dynamically, not lexically. A :: in a subrule will affect the enclosing alternation."
+
+[11:08] <timo> dynamically, so including going up the stack into callers right?
+
+[11:09] <ShimmerFairy> That's my reading, which would be unique to backtracking controls I think? At the moment I don't know if there's any implemented construct that affects the bstacks of parent cursors.
+
+[11:10] <ShimmerFairy> (an unanswered question, I suppose, is if proto regexes count as a "current LTM alternation" ever)
+
+[11:10] <timo> ok, so creating NFAs recurses into subrules "of course"
+
+[11:10] <timo> so the :: can be made to have an effect on "parent" bits of LTM
+
+[11:10] <ShimmerFairy> For the record, ::> also can effect parent temporal alternations.
+
+[11:11] <timo> i'm not sure what part of a || go into an NFA though
+
+[11:11] <ShimmerFairy> <commit> and <cut> also appear to have impacts on rule callers.
+
+[11:11] <timo> mhm
+
+[11:12] <timo> i'm not sure we have a good document that explains a bunch of how the regex engine works internally, with cstack and bstack and what-not
+
+[11:13] <ShimmerFairy> going back to S05, "The first || in a regex makes the token patterns on its left available to the outer longest-token matcher, but hides any subsequent tests from longest-token matching. Every || establishes a new longest-token matcher. That is, if you use | on the right side of ||, that right side establishes a new top level scope for longest-token processing for this subexpression and any called subrules."
+
+[11:13] <ab5tract> I was just thinking that this could be the subject of an entire book
+
+[11:13] <timo> so i'm not sure how to throw away older states also for caller's cursors?
+
+[11:13] <timo> yeah you're right about that ab5tract 
+
+[11:14] <ShimmerFairy> So once you hit a ||, the LTM mechanism stops. If I had written /[[ac || ad] e | afoo]/, then the LTM mechanism would (I think) see /[ac|afoo]/
+
+[11:14] <timo> did you know you can use the NfaChainsaw to find that out? :D
+
+[11:15] <ab5tract> I also still have a vague feeling that an alternative, “lite” version of the engine à la PCRE would be good for both internal comprehension as well as spreading the good word about what an improvement Raku regex syntax can be
+
+[11:15] <ShimmerFairy> My thinking is that, with the appropriate "type" info in the bstack, you "just" iterate backwards through your bstack (and then maybe your parent's bstack) until you find the latest set of choice points of type (LTM|temporal).
+
+[11:16] <ab5tract> Can LTM and temporal both match? Or does LTM always take precedence until stopped via one of these mechanisms?
+
+[11:17] <ShimmerFairy> The nice thing about these operators being unimplemented, and having only a couple basic tests in roast, is that we have the chance to change semantics described in S05 if we don't like them after all. (Like, maybe we don't want constructs that can kill a parent cursor at all, outside of things like <.panic> ?)
+
+[11:18] <timo> ab5tract: there's a precedence between | and || that means one is always nested inside the other
+
+[11:18] <timo> so either you're in a || match, then the LTM only starts when the branch it's in is currently being evaluated
+
+[11:19] <timo> or you're in a | match, then the || will have been made part of the NFA to decide if the branch it's in should be attempted and in what order compared to the other | branches
+
+[11:19] <ab5tract> ShimmerFairy: indeed, I’m always happy when we have a bit of wiggle room to make improvements without back company worries
+
+[11:20] <ab5tract> timo: I may just have to resign myself to never truly comprehending regexes :)
+
+[11:20] <ab5tract> *back compat
+
+[11:20] <timo> it should be possible if you can find an approach that truly works for you
+
+[11:21] <ShimmerFairy> Come to think of it, I wonder if the sorrow system (which I think exists in 6.e as a standard feature) competes with these backtracking controls. Like, if you're at the point where you want to write [if :: <cond> | for :: <loop>], wouldn't you also want to have helpful error messages? (Or do the backtracking controls still have a place here?)
+
+[11:21] <timo> are you refering to the "expecting any of ..." part of error messages?
+
+[11:21] <timo> that's something related to the high water mark i think
+
+[11:21] <ab5tract> timo: that book we were just discussing would certainly help ;)
+
+[11:23] <ShimmerFairy> timo: by "sorrow system" I mean the <.panic>/<.sorry>/<.worry> stuff that's always been a part of Rakudo's own Raku grammar, and which back in the day I wrote a module to make use of for myself.
+
+[11:25] <timo> ah ok
+
+[11:25] <timo> i have no clue if that interacts with the backtracking system
+
+[11:25] <ShimmerFairy> To rephrase my question, are there useful scenarios where you'd prefer `if :: <cond>` over `if [<cond> || <.panic("Invalid if statement")>]`, assuming <.panic> exists?
+
+[11:26] <ShimmerFairy> (<.sorry("...")> would have similar effect)
+
+[11:27] <ShimmerFairy> Actually, wait, you would want that, in a complex system where you wish to throw away the current LTM alternation, but there are parent LTM alternations that are still possible and valid.
+
+[11:31] <ShimmerFairy> For example, the sorrow system wouldn't make sense for /[ [ if :: <cond> | for :: <loop> ] || <varname> '=' <value> ]/, which says "if you match a keyword but fail the rest of the statement, don't try the others, *but* we let people use keywords as variable names so try an assignment next".
+
+[11:46] <timo> https://stanleymiracle.github.io/blogs/compiler/docs/chez-pub/22-call1cc.pdf points out that if you want to build something like nondeterminism a la prolog you still need multi-shot continuations and one-shot continuations aren't enough :(
+
+[11:52] <timo> i wonder what the exact reason is that we don't support multi shot continuations ... if the main thing is really just copying the stack frames instead of just "linking" them into place?
+
+[11:56] <ShimmerFairy> A quick look found me a reddit comment with a number of possibly helpful links: https://www.reddit.com/r/compsci/comments/36xsyz/comment/cri57tz/
+
+[11:56] <ShimmerFairy> In particular that mention of "generators" (whatever those are) being an alternative to multishot continuation sounds like it could be worth looking at.
+
+[11:59] <timo> i think generators are usually implemented using continuations
+
+[12:00] <timo> in my mind, generator is similar to coroutine, but more focused on implementing an iterator
+
+[12:00] <timo> like, a generator implements a "next" method that gives you the next value
+
+[12:01] <ShimmerFairy> This is all new territory to me, so I'd have to do a lot of reading to be helpful, but I can at least point to a page on generators from the same site that made that claim about them being an alternative: https://okmij.org/ftp/continuations/generators.html
+
+[12:03] <timo> ah, but generators can also receive values
+
+[12:04] <timo> you can pretty much think of generators as the more general form of what we have in raku with gather/take
+
+[12:07] <timo> alas, my understanding of haskell is amateur at best
+
+[12:12] <timo> i think this basic fact of one-shot continuations is what prevents me from using it like i wished for the backtracking stuff: when the continuation is invoked, the stack that belongs to it can just be reused by the runtime, i.e. overwritten as it works through the code. but what i want is the existing stuff to be retained. so it seems directly in contradiction
+
+[12:21] <timo> in a way, resumption when the string lengthens is kind of like un-backtracking
+
+[12:22] <timo> if we don't care about poor performance, we can store information about what matches we already gave and just re-run from the start :(
+
+[12:23] <timo> just throw away any match that doesn't reach into the freshly added text
+
+[13:39] *** lizmat_ joined
+[13:42] *** lizmat left
+[13:46] *** lizmat_ left
+[13:46] *** lizmat joined
+[14:04] <timo> the more i think about it, the less i'm certain that we can really do all that much about match resumption when consuming from a stream without something quite like multi-shot continuations
+
+[14:11] <timo> 2017.01 was when the continuations were forced to become one-shot in moarvm, it seems like
+
+[14:11] <timo> > + Enforce one-shot invocation of continuations Greatly simplify handling of call frame working register lifetimes, leading to consistently shorter lifetimes, less memory pressure, and faster calling
+
+[14:14] <timo> https://github.com/MoarVM/MoarVM/pull/487 - "The partial (but already decidedly broken) bits of work towards supporting multi-shot continuations" :(
+
+[14:17] <timo> i'm going to just not say "how hard could it be" and leave this be for now
+
+[14:20] <timo> unless some of the changes since then would make it easier somehow. or maybe adding more restrictions than being able to clone any continuation at any point could allow doing things with less pessimization for every call or return, etc etc
+
+[14:39] <timo> on the other hand, if it's fine to ask for more input before having exhausted possible earlier results, we only need regular backtracking, but it'd be very easy to write regexes/rules/grammars that just unconditionally ask for more data until the provider signals EOS
+
+[14:39] <timo> i think i was mostly thinking of doing matches like with `comb` or `m:g/.../`
+
+[14:45] <timo> i'm not sure under what circumstances it's even desirable to not wait for more input as soon as the end of string is hit in a context where more input could have conceivably lead to a match?
+
+[14:46] <timo> obviously if you accidentally write / .* "foo" / instead of / .*? "foo" / you're not going to benefit from lazy string matching at all
+
+[14:46] <timo> or if there's an end-of-string anchor somewhere
+
+[14:48] <ShimmerFairy> Just as a note here, I found an interesting quirk in using ratcheting something other than a quantifier. Not sure if it is (or should be) a bug.
+
+[14:48] <ShimmerFairy> m: my $test = "abbbbbbbc"; say $test ~~ m/a [b+? | x]: c/; say $test ~~ m/a [b+? ||]: c/
+
+[14:48] <camelia> rakudo-moar 14eabf1ec: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Null regex not allowed. Please use .comb if you wanted to produce a␤sequence of characters from a string.␤at <tmp>:1␤------>  [b+? | x]: c/; say $test ~~ m/a [b+? ||<HERE>]: c/␤    expecting any of:…»
+
+[14:48] <ShimmerFairy> m: my $test = "abbbbbbbc"; say $test ~~ m/a [b+? | x]: c/; say $test ~~ m/a [b+?]: c/
+
+[14:48] <camelia> rakudo-moar 14eabf1ec: OUTPUT: «False␤｢abbbbbbbc｣␤»
+
+[14:50] <ShimmerFairy> I can (uselessly) implement "frugal *and* don't backtrack", but I have to throw in a dummy alternation to make it work.
+
+[14:50] <timo> m: my $test = "abbbbbbbc"; say $test ~~ m/ :r a [b+? | x] c/;
+
+[14:50] <camelia> rakudo-moar 14eabf1ec: OUTPUT: «False␤»
+
+[14:51] <timo> it does seem wrong, but i'd have to dig a bunch to figure out why
+
+[14:52] <ShimmerFairy> S05 says that the frugal/greedy/ratchet modifiers can be applied to any atom, but doesn't explain what it means when that atom isn't a quantified one. Frugal and greedy are seemingly nonsense with the kinds of atoms we currently have in regexes, but ratchet could theoretically makes sense in scenarios like this.
+
+[14:53] <ShimmerFairy> My guess is that the quirk/bug is just because rakudo only handles the ratcheting on alternations and quantifiers specifically, and not on atoms in general (tbf most atoms wouldn't make good use of it anyway).
+
+[14:54] <timo> m: my $test = "say $test ~~ m/a [b+?]: c/
+
+[14:54] <camelia> rakudo-moar 14eabf1ec: OUTPUT: «===SORRY!=== Error while compiling <tmp>␤Cannot use variable $test in declaration to initialize itself␤at <tmp>:1␤------> my $test = "say $<HERE>test ~~ m/a [b+?]: c/␤    expecting any of:␤        double quotes␤        term␤»
+
+[14:54] <timo> oops
+
+[14:55] <timo> m: my $test = "abbbbbbbc"; say $test ~~ m/ :r a [b+?<!b> | x] c/;
+
+[14:55] <camelia> rakudo-moar 14eabf1ec: OUTPUT: «No such method 'b' for invocant of type 'Match'. Did you mean 'wb'?␤  in block <unit> at <tmp> line 1␤␤»
+
+[14:55] <timo> m: my $test = "abbbbbbbc"; say $test ~~ m/ :r a [b+?<! "b"> | x] c/;
+
+[14:55] <camelia> rakudo-moar 14eabf1ec: OUTPUT: «===SORRY!===␤Unrecognized regex metacharacter < (must be quoted to match literally)␤at <tmp>:1␤------> "abbbbbbbc"; say $test ~~ m/ :r a [b+?<!<HERE> "b"> | x] c/;␤Unable to parse expression in metachar:sym<[ ]>; couldn't find final ']' (corre…»
+
+[14:55] <timo> m: my $test = "abbbbbbbc"; say $test ~~ m/ :r a [[b <! "b">]+? | x] c/;
+
+[14:55] <camelia> rakudo-moar 14eabf1ec: OUTPUT: «===SORRY!===␤Unrecognized regex metacharacter < (must be quoted to match literally)␤at <tmp>:1␤------> "abbbbbbbc"; say $test ~~ m/ :r a [[b <!<HERE> "b">]+? | x] c/;␤Unable to parse expression in metachar:sym<[ ]>; couldn't find final ']' (co…»
+
+[14:55] <timo> m: my $test = "abbbbbbbc"; say $test ~~ m/ :r a [[b <!"b">]+? | x] c/;
+
+[14:55] <camelia> rakudo-moar 14eabf1ec: OUTPUT: «===SORRY!===␤Unrecognized regex metacharacter < (must be quoted to match literally)␤at <tmp>:1␤------> "abbbbbbbc"; say $test ~~ m/ :r a [[b <!<HERE>"b">]+? | x] c/;␤Unable to parse expression in metachar:sym<[ ]>; couldn't find final ']' (cor…»
+
+[14:56] <ShimmerFairy> And just to make it clear, "frugal ratcheting" is pointless because that's just forcing the minimum number of repetitions. [a+?]: is just /a/, [a **? {3..5}]: is just /aaa/, and so on. So it's not like this needs to be a supported feature.
+
+[14:56] <timo> hm?
+
+[14:56] <timo> oh
+
+[14:56] <timo> now that you say it it's a bit more obvious
+
+[14:57] <timo> m: my $test = "abbbbbbbc"; say $test ~~ m/ a [b+? <!before "b"> | x]: c/;
+
+[14:57] <camelia> rakudo-moar 14eabf1ec: OUTPUT: «｢abbbbbbbc｣␤»
+
+[14:57] <timo> m: my $test = "abbbbbbbc"; say $test ~~ m/ a [b+? <!before "b">]: c/;
+
+[14:57] <camelia> rakudo-moar 14eabf1ec: OUTPUT: «｢abbbbbbbc｣␤»
+
+[14:58] <ShimmerFairy> That being said though, the fact that you can get rakudo to do it with /[b+? | <!>]:/ means there's a consistency issue at least, so whatever the right answer is we perhaps have something to fix.
+
+[14:59] <timo> BBL
+
+[15:02] <ShimmerFairy> Anyway, my real point is just that S05 made allowances for changing what kind of backtracking *any* atom can do, but never bothered exploring what that would really mean. So it's no big surprise there are edge cases like this to be found.
+
+[15:04] <ab5tract> Am I the only one who wishes that quoting of character/string literals were mandatory in Reku regexes?
+
+[15:05] <ab5tract> Then we could have parity of x and xx operators, for example
+
+[15:06] <ab5tract> Though xx semantics are a bit hard to conceive for me at the moment
+
+[15:07] <ab5tract> I just find the extra verbosity of quoting to be hugely clarifying when trying to brainparse regexes
+
+[15:26] *** liztormato joined
+[15:27] *** liztormato left
+[18:00] <lizmat> bisectable6: old=2023.01 sub MAIN(Bool $a) { dd $a }; @*ARGS="True"
+
+[18:01] <bisectable6> lizmat, Cannot find revision “2023.01” (did you mean “2026.01”?)
+
+[18:01] <lizmat> bisectable6: old=2023.02 sub MAIN(Bool $a) { dd $a }; @*ARGS="True"
+
+[18:01] <bisectable6> lizmat, On both starting points (old=2023.02 new=14eabf1) the exit code is 0 and the output is identical as well
+
+[18:01] <bisectable6> lizmat, Output on both points: «Bool::True␤»
+
+[18:01] <lizmat> bisectable6: old=2020.01 sub MAIN(Bool $a) { dd $a }; @*ARGS="True"
+
+[18:01] <bisectable6> lizmat, On both starting points (old=2020.01 new=14eabf1) the exit code is 0 and the output is identical as well
+
+[18:01] <bisectable6> lizmat, Output on both points: «Bool::True␤»
+
+[18:01] <lizmat> bisectable6: sub MAIN(Bool $a) { dd $a }; @*ARGS="True"
+
+[18:01] <bisectable6> lizmat, Will bisect the whole range automagically because no endpoints were provided, hang tight
+
+[18:02] <bisectable6> lizmat, Output on all releases: https://gist.github.com/ba5cae82948a265b42878e559010c553
+
+[18:02] <bisectable6> lizmat, Bisecting by exit code (old=2016.11 new=2016.12). Old exit code: 2
+
+[18:02] <bisectable6> lizmat, bisect log: https://gist.github.com/d727fe573498831dfa92a903db340368
+
+[18:02] <bisectable6> lizmat, (2016-11-19) https://github.com/rakudo/rakudo/commit/d1ef82ac189ead6dab42fe246277f22ecd3e53a6
+
+[18:02] <bisectable6> lizmat, Output on all releases and bisected commits: https://gist.github.com/c3b08291ae37d874236a7e74e320c46a
+
+[21:47] *** librasteve_ left
+[22:17] <[Coke]> lizmat: can you scan the ecosystem for anything related to utf8/c8 ?
+
+[22:17] <[Coke]> timo is proposing a last minute fix.
+
+[23:00] <releasable6__> Next release in ≈19 hours. There are no known blockers. Please log your changes in the ChangeLog: https://github.com/rakudo/rakudo/wiki/ChangeLog-Draft
+
+[23:21] <lizmat> rakkable: eco-provides utf8-c8
+
+[23:21] <rakkable> lizmat, Running: eco-provides utf8-c8, please be patient!
+
+[23:22] <rakkable> lizmat, Found 38 lines in 22 files (21 distributions):
+
+[23:22] <rakkable> lizmat, https://gist.github.com/aedec5e6b52683bdaabac1c96ca662b4
+
+[23:22] <lizmat> [Coke] ^^
+
+[23:26] *** timotrieskiwi joined
+[23:27] *** timotrieskiwi left
+[23:29] *** SabeDoesThings joined
+[23:32] *** SabeDoesThings left
+[23:32] *** SabeDoesThings joined
+[23:32] *** SabeDoesThings left
+[23:34] *** SabeDoesThings joined
+[23:34] *** SabeDoesThings left

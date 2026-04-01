@@ -1,0 +1,187 @@
+[01:39] *** MasterDuke joined
+[01:43] <MasterDuke> timo, et al.: two thoughts: 1) have you seen https://iev.ee/blog/the-quadratic-problem-nobody-fixed/ ? i don't know enough about the regex engine in nqp, but maybe we can steal something from them.  2) unrelated, but if we reorder MVMStringBody (https://github.com/MoarVM/MoarVM/blob/main/src/6model/reprs/MVMString.h#L40-L56), and put storage_type
+
+[01:43] <MasterDuke> before the storage union, could we include num_strands in the in_situ members to make them a little bigger?
+
+[01:43] <tellable6> 2026-03-08T23:55:17Z #moarvm <lizmat> MasterDuke: I can't get rakudo to build anymore after the NQP bump
+
+[02:06] *** MasterDuke left
+[10:03] <patrickb> Sanity check: The debugserver does not seem to null out it's struct during initialization,  but also doesn't initialize every field (e.g. debugspam_protocol isn't nulled when not requested). 
+
+[10:03] <patrickb> Is this somehow relying on calloc nulling out requested memory?
+
+[11:20] *** librasteve_ joined
+[14:19] <lizmat> timo might know
+
+[16:46] <timo> for a quick first approximation, you can use malloc instead of calloc and run a representative workload under valgrind (or with asan I would assume) which can tell you if anything depends on uninitialised memory
+
+[16:51] <[Coke]> WHOOP. is that "can't get rakudo to build" message still valid? Release in 3 days
+
+[16:51] <lizmat> no, it isn't
+
+[16:51] <lizmat> there's some issue *if* you are rebuilding from an existing checkout that did builds before
+
+[16:52] <timo> MasterDuke, I thought about expanding the in-situ bit by including num_strands as well in the past. not sure why I never actually tried implementing it
+
+[16:52] <lizmat> [Coke]: you need to pull, build (fails), pull again, then it builds (in my recollection)
+
+[16:54] <[Coke]> oh, that one. *whew*
+
+[16:55] <lizmat> yeah
+
+[16:56] <timo> on the other question, I would have to spend some time investigating how well we do in the case of getting "all matches" instead of just "the first match", though in order for "ok give me the next match" to correctly work we already have to be smart and keep backtracking information around and whatnot. there's possibly stuff we can do to optimize for cases where we know upfront that the user wants
+
+[16:56] <timo> not just the next match, but every match?
+
+[16:57] <lizmat> does that imply that a cursor object has already done the whole source, and it's just producing values from an internal array >?
+
+[16:57] <timo> I'm thinking of introducing a tiny "sanity check" .moarvm file in moarvm's repo as a test case to run after compiling but before installing so that we catch issues like "the jit literally explodes on the first frame it tries to run" before we go on to NQP, which should give better diagnostics in such cases (i.e. moar doesn't install in the first place, so you don't waste time looking for a problem
+
+[16:57] <timo> with nqp)
+
+[16:58] <timo> lizmat: not exactly "the whole source", just "until the first successful match" and when you ask for the next one it's effectively the same behaviour as if an assertion had given "failed match" after the last step
+
+[16:59] <timo> if you match "abcdaaaaaaabcd" against / a+? / you'll get the lonely "a" first, so the cursor hasn't looked further than the second character, but for the second a and then aa aaa aaaa etc the cursor would have of course seen a bit more of the string
+
+[16:59] <lizmat> ah, ok... understood
+
+[17:00] <timo> if we know up front that you want every possible match, "a+?" could immediately take the stretch of as and generate all combinations of position + length that sits inside the stretch of as
+
+[17:01] <timo> the question is, how hard is it to do the same kind of optimization when the regex is more complicated than just a single quantifier
+
+[17:01] <timo> if the regex is /a+? b/ then there's no reason to generate any results for the a stretch that don't end at the "b", so the naive approach would immediately be very wasteful
+
+[17:02] <lizmat> ack
+
+[17:04] <timo> the regex optimizer (static, part of perl6/optimizer or raku/optimizer) could look for patterns where something like that is useful, which of course is a little cost for every regex and a bit of waste every time it doesn't help, which we would want to weigh against the benefits etc etc etc :)
+
+[17:04] <timo> but also, i haven't read the article yet, it may be about something else than i've been thinking of entirely
+
+[17:07] <timo> someone i follow on the fediverse is quite vocal about how good the approach of hyperscan (presumably also vectorscan?) is for how an application would use it, it's kind of callback based AIUI
+
+[17:07] <timo> the way action methods and code assertions / embedded curly blocks inside raku rules work are very slightly similar
+
+[17:09] <timo> but also, we don't promise linear time matching in the first place. that doesn't mean the optimizations done in RE# can't apply for us though
+
+[17:18] <timo> the first example given is matching / .* a || b / (this is the raku equivalent) against a string of bs and getting all results; 16k bs in a row take 5.4s but 32k bs in a row takes 21.7s, so that's a quadrupling of time for doubling of input, i.e. almost exactly quadratic
+
+[17:20] <timo> using | instead of || funny enough is almost 2x faster, but also grows quadratically (5.9s for 32k, 23.4s for 64k)
+
+[17:25] <timo> in any case, one of the bits in the beginning of the article is that a user-supplied pattern can DOS your application by easily giving you exponential run time, and even regex engines that promise linear time matches get quadratic if you go from "give me the first match" to "give me all matches" when they don't necessarily need to
+
+[17:26] <timo> taking a raku regex from a possibly adversarial user is already immediately obviously a really really bad idea, and we never ever tell people that's a fine thing to want to do
+
+[17:26] <timo> among other things that's because raku regexes don't pretend not to be code
+
+[17:29] <lizmat> well,, if a regex is received as a string, the only way to work with it, is to interpolate it as a string, no?
+
+[17:29] <lizmat> so at least the code bit would be disarmed?   or not?   am I missing something?
+
+[17:30] <timo> so treating the regex as if it were just a piece of text?
+
+[17:32] <lizmat> hmm... yeah, you're right, that wouldn't make sense if you ask people to enter a regex
+
+[17:32] <timo> yep
+
+[17:32] <timo> you could have a whitelist approach for allowing a very limited range of regexes as input
+
+[17:34] <timo> remember when I was musing about the case where possibly-zero-length matches were being quantified, leading to an infinite loop? I think one of the things that came up was checking at run time if we're in a pathological case right now and aborting
+
+[17:35] <lizmat> actually, I have been working on just that in RakuAST at CHECK time
+
+[17:35] <timo> i feel like it shouldn't be so hard to generate regex code in a way that can call back into user code regularly to let the user decide if aborting is a good idea
+
+[17:36] <timo> ah? something like a way to go from a string with a regex source code in it to a RakuAST of the regex without the danger of code from inside the input being executed?
+
+[17:36] <lizmat> my initial goal was simpler, actually, but related
+
+[17:37] <lizmat>  / :i /    e.g. will match anything
+
+[17:38] <timo> isn't raku meant to reject null regexes?
+
+[17:38] <lizmat> the modifier disables the empty regex compile time check
+
+[17:38] <lizmat> "it's not empty if it has a modifier"  :-)
+
+[17:38] <timo> i always thought of that as a trap-door if what you really really want is a regex that just immediately returns "matched"
+
+[17:40] <timo> i have been hoping that I could look into generating quick-rejection bits for regexes in an optimizer pass or something ... I've been hoping to do that for like, a decade now it almost feels like
+
+[17:42] <timo> there's many cool ideas in my head that probably only ever work in extremely synthetic situations
+
+[17:42] <lizmat> please put those ideas in a gist somewhere
+
+[17:42] <timo> oof.
+
+[17:43] <lizmat> hehe... simple question  :-)
+
+[17:44] <timo> like, if your regex looks something like / (blabla complicated stuff) "foobar" / then instead of going and doing the complicated stuff you could first look if there's literally any "foobar" in the target string and if not, you can immediately say "no match"
+
+[17:45] <timo> if the "blabla complicated stuff" can be determined to have a specific minimum and maximum length that's maybe not too far apart, you can go from a match of "foobar" backwards the maximum match length and start searching there, and when you're closer than minimum match length away from the foobar you saw, you can skip past the "foobar"
+
+[17:47] <timo> in theory, if we've already been spending some amount of time in a regex match attempt against a string, we could kick off additional work to analyse the string in question and when the results are in, switch strategies and use results from the analysis
+
+[17:47] <timo> simplest idea, if you have a histogram of all characters in the string, you may find that some parts of the entire regex you're working with are literally unable to ever match
+
+[17:48] <timo> but making use of that kind of information also has a run time cost of course
+
+[17:49] <lizmat> so, I assume we have a regex opt to look for a static string inside a larger string
+
+[17:50] <timo> we have an opt that turns "scan" followed by a literal into using the "index" op, yeah, that's fast string-in-string search
+
+[17:50] <timo> but as soon as it's not a literal after a scan, that opt is out of the window :)
+
+[17:50] <timo> if it's more than one literal, also tough luck IIRC
+
+[17:51] <lizmat> why?  the opt would consist of failing the match if the string isn't there
+
+[17:51] <lizmat> ?
+
+[17:51] <timo> so / .* "hello" / → fast
+
+[17:52] <timo> / .* a? "hello" / → not as fast
+
+[17:52] <timo> / .* ["hello" | "goodbye"] / → not as fast
+
+[17:52] <timo> and it doesn't have to be literally .* in the regex, since regexes are by default not anchored
+
+[17:53] <lizmat> ok, I think I'm going to frobnicate a bit on that  :-)
+
+[17:55] <timo> i've been interested in a multi-needle haystack search op into moarvm
+
+[18:00] <lizmat> would that be multi-threaded?   or   [foo|bar|baz] checking "f" and "b" at a cursor position, then on "f" move to check on "o", and on "b" move  to check for "a", etc ?
+
+[18:00] <lizmat> and all of that wrapped in an NFA ?
+
+[18:01] <timo> there's faster approaches to multi-needle haystack search than NFA
+
+[18:02] <timo> but no, it wouldn't be multithreaded, i don't think you need that
+
+[18:37] <timo> there's an algorithm for needle-haystack-search called teddy that is also mentioned by name in the article MasterDuke linked
+
+[18:38] <timo> some cool SSE-related tricks in there to search a whole bunch of bytes at once
+
+[18:42] <lizmat> which can be expressed in C-code without actually having to write machine code ?
+
+[18:53] <timo> but quite possibly wouldn't be trivial to apply to our 32bit-per-character storage type though
+
+[18:53] <timo> you can write assembly intrinsics in C as if they were function calls so you don't have to write inline assembly
+
+[18:54] <timo> I have no idea if you can write the algorithm with regular boring C and get the compiler to give you the optimal instructions using SSE
+
+[21:14] *** harrow left
+[21:25] *** [Coke] left
+[21:37] <Voldenet> you can attempt to use auto-vectorization, but in practice it's very brittle and you end up writing code that's even worse to read
+
+[21:39] <Voldenet> iirc in both gcc and clang you get loop + slp parallelization with -O2
+
+[21:40] <Voldenet> in gcc SLP may work better in O3 thanks to aggressive loop unrolling
+
+[21:41] *** harrow joined
+[21:41] <Voldenet> but O3 may produce slower code overall (also thanks to aggressive loop unrolling :>)
+
+[21:43] <Voldenet> so imo it's better to use intrinsics explicitly if that's performance-critical
+
+[21:44] <Voldenet> doesn't depend on compiler optimizations at all
+
+[23:50] *** librasteve_ left
