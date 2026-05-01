@@ -1,0 +1,180 @@
+[06:41] *** soverysour joined
+[06:41] *** soverysour left
+[06:41] *** soverysour joined
+[07:12] *** soverysour left
+[07:14] *** soverysour joined
+[07:14] *** soverysour left
+[07:14] *** soverysour joined
+[07:33] *** soverysour left
+[08:01] *** ShimmerFairy left
+[08:01] *** rnddim joined
+[08:36] <lizmat> looks like you would  need a table with name, op increment and body ?
+
+[08:37] <lizmat> hmmm...maybe not
+
+[11:31] *** librasteve_ joined
+[13:32] *** soverysour joined
+[13:32] *** soverysour left
+[13:32] *** soverysour joined
+[13:38] <apogee_ntv> I'm assuming the answer to this is no but does moarvm expose mlock/instant guaranteed free? Trying to solve transient heap allocation with a guarantee of no paging/no delay on free.
+
+[13:40] <timo> if you have a pointer, you can nativecall into mlock and friends no problem
+
+[13:40] <timo> but we don't give you a pointer to a high-level object
+
+[13:41] <apogee_ntv> But if I read from/write to the address pointed to, can I guarantee that what I read/wrote will get mlocked/explicit_bzero'd or am I just bringing the issue further up the chain.
+
+[13:43] <apogee_ntv> I'm basically trying to do sodium mlock stuff and I don't want the GC to ever intern these values and handle them automatically.
+
+[13:43] <apogee_ntv> If they get paged it defeats the object.
+
+[13:44] <timo> I'm not sure what you mean by the GC "interning" values
+
+[13:45] <apogee_ntv> So I have a char[], I want to interpolate this char[] into a Str using Template::Jinja2 and then immediately write it to another char[] in a secure buffer and forget the string entirely with a time guarantee and a no paging guarantee.
+
+[13:45] <timo> you need to have a pointer to use mlock with, so you'd have to be working with Pointer or CArray anyway. for those to be usable at all, they already can't be moved around by the GC or else anything keeping just the address we give to C functions through NativeCall would break immediately
+
+[13:46] <apogee_ntv> That Str is ofc a GC-handled object.
+
+[13:46] <apogee_ntv> I'm wondering if there's a way to mark the Str to not be a GC-handled object.
+
+[13:46] <timo> Template::Jinja2 is an implementation of jinja in raku, or also NativeCall?
+
+[13:46] <apogee_ntv> In Raku
+
+[13:47] <apogee_ntv> https://raku.land/zef:apogee/Template::Jinja2
+
+[13:47] <apogee_ntv> Like an "I want the interface of a Str but I want to manually allocate and free it"
+
+[13:47] <timo> with just Str, there's no guarantees. if the code in Jinja2 used string concatenation, the Str in question may be using strand representation internally anyway, so you'd have multiple Str objects involved in storing the data
+
+[13:48] <apogee_ntv> Yeah I own Template::Jinja2, I could make every intermediate Str manually managed if that existed.
+
+[13:49] <apogee_ntv> I know this is eldritch lol
+
+[13:49] <timo> right, there's no way to explicitly manage an actual Str, you'd have to put more stuff into NativeCall land if you need memory management like that I'm afraid
+
+[13:50] <apogee_ntv> Yeah thats fair enough, I'm using grammars heavily so all of the captures etc are Str's. I guess what I need is Jinja2 in C and then NativeCall wrapper that just hands you a pointer.
+
+[13:51] <timo> I think we make too many assumptions based on Str being immutable inside moarvm itself to allow user code to just manipulate it freely
+
+[13:52] <apogee_ntv> Yeah I was wondering if there was an annotation or something. Something like unsafe in rust lol.
+
+[13:52] <apogee_ntv> "If I break it thats my problem"
+
+[13:53] <timo> walk the C stack to find the pointer to MVMThreadContext, then do whatever the F you want :) :) :)
+
+[13:53] <apogee_ntv> :D
+
+[13:53] <timo> well, you can create your own extops
+
+[13:54] <timo> these get the tc passed "for free"
+
+[13:54] <timo> i'm not sure if you can load multiple extop libraries into one mvm instance?
+
+[13:55] <apogee_ntv> Not sure, my goal is basically limiting the time in which sensitive data exists on the heap and telling the OS not to page it or memdump it.
+
+[13:56] <apogee_ntv> So calling malloc with MAP_NOCORE, MADV_DONTDUMP etvc
+
+[13:56] <apogee_ntv> (or just sodium_mlock)
+
+[13:56] <timo> a Pointer or CArray that you make sure not to ask moar to realloc for you that you mlock yourself can get you a part of the way there, but whenever you grab values inside of it they will make it into other parts of memory, like registers and boxed values like Int and such
+
+[13:58] <apogee_ntv> Yeah I think what I actually need is to write Jinja2 in C or C++ and then expose via FFI. Probably less pain.
+
+[13:58] <timo> instead of composing a full Str, you could keep the result around as an array of Str bits and CArray bits
+
+[13:59] <apogee_ntv> But the intermediate capture groups from the grammar are a Str:D IIRC?
+
+[13:59] <apogee_ntv> (not sure on terminology)
+
+[13:59] <timo> then when it comes time to write to a file or socket or whatever you encode the Str bits to utf8 and just write() the pointer directly
+
+[14:00] <timo> oh, i thought the secret values just go into the template as an input and get put into the result verbatim
+
+[14:01] <apogee_ntv> Hm, yeah that could actually be an option, the sensitive data isnt in the captures.
+
+[14:01] <timo> i think i misread your initial explanation
+
+[14:01] <apogee_ntv> The sensitive data is in what gets replaced
+
+[14:01] <apogee_ntv> What gets written in as replacement**
+
+[14:02] <timo> as long as you don't have to put the sensitive data through a bunch of jinja functions it should be fine to just pass it around as an opaque object. it will make the API a bit more annoying to work with though I expect?
+
+[14:02] <apogee_ntv> So I could potentially keep the actual sensitive data in CString and write the final template to CPointer
+
+[14:02] <apogee_ntv> Yeah the sensitive data doesn't need to go through any functions, the comparators which jinja will check are not sensitive.
+
+[14:03] <timo> I wouldn't use anything that NativeCall would ever have a reason to try to deserialize
+
+[14:03] <apogee_ntv> I mean I can do all the logic in Raku then write %%PLACEHOLDER%% then do an interpolation step in C which is the easy part.
+
+[14:04] <timo> right, that's possible as well
+
+[14:04] <apogee_ntv> Write direct to my mlocked buffer
+
+[14:05] <timo> the approach with a "list of strings and Pointer objects" is a little bit more explicit which is good because you don't have to have a placeholder string that can now no longer be used in any other way, but is bad because you don't have just a regular Str of everything that you can do whatever you want with
+
+[14:05] <timo> though when "whatever you want with it" includes "accidentally leaking copies of the contents into unprotected memory" that can be a good thing
+
+[14:06] <timo> you never get away from these convenience / security trade-offs it seems!
+
+[14:07] <apogee_ntv> Yeah the pain is real when the OS pager is involved.
+
+[14:08] <apogee_ntv> Even then some OS's just ignore advisory flags (:
+
+[14:46] *** soverysour left
+[14:46] *** soverysour joined
+[14:46] *** soverysour left
+[14:46] *** soverysour joined
+[15:00] *** soverysour left
+[15:30] *** soverysour joined
+[15:35] *** soverysour left
+[15:40] *** soverysour joined
+[15:40] *** soverysour left
+[15:40] *** soverysour joined
+[15:41] *** librasteve_ left
+[16:08] *** soverysour left
+[16:10] *** soverysour joined
+[17:27] *** soverysour left
+[17:33] *** librasteve_ joined
+[17:33] <timo> i wanted to just fuzz the parsing stage of the nqp compiler with afl, but of course afl stumbled upon the "constant" keyword and figured out how to generate invalid bytecode, specifically in a way that causes an exception while verifying the bytecode and leaving the default_allocate_gen2 level undecremented :)
+
+[17:58] *** soverysour joined
+[18:03] *** soverysour left
+[18:13] *** soverysour joined
+[18:13] *** soverysour left
+[18:13] *** soverysour joined
+[19:13] <Geth> ¦ MoarVM/fix_gen2_default_sticking_after_bytecode_unpack_fail: dd72185ef1 | (Timo Paulssen)++ | src/core/bytecode.c
+
+[19:13] <Geth> ¦ MoarVM/fix_gen2_default_sticking_after_bytecode_unpack_fail: Clear gen2 default alloc flag when reporting erroneous bytecode
+
+[19:13] <Geth> ¦ MoarVM/fix_gen2_default_sticking_after_bytecode_unpack_fail: 
+
+[19:13] <Geth> ¦ MoarVM/fix_gen2_default_sticking_after_bytecode_unpack_fail: If an exception is thrown by any of the error cases when unpacking bytecode,
+
+[19:13] <Geth> ¦ MoarVM/fix_gen2_default_sticking_after_bytecode_unpack_fail: we jump out of the function to run a handler which will not be prepared to
+
+[19:13] <Geth> ¦ MoarVM/fix_gen2_default_sticking_after_bytecode_unpack_fail: deal with the gen2 flag being set (for example by having sp_fastcreate in it)
+
+[19:13] <Geth> ¦ MoarVM/fix_gen2_default_sticking_after_bytecode_unpack_fail: 
+
+[19:13] <Geth> ¦ MoarVM/fix_gen2_default_sticking_after_bytecode_unpack_fail: Found with afl++
+
+[19:13] <Geth> ¦ MoarVM/fix_gen2_default_sticking_after_bytecode_unpack_fail: review: https://github.com/MoarVM/MoarVM/commit/dd72185ef1
+
+[19:15] <Geth> ¦ MoarVM: timo++ created pull request #1998: Clear gen2 default alloc flag when reporting erroneous bytecode
+
+[19:15] <Geth> ¦ MoarVM: review: https://github.com/MoarVM/MoarVM/pull/1998
+
+[19:20] <timo> nqp: say("test")
+
+[20:11] *** librasteve_ left
+[20:20] *** soverysour left
+[20:24] *** soverysour joined
+[20:24] *** soverysour left
+[20:24] *** soverysour joined
+[20:35] *** soverysour left
+[20:38] *** soverysour joined
+[21:21] *** soverysour left

@@ -1,0 +1,94 @@
+[06:36] <ShimmerFairy> I'm not actually super familiar with how MoarVM stores its Unicode properties, but if I ever get around to modernizing that ucd perl script I certainly will be.
+
+[08:03] *** vrurg_ joined
+[08:03] *** vrurg left
+[11:40] *** librasteve_ left
+[13:04] <[Coke]> ShimmerFairy: any thoughts on making the unicode_1_name property available? I may take a stab at that so I can try to close a module issue request I gave myself. :)
+
+[13:11] <ShimmerFairy> So long as you don't expose it as if it were just another kind of character name (that is, .uniprop("Unicode_1_Name") but not "\c[OLD NAME]"), I think that'd be OK. I need to refresh my memory, but I'm confident that 1.0 names are not part of the character name namespace, so integrating it into that namespace in places like \c[...] needs to be thought through.
+
+[13:18] <[Coke]> I just want it to be available in .uniprop, honestly
+
+[13:27] <ShimmerFairy> Yeah, that's fine, and in general all Unicode properties ought to be available anyway (well, except for the provisional ones, but none exist in the "base" UCD properties, only in Unihan and similar areas)
+
+[14:22] *** woodi_ left
+[14:22] *** woodi joined
+[14:23] *** librasteve_ joined
+[14:31] *** kjp left
+[14:43] *** kjp joined
+[15:37] <timo> I see that we are storing "EGYPTIAN HIEROGLYPH-13460"/* 13460 */ through "EGYPTIAN HIEROGLYPH-143FA"/* 143FA */ with their full name; we do have a mechanism to handle codepoints where the number is part of the name, so that could be added to that
+
+[15:39] <lizmat> does that also apply to:
+
+[15:39] <lizmat> m: say 0xEFFFD.chr.uniname
+
+[15:39] <evalable6> lizmat, rakudo-moar f1c184644: OUTPUT: «<reserved-EFFFD>␤»
+
+[15:39] <lizmat> ?
+
+[15:40] <lizmat> or is there logic to generate that uniname ?
+
+[15:40] <timo> same for "KHITAN SMALL SCRIPT CHARACTER-18B00"/* 18B00 */ through /"KHITAN SMALL SCRIPT CHARACTER-18CD5"/* 18CD5 */ but that's a much smaller block
+
+[15:41] <timo> CONTROL, RESERVED, SURROGATE, PRIVATE-USE all use this
+
+[15:42] <timo> also CJK UNIFIED IDEOGRAPH-, CJK COMPATIBILITY IDEOGRAPH-, and TANGUT IDEOGRAPH-
+
+[15:45] <[Coke]> I opened https://github.com/rakudo/rakudo/issues/6108
+
+[15:57] <timo> https://gist.github.com/timo/5b4c22ffeb8a561e9a632b7da5b03ec1 words in unicode character names by frequency with examples of each
+
+[16:08] <timo> so i think unicode names have just the letters A through Z, the digits 0 through 9, the dash - and a single space
+
+[16:11] <timo> leaving me with theoretically 226 byte values to encode a longer word, or choosing a few of these values as a prefix to a second byte giving 225 + 255, or 224 + 2 * 255, or 225 - x + x * 255 for x < 225?
+
+[16:16] <timo> hm, but when we create the hash for looking up characters by name we put const char * in the entries for the actual names
+
+[16:17] <timo> so then in the cases where the hash is needed we would end up with 1x the "compressed" storage and then extra space for the expanded versions of these characters?
+
+[16:19] <timo> OTOH the "compression" scheme is round-trippable; we could compress a string before looking it up in the hash then we'd just store the compressed name in there and can be using const char* into static memory still
+
+[16:21] <ShimmerFairy> Looking at the standard, EGYPTIAN HIEROGLYPH is one of the kinds of "derived" names listed, so the fact that MoarVM doesn't encode them in the same way as the others comes down to me not knowing I should think of it when I was doing the 17.0 upgrade.
+
+[16:22] <timo> the hieroglyphs are kind of two sections, one where the code point number is in it, one where the mapping isn't 1:1 because there's like multiple variants of one in a row before the next number
+
+[16:23] <ShimmerFairy> Oh that's weird, UnicodeData.txt didn't "compress" the egyptian hierogylphs into ranges like the CJK ideographs are, which explains why this new kind of derived name slipped through unnoticed.
+
+[16:23] <timo> m: .uniname.say for 0x13000..0x13010
+
+[16:23] <evalable6> timo, rakudo-moar f1c184644: OUTPUT: «EGYPTIAN HIEROGLYPH A001␤EGYPTIAN HIEROGLYPH A0…»
+
+[16:23] <evalable6> timo, Full output: https://gist.github.com/b534312bdf6eb40c2188a36cc773e732
+
+[16:23] <timo> m: .uniname.words.tail.say for 0x13000..0x13010
+
+[16:23] <evalable6> timo, rakudo-moar f1c184644: OUTPUT: «A001␤A002␤A003␤A004␤A005␤A005A␤A006␤A006A␤A006B␤A007␤A008␤A009␤A010␤A011␤A012␤A013␤A014␤»
+
+[16:24] <timo> ... hard to see but there's 006, 006A, 006B there
+
+[16:24] <ShimmerFairy> Actually, it looks like a few of the derived name ranges are spelled out.
+
+[16:29] <ShimmerFairy> Oh huh, looks like Unicode's wording is in need of updating. Rule NR2 suggests that only characters with Ideographic=True are possibly affected by its rule, but the Egyptian hieroglyphs mentioned in the relevant table don't have that property.
+
+[16:30] <timo> sounds like you can post a bug report to the unicode consortium! :D
+
+[16:35] <ShimmerFairy> I wonder, would it be worth it for ucd2c.pl to handle derived names that UnicodeData spells out? Currently it only does special stuff for the ranges that aren't already spelled out, and that just gives them all a dummy name that tells moarvm to generate the real name at runtime, I think.
+
+[16:40] <ShimmerFairy> timo: btw, was it mimalloc that was causing fetch issues a little while ago? Updating moar I just got the message (on a second 'git pull') of "fatal: couldn't find remote ref refs/heads/master", and turns out the mimalloc main branch is, er, "main".
+
+[16:40] <timo> right, we have something called "extents", MVM_NUM_UNICODE_EXTENTS counts them, and they do something in generate_codepoints_by_name
+
+[16:41] <timo> uh yeah could have been mimalloc
+
+[16:42] <timo> i wonder why it was referencing "master" in your case; is that something that requires "git submodule sync" to fix or just update?
+
+[16:43] <ShimmerFairy> On the second pull it fell back to grabbing the commit directly. I just ran "git submodule sync" but I don't know how to check if it solved the problem, since my copy of moar is now up-to-date.
+
+[16:51] <timo> git submodules still serve to stump, it seems
+
+[16:53] <ShimmerFairy> I just checked, and I've had this copy of the repo since at least mid-2016, so I'm willing to bet that something was just outdated, and that perhaps that sync fixed things for the future.
+
+[18:25] *** vrurg_ left
+[18:37] *** vrurg joined
+[18:40] *** vrurg left
+[18:57] *** vrurg joined

@@ -1,0 +1,186 @@
+[01:38] *** Pixi left
+[01:42] <Geth> ¦ rakudo: ugexe++ created pull request #6118: Fix silent no-op for `$.foo = ...` on non-rw attributes
+
+[01:42] <Geth> ¦ rakudo: review: https://github.com/rakudo/rakudo/pull/6118
+
+[01:46] *** Pixi joined
+[03:28] *** apogee_ntv left
+[03:29] *** apogee_ntv joined
+[08:14] <Geth> ¦ roast: bf0828d761 | (David Schultz)++ (committed using GitHub Web editor) | 2 files
+
+[08:14] <Geth> ¦ roast: +test (r)index for lists of overlapping needles (Rakudo issue #6104)
+
+[08:14] <Geth> ¦ roast: review: https://github.com/Raku/roast/commit/bf0828d761
+
+[09:27] *** finanalyst joined
+[09:42] <timo> MasterDuke, interesting but probably not achievable for us at any point in the near future :D
+
+[09:43] <timo> but also, we spend a lot of time on things other than running the NFA, I think even a 1000x speedup won't really be felt :(
+
+[10:25] *** finanalyst left
+[10:55] <Geth> ¦ roast: e1851a7cf7 | (Elizabeth Mattijsen)++ | S32-str/rindex.t
+
+[10:55] <Geth> ¦ roast: Update test count + add reference to issue
+
+[10:55] <Geth> ¦ roast: review: https://github.com/Raku/roast/commit/e1851a7cf7
+
+[11:06] *** librasteve_ joined
+[11:09] <ShimmerFairy> Even just within the parsing infrastructure, most of it isn't spent in the NFA I would imagine. Rakudo only uses the NFA for sorting alternations and multi rules, as I recall; all other parsing tasks would be untouched by changes to the NFA.
+
+[11:12] <timo> I feel like I really need to write down some of the concrete opportunities for improvements that we have in the grammar engine
+
+[11:13] <timo> for example, we should be able to statically go from "this alternative has been chosen by the NFA" to "this literal string at the start must have matched and we don't have to check it again"
+
+[11:13] <timo> probably not worth bajillions of cycles, but surely it adds up?
+
+[11:14] <timo> randomly, I've been looking at what parsing some NQP code does in terms of string comparisons and it looks like because the `'{YOU_ARE_HERE}'` is in a `||` alteration with `'{' <other stuff>` we do a string-equals-at to look for '{YOU_ARE_HERE}' every time we get to a '{'
+
+[11:14] <timo> again, maybe not worth the world, and compiling the nqp bits of rakudo is relatively fast
+
+[11:19] <timo> just breakpointing MVM_string_equals_at or what it's called during "stage parse" and maybe limiting to strings longer than 2 or 3 or so graphemes could give interesting insights for optimization opportunities
+
+[11:44] <ShimmerFairy> Makes me wonder what percentage of the NFA'd parts of a grammar would only involve updating the position of match from the NFA. For example, /ABCDE/ obviously requires nothing more than what an NFA provides, but /A(BCD)E/ requires data for the capture that finite automata can't provide, so the "resuable" portion of the NFA match stops with /A/.
+
+[11:46] <ShimmerFairy> That is, currently raku rules are divided up into the NFAable "delcarative" portion and the subsequent "action" portion (if I remember the S05 terms right), and I'm wondering if it's feasible or useful to further split the declarative part into a prefix that can update the cursor position, and the rest that requires reparsing.
+
+[11:47] <timo> i don't think i've heard "action" be used as the opposite of the declarative prefix of a rule, but if it was, we may want to not use it since it kind of conflicts with action methods?
+
+[11:48] <timo> right now the NFA implementation throws away the "longlit" value for each of the fates before returning it in direction of the regex engine, but the nfa API is completely internal, so things like that could be changed
+
+[11:49] <timo> and longlit is so far only used in sorting, i.e. it refers to the rule that "longest literal" should win over a same-length match of non-literal pieces
+
+[11:49] <timo> so "hello" wins over "....." or "\w ** 5'
+
+[11:51] <timo> in theory a different set of fates only used to ship a number out of the NFA match could become part of the implementation
+
+[11:51] <timo> then the grammar compiler could generate these different kinds of fates for exactly this purpose, and do something with results coming back from the nfa match
+
+[11:51] <ShimmerFairy> Not too familiar, but I wonder how longlit interacts with captures or other non-NFA-supported features. e.g. how would updating the cursor to the longlit match affect things like /(const_)var/ or /(abc.+)/ ?
+
+[11:52] <timo> but it's very possible that the way NFAs criss-cross between states internally could give us trouble with that idea after all
+
+[11:52] <timo> I believe capturing is a no-op for the NFA-generating and -running parts. back-references are the part that we can't do in NFAs
+
+[11:55] <ShimmerFairy> My concern is that (to my understanding) finite automata can't hold any data beyond the current state, and if we want to "reuse" the NFA result for /a(.+)e/, then you'd need the NFA to tell you where the /.+/ substring match is, which is more information than "the current state".
+
+[11:58] <ShimmerFairy> Maybe for purely literal, non-quantified things like /a(bcd)e/ you could encode the substring extents into the final state, but that would result in things like /a[(bcd)|bcd]e/ now having two fates instead of one in the NFA (assuming it results in just one currently).
+
+[11:58] <timo> oh, and also we must not forget that the backtrace stack needs to be set up correctly
+
+[11:59] <timo> we may or may not want to differentiate here in this discussion between running a proto nfa or an alt nfa, they may have slightly different details
+
+[12:01] <ShimmerFairy> I was under the impression that they're the same thing (i.e. a multi rule is functionally equivalent to [a|b|c], it really just lets you avoid incessant conditionals in the action methods), but I could be wrong on that.
+
+[12:02] <timo> for the question of being able to optimize things, in one case we have everything up front in the same method we're compiling, in the other, the method doesn't know "statically" where it's called from
+
+[12:02] <timo> though we do go into subrule calls when generating NFAs from regex code, so it does get a bit muddy
+
+[12:03] <timo> in your [(bcd)|bcd] example, did you mean for the two branches to be equal?
+
+[12:04] <timo> if two alternatives match the same length and both count as literal, the order they appear in the code decides which one wins IIRC
+
+[12:13] <timo> you're right about NFAs not being able to hold state; what we have is kind of an extension to NFAs that is not common in the literature
+
+[12:14] <timo> normally, NFAs only give a yes/no answer at the end, but we give a sorted list of fates
+
+[12:15] <ShimmerFairy> The [(bcd)|bcd] example is meant to illustrate where a classical NFA construction ought to collapse to a simple b->c->d graph, but where "we need to know where captures are" would force two b->c->d subgraphs, one pointing to a fate that says "submatch at [x,y)" and one that doesn't.
+
+[12:17] <ShimmerFairy> My thinking is that our NFAs can be constructed from anything that be obviously interpreted as a regular expression construct, and stops when it runs into something "irregular". And currently, we only use NFAs to check if a string could match a regex, which means we can incorporate technically irregular things into the NFA that don't affect the actual parsing, like captures, by ignoring the irregular part.
+
+[12:18] <timo> right, any parts that we have skipped when going from regex to NFA need to be considered when trying to use the result for skipping over potentially duplicate work
+
+[12:18] <ShimmerFairy> So for example, the round parens in /a(bcd)e/ are only irregular in their after-matching behavior, so an NFA that isn't asked to engage in any after-matching behavior can pretend it's /a[bcd]e/.
+
+[12:20] <ShimmerFairy> But if we now want to use the results of NFAs to skip doing some stuff in the real grammar rules, suddenly those after-matching behaviors are vital. Either we have to make NFAs not-quite-automata, or we have to split NFAs in half at the point where where you can no longer use the NFA to skip the real parsing.
+
+[12:22] <ShimmerFairy> the "two NFAs" idea would mean that /AB(CD)EF/ would have a first NFA of /AB/ whose results can be used to skip redundant work, and a second NFA /(CD)EF/ that can (and must) still be used for alternation sorting, but which can't be used to optimize work.
+
+[12:22] <ShimmerFairy> (we can't just change to one NFA that stops at /AB/ because that would break how Raku's LTM rules are spec'd to work)
+
+[12:23] <timo> two NFAs is tricky because most of the time there's really not a clean break like that I would assume
+
+[12:24] <ShimmerFairy> Yeah, the reality is you'd have a tree with a "fault line" where each branch has to be cut to separate the "reusable" start from the rest of that branch's work.
+
+[12:24] <timo> I think at least for the beginning we have to be very conservative with what we use for skipping. initial literal strings for example seems like a decent choice to get a tiny saving from every `multi token foo:sym<bar> { <.sym> extra stuff blabla }`
+
+[12:26] <timo> even with <sym> rather than <.sym> we can do that
+
+[12:26] <ShimmerFairy> And as for the "break the purity of the finite automata" approach, that is a classical solution to implementing the irregular parts of regex engines, but I worry if that would complicate our use of NFAs or even make them less helpful. (That is, how much are we benefitting from a (relatively?) pure implementation of finite automata?)
+
+[12:26] <timo> in the rakudo grammar the next thing is probably most of the time <.ws> or something, which is a large rule with lots of stuff
+
+[12:29] <ShimmerFairy> Also, while it's not quite the same thing, I wonder if the backtracking controls I brought up before would help here. If we implemented the intended controls, and promoted their use to kill backtracking where the programmer knows it's pointless, would that help reduce some of the pointless rework from another angle?
+
+[12:37] <timo> not sure about that. we may want to come up with a tool that lets us measure backtracking behaviour to see if we do a lot of backtracking into "doomed" match attempts?
+
+[12:38] <ShimmerFairy> I think a way to investigate if optimization here would be worth it would be to temporarily augment NFAs to be able to report the obviously reusable prefix, and then run things like the NQP or rakudo grammars through that, and examine the logged results. If there are a lot of NFAs with big resuable portions, then it'd be worth it.
+
+[12:43] <timo> so the "re-doing nfa work" I've been focusing on came from a proto regex choosing a multi candidate, and then there's maybe a left recursion into another proto regex and its candidate and maybe an alternation right at the start or so
+
+[12:44] <timo> and for the backtracking-related stuff you just brought up it would be backtracking to before the NFA ran and seeing the same nfa match happen at the same offset for that reason?
+
+[12:47] <ShimmerFairy> Like I said, it's not quite the same issue as running a successful NFA and then running the real grammar, but I do wonder if backtracking exacerbates noticeable slowdowns from that double effort.
+
+[12:49] <timo> not sure if this is what you're asking about, but after an nfa runs the results are pushed onto the backtrack stack, that's how it communicates what order to try the alternatives in
+
+[12:50] <timo> so in that sense there's no second run of the nfa if the first alternative wasn't fruitful
+
+[12:50] <ShimmerFairy> If your concern is with descending into multiple subrules at the beginning, aren't they all merged into one NFA at the time LTM sorting is performed? Wouldn't that ultimately just be one NFA use + one real parse? If I'm correct, I'm not seeing offhand how that'd be worse than an NFA that doesn't involve any subrules.
+
+[12:51] <timo> in theory it could be one NFA run but we currently do one NFA run for each step on the way down
+
+[12:52] <ShimmerFairy> oh huh, I thought the mergesubstates method built up a single NFA, at sort time at the worst.
+
+[12:53] <timo> we do create a single NFA for the outer match
+
+[12:53] <timo> then after the right candidate for the proto to call is selected, the candidate is called and whatever it does then ignores what the NFA spat out, we don't pass the results on
+
+[12:53] <timo> so it runs its own NFA, which is usually a lot smaller
+
+[12:54] <ShimmerFairy> I admit I haven't been 100% clear on what the concern was here in the first place, but if the issue was "multiple redundant NFA runs", rather than "NFA + bytecode duplicating work", then I've been talking down the wrong path this whole time.
+
+[12:54] <timo> both are concerns
+
+[12:56] <timo> removing stuff from the generated bytecode section based on statically knowing that we have just run an NFA feels like an easier optimization (and implementable piece-wise) than figuring out how to properly send data from a merged NFA match to immediate-future NFA matches that use a sub-NFA
+
+[12:58] <ShimmerFairy> My feeling thus far has been that the "NFA + bytecode" issue is largely theoretical, and that optimization is unlikely to be very useful in practice. (As I mentioned, any kind of capture construct wrecks any pure NFA intended to affect Cursors directly, and more such constructs may exist.) But sharing NFA results with subrules feels like something that could provide real benefit.
+
+[12:58] <ShimmerFairy> Bear in mind I'm just speculating, I've got no hard evidence that I'm right on either count there.
+
+[12:59] <timo> that roughly matches my understanding. until I've got measurements of the "redundant bytecode work after NFA match" issue I'm also just guessing
+
+[13:02] <timo> I wonder if there's an obvious thing that makes our nibble code slow
+
+[13:02] <timo> really any place where we have an alternation like "literal character" vs "backslashed sequence of some kind" and also "don't match past the stopper"
+
+[13:05] <ShimmerFairy> So things like /'"' [(<-[\\"]>+)|\\ (<[\\"]>)]* '"' { make $0».Str.join }/ (lazy simple string literal parser) are a potential source of big slowdowns?
+
+[13:07] <lizmat> generally, actually creating Match objects is slowing down a lot
+
+[13:07] <lizmat> that's why .contains( / foo / ) is so  much faster, because it just runs the cursor and depending on its pos, returns True / False   
+
+[13:09] <timo> actually, nibbler is mostly || based
+
+[13:10] <timo> I'm not sure if it's so much "a potential source of big slowdowns", I'm just idly wondering if it's slower than it should be, based on no concrete data
+
+[17:15] <Geth> ¦ rakudo/main: ab6efcab1a | (Elizabeth Mattijsen)++ | 4 files
+
+[17:15] <Geth> ¦ rakudo/main: Properly support coercive types on parameterized Set(Hash)
+
+[17:15] <Geth> ¦ rakudo/main: 
+
+[17:15] <Geth> ¦ rakudo/main: In response to:
+
+[17:15] <Geth> ¦ rakudo/main: - https://github.com/Rakudo/rakudo/issues/6031
+
+[17:15] <Geth> ¦ rakudo/main: - https://github.com/rakudo/rakudo/pull/6117    ugexe++
+
+[17:15] <Geth> ¦ rakudo/main: 
+
+[17:15] <Geth> ¦ rakudo/main: The underlying issue is really that the key that is being specified
+
+[17:15] <Geth> ¦ rakudo/main: <…commit message has 28 more lines…>
+
+[17:15] <Geth> ¦ rakudo/main: review: https://github.com/rakudo/rakudo/commit/ab6efcab1a
+
+[21:45] *** librasteve_ left

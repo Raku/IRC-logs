@@ -1,0 +1,150 @@
+[00:10] <[Coke]> is "anything with nativecall" cheating?
+
+[00:11] <[Coke]> and or helpful
+
+[00:27] <timo> that will be a bit more work
+
+[00:27] <timo> AFL would really prefer things to be statically linked
+
+[00:28] <timo> but since you already basically have to compile a custom rakudo if you want to do fuzzing, may as well just link the parts of the .so in as well. also, depends on whether you want coverage from inside the called native code to influence what AFL thinks is interesting or not
+
+[00:28] <timo> if you want that, you'll have to recompile with the right flags anyway
+
+[00:30] <timo> fuzzing json tiny and json fast is, at least i hope, a good test to see how well the coverage feedback allows the input state space to be explored already with no changes to the code-under-test
+
+[04:13] *** gfldex left
+[04:52] *** gfldex joined
+[09:15] *** lizmat left
+[09:15] *** lizmat joined
+[09:30] *** gfldex left
+[10:49] *** lizmat left
+[10:50] *** lizmat joined
+[11:27] <timo> the fuzzer found a hang in rakudo when a quote language with some kind of balancable parenthesis is used and the end-of-file comes before any matching closer. looks to me like a backtracking explosion
+
+[11:37] <timo> do_nibbling looks roughly like <starter> <nibbler> <stopper> || <escape> || .
+
+[11:38] <timo> so my thinking is since . can also match <starter> in the case of something like '<' or '(' we get it trying to match starter at every place and looks for the stopper, can't find one, goes back into one nibbler and switches starter for ., then tries going forward again etc etc
+
+[11:38] <timo> classic backtracking explosion methinks
+
+[12:09] <lizmat> looks like  :-)
+
+[12:33] <timo> finally built a version of the rakudo fuzz target binary thingie with asan turned on so that anything in "stage parse" that somehow causes memory trouble it'll be saved as a crash :)
+
+[12:44] <timo> I now have an env var that lets me filter out entire compunits by part-of-filename or frames if any of the filenames in line number annotations match
+
+[12:44] <timo> that lets me more easily exclude dispatchers from coverage, because they are very unstable between consecutive runs in the same process, and I want to add more stuff to my blacklists as well
+
+[17:24] *** gfldex joined
+[21:16] <patrickb> timo: Should we bump the debug protocol version given all the changes I made?
+
+[21:17] <timo> that's something for after the release though right?
+
+[21:25] <patrickb> That PR in general? I'd say after the release, yes.
+
+[21:38] *** lizmat left
+[21:39] <patrickb> I've updated the PR. The issue with exceptions from the debugger thread is solved and I bumped the protocol version to 1.5.
+
+[21:42] *** lizmat joined
+[21:44] <timo> would you like to brainstorm a command to get all outgoing connections of one object (as the GC sees it) as handles?
+
+[21:45] <timo> it'd use the exact same mechanism as the heap snapshot feature and just generate a bunch of handles for the client
+
+[21:45] <timo> since the connections are named or have indices, I'm considering allowing the connections to be filtered when you're looking for something specific
+
+[21:46] <timo> so you can easily get an array's HOW without also having to receive and then free its ten million object slot handles or whatever
+
+[21:56] <patrickb> So I understand this right, this would answer "Which other objects fere
+
+[21:56] <patrickb> reference this object here?"
+
+[21:58] <patrickb> I would then still have to find out in what way that reference happens. Correct? Typically I'd search for a specific connection. So I'd retrieve the referencing object I'm interested in and then check if the reference actually happens via the field I'm interested in.
+
+[22:02] <patrickb> I think I'm misunderstanding. How is this related to retrieving an object's HOW?
+
+[22:02] <timo> it's the opposite, i.e. the trivial case
+
+[22:02] <timo> "for my object X, give me everything reachable with one step from X"
+
+[22:03] <timo> for the opposite, I think a more direct API for heap snapshots may be a better bet
+
+[22:03] <timo> maybe even creating a real heapsnapshot and asking the debug client to retrieve it either via the socket or filesystem or whatever
+
+[22:03] <patrickb> Hm. But how is this different from the sum of attributes, associatives and positionals we already have?
+
+[22:04] <timo> an object's HOW and WHAT and specializer / specialization and type check cache and so on and so forth are none of these three :)
+
+[22:05] <patrickb> Ah. So the idea is to provide a more low level mechanism that covers all of these cases, right?
+
+[22:06] <timo> I think I have a branch with a "get metadata" command that gives HOW/WHAT/WHO, but that's just a "fix one missing thing at a time" kind of approach
+
+[22:06] <timo> that's right
+
+[22:08] <patrickb> Do you already have an idea of how to make each of the references unique? i.e. imagine an object with a different reference in each possible slot. How would I identify the reference I'm interested in?
+
+[22:09] <timo> the heapsnapshot protocol allows the describe_refs repr function to give the references names and indices, but other than that I imagine they would be, or can be made to be, deterministically ordered and such?
+
+[22:10] <timo> or what do you mean by "the reference i'm interested in"?
+
+[22:10] <timo> by default you'd get all of them from the one object
+
+[22:11] <patrickb> I know too little about the possibilities a reference can be. Above you gave a list of possibilities.
+
+[22:12] <patrickb> To be useful I need to know which   of these possibilities a reference is.
+
+[22:12] <timo> ah, it's a little low-level yeah, but it would literally be anything in the object that's a pointer to a gc-managed object
+
+[22:12] <timo> so everything that gc_mark has to mark for the given object during a GC run
+
+[22:13] <patrickb> Would it be a flat list without meta information?
+
+[22:15] <timo> check MVM_gc_mark_collectable in src/gc/collect.c
+
+[22:15] <timo> i imagine it'd be a list of key-value pairs (so not necessarily a hash, as there could be duplicates)
+
+[22:15] <patrickb> let's say I have a list holding a bunch of meta objects. If I retrieve the full reference list of that list, could I differentiate the WHAT of the list and the contents?
+
+[22:19] <timo> src/profiler/heapsnapshot.c:1902 has the function process_workitems which gives descriptions to references inside an object
+
+[22:19] <timo> what's maybe important to know is that HOW and WHAT and such live on the STable, not on the object itself
+
+[22:20] <timo> so for your concrete question of a list that has BlaHOW and FooHOW in it, you'd get the contents of the list as references coming out of the object, and the STable is also a reference coming out of the object, and the STable would have the list's ClassHOW or what it may have
+
+[22:24] <patrickb> Ok. So there already is a fixed catalog of all possible references, correct?
+
+[22:24] <patrickb> *reference types 
+
+[22:25] <timo> we don't have it formalized per se
+
+[22:25] <timo> it's "just" either a string, or an integer
+
+[22:27] <patrickb> But to enable our user to rely on the identifiers we have to formalize them.
+
+[22:27] <timo> kind of depends on what we want to offer the user to do with this, exactly
+
+[22:28] <timo> a lot is probably possible if we put a bit more time into building "debug helpers", i.e. stuff you can call into on a stopped-at-a-breakpoint thread that is specifically meant to do useful things
+
+[22:29] <timo> we could literally have roughly one function per nqp op; getwhat, getwhere, getwho, getcodeobj, etc etc etc
+
+[22:30] <timo> and invoking the compiler from a breakpoint isn't necessarily a terrible idea either :) :)
+
+[22:31] <patrickb> When trying to reach for a specific reference, I depend on the identifiers of it to not change. E.g. obj -> STable -> WHO . Somewhere in my code I'd hard code "STable" and "WHO"
+
+[22:31] <timo> the heap snapshot feature has some more special stuff because it is meant to reach the entirety of all objects and make them into a somewhat sensible structure, so there's kind of "virtual" collectables that get indices which aren't represented by an actual MVMObject directly
+
+[22:32] <timo> we can certainly make a certain set of references fixed in the spec
+
+[22:33] <timo> STable and SC are very obvious and I wouldn't expect them to change any time soon (though SC is unset in some objects)
+
+[22:35] <patrickb> The fixed ones we could put in non changing fields in the response. The dynamic ones in some type of list.
+
+[22:36] <patrickb> I wonder, what use would the dynamic list fulfill apart from building a generic graph of references?
+
+[22:37] <patrickb> I need to go to bed. can we continue this session some other time?
+
+[22:38] <timo> sure we can
+
+[22:39] <patrickb> Cool! Good night then!
+
+[22:41] <timo> gnite!
+
